@@ -9,7 +9,10 @@ import {
   armedExpectedPhrase, chargeIsWindowBound, chargeLevelPct, chargeReservePct, floorCushionLinePct, fmtPhoenixDayHm,
   noChargeExpected, statedBuyKwh,
 } from './nightChargeAdvisor.js';
-import { forceChargeStopPct, partialForceChargeOnFailureSlots, type ForceChargeNightOutcome } from './nightForceCharge.js';
+import {
+  forceChargeStopPct, partialForceChargeOnFailureSlots, forceChargeFailedSlotsText,
+  type ForceChargeNightOutcome, type ForceChargeSlotCore,
+} from './nightForceCharge.js';
 import { isNoChargeKwh, revertRetryText, RESERVE_WRITE_MAX_PCT, type NightChargeMode, type RevertResendOnReport, type RestoreSummaryKind } from './nightChargeActuator.js';
 // R5 — the day-aware formatter's clocks (chargeText.ts), shared with the mid-day texts.
 import { phxParts, phxShortClock } from './chargeText.js';
@@ -412,11 +415,20 @@ export function buildNightChargeMessage(
   // A null plan can only ever be "insufficient basis" — never a fabricated
   // charge/hold — regardless of the shape the caller asked for.
   if (shape === 'insufficient_basis' || !plan) {
+    // v1.196.0 — SAY WHAT REFUSED THE PLAN. The body was the same fixed sentence for every refusal
+    // — a band-coverage miss, incoherent SoC telemetry, a climatology tier — and for a night with no
+    // panel reading at all, which is no basis question. A null plan is the panel's pool readings
+    // missing (recomputeNightChargePlan: no SHP2, or no capacity, SoC or reserve); a refused plan
+    // names its gate (plan.basisBlockedBy). A refused plan with no reason (one issued before
+    // v1.196.0) reads exactly as before.
+    const reason = plan == null
+      ? "the panel's pool readings (capacity, state of charge, reserve) are unavailable"
+      : `the forecast/telemetry basis is incomplete${plan.basisBlockedBy ? `: ${plan.basisBlockedBy}` : ''}`;
     return {
       ...base,
       title: 'Night-charge: no plan tonight',
       body:
-        'No overnight charge plan tonight — the forecast/telemetry basis is incomplete, '
+        `No overnight charge plan tonight — ${reason}, `
         + 'so nothing will be charged. (This confirms the evening job ran; the reserve '
         + 'floor is unchanged.)',
     };
@@ -868,18 +880,26 @@ export function buildNightForceChargeOnFailure(o: {
   noRetry: boolean;
   /** The armed ceiling (forceChargeCeilingPct). */
   ceilingPct: number | null;
+  /** v1.196.0 — every slot's Core and its own settings (forceChargeSlotCores: the slots from the
+   *  fresh panel readback the verify read, each Core's settings its last reported DPU projection).
+   *  null/omitted ⇒ the slot numbers alone, as before. */
+  cores?: ReadonlyArray<ForceChargeSlotCore> | null;
 }): NotifyMessage {
   const partial = partialForceChargeOnFailureSlots({ forceChargeSlots: o.ourSlots, forceChargeOnFailedSlots: o.slots }) != null;
   const toward = o.ceilingPct != null && Number.isFinite(o.ceilingPct) ? ` (toward ~${round1(forceChargeStopPct(o.ceilingPct))}%)` : '';
+  // v1.196.0 — each failed slot's Core, and what about it differs from the other Cores'.
+  const named = forceChargeFailedSlotsText(o.slots, o.ourSlots, o.cores ?? null);
+  const compare = named.differing === 0 ? ''
+    : `, and compare ${named.differing === 1 ? "that Core's" : "those Cores'"} work mode and backup reserve with the other Cores' in the EcoFlow app`;
   return {
     severity: 'warning',
     dedupId: 'night_charge_force_charge_on_failure',
     title: 'Night-charge: force-charge did not take effect',
     body:
       `The night-charge for ${o.day ?? '—'} switched force-charge ("Charge Now") ON, but the Smart Home Panel 2 `
-      + `still reads slot(s) ${o.slots.join(', ')} OFF after ${o.retries} re-issue(s)${o.noRetry ? ' (too close to the window end to re-issue)' : ''}. `
+      + `still reads slot(s) ${named.text} OFF after ${o.retries} re-issue(s)${o.noRetry ? ' (too close to the window end to re-issue)' : ''}. `
       + `Tonight's buy above the ${RESERVE_WRITE_MAX_PCT}% reserve${toward} will not happen${partial ? ' on those slot(s)' : ''}; `
-      + 'the reserve charge is unaffected. No action needed tonight — but if this repeats, check the SHP2 cloud link.',
+      + `the reserve charge is unaffected. No action needed tonight — but if this repeats, check the SHP2 cloud link${compare}.`,
   };
 }
 

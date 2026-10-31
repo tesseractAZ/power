@@ -399,7 +399,7 @@ const ROWS: readonly OptionRow[] = [
   row({ name: 'VENDOR_ENERGY_STATE_PATH', source: 'env-only', canonicalReader: 'energyHistory.ts:VENDOR_STATE_PATH',
     doc: 'Overrides the vendor energy ledger file (vendor-energy-daily.json beside the database); absent uses that default.', parse: (raw) => raw }),
   row({ name: 'CURTAIL_MEMBERSHIP_HISTORY_PATH', source: 'env-only', canonicalReader: 'curtailmentFreeze.ts:curtailmentMembershipHistory',
-    doc: "Overrides the membership record the curtailment freeze reads; absent reads membership-history.json beside the database inside the add-on, and nothing elsewhere ('' disables).", parse: (raw) => raw }),
+    doc: "Overrides the membership record the curtailment freeze and the forecast-skill hindcast read; absent reads membership-history.json beside the database inside the add-on, and nothing elsewhere ('' disables).", parse: (raw) => raw }),
   row({ name: 'CURTAILMENT_DAYS_PATH', source: 'env-only', canonicalReader: 'curtailmentFreeze.ts:ensureLoaded',
     doc: "Overrides the frozen curtailment-day store; absent persists curtailment-days.json beside the database inside the add-on, and nothing elsewhere ('' disables).", parse: (raw) => raw }),
 

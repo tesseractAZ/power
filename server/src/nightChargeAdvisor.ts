@@ -355,6 +355,12 @@ export interface NightChargePlan {
    * v1.148.0 — WHICH of the four basis gates failed, or null when complete.
    * `basisComplete: false` alone cost an hour of live probing to explain, after a
    * night the plant spent at its reserve floor.
+   *
+   * v1.196.0 — which gate refused; set on every refused null plan (`basisComplete: false`):
+   * the input's basis gate (null when the caller named none), or the planner's own precondition
+   * (SoC incoherent, climatology tier, pool capacity, SoC, floor/cushion, efficiency, horizon).
+   * Absent on a complete plan — a charge or hold plan's JSON carries no key. The 21:30 "no plan
+   * tonight" push states it (notify.buildNightChargeMessage); it was declared and never set.
    */
   basisBlockedBy?: string | null;
   /**
@@ -461,7 +467,12 @@ export interface NightChargePlan {
    *  only help: real contention simply means the device never reaches it (and
    *  the normal auto-revert fires on schedule), no contention means we get the
    *  reserve we actually wanted. Still bounded by the actuator's [10,50]
-   *  clampReserveTarget — the write envelope is unchanged. */
+   *  clampReserveTarget — the write envelope is unchanged.
+   *
+   *  v1.196.0 — "meets floor+cushion" is the leg's OWN arm test: the pack at the window close on
+   *  the overnight islanded-outage / disabled basis (the line, asked to the whole percent above it,
+   *  or the cost target where that is higher), the whole-house walk to the next recharge on the
+   *  legacy-pct basis and the backup leg. A mid-day leg writes T_mid (middayReserveTargetPct). */
   setpointSocPct: number | null;
   /** Pack-kWh the buy must ADD at the trough to hold floor+cushion. */
   requiredExtraKwh: number | null;
@@ -539,9 +550,17 @@ export interface NightChargePlan {
    *  null/absent in resilience mode. */
   costCeilingSurplusRawKwh?: number | null;
   /** v1.187.1 — the load factor the de-biased surplus was computed on (1 = the forecast as
-   *  is) and the ledger nights behind it; null when no de-biased surplus was supplied. */
+   *  is) and the ledger nights behind it; null when no de-biased surplus was supplied.
+   *  v1.196.0 — 1, with its nights, when only the PV term was de-biased (costSurplusPvFactor
+   *  above 1): a non-null factor no longer means the load was de-biased. */
   costSurplusLoadFactor?: number | null;
   costSurplusLoadSamples?: number | null;
+  /** v1.196.0 — the PV factor the de-biased surplus's P50 PV was counted at (costSurplusPvFactor:
+   *  1 = the forecast as is, as when only the load term was de-biased) and the ledger nights
+   *  behind it; null when no de-biased surplus was supplied, and on a long-gap night. null/absent
+   *  in resilience mode. */
+  costSurplusPvFactor?: number | null;
+  costSurplusPvSamples?: number | null;
   /** v1.125.0 — the outage this cushion is sized to survive, hours. */
   cushionOutageHours?: number;
   /** R2 — a mid-day (super off-peak) leg only: which term of T_mid set the reserve it writes
@@ -625,10 +644,15 @@ function nullPlan(
   basisComplete: boolean,
   rationale: string,
   basisTransient = false,
+  /** v1.196.0 — which gate refused (NightChargePlan.basisBlockedBy); read only when the basis is
+   *  incomplete. */
+  blockedBy: string | null = null,
 ): NightChargePlan {
   return {
     generatedAt: inputs.nowMs,
     basisComplete,
+    // v1.196.0 — only on a refused plan: a hold plan's JSON gains no key.
+    ...(basisComplete ? {} : { basisBlockedBy: blockedBy }),
     basisTransient,
     buyKwhDebiased: null,
     buyDebiasFactor: inputs.buyDebiasFactor ?? 1,
@@ -1180,31 +1204,35 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
 
   // ── Gates (fail-safe → null over a fabricated number) ──
   // I11 SoC coherence; I6 basis; I5 SHP2/state; and structural preconditions.
+  // v1.196.0 — every refused plan carries the gate that refused it (NightChargePlan.basisBlockedBy):
+  // the rationale alone reached no push. The 21:30 "no plan tonight" push states it.
+  const refuse = (why: string, transient = false, tail = ''): NightChargePlan =>
+    nullPlan(inputs, false, `No plan — ${why}${tail}.`, transient, why);
   if (!basisComplete) {
-    // v1.148.0 — name it here too: this string reaches the 21:30 notification and
-    // the spoken advisory, which is where an operator actually meets the decision.
+    // v1.148.0 — name it here too (the rationale), and v1.196.0 on the plan, where the 21:30
+    // push reads it.
     const why = inputs.basisBlockedBy ? ` (${inputs.basisBlockedBy})` : '';
-    return nullPlan(inputs, false, `No plan — forecast/telemetry basis incomplete${why}; nothing will be charged.`, inputs.basisTransient === true);
+    return nullPlan(inputs, false, `No plan — forecast/telemetry basis incomplete${why}; nothing will be charged.`, inputs.basisTransient === true, inputs.basisBlockedBy ?? null);
   }
-  if (!socCoherent) return nullPlan(inputs, false, 'No plan — SoC telemetry incoherent (% vs remaining/full mismatch).', true);
-  if (inputs.confidenceTier === 'climatology') return nullPlan(inputs, false, 'No plan — horizon is climatology-only (no real forecast); will not size a buy on a guessed sky.');
+  if (!socCoherent) return refuse('SoC telemetry incoherent (% vs remaining/full mismatch)', true);
+  if (inputs.confidenceTier === 'climatology') return refuse('horizon is climatology-only (no real forecast)', false, '; will not size a buy on a guessed sky');
   // v1.132.0 — basisComplete TRUE here: the forecast/telemetry basis is fine,
   // there is simply no cheap window tonight (Saturday has none on this tariff).
   // Reporting basisComplete:false made HA say "basis incomplete" about a healthy
   // basis, and conflated a normal windowless night with a genuine data outage.
   if (!window || !(window.endMs > window.startMs)) return nullPlan(inputs, true, 'No plan — no valid cheap charge window resolved for tonight.');
-  if (!Number.isFinite(fullKwh) || fullKwh <= 0) return nullPlan(inputs, false, 'No plan — pool capacity unavailable.', true);
-  if (!Number.isFinite(socNowPct)) return nullPlan(inputs, false, 'No plan — current SoC unavailable.', true);
+  if (!Number.isFinite(fullKwh) || fullKwh <= 0) return refuse('pool capacity unavailable', true);
+  if (!Number.isFinite(socNowPct)) return refuse('current SoC unavailable', true);
   // v1.39.0 review fix: a non-finite floor/cushion made targetFloorKwh NaN,
   // every bisection comparison false, and the buy silently resolved to the FULL
   // pool headroom — a confident max-buy instead of the fail-closed null the
   // module's contract promises for degenerate inputs. Same class for the
   // efficiency/charge-cap knobs (all operator-config-sourced).
   if (!Number.isFinite(reserveFloorPct) || reserveFloorPct < 0 || !Number.isFinite(cushionPct) || cushionPct < 0)
-    return nullPlan(inputs, false, 'No plan — reserve floor / outage cushion is not a finite non-negative number.');
+    return refuse('reserve floor / outage cushion is not a finite non-negative number');
   if (!Number.isFinite(legEff) || legEff <= 0 || !Number.isFinite(dischargeEff) || dischargeEff <= 0 || !Number.isFinite(chargeCapKw) || chargeCapKw < 0)
-    return nullPlan(inputs, false, 'No plan — efficiency/charge-power configuration is not a finite number.');
-  if (horizon.length === 0) return nullPlan(inputs, false, 'No plan — empty forecast horizon.', true);
+    return refuse('efficiency/charge-power configuration is not a finite number');
+  if (horizon.length === 0) return refuse('empty forecast horizon', true);
 
   // R2 — the leg (WindowSpec). Every term below that reads it is a no-op on the overnight leg.
   const spec = inputs.windowSpec;
@@ -1515,6 +1543,8 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     // there is simply no margin above it.
     // R4 — and the backup leg: the walk the setpoint below is solved on (troughFromPack), so the
     // leg arms exactly when the walk it writes for dips under the line.
+    // v1.196.0 — every leg's setpoint is its own arm test (setpointOnWalk, below): the walk here,
+    // the pack at window close on the branch below.
     if (cushionBasis === 'legacy-pct' || backupLeg) return houseTroughAtLift(lift);
     // The pack AT OUTAGE ONSET. The outage energy itself lives in targetFloorKwh
     // (reserve + cushion), so subtracting it here too would double-count it and
@@ -1549,7 +1579,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   const holdPlan = (
     rationale: string,
     cost?: Pick<NightChargePlan, 'costCeilingBasis' | 'costCeilingSocPct' | 'longGapAhead' | 'costCeilingSurplusKwh' | 'costCeilingSurplusBasis'
-      | 'costCeilingSurplusRawKwh' | 'costSurplusLoadFactor' | 'costSurplusLoadSamples'>,
+      | 'costCeilingSurplusRawKwh' | 'costSurplusLoadFactor' | 'costSurplusLoadSamples' | 'costSurplusPvFactor' | 'costSurplusPvSamples'>,
   ): NightChargePlan => ({
       ...nullPlan(inputs, true, rationale),
       objective: 'none',
@@ -1754,6 +1784,9 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     costCeilingSurplusRawKwh: costSurplusKwh != null ? round2(costSurplusKwh) : null,
     costSurplusLoadFactor: costLoad != null && !longGap ? costLoad.factor : null,
     costSurplusLoadSamples: costLoad != null && !longGap ? costLoad.samples : null,
+    // v1.196.0 — the PV factor beside it (absent on a CostSurplusLoad from before: the forecast as is).
+    costSurplusPvFactor: costLoad != null && !longGap ? (costLoad.pvFactor ?? 1) : null,
+    costSurplusPvSamples: costLoad != null && !longGap ? (costLoad.pvSamples ?? 0) : null,
   };
   if (costMode) {
     const ct = costModeTargetKwh({
@@ -1838,6 +1871,20 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   // ceiling and silently collapses back into targetSocPct). trough(P) is
   // monotone non-decreasing in P — the sim's [0, full] clamps preserve order —
   // so the bisection is exact.
+  //
+  // ★★ v1.196.0 — ONE TEST: THE SETPOINT IS THE LEG'S OWN ARM TEST. The walk below (troughFromPack,
+  // a whole-house P10 PV / P90 load walk from the close to the next recharge) is the arm test of the
+  // legacy-pct basis and of the backup leg (troughAtLift), and T_mid's R on a mid-day leg. On the
+  // overnight leg with an islanded-outage or disabled cushion the arm test is the pack AT the window
+  // close against reserve + cushion (troughAtLift: the outage energy lives in the line). Solving the
+  // setpoint on the walk there counted the drain twice: a whole day of whole-house drain AND the
+  // outage cushion on top of it. On this plant the walk falls under the line from any start, so every
+  // charge night asked ~73-100% and wrote the 50% maximum, while the plan was sized on the line
+  // (31.1% on a 16% floor with 4 h × 2.62 kW × 1.25 islanded). That leg's setpoint is now the line
+  // itself, asked to the whole percent above it (clampReserveTarget rounds: 28.07% must not write
+  // 28), and in cost mode the cost target where that is higher — the target, never the derated
+  // arrival, as the v1.60.0 note above requires.
+  const setpointOnWalk = midday || backupLeg || cushionBasis === 'legacy-pct';
   const troughFromPack = (p: number): number =>
     simulate(p, fullKwh, postHours, dischargeEff, legEff, windowEnd, windowEnd).minPackKwh;
   let requiredPackAtWindowEndKwh: number;
@@ -1848,6 +1895,10 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     // R2 — a mid-day leg asks the resilience question whatever cost mode says: its reserve
     // write (T_mid) carries the resilience lift, and the force-charge only the cost fill.
     requiredPackAtWindowEndKwh = Math.max(packAtWindowEnd_noBuy, costTargetKwh ?? packAtWindowEnd_noBuy);
+  } else if (!setpointOnWalk) {
+    // v1.196.0 — the pack at the window close the arm test asks for: the line, or in cost mode the
+    // cost target where that is higher (as on an economic-only night above).
+    requiredPackAtWindowEndKwh = Math.min(fullKwh, Math.max(targetFloorKwh, costMode ? (costTargetKwh ?? 0) : 0));
   } else if (troughFromPack(fullKwh) < targetFloorKwh - 1e-9) {
     requiredPackAtWindowEndKwh = fullKwh; // even a full pack cannot hold the line — ask for all of it
   } else {
@@ -1875,9 +1926,20 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   // would be strictly worse than the pre-v1.60.0 write and would cap a charge
   // the window can demonstrably deliver. (Only bisection tolerance can put them
   // out of order; the guard makes the ordering structural.)
+  // v1.196.0 — on the pack-at-close leg the line is asked to the whole percent ABOVE it: the
+  // actuator writes Math.round (clampReserveTarget), and a write under the line is a write the
+  // plan was not sized on. 0 elsewhere (the walk and the cost-only ask keep their own figure).
+  // The line is the arm test's, on the planner's nameplate fullKwh; the pool percent the panel
+  // holds is a share of the packs' measured capacity (~0.944 of nameplate on this fleet), so the
+  // written percent holds about that share of the counted cushion above the floor, beside the Core
+  // standby the cushion leaves out (header). The measured basis is kept out of the planner
+  // (runwayBasisContracts.test.ts, SCOPE): this ask is on the basis the plan is sized on.
+  const lineAskPct = !setpointOnWalk && !baselineHolds
+    ? Math.min(100, Math.ceil((targetFloorKwh / fullKwh) * 100 - 1e-9)) : 0;
   const setpointSocPct = middayReserve != null ? middayReserve.pct : Math.max(
     targetSocPct,
     round1((requiredPackAtWindowEndKwh / fullKwh) * 100),
+    lineAskPct,
   );
 
   // v1.60.0 — name the contention. Two MUTUALLY EXCLUSIVE shapes, and neither
@@ -1907,8 +1969,15 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   // the resilience requirement ASKED for when the envelope truncated it, and
   // what the window is expected to REACH.
   const writtenPct = clampReserveTarget(setpointSocPct);
-  const truncated = setpointSocPct > writtenPct + 0.05;
-  const askName = baselineHolds ? "tonight's cost target" : 'the resilience requirement';
+  // v1.196.0 — only the envelope truncates. The write is a whole percent: a 40.3% cost target is
+  // written as 40, which is not "the panel only accepts a backup reserve up to 50%" (the words this
+  // compared `writtenPct` against said so for any ask with a fraction).
+  const truncated = setpointSocPct > RESERVE_WRITE_MAX_PCT + 0.05;
+  // v1.196.0 — on the pack-at-close leg a cost night's setpoint is the cost target wherever that
+  // is above the line's ask: named as what it is, not as a resilience need.
+  const askIsCost = baselineHolds || (!setpointOnWalk && costMode && costTargetKwh != null
+    && round1((costTargetKwh / fullKwh) * 100) > lineAskPct);
+  const askName = askIsCost ? "tonight's cost target" : 'the resilience requirement';
   // v1.187.22 — the third quantity ("the window is only expected to reach ~X%") was the
   // islanded worst case's arrival, already stated once as such by the sizing sentence just
   // before; called "expected" it contradicted the Expected: sentence (~5 kWh to 50%, then
@@ -2024,9 +2093,14 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     : ' (no full-length cheap window for more than a day after this one, so the morning-solar headroom is set aside)';
   // v1.187.1 — when the de-biased load set the headroom, the rationale says so and gives the
   // figure the forecast load alone would have left.
-  const headroomNote = costLoad != null && costHeadroomKwh != null && costSurplusKwh != null
+  // v1.196.0 — and the de-biased sun, each term named only where it moved the surplus.
+  const debiasTerms = costLoad == null ? [] : [
+    ...(costLoad.factor < 1 ? [`the house load at ×${costLoad.factor} of its forecast from ${costLoad.samples} realized nights`] : []),
+    ...((costLoad.pvFactor ?? 1) > 1 ? [`the median sun at ×${costLoad.pvFactor} of its forecast from ${costLoad.pvSamples ?? 0} realized nights`] : []),
+  ];
+  const headroomNote = costLoad != null && debiasTerms.length > 0 && costHeadroomKwh != null && costSurplusKwh != null
     && costHeadroomKwh > costSurplusKwh + 0.005
-    ? ` (~${round1(costHeadroomKwh)} kWh, counting the house load at ×${costLoad.factor} of its forecast from ${costLoad.samples} realized nights; ~${round1(costSurplusKwh)} kWh on the forecast as is)`
+    ? ` (~${round1(costHeadroomKwh)} kWh, counting ${debiasTerms.join(' and ')}; ~${round1(costSurplusKwh)} kWh on the forecast as is)`
     : '';
   const holdReason = starved
     ? `this window can deliver only ~${round1(buyKwh)} kWh, under the ${round1(minBuyKwh)} kWh minimum-buy threshold${holdCapName} — against a requirement of ${meetable ? `~${round1(requiredExtraKwh)} kWh` : 'more than the pool can hold'}. The window cannot serve the need; this is not a night with little worth buying.`
@@ -3207,6 +3281,8 @@ export function costModeTargetKwh(o: {
  * The per-hour physical floor (costSurplusLoadW) and the resilience bound
  * (debiasedCostSurplusKwh) apply on top. COST MODE ONLY: the resilience sizing, the P90 over-buy
  * flag, the long-gap P10 surplus, the islanded cushion and every alarm keep the raw forecast.
+ * v1.196.0 — the surplus's other term, the P50 PV, is de-biased beside it from the same rows
+ * (costSurplusPvFactor, expand-only), under the same sample ramp and the same bounds.
  */
 export const COST_SURPLUS_LOAD_LOOKBACK_DAYS = 14;
 export const COST_SURPLUS_LOAD_MIN_SAMPLES = 5;
@@ -3234,6 +3310,81 @@ export function costSurplusLoadFactor(
     samples: n,
     medianRatio: Math.round(median * 1000) / 1000,
   };
+}
+
+/**
+ * v1.196.0 — THE COST CEILING'S PV TERM, DE-BIASED FROM THE LEDGER, beside the load term above.
+ *
+ * The morning surplus is Σ max(0, P50 PV − load). v1.187.1 de-biased the load and left the P50 PV
+ * as forecast, and the PV forecast is censored low on exactly the days the ceiling matters: the
+ * solar fit and pvBiasFactor (analytics.ts) learn from hours when the pool was full and the Cores
+ * shed their PV, so a sunny morning's P50 under-states the sun, the surplus comes out small, the
+ * ceiling high, and the overnight buy fills room the sun would have filled.
+ *
+ * The factor is the MEDIAN realized/forecast P50 PV ratio (1 + pv_err_frac, the ledger's own
+ * measure of the same 24 h P50 sum the surplus hours are part of) over the rows that measured the
+ * sun and nothing else:
+ *  - a forecast-tier row whose PV verdict stands (pv_verdict_set_aside null: the band was built
+ *    for the Cores it was graded against) — the readiness gate's own PV pool;
+ *  - not SATURATED (pv_saturated): a day whose pool reached the charge taper shed PV, so its
+ *    actual measures the curtailment, not the sun. A row from before the column (NULL) counts —
+ *    censoring only pulls its ratio down, toward the forecast as is;
+ *  - a forecast of at least COST_SURPLUS_PV_MIN_FORECAST_KWH: a near-dark day's ratio is noise.
+ * Guards, as the load factor's:
+ *  - EXPAND-ONLY: at least 1. It only ever raises the PV the surplus counts, so it can only widen
+ *    the headroom (lower the ceiling) — never raise a buy. A ledger whose sun ran at or under the
+ *    forecast leaves the ceiling as it was;
+ *  - FEW SAMPLES: under COST_SURPLUS_LOAD_MIN_SAMPLES nights the factor is 1; the correction ramps
+ *    in, whole at COST_SURPLUS_LOAD_FULL_SAMPLES;
+ *  - BOUNDED above at COST_SURPLUS_PV_FACTOR_MAX, and per hour never past that hour's own P90
+ *    (costSurplusPvW).
+ * COST MODE ONLY, through the same resilience bound (debiasedCostSurplusKwh) and the same
+ * exclusions (a cushion-shortfall night, a long-gap night). The analytics PV forecast that feeds
+ * the runway and every alarm is unchanged: its curtailed hours are its own question.
+ */
+export const COST_SURPLUS_PV_FACTOR_MAX = 1.3;
+export const COST_SURPLUS_PV_MIN_FORECAST_KWH = 5;
+
+/** The ledger fields costSurplusPvFactor reads (a NightLedgerRow). */
+export interface CostSurplusPvRow {
+  pv_err_frac?: number | null;
+  pv_p50_kwh?: number | null;
+  pv_verdict_set_aside?: string | null;
+  confidence_tier?: string | null;
+  pv_saturated?: number | null;
+}
+
+export function costSurplusPvFactor(
+  rows: ReadonlyArray<CostSurplusPvRow>,
+): { factor: number; basis: 'measured' | 'default'; samples: number; medianRatio: number | null } {
+  const ratios = rows
+    .filter((r) => r.confidence_tier === 'forecast' && r.pv_verdict_set_aside == null && r.pv_saturated !== 1)
+    .filter((r) => typeof r.pv_p50_kwh === 'number' && Number.isFinite(r.pv_p50_kwh) && r.pv_p50_kwh >= COST_SURPLUS_PV_MIN_FORECAST_KWH)
+    .map((r) => r.pv_err_frac)
+    // An actual of nothing or less (err ≤ −1) is a dark fleet, not a ratio.
+    .filter((v): v is number => typeof v === 'number' && Number.isFinite(v) && v > -1)
+    .map((v) => 1 + v)
+    .sort((a, b) => a - b);
+  const samples = ratios.length;
+  if (samples < COST_SURPLUS_LOAD_MIN_SAMPLES) return { factor: 1, basis: 'default', samples, medianRatio: null };
+  const mid = Math.floor(samples / 2);
+  const median = samples % 2 === 1 ? ratios[mid] : (ratios[mid - 1] + ratios[mid]) / 2;
+  const weight = Math.min(1, samples / COST_SURPLUS_LOAD_FULL_SAMPLES);
+  const factor = Math.max(1, Math.min(COST_SURPLUS_PV_FACTOR_MAX, 1 + weight * (median - 1)));
+  return {
+    factor: Math.round(factor * 1000) / 1000,
+    basis: 'measured',
+    samples,
+    medianRatio: Math.round(median * 1000) / 1000,
+  };
+}
+
+/** v1.196.0 — one morning hour's P50 PV for the cost ceiling's surplus: × the factor, but never past
+ *  the hour's own P90 (the band's best case), and never below the P50 itself. A factor of 1 or less,
+ *  or a non-finite one, keeps the P50 as is. PURE. */
+export function costSurplusPvW(p50W: number, p90W: number, factor: number): number {
+  if (!(factor > 1) || !Number.isFinite(factor)) return p50W;
+  return Math.min(p50W * factor, Math.max(p50W, Number.isFinite(p90W) ? p90W : p50W));
 }
 
 /** v1.187.1 — the trailing days the per-hour physical floor is measured over, and how many of
@@ -3297,10 +3448,13 @@ export interface MorningSurplusHour {
  * v1.187.1 — the cost ceiling's morning surplus on the de-biased load: the P50, and the P90 that
  * stands in for it, over the same hours as morningPvSurplusP50Kwh / P90Kwh. PURE. Null exactly
  * where the raw figures are: no hour ⇒ both null; any hour without a finite p50W ⇒ the P50 null.
+ * v1.196.0 — and on the de-biased P50 PV (`pvFactor`, costSurplusPvW). The P90 is the band's
+ * best case already, and stays as forecast.
  */
 export function costMorningSurplusKwh(
   hours: ReadonlyArray<MorningSurplusHour>,
   factor: number,
+  pvFactor = 1,
 ): { p50Kwh: number | null; p90Kwh: number | null } {
   if (hours.length === 0) return { p50Kwh: null, p90Kwh: null };
   let p50Kwh = 0;
@@ -3309,7 +3463,7 @@ export function costMorningSurplusKwh(
   for (const h of hours) {
     const loadW = costSurplusLoadW({ loadW: h.loadW, evW: h.evW, factor, floorW: h.floorW });
     p90Kwh += Math.max(0, h.p90W - loadW) / 1000;
-    if (typeof h.p50W === 'number' && Number.isFinite(h.p50W)) p50Kwh += Math.max(0, h.p50W - loadW) / 1000;
+    if (typeof h.p50W === 'number' && Number.isFinite(h.p50W)) p50Kwh += Math.max(0, costSurplusPvW(h.p50W, h.p90W, pvFactor) - loadW) / 1000;
     else p50Complete = false;
   }
   return { p50Kwh: p50Complete ? round2(p50Kwh) : null, p90Kwh: round2(p90Kwh) };
@@ -3322,6 +3476,10 @@ export interface CostSurplusLoad {
   samples: number;
   p50Kwh: number | null;
   p90Kwh: number | null;
+  /** v1.196.0 — the PV factor the P50 was de-biased by (costSurplusPvFactor) and the ledger nights
+   *  behind it. Absent ⇒ 1 and 0: the P50 PV as forecast. */
+  pvFactor?: number;
+  pvSamples?: number;
 }
 
 /**
@@ -3331,18 +3489,24 @@ export interface CostSurplusLoad {
  * ceiling would have been. Every field null when the plan has none (resilience mode). PURE.
  */
 export function costSurplusLedgerColumns(
-  plan: Pick<NightChargePlan, 'costCeilingSurplusKwh' | 'costCeilingSurplusRawKwh' | 'costSurplusLoadFactor' | 'costSurplusLoadSamples'>,
+  plan: Pick<NightChargePlan, 'costCeilingSurplusKwh' | 'costCeilingSurplusRawKwh' | 'costSurplusLoadFactor' | 'costSurplusLoadSamples'
+    | 'costSurplusPvFactor' | 'costSurplusPvSamples'>,
 ): {
   cost_surplus_kwh: number | null;
   cost_surplus_raw_kwh: number | null;
   cost_surplus_load_factor: number | null;
   cost_surplus_load_samples: number | null;
+  cost_surplus_pv_factor: number | null;
+  cost_surplus_pv_samples: number | null;
 } {
   return {
     cost_surplus_kwh: plan.costCeilingSurplusKwh ?? null,
     cost_surplus_raw_kwh: plan.costCeilingSurplusRawKwh ?? null,
     cost_surplus_load_factor: plan.costSurplusLoadFactor ?? null,
     cost_surplus_load_samples: plan.costSurplusLoadSamples ?? null,
+    // v1.196.0 — the PV factor beside the load factor (costSurplusPvFactor).
+    cost_surplus_pv_factor: plan.costSurplusPvFactor ?? null,
+    cost_surplus_pv_samples: plan.costSurplusPvSamples ?? null,
   };
 }
 
@@ -3384,9 +3548,10 @@ export function ledgerExpectedBuyKwh(
  *
  * null — the planner keeps the raw surplus, today's behaviour — in resilience mode, with no
  * morning hour, under COST_SURPLUS_LOAD_MIN_SAMPLES ledger nights, or with a ledger whose load
- * ran at or above its forecast (factor 1). A ledger read that throws counts as no nights. The
- * hourly-load query runs only when a de-bias can apply; a query that fails or returns nothing
- * leaves every hour without a floor, so on its forecast (costSurplusLoadW).
+ * ran at or above its forecast (factor 1) AND whose sun ran at or under its forecast (PV factor
+ * 1, v1.196.0: costSurplusPvFactor). A ledger read that throws counts as no nights. The
+ * hourly-load query runs only when the load de-bias can apply; a query that fails or returns
+ * nothing leaves every hour without a floor, so on its forecast (costSurplusLoadW).
  *
  * The hours are those of index.ts's raw morning surplus: [fromMs, toMs) (window close →
  * +14 h), an hour with no day-ahead load skipped, the expected-value EV block carried whole.
@@ -3401,12 +3566,12 @@ export async function buildCostSurplusLoad(o: {
   fromMs: number;
   toMs: number;
   /** The ledger rows over the last `days` days. */
-  readLedger: (days: number) => ReadonlyArray<{ load_err_frac?: number | null }>;
+  readLedger: (days: number) => ReadonlyArray<{ load_err_frac?: number | null } & CostSurplusPvRow>;
   /** The house panel's load in `bucketS`-second means over [fromMs, toMs), or null. */
   fetchHourlyLoad: (fromMs: number, toMs: number, bucketS: number) => Promise<ReadonlyArray<{ ts: number; value: number }> | null>;
   /** The local clock hour (0-23) of `ts` in the tariff's timezone. */
   hourOf: (ts: number) => number;
-}): Promise<{ load: CostSurplusLoad; medianRatio: number | null; floored: boolean } | null> {
+}): Promise<{ load: CostSurplusLoad; medianRatio: number | null; pvMedianRatio: number | null; floored: boolean } | null> {
   if (o.objectiveMode !== 'cost') return null;
   const hours: Array<MorningSurplusHour & { ts: number }> = [];
   for (const pb of o.probHours) {
@@ -3416,22 +3581,28 @@ export async function buildCostSurplusLoad(o: {
     hours.push({ ts: pb.ts, p50W: pb.p50W, p90W: pb.p90W, loadW: fh.forecastLoadW, evW: fh.predictedEvLoadW ?? 0 });
   }
   if (hours.length === 0) return null;
-  let rows: ReadonlyArray<{ load_err_frac?: number | null }> = [];
+  let rows: ReadonlyArray<{ load_err_frac?: number | null } & CostSurplusPvRow> = [];
   try { rows = o.readLedger(COST_SURPLUS_LOAD_LOOKBACK_DAYS); } catch { rows = []; }
   const cal = costSurplusLoadFactor(rows);
-  if (!(cal.factor < 1)) return null;
+  // v1.196.0 — the PV factor from the same rows: either de-bias alone builds a surplus.
+  const pv = costSurplusPvFactor(rows);
+  if (!(cal.factor < 1) && !(pv.factor > 1)) return null;
   let pts: ReadonlyArray<{ ts: number; value: number }> | null = null;
-  try {
-    pts = await o.fetchHourlyLoad(o.nowMs - COST_SURPLUS_FLOOR_DAYS * 24 * 3_600_000, o.nowMs, 3600);
-  } catch { pts = null; }
+  if (cal.factor < 1) {
+    try {
+      pts = await o.fetchHourlyLoad(o.nowMs - COST_SURPLUS_FLOOR_DAYS * 24 * 3_600_000, o.nowMs, 3600);
+    } catch { pts = null; }
+  }
   const floorByHour = pts ? measuredHourlyLoadFloorW(pts, o.hourOf) : null;
   const deb = costMorningSurplusKwh(
     hours.map((h) => ({ ...h, floorW: floorByHour ? floorByHour[o.hourOf(h.ts)] : null })),
     cal.factor,
+    pv.factor,
   );
   return {
-    load: { factor: cal.factor, basis: cal.basis, samples: cal.samples, ...deb },
+    load: { factor: cal.factor, basis: cal.basis, samples: cal.samples, ...deb, pvFactor: pv.factor, pvSamples: pv.samples },
     medianRatio: cal.medianRatio,
+    pvMedianRatio: pv.medianRatio,
     floored: floorByHour?.some((v) => v != null) === true,
   };
 }

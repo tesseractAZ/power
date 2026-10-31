@@ -12,6 +12,7 @@ import {
   type MorningSurplusHour,
 } from '../src/nightChargeAdvisor.js';
 import { localParts } from '../src/tariff.js';
+import { clampReserveTarget } from '../src/nightChargeActuator.js';
 
 /**
  * v1.187.1 — the cost ceiling's morning surplus on a DE-BIASED load.
@@ -257,7 +258,9 @@ async function build(o: {
 
 test('★★★ BUILDER: the 09-29 morning, end to end, is exactly what the planner tests below are given', async () => {
   const { out, calls } = await build();
-  assert.deepEqual(out?.load, { factor: 0.793, basis: 'measured', samples: 6, ...costMorningSurplusKwh(hours0929(), 0.793) });
+  // v1.196.0 — with the PV factor beside the load's (costCeilingPvDebias.test.ts): these rows carry
+  // no PV verdict, so the sun is counted as forecast (×1, no nights).
+  assert.deepEqual(out?.load, { factor: 0.793, basis: 'measured', samples: 6, ...costMorningSurplusKwh(hours0929(), 0.793), pvFactor: 1, pvSamples: 0 });
   assert.equal(out?.load.p50Kwh, 25.08);
   assert.equal(out?.medianRatio, 0.655);
   assert.equal(out?.floored, true);
@@ -453,7 +456,14 @@ test('★★★ the de-bias never lowers the ceiling below the resilience target
   assert.equal(after.costCeilingSocPct, 73.7, 'it lowers the ceiling, and stops at the resilience target');
   assert.equal(after.targetSocPct, 73.7, 'the force-charge stop is the target itself');
   assert.equal(after.requiredExtraKwh, before.requiredExtraKwh);
-  assert.equal(after.setpointSocPct, before.setpointSocPct);
+  // v1.196.0 — the setpoint is the cost target on this leg (setpointOneTest.test.ts): 77.7 before,
+  // and after the de-bias the 73.71% line asked to the whole percent above it, 74. Both write the
+  // panel's 50% maximum, and the force-charge stop (the ceiling, above) never falls under the line.
+  assert.equal(before.setpointSocPct, 77.7);
+  assert.equal(after.setpointSocPct, 74);
+  assert.ok(after.setpointSocPct >= Math.ceil(after.cushionLineSocPct));
+  assert.equal(clampReserveTarget(after.setpointSocPct), 50);
+  assert.equal(clampReserveTarget(before.setpointSocPct), 50);
   assert.equal(after.cushionShortfall, before.cushionShortfall);
   // A resilience target above the raw ceiling: the raw ceiling stands, the de-bias adds nothing.
   const higher = { socNowPct: 40, islandedLoadKw: 11 };
@@ -609,17 +619,22 @@ test('★★★ SWEEP (contention): no force-charge stop falls under the cushion
 /* ══ the ledger's record ══════════════════════════════════════════════════ */
 
 test('★★★ the ledger columns: the headroom used, the raw one, and the factor and nights between them', () => {
+  // v1.196.0 — and the PV factor beside the load's (costCeilingPvDebias.test.ts). A de-biased
+  // surplus with no PV factor counts the sun as forecast: ×1 from 0 nights.
   const p = plan({ costSurplusLoad: surplusLoad(LEDGER_0923_0928) });
   assert.deepEqual(costSurplusLedgerColumns(p), {
     cost_surplus_kwh: 25.08, cost_surplus_raw_kwh: 20.54, cost_surplus_load_factor: 0.793, cost_surplus_load_samples: 6,
+    cost_surplus_pv_factor: 1, cost_surplus_pv_samples: 0,
   });
   // No de-bias supplied: the raw figure twice, no factor.
   assert.deepEqual(costSurplusLedgerColumns(plan()), {
     cost_surplus_kwh: 20.54, cost_surplus_raw_kwh: 20.54, cost_surplus_load_factor: null, cost_surplus_load_samples: null,
+    cost_surplus_pv_factor: null, cost_surplus_pv_samples: null,
   });
   // Resilience mode: nothing to record, and nothing fabricated.
   assert.deepEqual(costSurplusLedgerColumns(plan({ objectiveMode: 'resilience' })), {
     cost_surplus_kwh: null, cost_surplus_raw_kwh: null, cost_surplus_load_factor: null, cost_surplus_load_samples: null,
+    cost_surplus_pv_factor: null, cost_surplus_pv_samples: null,
   });
 });
 

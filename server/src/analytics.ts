@@ -35,6 +35,8 @@ import {
   curtailmentDaySettled, frozenCurtailmentDay, freezeCurtailmentDay, pruneFrozenCurtailmentDays, persistFrozenCurtailmentDays,
   curtailmentMembershipSound, curtailmentMembershipHistory,
 } from './curtailmentFreeze.js';
+// v1.196.0 — the forecast-skill hindcast measures each past day on that day's recorded Cores.
+import { membershipsDuring, membershipConfirmedDuring, latestSlotOf, standInCores, type MembershipHistory } from './membershipHistory.js';
 
 /**
  * Learned alerting — phase 1: peer-comparison anomaly detection.
@@ -6247,6 +6249,20 @@ export interface ForecastSkillDay {
   // errorPct is null). Keeps the 06-29-style wedge from being scored as a
   // phantom +29% over-forecast.
   coverageGap?: boolean;
+  /**
+   * v1.196.0 — true when the recorded pool membership that day did not hold every Core the
+   * solar model was fitted on, in person or through the Core then in its panel slot
+   * (skillRosterByDay): a Core added through a slot nobody held, or a day on which the
+   * Cores changed. The pool lacked an array the model expects, so the day is shown but its
+   * errorPct is null and it stays out of MAE, the bias factor and the PV band calibration.
+   */
+  offRoster?: boolean;
+  /**
+   * v1.196.0 — true when the day was measured on the Core(s) that then held a current home
+   * Core's panel slot: a day before a like-for-like swap, scored on that day's own Cores
+   * (the incoming Core took over the departing Core's PV array).
+   */
+  predecessorCores?: boolean;
 }
 
 export interface ForecastSkillReport {
@@ -6258,6 +6274,11 @@ export interface ForecastSkillReport {
   windowDays: number;
   /** v1.173.0 (GHI stage 2) — the irradiance basis this report was scored on. */
   ghiBasis?: ForecastSkillGhiBasis;
+  /**
+   * v1.196.0 — window days that start before the membership record (skillRosterByDay
+   * `unrecorded`): measured on the current home Cores and judged on telemetry coverage alone.
+   */
+  unrecordedRosterDays?: number;
 }
 
 // v1.20.0 (review fix) — keyed by windowDays: /api/confidence computes
@@ -6465,60 +6486,38 @@ export const SOLAR_FIT_MIN_FULL_COVERAGE_HOURS = 72;  // ≈3 days of daylight p
 
 /** v1.10.0 (review F4) — per-local-day, per-core telemetry coverage over the
  *  day's DAYLIGHT hours (GHI > DAYLIGHT_GHI). A day is `covered` only when
- *  EVERY SN in `pvBySn` reported at least `minFrac` of that day's daylight
- *  hour-epochs. Days with no daylight GHI at all are neutral (`covered: true`,
- *  daylightHours 0) — the existing dayHasGhiCoverage gate already excludes
- *  them from every consumer. A core that is dark for the WHOLE window fails
- *  every day, driving the bias factor to its neutral 1.0 no-op — the safe
- *  posture when the actuals are unmeasurable. Pure + exported for tests. */
+ *  EVERY core it is measured on reported at least `minFrac` of that day's
+ *  daylight hour-epochs: every SN in `pvBySn`, or (v1.196.0) the SNs `coresOn`
+ *  names for that day, where an SN with no series in `pvBySn` reported nothing.
+ *  Days with no daylight GHI at all are neutral (`covered: true`, daylightHours
+ *  0) — the existing dayHasGhiCoverage gate already excludes them from every
+ *  consumer. A core that is dark for the WHOLE window fails every day, driving
+ *  the bias factor to its neutral 1.0 no-op — the safe posture when the actuals
+ *  are unmeasurable. Pure + exported for tests.
+ *
+ *  v1.196.0 — ONE rule for both consumers: a core with no readings on a day is a
+ *  gap that day, whatever the reason. v1.93.0/v1.94.0 exempted a core on the
+ *  skill path until its first in-window sample ("had not joined yet"), but no
+ *  rows is also what a blackout already running when the window began produces,
+ *  and what several Cores returning on different days after a fleet-wide outage
+ *  produce: the dark Core's missing share was then scored as a forecast miss
+ *  (+50% a day with one of three Cores dark, +200% with two). Whether a Core
+ *  was in the pool on a day is now read from the membership record
+ *  (skillRosterByDay), not inferred from the telemetry being checked; the
+ *  skill path passes the day's Cores as `coresOn`. */
 export function coreCoverageByDay(
   ghiByEpoch: Map<number, number>,
   pvBySn: Map<string, Array<{ ts: number; value: number }>>,
   todayStartMs: number,
   windowDays: number,
   minFrac = PV_COVERAGE_MIN_FRAC,
-  /**
-   * v1.94.0 — exclude a core from a day's coverage requirement until it has
-   * actually JOINED the fleet (its first in-window sample is before that day).
-   *
-   * The two consumers of this map want different things from a never-reporting
-   * core, and conflating them cost 14 nights of night-charge. For the pv-bias
-   * factor (default, false) a wholly-dark core SHOULD fail every day: the fleet
-   * actual is unmeasurable, so the bias degrades to its neutral 1.0 no-op. But
-   * `computeForecastSkill` reuses the same map to null each day's errorPct, and
-   * a core that has never reported cannot make a PAST day's actual wrong — it
-   * simply was not part of that day's fleet. On 2026-08-20 two cores entered
-   * the set with zero history behind them, every one of the 30 hindcast days
-   * was marked a coverage gap, calScoredDays went 26 -> 0 against a floor of
-   * 14, and `basisComplete` stayed false — so the planner produced no plan at
-   * all. The sibling `fullCoverageFleetPv` already skips zero-sample cores for
-   * exactly this reason (see its `contributing` filter); this brings the skill
-   * path into line without loosening the bias gate.
-   *
-   * v1.94.0 corrects a v1.93.0 under-implementation: skipping only cores with
-   * ZERO in-window samples fixed nothing once the new core had logged a single
-   * day, because all of its earlier absent days became gaps again. The gate is
-   * therefore per-DAY against each core's first in-window sample, not a global
-   * all-or-nothing skip.
-   */
-  skipBeforeJoin = false,
+  coresOn?: (dayStartMs: number) => readonly string[],
 ): Map<number, { covered: boolean; daylightHours: number; worstSn: string | null; worstFrac: number | null }> {
   // Bucket each SN's samples once into hour-epoch presence sets.
   const presentBySn = new Map<string, Set<number>>();
-  const firstInWindowMs = new Map<string, number>();
-  const windowStartMs = siteShiftDaysMs(todayStartMs, -windowDays);
   for (const [sn, pts] of pvBySn) {
     const set = new Set<number>();
-    let first: number | null = null;
-    for (const p of pts) {
-      set.add(Math.floor(p.ts / 3_600_000));
-      if (p.ts >= windowStartMs && p.ts < todayStartMs && (first == null || p.ts < first)) first = p.ts;
-    }
-    // A core with no sample anywhere INSIDE the window never contributed to any
-    // of these days' actuals. Samples that exist only outside the window are the
-    // same case as no samples at all.
-    if (skipBeforeJoin && first == null) continue;
-    if (first != null) firstInWindowMs.set(sn, first);
+    for (const p of pts) set.add(Math.floor(p.ts / 3_600_000));
     presentBySn.set(sn, set);
   }
   const out = new Map<number, { covered: boolean; daylightHours: number; worstSn: string | null; worstFrac: number | null }>();
@@ -6539,35 +6538,68 @@ export function coreCoverageByDay(
     let covered = true;
     let worstSn: string | null = null;
     let worstFrac: number | null = null;
-    let evaluated = 0;
-    for (const [sn, present] of presentBySn) {
-      // v1.94.0 — a core that had not JOINED the fleet yet on this day cannot
-      // make this day's actual wrong. Requiring it turns every pre-join day
-      // into a coverage gap the moment a core is added, which is what emptied
-      // the skill window. Only applied on the skill path (skipBeforeJoin).
-      if (skipBeforeJoin) {
-        const joined = firstInWindowMs.get(sn);
-        if (joined == null || joined >= dayEnd) continue;
-      }
-      evaluated++;
-      const hit = daylight.reduce((n, he) => n + (present.has(he) ? 1 : 0), 0);
+    for (const sn of coresOn ? coresOn(dayStart) : presentBySn.keys()) {
+      const present = presentBySn.get(sn);
+      const hit = present ? daylight.reduce((n, he) => n + (present.has(he) ? 1 : 0), 0) : 0;
       const frac = hit / daylight.length;
       if (worstFrac == null || frac < worstFrac) { worstFrac = frac; worstSn = sn; }
       if (frac < minFrac) covered = false;
     }
-    // v1.150.0 — a day on which EVERY core was skipped reported `covered: true`.
-    //
-    // `covered` starts true and the only write to false is inside the loop, which
-    // the skipBeforeJoin `continue` bypasses. So when every SN is skipped the
-    // loop body never runs, nothing sets covered=false, and a day with full
-    // daylight and NOT ONE reporting core was published as covered — with
-    // worstSn/worstFrac null, so the row carried no hint either.
-    //
-    // This is the same defect class as the gate it sits in: absence read as
-    // success. A day nobody measured is not a covered day, it is an unevaluable
-    // one, and the distinction is the whole point of the gate.
-    if (presentBySn.size > 0 && evaluated === 0) covered = false;
     out.set(dayStart, { covered, daylightHours: daylight.length, worstSn, worstFrac });
+  }
+  return out;
+}
+
+/** v1.196.0 — skillRosterByDay's per-day verdict (see there). */
+export type SkillRosterVerdict = 'on-roster' | 'predecessor' | 'off-roster' | 'unrecorded';
+
+/**
+ * v1.196.0 — how a past day's actual PV is measured for the forecast-skill hindcast, from the
+ * membership record (membership-history.json, membershipHistory.ts), per day of the window:
+ *
+ *  - `on-roster`   — every Core the solar model was fitted on (`modelSns`) was in the pool all day
+ *                    (a pool with more Cores than that, before a Core left, counts: the actual is
+ *                    summed over the model's Cores alone). Measured on `modelSns`.
+ *  - `predecessor` — a model Core was not yet in the pool, but the Core that then held its panel
+ *                    slot was (a like-for-like swap: the Core taking a slot takes over the departing
+ *                    Core's PV array), and a fresh panel reading confirmed the record through the day
+ *                    (membershipConfirmedDuring). Measured on that day's Cores, `sns` (standInCores).
+ *  - `off-roster`  — a model Core was in neither form (it was added through a slot nobody held, or
+ *                    the entry carries no slot map), the day's Cores changed during the day, or the
+ *                    day would be a stand-in day the record cannot vouch for. Not scored: the pool
+ *                    lacked an array the model was fitted on, or may have.
+ *  - `unrecorded`  — the day starts before the record (a fresh install, a lost file, entries past
+ *                    the 64-entry cap). Measured on `modelSns`, judged on telemetry coverage alone.
+ *
+ * Memberships held under MEMBERSHIP_GLITCH_MS are folded away (membershipsDuring). Pure.
+ */
+export function skillRosterByDay(
+  history: MembershipHistory | null,
+  modelSns: readonly string[],
+  todayStartMs: number,
+  windowDays: number,
+): Map<number, { verdict: SkillRosterVerdict; sns: string[] }> {
+  const model = [...modelSns].sort();
+  const slotOf = history ? latestSlotOf(history, model) : new Map<string, string>();
+  const out = new Map<number, { verdict: SkillRosterVerdict; sns: string[] }>();
+  for (let i = windowDays; i >= 1; i--) {
+    const dayStart = siteShiftDaysMs(todayStartMs, -i); // CA26
+    const inForce = history ? membershipsDuring(history, dayStart, siteShiftDaysMs(dayStart, 1)) : null;
+    if (inForce == null) { out.set(dayStart, { verdict: 'unrecorded', sns: model }); continue; }
+    let cores: string[] | null = null;
+    for (const e of inForce) {
+      const c = standInCores(e, model, slotOf);
+      if (c == null || (cores != null && c.join(',') !== cores.join(','))) { cores = null; break; }
+      cores = c;
+    }
+    if (cores == null) out.set(dayStart, { verdict: 'off-roster', sns: model });
+    else if (cores.join(',') === model.join(',')) out.set(dayStart, { verdict: 'on-roster', sns: cores });
+    // A stand-in only on a day the record vouches for. A swap made while the panel was cloud-offline
+    // (its projection is kept verbatim) or the add-on stopped is recorded only when the panel next
+    // reads fresh; until then the record still names the departed Core, on the bench by then, and
+    // its bench rows would be scored as the array's.
+    else if (!(history && membershipConfirmedDuring(history, dayStart, siteShiftDaysMs(dayStart, 1)))) out.set(dayStart, { verdict: 'off-roster', sns: model });
+    else out.set(dayStart, { verdict: 'predecessor', sns: cores });
   }
   return out;
 }
@@ -6671,6 +6703,13 @@ export async function computeForecastSkill(
   forecast: DayForecast | null,
   windowDays = 7,
   ghiBasis: ForecastSkillGhiBasis = 'first-write',
+  /**
+   * v1.196.0 — the pool membership record each past day is measured against (skillRosterByDay).
+   * Omitted: the recorder's record, read on a cache miss (curtailmentMembershipHistory: none
+   * outside the add-on unless CURTAIL_MEMBERSHIP_HISTORY_PATH names one). Null: no record, so
+   * every day is `unrecorded`.
+   */
+  membership?: MembershipHistory | null,
 ): Promise<ForecastSkillReport> {
   const cacheKey = `${windowDays}:${ghiBasis}`;
   // v1.186.5 — a hit is valid only for the forecast it was scored against. The hindcast
@@ -6734,14 +6773,32 @@ export async function computeForecastSkill(
     ? buildRealizedGhiByEpoch(ghiRows, queryRealizedGhi(recorder, windowStart, now), weather.hours)
     : buildGhiByEpoch(ghiRows, weather.hours);
 
+  // v1.196.0 — each past day is measured on the Cores the membership record says were in the
+  // pool that day, not on today's Cores applied to 30 days of history (skillRosterByDay): the
+  // current home Cores; that day's own Cores before a like-for-like swap (the Core taking a
+  // slot takes over the departing Core's PV array); or not at all (offRoster) when the pool
+  // lacked an array the model was fitted on — after a Core is ADDED, only days on the new
+  // set of Cores score. Days before the record are measured on the current Cores.
+  const dpuSns = dpus.map((d) => d.sn);
+  const history = membership === undefined ? curtailmentMembershipHistory() : membership;
+  const roster = skillRosterByDay(history, dpuSns, todayStart, windowDays);
+  const coresOn = (dayStartMs: number): readonly string[] => {
+    const r = roster.get(dayStartMs);
+    return r?.verdict === 'predecessor' ? r.sns : dpuSns;
+  };
+
   // v0.21.0 — fetch each DPU's full pv_total series ONCE for the whole hindcast
   // window, then slice each hour in memory (was one SQLite query per hour per
   // DPU = windowDays×24×DPUs synchronous calls per cold recompute). The
   // inclusive slice reproduces the recorder's bounds, so the per-hour mean
-  // below is bit-identical.
+  // below is bit-identical. v1.196.0 — and each predecessor Core's, by SN (it
+  // may be on the bench now, or gone from the device list).
   const pvBySn = new Map<string, Array<{ ts: number; value: number }>>();
-  for (const d of dpus) {
-    pvBySn.set(d.sn, recorder.query(d.sn, 'pv_total', windowStart, todayStart));
+  for (const sn of dpuSns) {
+    pvBySn.set(sn, recorder.query(sn, 'pv_total', windowStart, todayStart));
+  }
+  for (const r of roster.values()) {
+    for (const sn of r.sns) if (!pvBySn.has(sn)) pvBySn.set(sn, recorder.query(sn, 'pv_total', windowStart, todayStart));
   }
 
   // v1.10.0 (review F4) — per-core daylight coverage per day: a day where a
@@ -6749,16 +6806,21 @@ export async function computeForecastSkill(
   // missing telemetry, not missing sunlight. Such days previously passed the
   // maturity gate and injected phantom over-forecast errors into MAE/bias
   // (07-04: +29.1% "error" while Core2 recorded zero rows).
-  // v1.93.0 — skill scoring excludes never-reporting cores from the coverage
-  // requirement (a core with no history cannot invalidate a past day's actual).
-  // The pv-bias call above deliberately keeps the strict all-cores gate.
-  const dayCoverage = coreCoverageByDay(ghiByEpoch, pvBySn, todayStart, windowDays, PV_COVERAGE_MIN_FRAC, true);
+  // v1.196.0 — the same all-Cores rule as the pv-bias factor, over the Cores the
+  // day is measured on: the v1.93.0/v1.94.0 exemption until a Core's first
+  // in-window row is gone (coreCoverageByDay).
+  const dayCoverage = coreCoverageByDay(ghiByEpoch, pvBySn, todayStart, windowDays, PV_COVERAGE_MIN_FRAC, coresOn);
 
   const days: ForecastSkillDay[] = [];
   let totalPred = 0, totalAct = 0, errSum = 0, errCount = 0;
+  let unrecordedRosterDays = 0;
   for (let i = windowDays; i >= 1; i--) {
     const dayStart = siteShiftDaysMs(todayStart, -i); // CA26
     const dayEnd = siteShiftDaysMs(dayStart, 1);
+    const rosterVerdict = roster.get(dayStart)?.verdict ?? 'unrecorded';
+    if (rosterVerdict === 'unrecorded') unrecordedRosterDays++;
+    const offRoster = rosterVerdict === 'off-roster';
+    const daySns = coresOn(dayStart);
     // v0.13.1 — a day with no irradiance for ANY hour can't be hindcast.
     // Emit errorPct:null + weatherCovered:false instead of a predictedKwh=0 /
     // errorPct=-100 row, and keep it out of the MAE/bias stats (which were
@@ -6773,8 +6835,8 @@ export async function computeForecastSkill(
       const resp = forecast.solarModel.hourly[hod];
       if (ghi != null && resp.coeff != null) predWh += resp.coeff * ghi;
       let act = 0;
-      for (const d of dpus) {
-        const pts = sliceByTsInclusive(pvBySn.get(d.sn) ?? [], hourStart, hourStart + 3_600_000);
+      for (const sn of daySns) {
+        const pts = sliceByTsInclusive(pvBySn.get(sn) ?? [], hourStart, hourStart + 3_600_000);
         if (pts.length === 0) continue;
         act += pts.reduce((s, p) => s + p.value, 0) / pts.length;
       }
@@ -6785,7 +6847,8 @@ export async function computeForecastSkill(
     const errKwh = predKwh - actKwh;
     // v1.10.0 (review F4) — a coverage-gap day's errorPct is null: the actual
     // is unmeasurable, so a percentage "miss" would be a fabrication.
-    const errPct = weatherCovered && !coverageGap && actKwh > 0.5 ? Math.round((errKwh / actKwh) * 1000) / 10 : null;
+    // v1.196.0 — so is an off-roster day's: its pool lacked an array the model expects.
+    const errPct = weatherCovered && !coverageGap && !offRoster && actKwh > 0.5 ? Math.round((errKwh / actKwh) * 1000) / 10 : null;
     days.push({
       date: siteYmd(dayStart),
       predictedKwh: round2(predKwh),
@@ -6794,6 +6857,8 @@ export async function computeForecastSkill(
       errorPct: errPct,
       weatherCovered,
       ...(coverageGap ? { coverageGap: true } : {}),
+      ...(offRoster ? { offRoster: true } : {}),
+      ...(rosterVerdict === 'predecessor' ? { predecessorCores: true } : {}),
     });
     // Uncovered days never feed the stats — there's no prediction to score.
     if (!weatherCovered) continue;
@@ -6801,6 +6866,10 @@ export async function computeForecastSkill(
     // scoring missing data as missing sunlight whipsawed biasFactor to 0.63
     // during the 06-29 wedge and still dragged it 1.23→1.19 via the 07-04 gap.
     if (coverageGap) continue;
+    // v1.196.0 — nor off-roster days: the pool lacked an array the model was fitted
+    // on, so the actual is short by its share (a new Core's bench rows scored +25%
+    // a day against three home arrays).
+    if (offRoster) continue;
     // v0.10.4 — only "mature" days feed the skill stats. Warmup days, where
     // the solar model was barely trained and under-predicted grossly (predKwh
     // a small fraction of actual), passed the old `>0.5` gate and dragged
@@ -6820,6 +6889,7 @@ export async function computeForecastSkill(
     biasFactor: totalPred > 0.5 ? round2(totalAct / totalPred) : null,
     windowDays,
     ghiBasis,
+    unrecordedRosterDays,
   };
   if (dpus.length > 0 && cacheWritable()) forecastSkillCache.set(cacheKey, { ts: now, forecastTs: forecast.generatedAt, value });
   return value;

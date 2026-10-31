@@ -6,7 +6,7 @@ import { siteCoordinates } from './site.js';
 import { SnapshotStore, FleetSnapshot, type DeviceSnapshot } from './snapshot.js';
 import type { DpuProjection, Shp2Projection, GenericProjection } from './ecoflow/project.js';
 import { integrateWh } from './aggregator.js';
-import { benchSpareSns, isBenchSpareSn, shp2ConnectedDpuSns, findShp2 } from './shp2Membership.js';
+import { benchSpareSns, isBenchSpareSn, shp2ConnectedDpuSns, findShp2, connectedSlotMap, allShp2s, shp2ReadbackFresh } from './shp2Membership.js';
 import { loadMembershipHistory, saveMembershipHistory, recordMembership } from './membershipHistory.js';
 // v1.38.0 (WS2) — site calendar-date resolution for the night-charge ledger read cutoff: the same
 // site-local YYYY-MM-DD key the ledger stores plan_date as (v1.191.0, T7: siteTime.ts, was a literal).
@@ -829,9 +829,26 @@ export interface NightLedgerRow {
   cost_surplus_raw_kwh: number | null;
   /** v1.187.1 — the ledger load factor the de-biased surplus was computed on, and the
    *  ledger nights behind it. NULL when none was supplied (resilience mode, a long-gap
-   *  night, under five nights, a load at/above forecast) and before v1.187.1. */
+   *  night, a ledger that de-biases neither term — each factor 1: under five nights, a load
+   *  at/above its forecast, a sun at/under its own) and before v1.187.1. v1.196.0 — 1, with its
+   *  nights (under five, possibly), when only the PV term was de-biased
+   *  (cost_surplus_pv_factor above 1). */
   cost_surplus_load_factor: number | null;
   cost_surplus_load_samples: number | null;
+  /** v1.196.0 — the PV factor the de-biased surplus's P50 PV was counted at (plan
+   *  costSurplusPvFactor; 1 = as forecast, as when only the load term was de-biased), and the
+   *  ledger nights behind it. NULL when no de-biased surplus was supplied, in resilience mode
+   *  and on rows written before v1.196.0. */
+  cost_surplus_pv_factor: number | null;
+  cost_surplus_pv_samples: number | null;
+  /** v1.196.0 — OUTCOME: the highest pool SoC measured over the forecast span [issue, +24 h]
+   *  (backup_pct, 3-sample median), and whether it reached the charge taper
+   *  (saturationThresholdPct of the home Cores' mean chgMaxSoc): 1 = the pool sat where the Cores
+   *  shed PV, so the row's actual PV measures the curtailment, not the sun, and the cost
+   *  ceiling's PV factor leaves it out (costSurplusPvFactor). NULL with no reading over the span
+   *  and on rows captured before v1.196.0. */
+  actual_max_soc_pct: number | null;
+  pv_saturated: number | null;
   /** v1.187.22 — the EXPECTED meter-side buy (plan expectedBuyKwh: what the armed write would
    *  draw from the expected window-open SoC, the drain to a just-in-time force-charge included)
    *  and that expected window-open SoC (plan expectedStartSocPct), beside buy_kwh — the worst
@@ -843,6 +860,13 @@ export interface NightLedgerRow {
    *  what expected_start_soc_pct and soc_at_window_start_pct (the islanded sizing start) are
    *  graded against. NULL when no reading covers the lead-in, and on rows captured earlier. */
   window_open_soc_pct: number | null;
+  /** v1.196.0 — OUTCOME: the pool SoC measured as the window closed (backup_pct over the last
+   *  WINDOW_CLOSE_SOC_LEAD_MS of the window, median; nightLedgerScoring.measuredWindowCloseSocPct).
+   *  Where the plan's cushion claim is the pack at the close (the islanded-outage and disabled
+   *  bases), `cushion_breached` is this reading against cushion_line_soc_pct
+   *  (nightChargeGate.realizedCushionBreach). NULL when no reading covers the lead-in, and on rows
+   *  captured before v1.196.0. */
+  window_close_soc_pct: number | null;
 
   // ── v1.189.0 — THE CHARGE CYCLE (chargeCycle.ts). The row stays keyed by plan_date and its
   // plan columns hold the cost leg; a mid-day cycle's overnight backup leg has its own
@@ -1089,6 +1113,10 @@ const NIGHT_LEDGER_COLUMNS: readonly (keyof NightLedgerRow)[] = [
   'delivered_basis',
   // v1.187.22 — the expected buy and start beside the worst case, and the measured window-open SoC.
   'expected_buy_kwh', 'expected_start_soc_pct', 'window_open_soc_pct',
+  // v1.196.0 — the cost ceiling's PV de-bias, and the saturation that censors a row's PV.
+  'cost_surplus_pv_factor', 'cost_surplus_pv_samples', 'actual_max_soc_pct', 'pv_saturated',
+  // v1.196.0 — the pool at the window close: the realized cushion verdict on the claim the plan made.
+  'window_close_soc_pct',
   // v1.189.0 — the charge cycle (NightLedgerRow.window_kind).
   ...CHARGE_CYCLE_LEDGER_COLUMNS,
 ];
@@ -1363,6 +1391,10 @@ export function createRecorder(
     'delivered_basis TEXT',
     // v1.187.22 — see NightLedgerRow.expected_buy_kwh / window_open_soc_pct.
     'expected_buy_kwh REAL', 'expected_start_soc_pct REAL', 'window_open_soc_pct REAL',
+    // v1.196.0 — see NightLedgerRow.cost_surplus_pv_factor / pv_saturated.
+    'cost_surplus_pv_factor REAL', 'cost_surplus_pv_samples INTEGER', 'actual_max_soc_pct REAL', 'pv_saturated INTEGER',
+    // v1.196.0 — see NightLedgerRow.window_close_soc_pct.
+    'window_close_soc_pct REAL',
     // v1.189.0 — the charge cycle, from the list the allowlist reads (CHARGE_CYCLE_LEDGER_SCHEMA).
     ...CHARGE_CYCLE_LEDGER_SCHEMA.map(([c, t]) => `${c} ${t}`),
     // v1.189.0 (R4) — the mid-day cycle in shadow (MIDDAY_SHADOW_LEDGER_SCHEMA).
@@ -3992,7 +4024,12 @@ export function createRecorder(
     // fingerprint matches the newest entry), and recording the STATE rather than
     // the EVENT is what makes the first entry appear on a stable plant at all —
     // the same trap that made v1.96.0/v1.97.0's floor repair unreachable.
-    if (recordMembership(membershipHistory, membershipFp, now)) {
+    // v1.196.0 — with the panel's slot table, which tells a like-for-like swap from an addition
+    // (the forecast-skill hindcast scores a day before a swap on that day's Cores), and confirmed
+    // only by a fresh reading of every panel (shp2ReadbackFresh): a cloud-offline panel keeps its
+    // last projection verbatim, so its fingerprint says who WAS in the pool, not who is.
+    const panelsFresh = allShp2s(snap.devices).every((panel) => shp2ReadbackFresh(panel, now));
+    if (recordMembership(membershipHistory, membershipFp, now, connectedSlotMap(snap.devices), panelsFresh)) {
       saveMembershipHistory(MEMBERSHIP_HISTORY_PATH, membershipHistory);
     }
     const sustained = pendingMembership != null && pendingMembership.rollups >= MEMBERSHIP_SUSTAINED_ROLLUPS;
