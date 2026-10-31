@@ -31,7 +31,8 @@
 #     /media, /addons, /addon_configs, /homeassistant)
 #   - reading /etc/shadow, /etc/gshadow, /root/**, /home/**, /etc/ssh/**
 #   - running or exec-mapping anything from the writable trees /data, /share,
-#     /tmp and /var/tmp
+#     /tmp and /var/tmp (s6's runtime trees under /run are the one writable and
+#     executable exception: s6 copies its own scripts there at boot)
 #   - writing a process's memory file (/proc/<pid>/mem)
 #   - writing to /proc/sys/* or /sys/** (host kernel tunables)
 #   - writing to the code, system and config directories (write-locks below)
@@ -41,11 +42,13 @@
 # /var/log/audit/audit.log, not dmesg). An explicit `deny` rule is silent;
 # only an `audit deny` rule, or an operation no allow rule covers, is logged:
 # since v1.197.1 a read this profile does not grant is refused AND logged
-# (apparmor="DENIED"). Boot-test a change on an isolated container in complain
-# mode, then enforced, over three starts and three stops (the v1.7.0 failure
-# was at start/restart), and compile it fresh (`apparmor_parser -T -Q -K`)
-# before shipping. The procedure is in docs/reference/12-configuration-
-# deployment-security.md, "AppArmor profile".
+# (apparmor="DENIED"). Boot-test a change on an isolated container of the
+# image that ships, in complain mode, then enforced, over three starts and
+# three stops, each stop within the Supervisor's 10 s timeout (the v1.7.0
+# failure was at start/restart), and compile it fresh (`apparmor_parser -T -Q
+# -K`) before shipping. The procedure, the rules-only hash and the shipping
+# gate are in docs/reference/12-configuration-deployment-security.md,
+# "AppArmor profile".
 
 profile addon_ecoflow_panel flags=(attach_disconnected,mediate_deleted) {
   #include <abstractions/base>
@@ -99,14 +102,25 @@ profile addon_ecoflow_panel flags=(attach_disconnected,mediate_deleted) {
   #     directory /run/s6-rc*), so those stay executable.
   #   - Writable: /data, /share/ecoflow-panel, /tmp, /var/tmp and /run. Nothing
   #     may be executed or exec-mapped from /data, /share, /tmp or /var/tmp
-  #     (audit deny below).
+  #     (audit deny below). /run is the exception: s6 copies its scandir and
+  #     service scripts into /run/service, /run/s6 and /run/s6-rc* at boot and
+  #     runs them from there, so those are writable AND executable. A file
+  #     written there can be run, and a new service folder under /run/service
+  #     would be supervised after an s6 rescan; /run is a tmpfs, so nothing
+  #     written there survives a restart. apparmorProfile.test.ts bounds the
+  #     writable-and-executable paths to these three trees.
   #   - /share holds every add-on's files; only this add-on's own folder is
   #     granted (and the listing of /share itself, which names the folders).
   #   - /proc is readable; it is written only for thread names (comm). /sys is
   #     readable for the thermal zones, the cgroup limits libuv reads, the
-  #     network interfaces and /sys/devices.
+  #     transparent-huge-page settings, the network interfaces and /sys/devices.
+  #     The Go runtime inside esbuild reads the huge-page size at every start
+  #     (tsx starts esbuild in the server and in each worker that loads
+  #     TypeScript). <abstractions/base> grants that file only from AppArmor
+  #     3.0.12 and 3.1.6 on, so the profile grants the folder itself rather than
+  #     depend on the host's AppArmor version.
   # Boot test, required before any change to these grants ships: an isolated
-  # container of the released image under a test-named copy of this profile,
+  # container of the image that ships under a test-named copy of this profile,
   # first in complain mode, then enforced, over three starts and three stops,
   # exercising the API, the workers, the database snapshot, the SSH console and
   # the backup hook; every ALLOWED record becomes a rule or a documented denial
@@ -121,6 +135,7 @@ profile addon_ecoflow_panel flags=(attach_disconnected,mediate_deleted) {
   /proc/{,**} r,
   /sys/class/thermal/{,**} r,
   /sys/fs/cgroup/{,**} r,
+  /sys/kernel/mm/transparent_hugepage/{,**} r,
   signal,
   # v1.187.15 — the socket families in use: TCP and UDP (DNS) over IPv4/IPv6, unix (s6's
   # IPC), netlink (Node's interface listing). No raw or packet sockets.
@@ -273,7 +288,8 @@ profile addon_ecoflow_panel flags=(attach_disconnected,mediate_deleted) {
   # NEVER deny `r` on /data/options.json: bashio reads every option from it.
   #   - The Home Assistant folders this add-on does not map (config.yaml maps
   #     only data and share): a tripwire, nothing may touch them.
-  #   - Nothing runs from, or is exec-mapped from, a writable tree.
+  #   - Nothing runs from, or is exec-mapped from, /data, /share, /tmp or
+  #     /var/tmp (s6's /run trees are the exception, see the grants above).
   #   - A process's memory file is never writable (/proc/self/mem resolves to
   #     /proc/<pid>/mem; the ptrace deny does not cover a process's own memory).
   audit deny /{config,ssl,backup,media,addons,addon_configs,homeassistant}/{,**} rwlkmx,

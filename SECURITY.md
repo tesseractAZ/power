@@ -155,7 +155,11 @@ never blocked).
     `/addons`, `/addon_configs`, `/homeassistant`) carry an audited deny;
   - nothing can be executed or exec-mapped from `/data`, `/share`, `/tmp` or
     `/var/tmp`, and a process's memory file (`/proc/<pid>/mem`) cannot be
-    written; each of these denies is audited, so an attempt is logged;
+    written; each of these denies is audited, so an attempt is logged. `/run`
+    is the one writable and executable exception: s6 copies its own service
+    scripts into `/run/service`, `/run/s6` and `/run/s6-rc*` at boot and runs
+    them from there, so a file written there can be run until the next restart
+    (`/run` is a tmpfs);
   - no write mask combines `a` with `w` (the HAOS parser rejects it and the
     profile then fails to load), and a read of `/data/options.json` is never
     denied.

@@ -9,6 +9,11 @@
  * AppArmor glob matcher over the profile's own file rules (deny beats allow) checks every path
  * the isolated boot test exercises, by the path the kernel names (the target of a symlink, a
  * folder with its trailing slash).
+ *
+ * The evaluator reads THIS file's rules only. `#include <abstractions/base>` adds the host's own
+ * grants on top (AppArmor 3.1.7 on Home Assistant OS: /dev/log, /dev/full, the huge-page size, …),
+ * and what it grants differs by AppArmor version, so a read the add-on needs on every host is
+ * granted here and not left to the abstraction (the huge-page size: from 3.0.12 and 3.1.6 only).
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -97,7 +102,8 @@ const fileRules: FileRule[] = rules.flatMap((text): FileRule[] => {
 });
 
 /** 'allow' — an allow rule grants `perm` and no deny rule refuses it; 'deny' — a deny rule refuses it
- *  (deny always wins); 'none' — nothing grants it (refused, and logged as DENIED in enforce mode). */
+ *  (deny always wins); 'none' — nothing in this file grants it (refused, and logged as DENIED in
+ *  enforce mode, unless the host's abstractions/base happens to grant it). */
 function decide(path: string, perm: Perm): 'allow' | 'deny' | 'none' {
   const hits = fileRules.filter((r) => r.perms.has(perm) && r.res.some((re) => re.test(path)));
   if (hits.some((r) => r.deny)) return 'deny';
@@ -141,6 +147,30 @@ test('★★★ no blanket file rule; /init and the s6 trees stay readable and e
   // Every program folder of the image stays readable as a whole, for every file in it.
   for (const p of ['/bin/busybox', '/sbin/x', '/lib/ld-musl-aarch64.so.1', '/usr/lib/bashio/bashio.sh', '/package/admin/s6-overlay/libexec/stage0', '/command/with-contenv', '/etc/s6-overlay/s6-rc.d/user/type', '/app/server/package.json', '/var/lib/apk/x']) {
     assert.equal(decide(p, 'r'), 'allow', `read of ${p}`);
+  }
+  // All of /proc is readable as a folder, not only the files named one by one below it.
+  for (const p of ['/proc/', '/proc/filesystems', '/proc/sys/vm/overcommit_memory', '/proc/sys/crypto/fips_enabled']) {
+    assert.equal(decide(p, 'r'), 'allow', `read of ${p}`);
+  }
+  // The exec grants kept from before v1.197.1. While `file,` existed they were backed up by it; now
+  // each is the only exec grant for its folder, so each is pinned by a path in it: s6-overlay's
+  // scripts and the legacy cont-init / services.d / cont-finish folders (boot, and the STOP path),
+  // the image's program folders, and a terminal under /dev/pts (`docker exec -t`).
+  for (const [p, perms] of [
+    ['/etc/s6-overlay/scripts/x', 'rx'],
+    ['/etc/s6/x', 'rx'],
+    ['/etc/cont-init.d/x', 'rx'],
+    ['/etc/services.d/ecoflow-panel/run', 'rx'],
+    ['/etc/services.d/ecoflow-panel/finish', 'rx'],
+    ['/etc/cont-finish.d/x', 'rx'],
+    ['/usr/sbin/x', 'rx'],
+    ['/sbin/x', 'rx'],
+    ['/usr/local/bin/x', 'rx'],
+    ['/bin/x', 'rx'],
+    ['/usr/bin/x', 'rx'],
+    ['/dev/pts/0', 'rw'],
+  ] as const) {
+    assert.ok(granted(p, perms), `${p} needs ${perms}`);
   }
 });
 
@@ -195,6 +225,7 @@ const GRANTED: ReadonlyArray<readonly [path: string, perms: string, why: string]
   ['/proc/stat', 'r', 'os.cpus'],
   ['/sys/fs/cgroup/memory.max', 'r', 'libuv constrained memory'],
   ['/sys/fs/cgroup/cpu.max', 'r', 'libuv available parallelism'],
+  ['/sys/kernel/mm/transparent_hugepage/hpage_pmd_size', 'r', "the Go runtime in esbuild, at every start (abstractions/base grants it only from AppArmor 3.0.12 / 3.1.6)"],
   ['/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq', 'r', 'os.cpus'],
   ['/sys/class/thermal/', 'r', 'hostThermal lists the zones'],
   ['/sys/devices/virtual/thermal/thermal_zone0/temp', 'r', 'thermal_zone0 is a symlink into /sys/devices'],
@@ -254,6 +285,7 @@ const REFUSED: ReadonlyArray<readonly [path: string, perm: Perm, by: 'audit-deny
   ['/media/x', 'r', 'audit-deny', 'media'],
   // the secrets and the write-locks that predate v1.197.1 (plain denies)
   ['/etc/shadow', 'r', 'deny', 'password hashes'],
+  ['/etc/gshadow', 'r', 'deny', 'group password hashes'],
   ['/etc/ssh/ssh_host_ed25519_key', 'r', 'deny', 'host keys'],
   ['/root/.npm/_logs/x.log', 'w', 'deny', "npm's log (silent on purpose)"],
   ['/app/server/src/index.ts', 'w', 'deny', 'code write-lock'],
@@ -261,8 +293,13 @@ const REFUSED: ReadonlyArray<readonly [path: string, perm: Perm, by: 'audit-deny
   ['/init', 'w', 'deny', 'init write-lock'],
   ['/etc/passwd', 'w', 'deny', 'config write-lock'],
   ['/package/admin/s6/command/s6-svscan', 'w', 'deny', 's6 write-lock'],
+  ['/lib64/x', 'w', 'deny', 'library write-lock'],
+  ['/var/lib/apk/x', 'w', 'deny', 'package database write-lock'],
   ['/proc/sys/kernel/x', 'w', 'deny', 'kernel tunables'],
+  ['/proc/sysrq-trigger', 'w', 'deny', 'sysrq'],
   ['/sys/kernel/x', 'w', 'deny', 'kernel tunables'],
+  ['/sys/class/x', 'w', 'deny', 'every /sys write'],
+  ['/sys/firmware/x', 'r', 'deny', 'firmware tables'],
   // and anything outside the granted folders
   ['/mnt/x', 'r', 'none', 'not granted'],
   ['/opt/x', 'x', 'none', 'not granted'],
@@ -339,6 +376,23 @@ test('★★ no exec from writable trees, no /proc mem write — each an explici
   }
 });
 
+/** A path one brace-free glob matches: `**` → x/y, `*` and `?` → x, a class → its first character. */
+const concrete = (glob: string) => glob.replace(/\*\*/g, 'x/y').replace(/[*?]/g, 'x').replace(/\[([^\]])[^\]]*\]/g, '$1');
+
+test("★★ the only paths both writable and executable are s6's runtime trees under /run (documented exception)", () => {
+  // s6 copies its scandir and service scripts into /run at boot and runs them from there, so
+  // /run/service, /run/s6 and /run/s6-rc* are writable AND executable: a file written there can be
+  // run. That exception is documented (profile, docs/reference/12, SECURITY.md); this bounds it, so
+  // no other folder becomes one.
+  const samples = new Set(['/run/x', '/run/x/y', '/run/service/evil/run', '/run/s6/evil', '/run/s6-rcevil', '/run/s6-rc:s6-rc-init:ab/servicedirs/x/run']);
+  for (const r of fileRules.filter((x) => !x.deny)) for (const g of r.globs) samples.add(concrete(g));
+  const both = [...samples].filter((p) => decide(p, 'w') === 'allow' && decide(p, 'x') === 'allow');
+  for (const p of both) assert.match(p, /^\/run\/(?:service\/|s6\/|s6-rc)/, `writable AND executable outside s6's /run trees: ${p}`);
+  // The exception is what the documentation says it is, and nothing else under /run is executable.
+  for (const p of ['/run/service/evil/run', '/run/s6/evil', '/run/s6-rcevil']) assert.ok(both.includes(p), `the documented exception: ${p}`);
+  for (const p of ['/run/x', '/run/x/y']) assert.equal(decide(p, 'x'), 'none', `exec of ${p}`);
+});
+
 test('★★ every deny added since v1.197.1 is `audit deny`; the /root and /home denies stay plain (npm noise)', () => {
   for (const r of [
     'audit deny /{config,ssl,backup,media,addons,addon_configs,homeassistant}/{,**} rwlkmx,',
@@ -357,10 +411,14 @@ test('★★★ no rule combines the append and write bits (v1.9.0: `wal` failed
   }
 });
 
-test('★★ the capability allow list is exactly chown and dac_override', () => {
+test('★★ the capability allow list is exactly chown and dac_override; the dangerous ones, mount and ptrace stay denied', () => {
   const allowed = rules.filter((r) => /^capability /.test(r)).map((r) => r.replace(/^capability\s+|,$/g, '')).sort();
   assert.deepEqual(allowed, ['chown', 'dac_override']);
-  assert.ok(rules.includes('deny capability sys_admin,') && rules.includes('deny capability sys_ptrace,'));
+  const denied = rules.filter((r) => /^deny capability /.test(r)).map((r) => r.replace(/^deny capability\s+|,$/g, '')).sort();
+  assert.deepEqual(denied, ['mac_admin', 'mac_override', 'sys_admin', 'sys_boot', 'sys_module', 'sys_ptrace', 'sys_rawio', 'sys_time']);
+  for (const r of ['deny mount,', 'deny umount,', 'deny pivot_root,', 'deny remount,', 'deny ptrace,', 'signal,']) {
+    assert.ok(rules.includes(r), `missing: ${r}`);
+  }
 });
 
 test('★★ network is the families in use — no blanket rule, no raw or packet sockets', () => {

@@ -285,19 +285,32 @@ the HA security rating and confines the process even if a Fastify endpoint is ex
   `/lib64`, `/usr`, `/package` and `/command` readable and mappable, `/etc`, `/var` and `/app`
   readable, `/init` readable and executable. Outside them: `/data`, `/share/ecoflow-panel`,
   `/tmp`, `/var/tmp` and `/run` (`rwk`), all of `/proc` (read), and in `/sys` the thermal zones,
-  the cgroup limits, the network interfaces and `/sys/devices` (read). A read nothing grants is
-  refused and logged as `apparmor="DENIED"`.
+  the cgroup limits, the transparent-huge-page settings, the network interfaces and `/sys/devices`
+  (read). A read nothing grants is refused and logged as `apparmor="DENIED"`. The Go runtime
+  inside esbuild reads the huge-page size on every start (tsx starts esbuild in the server and in
+  each worker that loads TypeScript); `<abstractions/base>` grants that file only from AppArmor
+  3.0.12 and 3.1.6 on, so the profile grants the folder itself rather than depend on the host's
+  AppArmor version.
 - **Exec, by the path the kernel checks:** AppArmor checks the target of a symlink, so the grants
   name `/usr/lib/bashio/bashio` (for `/usr/bin/bashio`), npm's `npm-cli.js` (for `/usr/bin/npm`),
   `tsx/dist/cli.mjs` (for `node_modules/.bin/tsx`), esbuild's service binary, every s6-overlay
   package under `/package` (where `/command/*` resolves) and the scripts s6 copies into `/run` at
   boot (`/run/service`, `/run/s6`, `/run/s6-rc*`), beside the program folders `/bin`, `/sbin`,
-  `/usr/bin`, `/usr/sbin` and `/usr/local/bin`.
+  `/usr/bin`, `/usr/sbin` and `/usr/local/bin` and s6's script folders under `/etc`
+  (`/etc/s6-overlay`, `/etc/s6`, `/etc/cont-init.d`, `/etc/services.d`, `/etc/cont-finish.d`;
+  the last runs at stop). Each of these was backed up by `file,` until v1.197.1 and is now the only
+  exec grant for its folder; `apparmorProfile.test.ts` pins every one.
 - **`/share`: the add-on's own folder only.** `/share/ecoflow-panel` (the database snapshot and the
   backup hook's journal) is `rwk` and the listing of `/share` itself is readable; other add-ons'
   files there are refused.
-- **Nothing runs from a writable tree:** `audit deny /{data,share,tmp,var/tmp}/** mx` refuses
-  executing or exec-mapping anything in `/data`, `/share`, `/tmp` or `/var/tmp`.
+- **Nothing runs from `/data`, `/share`, `/tmp` or `/var/tmp`:** `audit deny
+  /{data,share,tmp,var/tmp}/** mx` refuses executing or exec-mapping anything in them.
+- **`/run` is the writable and executable exception.** s6 copies its scandir and service scripts
+  into `/run/service`, `/run/s6` and `/run/s6-rc*` at boot and runs them from there, so those
+  trees are both writable and executable: a file written there can be run, and a new service
+  folder under `/run/service` would be supervised after an s6 rescan. `/run` is a tmpfs, so
+  nothing written there survives a restart. `apparmorProfile.test.ts` bounds the paths that are
+  both writable and executable to these three trees.
 - **A process's memory file is never writable:** `audit deny /proc/*/{,task/*/}mem w`.
   `/proc/self/mem` resolves to `/proc/<pid>/mem`, and the ptrace deny does not cover a process's
   own memory.
@@ -324,23 +337,64 @@ the HA security rating and confines the process even if a Fastify endpoint is ex
   its API, created its database and spawned its workers, and the host audit journal held no
   ALLOWED/DENIED record for either. The final profile was compiled fresh (`apparmor_parser -T -Q -K`)
   before shipping. Invariants pinned in `apparmorProfile.test.ts` (harness `mutate-v1187-15.mjs`).
-- **Boot test for a read or exec change (v1.197.1 onward), required before it ships:** compile the
-  candidate fresh on the host (`apparmor_parser -T -Q -K`), then load a copy renamed
-  `power_aa_test` in complain mode with every new deny as `audit deny`. Run a throwaway container of
-  the released image under it (`--security-opt apparmor=power_aa_test`) on an internal network with
-  no egress, throwaway `/data` and `/share` volumes, a sanitized `options.json` (dummy EcoFlow keys;
-  notifications, broadcasts, MQTT discovery and night-charge writes off; the SSH console on with a
-  throwaway password) and a stub answering as the Supervisor. Start it with the real `/init` (s6 is
-  the risk). Exercise the API, a WebSocket, the worker reports, the database snapshot, the
-  maintenance endpoints, an SSH console login and both backup-hook phases (`docker exec`), and let
-  it run at least 10 minutes for the timers. Stop and start it three times. Probe what must stay
-  refused (a file under another `/share` folder, an executable copied into `/data`, a write to
-  `/proc/self/mem`). Then read the host audit journal for the test profile: every `ALLOWED` record
-  outside the probes becomes a rule or a documented denial, and the run repeats until there are
-  none. Repeat enforced: `DENIED` records for the probes only, the API up, both hook phases exit 0,
-  three stops exit 0. Ship only the profile whose rules (comments and blank lines stripped) hash to
-  the tested copy's. `apparmorProfile.test.ts` evaluates the profile over the same inventory with a
-  small AppArmor glob matcher, deny beating allow.
+- **Boot test for a read or exec change (v1.197.1 onward), required before it ships:**
+  - *Preconditions.* Docker on the host is reachable from the shell used (on Home Assistant OS, the
+    SSH add-on with protection mode off); the test never changes protection mode or the SSH
+    add-on and leaves both as it found them. Every helper container that reads the host journal
+    runs with `--log-driver=none --network=none`: a reader that logs to journald writes its own
+    output back into the journal it reads. Not during the night-charge window or a scheduled
+    backup.
+  - *Image.* The image the release will ship (see *Shipping gate* below). Record its image id and
+    `io.hass.version` label beside the result.
+  - *Run.* Compile the candidate fresh on the host (`apparmor_parser -T -Q -K`), then load a copy
+    renamed `power_aa_test` in complain mode with every new deny as `audit deny`. Run a throwaway
+    container of the image under it (`--security-opt apparmor=power_aa_test`) on an internal
+    network with no egress, throwaway `/data` and `/share` volumes, a sanitized `options.json`
+    (dummy EcoFlow keys; notifications, broadcasts, MQTT discovery and night-charge writes off; the
+    SSH console on with a throwaway password) and a stub answering as the Supervisor. Start it with
+    the real `/init` (s6 is the risk). Exercise the API, a WebSocket, the worker reports, the
+    database snapshot, the maintenance endpoints, an SSH console login and both backup-hook phases
+    (`docker exec`), and let it run at least 10 minutes for the timers. Stop and start it three
+    times, each stop with the Supervisor's stop timeout: `config.yaml` sets no `timeout:`, so the
+    Supervisor waits 10 s and then kills the container (`docker stop -t 10`). Probe what must stay
+    refused (a file under another `/share` folder, an executable copied into `/data`, a write to
+    `/proc/self/mem`).
+  - *Complain pass.* Read the host audit journal for the test profile: every `ALLOWED` record
+    outside the probes becomes a rule or a documented denial, and the run repeats until there are
+    none.
+  - *Enforced pass.* Repeat with the profile enforced: `DENIED` records for the probes only, the
+    API up, both hook phases exit 0, and each of the three stops exits 0 in under 10 s with the
+    clean-shutdown marker written. A stop the profile slows past 10 s is killed in production: no
+    marker, and the next start records the stop as a power loss.
+  - *Cleanup, in a `finally`.* Remove the test and stub containers, the internal network and the
+    throwaway volumes; unload the test profile (`apparmor_parser -R`, or write its name to
+    `/sys/kernel/security/apparmor/.remove`) and delete the host's temporary copies. While a
+    container the Supervisor did not create exists, the Supervisor marks the system unsupported
+    (`Unsupported software`); after cleanup, run its health check (`POST /resolution/healthcheck`)
+    and confirm `GET /resolution/info` lists `unsupported: []`.
+  - *Rules hash.* The rules-only sha256 strips comments and blank lines and trims each line, keeps
+    the `#include` lines, and normalizes the `profile … {` line to the shipped one (the test copy
+    differs there in name and in the `complain` flag). The shipped profile's hash equals the
+    enforced test copy's:
+
+    ```sh
+    sed -e '/^[[:space:]]*#include/!s/#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+        -e '/^$/d' -e 's/^profile [^ ]* flags=([^)]*) {$/profile addon_ecoflow_panel flags=(attach_disconnected,mediate_deleted) {/' \
+        apparmor.txt | sha256sum
+    ```
+
+  - *Shipping gate.* The profile ships with the image it was tested on. Either the release changes
+    nothing the image is built from since the tested image's release (`git diff --stat
+    <tested-tag>..<release-commit> -- Dockerfile build.yaml rootfs server web
+    ':(exclude)server/test'` prints nothing, and `ecoflow_panel/config.yaml` changes only its
+    `version:` line), or the test ran on an image built from the release commit. Otherwise a new
+    file or exec path in the release meets the profile untested: the invisible crash-loop class
+    this test exists for.
+
+  `apparmorProfile.test.ts` evaluates the profile over the same inventory with a small AppArmor
+  glob matcher, deny beating allow. It reads the profile's own rules only; `<abstractions/base>`
+  adds the host's grants, which differ by AppArmor version, so a read needed on every host is
+  granted in the profile itself.
 
 ★ Two hard-won footguns baked into the profile comments (do not "clean up"):
 
