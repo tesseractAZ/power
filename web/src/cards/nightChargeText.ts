@@ -314,6 +314,8 @@ export interface HoldSummaryPlan {
   baselineMinSocPct: number | null;
   reserveFloorPct: number;
   cushionPct: number;
+  /** v1.198.0 — the hold was sized on the provisional solar band; absent on the full basis. */
+  pvBandWiden?: PvBandWidenText | null;
 }
 
 /**
@@ -330,6 +332,8 @@ export interface HoldSummaryPlan {
  * v1.189.0 — `writeStands`: the hold is a later recompute's and the write armed from the announced
  * plan still stands (writeStands), so the hold leads with that, each shape says what the
  * recompute would do instead of "nothing will be charged", and the tone is 'warn'.
+ * v1.198.0 — a sized hold on the provisional solar band (pvBandWiden) closes its detail with
+ * provisionalBandText, as the hold push does; before the write-stands note when one stands.
  */
 export function holdSummary(
   plan: HoldSummaryPlan,
@@ -353,18 +357,21 @@ function holdVerdict(plan: HoldSummaryPlan, none: string): { headline: string; d
   if (plan.requiredExtraKwh == null) {
     return { headline: 'No overnight charge tonight.', detail: `No cheap charge window was resolved — ${none}.`, tone: 'muted' };
   }
+  // v1.198.0 — a hold SIZED on the provisional solar band closes its detail with the sentence the
+  // push closes it with ('' on the full basis); a hold with no window, above, was sized on nothing.
+  const provisionalDetail = provisionalBandText(plan.pvBandWiden);
   if (plan.cushionShortfall) {
     return {
       headline: 'No overnight charge tonight — the window cannot cover the cushion.',
       detail: 'The outage cushion needs a charge, but this window cannot deliver enough to clear the minimum buy, '
-        + `so ${none}. Charge/pool limits prevent meeting the cushion — residual risk remains.`,
+        + `so ${none}. Charge/pool limits prevent meeting the cushion — residual risk remains.${provisionalDetail}`,
       tone: 'warn',
     };
   }
   if (plan.requiredExtraKwh > 0) {
     return {
       headline: 'No overnight charge tonight.',
-      detail: `The islanded worst case the plan is sized on needs only a small top-up, under the minimum buy, so ${none}.`,
+      detail: `The islanded worst case the plan is sized on needs only a small top-up, under the minimum buy, so ${none}.${provisionalDetail}`,
       tone: 'ok',
     };
   }
@@ -375,7 +382,7 @@ function holdVerdict(plan: HoldSummaryPlan, none: string): { headline: string; d
     headline: 'No overnight charge needed.',
     detail: `Even if the grid were lost overnight, ${wholeHouse
       ? `the whole-house low would stay at ~${pct(trough)}`
-      : `the pack would close the charge window at ~${pct(trough)}`}, at or above the ${pct(line)} floor+cushion line — ${none}.`,
+      : `the pack would close the charge window at ~${pct(trough)}`}, at or above the ${pct(line)} floor+cushion line — ${none}.${provisionalDetail}`,
     tone: 'ok',
   };
 }

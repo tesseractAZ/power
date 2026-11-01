@@ -215,7 +215,7 @@ const MUTANTS = [
     file: NCA,
     find: '  return w != null && plan.basisComplete && plan.requiredExtraKwh != null',
     to: '  return w != null && plan.basisComplete && plan.chargeTonight /* MUTANT */',
-    why: 'A hold sized on the widened band reads as a full-basis hold.',
+    why: 'A hold sized on the widened band reads as a full-basis hold in the rationale, the hold push and the card.',
   },
   {
     id: 'xxvii. ★★ the rationale drops the sentence',
@@ -287,6 +287,42 @@ const MUTANTS = [
     find: '    pvP10 += pb.p10W / 1000;',
     to: '    pvP10 += Math.min(pb.p10W, pb.p50W) / 1000; /* MUTANT */',
     why: 'pv_in_band is graded on a band the forecast never published (a scored column changes meaning).',
+  },
+  /* ── review round 2 ── */
+  {
+    id: 'xxxvii. ★★ the 0.5 kWh rail read in kWh against a sum in Wh',
+    file: NCA,
+    find: '  return p50Wh < 500 ? 1 : halfWh / p50Wh;',
+    to: '  return p50Wh < 0.5 ? 1 : halfWh / p50Wh; /* MUTANT */',
+    why: 'A near-dark band (0.45 kWh of P50) widens the multi-day carry by k × its own 0.4, not by k: ±52% per √day for ±131%.',
+  },
+  {
+    id: 'xxxviii. ★★ the hold push drops the sentence',
+    file: NOTIFY,
+    find: '    const provisionalHold = provisionalBandText(plan.pvBandWiden);',
+    to: "    const provisionalHold = ''; /* MUTANT */",
+    why: 'The 21:30 hold push reads exactly as a full-basis hold for a hold decided on the widened band.',
+  },
+  {
+    id: 'xxxix. ★★ the card\'s hold drops the sentence',
+    file: CARD,
+    find: '  const provisionalDetail = provisionalBandText(plan.pvBandWiden);',
+    to: "  const provisionalDetail = ''; /* MUTANT */",
+    why: 'The card\'s hold summary reads exactly as a full-basis hold for a hold decided on the widened band.',
+  },
+  {
+    id: 'xl. ★★ the coverage refusal prints the day count against 14',
+    file: NCA,
+    find: '  const calDaysPassedText = calScoredDays < minCalScoredDays',
+    to: '  const calDaysPassedText = (false as boolean) /* MUTANT */',
+    why: '"calDays 4/14" on the likeliest refusal after a return reads as the day count failing too, where 4 passed.',
+  },
+  {
+    id: 'xli. ★ the 14th day still printed as provisional',
+    file: NCA,
+    find: '  const calDaysPassedText = calScoredDays < minCalScoredDays',
+    to: '  const calDaysPassedText = calScoredDays <= minCalScoredDays /* MUTANT */',
+    why: 'A full-basis coverage refusal at 14 days reads "calDays 14/4, provisional band below 14".',
   },
 ];
 

@@ -2788,6 +2788,12 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
   /** v1.198.0 — k(n) on a provisional basis; null on the full basis (and on a refused one): every
    *  transform below runs only when this is set, so the full basis is the planner as it was. */
   const bandWidenK: number | null = basisComplete ? provisionalK : null;
+  /** v1.198.0 — the day count as the coverage refusal prints it, the minimum it PASSED: the
+   *  provisional one below the full one, said so ("4/14" read as a failed count on the likeliest
+   *  refusal after a return), and the full one from it, as before. */
+  const calDaysPassedText = calScoredDays < minCalScoredDays
+    ? `${calScoredDays}/${provisionalMinDays}, provisional band below ${minCalScoredDays}`
+    : `${calScoredDays}/${minCalScoredDays}`;
   // v1.148.0 — SAY WHICH GATE FAILED.
   //
   // On 2026-09-10 this returned false, the plan was null, and the backup pool sat
@@ -2810,7 +2816,7 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
               ? ` (a provisional plan on a widened solar band from ${provisionalMinDays}; the full band from ${minCalScoredDays})` : '')
           : !(bandCoverageFrac >= BASIS_MIN_BAND_COVERAGE)
             ? `PV band coverage ${Math.round(bandCoverageFrac * 100)}% < ${Math.round(BASIS_MIN_BAND_COVERAGE * 100)}%`
-              + ` (forecast present, tier=${confidenceTier}, calDays ${calScoredDays}/${minCalScoredDays})`
+              + ` (forecast present, tier=${confidenceTier}, calDays ${calDaysPassedText})`
             : `no provisional band widening is defined for ${calScoredDays} scored calibration day(s)`;
 
   // ★ EV de-dup MUST be atomic with the re-add (§2.3): only STRIP the embedded

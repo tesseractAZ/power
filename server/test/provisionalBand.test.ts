@@ -197,6 +197,12 @@ test('★★ the band lower half-width H: Σ(P50 − P10)/ΣP50, and 1 when the 
   assert.equal(nca.bandLowerHalfFrac([]), 1);
   assert.equal(nca.bandLowerHalfFrac([{ ts: 0, pvP10W: 0, loadP90W: 0, pvP50W: 499 }]), 1);
   assert.equal(nca.bandLowerHalfFrac([{ ts: 0, pvP10W: 300, loadP90W: 0, pvP50W: 500 }]), 0.4);
+  // The 0.5 kWh rail is on the P50 SUM, in Wh, and it decides alone: under it the band is 1 however
+  // narrow its own figures read (300 W of P10 under 499 W of P50 would compute 0.399), whether the
+  // 499 Wh sit in one hour or several; at 500 Wh the band's own width is used.
+  assert.equal(nca.bandLowerHalfFrac([{ ts: 0, pvP10W: 300, loadP90W: 0, pvP50W: 499 }]), 1);
+  assert.equal(nca.bandLowerHalfFrac([{ ts: 0, pvP10W: 100, loadP90W: 0, pvP50W: 249 }, { ts: H, pvP10W: 100, loadP90W: 0, pvP50W: 250 }]), 1);
+  assert.equal(nca.bandLowerHalfFrac([{ ts: 0, pvP10W: 100, loadP90W: 0, pvP50W: 250 }, { ts: H, pvP10W: 100, loadP90W: 0, pvP50W: 250 }]), 0.6);
   // An hour without a P50 tells nothing about the band's width.
   assert.equal(nca.bandLowerHalfFrac([{ ts: 0, pvP10W: 300, loadP90W: 0, pvP50W: 500 }, { ts: H, pvP10W: 9000, loadP90W: 0, pvP50W: null }]), 0.4);
 });
@@ -261,10 +267,25 @@ test('★★★ the coverage gate is unchanged and judged on the published band:
   const cov = (inBand: number, n: number): number => Math.round((inBand / n) * 100) / 100;
   const three = buildNightChargeInputs(night1117({ n: 4, coverage: cov(3, 4) }));
   assert.equal(three.basisComplete, false);
-  assert.equal(three.basisBlockedBy, 'PV band coverage 75% < 78% (forecast present, tier=forecast, calDays 4/14)');
+  // The coverage branch prints the quantities that PASSED: on a provisional day count, the
+  // provisional minimum it passed (never "4/14", which reads as a failed count), and that the band
+  // would be the provisional one.
+  assert.equal(three.basisBlockedBy,
+    'PV band coverage 75% < 78% (forecast present, tier=forecast, calDays 4/4, provisional band below 14)');
   assert.equal(buildNightChargeInputs(night1117({ n: 5, coverage: cov(4, 5) })).basisComplete, true, '4 of 5');
   assert.equal(buildNightChargeInputs(night1117({ n: 9, coverage: cov(7, 9) })).basisComplete, true, '7/9 = 77.8% rounds to 78');
-  assert.equal(buildNightChargeInputs(night1117({ n: 9, coverage: cov(6, 9) })).basisComplete, false, '6 of 9');
+  const sixOfNine = buildNightChargeInputs(night1117({ n: 9, coverage: cov(6, 9) }));
+  assert.equal(sixOfNine.basisComplete, false, '6 of 9');
+  assert.equal(sixOfNine.basisBlockedBy,
+    'PV band coverage 67% < 78% (forecast present, tier=forecast, calDays 9/4, provisional band below 14)');
+  // From 14 days the full minimum passed: the text is the one before the provisional band, whether or
+  // not a provisional minimum is passed.
+  for (const provisionalMin of [4, null]) {
+    for (const n of [14, 29]) {
+      assert.equal(buildNightChargeInputs(night1117({ n, coverage: 0.72, provisionalMin })).basisBlockedBy,
+        `PV band coverage 72% < 78% (forecast present, tier=forecast, calDays ${n}/14)`, `n=${n}, provisional minimum ${provisionalMin}`);
+    }
+  }
   // A coverage that is not a number is a coverage miss, named as one (as before).
   assert.ok(buildNightChargeInputs(night1117({ n: 4, coverage: Number.NaN })).basisBlockedBy!.startsWith('PV band coverage NaN% < 78%'));
   // The other gates still refuse first.
@@ -319,6 +340,15 @@ test('★★★ the beyond-24 h carry widens by k·H·√daysAhead on a provisio
   assert.ok(Math.abs(hourAt(darkIn.horizon, phx(11, 18, 14)).loadP90W - 2500 * (1 + K4)) < 1e-9);
   assert.equal(hourAt(darkIn.horizon, phx(11, 18, 14)).pvP10W, 0);
   assert.equal(darkIn.pvBandWiden?.rollupHalfFrac, K4, 'H = 1, so the carry widens by k itself');
+  // A near-dark band (ten sun hours at P50 45 W / P10 27 W: ΣP50 0.45 kWh, its own width 0.4): under
+  // the 0.5 kWh rail, so H = 1 and the carry widens by k, not by k × 0.4.
+  const dim = night1117({ nowMs: phx(11, 17, 13), over: { nextRechargeMs: null } });
+  dim.bandHours = dim.bandHours.map((h) => (h.pvP50W ? { ...h, pvP10W: 27, pvP50W: 45 } : h));
+  assert.ok(Math.abs(nca.bandLowerHalfFrac(dim.bandHours) - 1) < 1e-12);
+  const dimIn = buildNightChargeInputs(dim);
+  assert.equal(dimIn.pvBandWiden?.rollupHalfFrac, K4);
+  assert.ok(Math.abs(hourAt(dimIn.horizon, phx(11, 18, 14)).loadP90W - 2500 * (1 + K4)) < 1e-9);
+  assert.equal(hourAt(dimIn.horizon, phx(11, 18, 14)).pvP10W, 0);
 });
 
 test('★★★ a band hour with no P50: the widened P10 is 0 and the P50 walks keep the published P10 they stood on', () => {
@@ -440,6 +470,7 @@ test('★★ n = 14 and n = 30 give the same plan, byte for byte (calScoredDays 
 test('★★★ the widening only ever moves the plan toward buying more (n = 4..13 against the same night unwidened)', () => {
   const cases = legacyIdentityCases().filter((c) => c.deps.forecastPresent && c.deps.confidenceTier !== 'climatology');
   let compared = 0, armedBoth = 0, outsideBand = 0, longGap = 0, turnedShort = 0;
+  let requirementFell = 0, expectedRose = 0, expectedFell = 0;
   cases.forEach((c, i) => {
     const n = 4 + (i % 10);
     const base = { ...withPrePeakBasis(c.deps), provisionalMinCalScoredDays: 4, bandCoverageFrac: 0.85 } as NightChargeInputDeps;
@@ -464,8 +495,34 @@ test('★★★ the widening only ever moves the plan toward buying more (n = 4.
     const prov = computeNightChargePlan(provIn);
     const flat = computeNightChargePlan(flatIn);
     compared++;
-    // The P50 disclosures the widening must not touch.
+    // The P50 disclosures the widening must not touch, and the morning surplus (P90 PV).
     assert.equal(prov.expectedStartSocPct, flat.expectedStartSocPct, `${c.label}: expected start`);
+    assert.equal(provIn.morningPvSurplusP90Kwh, flatIn.morningPvSurplusP90Kwh, `${c.label}: morning surplus`);
+    // The figures computed FROM what is written move only with it: the expected buy and the
+    // just-in-time start read the written level (and move either way with it — a higher stop starts
+    // the force-charge earlier, so the pool drains less before it and less is bought back), and the
+    // over-buy flag reads the requirement and the lift.
+    const writeMoved = prov.chargeTonight !== flat.chargeTonight || prov.setpointSocPct !== flat.setpointSocPct
+      || prov.costCeilingSocPct !== flat.costCeilingSocPct;
+    if ((prov.expectedBuyKwh ?? null) !== (flat.expectedBuyKwh ?? null)) {
+      assert.ok(writeMoved, `${c.label}: the expected buy moved (${flat.expectedBuyKwh} → ${prov.expectedBuyKwh}) under the same write`);
+      if ((prov.expectedBuyKwh ?? 0) > (flat.expectedBuyKwh ?? 0)) expectedRose++;
+      else expectedFell++;
+    }
+    if ((prov.expectedForceChargeStartMs ?? null) !== (flat.expectedForceChargeStartMs ?? null)) {
+      assert.ok(writeMoved, `${c.label}: the just-in-time start moved under the same write`);
+    }
+    if ((prov.bindingCap === 'overBuy') !== (flat.bindingCap === 'overBuy')) {
+      assert.ok(writeMoved || prov.requiredExtraKwh !== flat.requiredExtraKwh || prov.buyKwh !== flat.buyKwh
+        || prov.cushionShortfall !== flat.cushionShortfall, `${c.label}: the over-buy flag moved under the same requirement and write`);
+    }
+    // The requirement falls only where the widening turns a meetable night unmeetable: the planner then
+    // states the pool-headroom placeholder, which can sit under the meetable requirement.
+    if (flat.requiredExtraKwh != null && prov.requiredExtraKwh != null && prov.requiredExtraKwh < flat.requiredExtraKwh - 1e-6) {
+      requirementFell++;
+      assert.ok(!flat.cushionShortfall && prov.cushionShortfall, `${c.label}: requirement ${flat.requiredExtraKwh} → ${prov.requiredExtraKwh}`);
+      assert.equal(prov.bindingCap, 'poolHeadroom', `${c.label}: the placeholder`);
+    }
     // The cost ceiling (the force-charge stop) never falls.
     if (flat.costCeilingSocPct != null) {
       assert.ok(prov.costCeilingSocPct != null && prov.costCeilingSocPct >= flat.costCeilingSocPct - 1e-9,
@@ -513,6 +570,12 @@ test('★★★ the widening only ever moves the plan toward buying more (n = 4.
   // 1,035 nights compared, 609 armed both ways, 99 windows beyond the band,
   // 159 long gaps with a P10 headroom, 22 nights the widening turned unmeetable (the write held).
   assert.ok(turnedShort > 0, 'a night the widening turns unmeetable is in the year (its write is held above)');
+  // The disclosures the CHANGELOG and chapter 15 part 1 name as moving do move, in the year:
+  // the requirement falls on a night turned unmeetable, and the expected buy moves both ways
+  // (here 2 requirement falls, the expected buy 20 up and 3 down; over every n = 4..13 of the
+  // 1,035 nights, 25, 209 and 21 of 10,350).
+  assert.ok(requirementFell > 0, `the requirement falls on a night turned unmeetable: ${requirementFell}`);
+  assert.ok(expectedRose > 0 && expectedFell > 0, `the expected buy moves both ways: +${expectedRose} / −${expectedFell}`);
 });
 
 /* ── what is published, what is recorded ───────────────────────────────── */
@@ -538,6 +601,39 @@ test('★★★ the plan names its provisional band: the field, the rationale, t
   assert.equal(hold.basisComplete, true);
   assert.deepEqual(hold.pvBandWiden, p.pvBandWiden);
   assert.ok(hold.rationale.endsWith(clause));
+  // ... and the hold push and the card's hold summary close with it: every hold shape that was SIZED
+  // (the cushion holds, the need under the minimum buy, the window that cannot cover the cushion).
+  // The sentence is the only thing the provisional band adds to them.
+  const unprovisional = (q: NightChargePlan): NightChargePlan => ({ ...q, pvBandWiden: undefined });
+  const holds: Array<[string, NightChargePlan, string, string]> = [
+    ['no charge needed', hold, 'Night-charge: hold (no charge needed)', 'No overnight charge needed.'],
+    ['under the minimum buy', { ...hold, requiredExtraKwh: 0.63 }, 'Night-charge: hold (the need is under the minimum buy)', 'No overnight charge tonight.'],
+    ['the window cannot cover the cushion', { ...hold, requiredExtraKwh: 3, cushionShortfall: true },
+      'Night-charge: no charge tonight (the window cannot cover the cushion)', 'No overnight charge tonight — the window cannot cover the cushion.'],
+  ];
+  for (const [name, h, title, headline] of holds) {
+    const push = buildNightChargeMessage(h, 'hold');
+    assert.equal(push.title, title, name);
+    assert.ok(push.body.endsWith(clause), `${name}: ${push.body}`);
+    assert.equal(push.body, buildNightChargeMessage(unprovisional(h), 'hold').body + clause, name);
+    const card = web.holdSummary(h);
+    assert.equal(card.headline, headline, name);
+    assert.ok(card.detail.endsWith(clause), `${name}: ${card.detail}`);
+    assert.equal(card.detail, web.holdSummary(unprovisional(h)).detail + clause, name);
+    // Beside a write that stands, the sentence stays with the hold it describes, before the note.
+    assert.equal(web.holdSummary(h, { writeStands: true }).detail,
+      `${web.holdSummary(unprovisional(h), { writeStands: true }).detail.replace(` ${web.WRITE_STANDS_NOTE}`, '')}${clause} ${web.WRITE_STANDS_NOTE}`, name);
+  }
+  // A hold with no window was sized on nothing: it says nothing of the band (the plan carries no field).
+  const noWindow = { ...hold, requiredExtraKwh: null };
+  assert.ok(!buildNightChargeMessage(noWindow, 'hold').body.includes('PROVISIONAL'));
+  assert.ok(!web.holdSummary(noWindow).detail.includes('PROVISIONAL'));
+  // A full-basis hold says nothing either.
+  const fullHold = planOf(night1117({ n: 14, over: { socNowPct: 90 } }));
+  assert.equal(fullHold.chargeTonight, false);
+  assert.equal('pvBandWiden' in fullHold, false);
+  assert.ok(!buildNightChargeMessage(fullHold, 'hold').body.includes('PROVISIONAL'));
+  assert.ok(!web.holdSummary(fullHold).detail.includes('PROVISIONAL'));
   const full = planOf(night1117({ n: 14 }));
   assert.equal('pvBandWiden' in full, false);
   assert.equal(nca.provisionalBandText(full.pvBandWiden), '');
@@ -553,6 +649,13 @@ test('★★ the 21:30 "no plan tonight" push names the provisional minimum', ()
   assert.equal(m.body,
     'No overnight charge plan tonight — the forecast/telemetry basis is incomplete: only 2 scored calibration day(s), need 4 '
     + '(a provisional plan on a widened solar band from 4; the full band from 14), so nothing will be charged. '
+    + '(This confirms the evening job ran; the reserve floor is unchanged.)');
+  // The likeliest refusal after a return: 4 days scored, one of them outside the band. The day count
+  // passed, and the push says so rather than "calDays 4/14".
+  const cov = buildNightChargeMessage(planOf(night1117({ n: 4, coverage: 0.75 })), 'insufficient_basis');
+  assert.equal(cov.body,
+    'No overnight charge plan tonight — the forecast/telemetry basis is incomplete: PV band coverage 75% < 78% '
+    + '(forecast present, tier=forecast, calDays 4/4, provisional band below 14), so nothing will be charged. '
     + '(This confirms the evening job ran; the reserve floor is unchanged.)');
 });
 
