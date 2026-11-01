@@ -94,8 +94,9 @@ const MUTANTS = [
   {
     id: 'x. ★★★ index.ts sizes the headroom on the MEDIAN, not the P10',
     file: IDX,
-    find: '    if (fh) prePeakP10Hours.push({ ts: pb.ts, p10W: pb.p10W, loadW: fh.forecastLoadW });',
-    to: '    if (fh) prePeakP10Hours.push({ ts: pb.ts, p10W: pb.p50W, loadW: fh.forecastLoadW }); /* MUTANT */',
+    // v1.198.0 — repointed: each hour also carries its P50 (the provisional band).
+    find: '    if (fh) prePeakP10Hours.push({ ts: pb.ts, p10W: pb.p10W, p50W: pb.p50W, loadW: fh.forecastLoadW });',
+    to: '    if (fh) prePeakP10Hours.push({ ts: pb.ts, p10W: pb.p50W, p50W: pb.p50W, loadW: fh.forecastLoadW }); /* MUTANT */',
     why: 'An ordinary day\'s forecast sizes the long-gap buy; a cloudier-than-median weekend starts short.',
   },
   {

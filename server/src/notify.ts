@@ -8,6 +8,8 @@ import type { NightChargePlan } from './nightChargeAdvisor.js';
 import {
   armedExpectedPhrase, chargeIsWindowBound, chargeLevelPct, chargeReservePct, floorCushionLinePct, fmtPhoenixDayHm,
   noChargeExpected, statedBuyKwh,
+  // v1.198.0 — a plan sized on the provisional solar band says so beside its confidence tier.
+  provisionalBandText,
 } from './nightChargeAdvisor.js';
 import {
   forceChargeStopPct, partialForceChargeOnFailureSlots, forceChargeFailedSlotsText,
@@ -609,6 +611,8 @@ export function buildNightChargeMessage(
   const projection = `Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~${pct(plan.baselineMinSocPct)} `
     + `without ${held ? "tonight's write" : 'this charge'}, ~${pct(plan.minProjSocPct)} with it; the floor+cushion line is ${pct(line)}. `
     + `Confidence: ${plan.confidenceTier}.${shortfallNote}${overBuyNote}${economicNote}${held ? '' : evNote} `;
+  // v1.198.0 — a plan sized on the provisional solar band says so, after its confidence tier.
+  const provisionalNote = plan.pvBandWiden != null ? `${provisionalBandText(plan.pvBandWiden).trim()} ` : '';
   if (held) {
     // Where the pool is expected to open the window, when that is at or above the reserve (the
     // reason nothing is charged); a figure under it would contradict the clause, so none is given.
@@ -620,7 +624,7 @@ export function buildNightChargeMessage(
       title: `Night-charge: ${supervised ? `reserve held at ${reserveText}` : `reserve hold at ${reserveText} recommended`} tonight — no charge expected`,
       body:
         `${supervised ? 'Holding' : 'Recommended: hold'} the backup reserve at ${reserveText} overnight as a floor; `
-        + `no charge is expected${stays}. ${projection}${tail}`,
+        + `no charge is expected${stays}. ${projection}${provisionalNote}${tail}`,
     };
   }
   return {
@@ -632,6 +636,7 @@ export function buildNightChargeMessage(
       + (bound ? ', as far as the window can deliver' : '')
       + (expected == null ? '. ' : `, ~${kwh(expected)} of grid energy expected. `)
       + projection
+      + provisionalNote
       + tail,
   };
 }

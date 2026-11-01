@@ -291,9 +291,29 @@ export interface NightChargeInputs {
    * coverage miss, a climatology tier, bad configuration — is decided at once.
    */
   basisTransient?: boolean;
+  /** v1.198.0 — the basis is PROVISIONAL (fewer than N_MIN scored calibration days): the horizon's
+   *  P10 PV and the beyond-24 h carry are widened (PROVISIONAL_BAND_WIDEN), and this says by how
+   *  much. Absent on the full basis and on a refused one. */
+  pvBandWiden?: PvBandWiden;
 
   /** Below this buy, treat the night as "hold" (no meaningful charge). kWh. */
   minBuyKwh: number;
+}
+
+/** v1.198.0 — how a plan's PROVISIONAL solar band was widened (buildNightChargeInputs). */
+export interface PvBandWiden {
+  /** k(n), PROVISIONAL_BAND_WIDEN[calScoredDays]: the widening of the band's lower half-width. */
+  factor: number;
+  /** The scored calibration days the basis had. */
+  calScoredDays: number;
+  /** The scored days the full band needs (N_MIN, 14): the widening ends there. */
+  fullCalScoredDays: number;
+  /** The next 24 h's P10 PV as published (the probabilistic band), and as the plan sized on it, kWh. */
+  bandP10Kwh: number;
+  widenedP10Kwh: number;
+  /** The beyond-24 h carry's widening per √day: factor × the band's own lower half-width
+   *  (bandLowerHalfFrac) — what realizedDailyErrHalfFrac is on the full basis. */
+  rollupHalfFrac: number;
 }
 
 export type BindingCap =
@@ -566,6 +586,11 @@ export interface NightChargePlan {
   /** R2 — a mid-day (super off-peak) leg only: which term of T_mid set the reserve it writes
    *  (middayReserveTargetPct). Absent on every overnight plan. */
   reserveTargetBasis?: MiddayReserveBasis;
+  /** v1.198.0 — a plan sized on the PROVISIONAL solar band (fewer than 14 scored calibration
+   *  days): how far its P10 PV was widened (NightChargeInputs.pvBandWiden). The rationale, the
+   *  card and the evening push state it (provisionalBandText). Absent on the full basis — that
+   *  plan's JSON is unchanged — on a refused plan and on a night with no window (nothing sized). */
+  pvBandWiden?: PvBandWiden;
   /** A mid-day cost leg the re-entry hold held (plan §3.3): the level its write would take the pool
    *  to, and the line it had to reach (floor + MIDDAY_REENTRY_MARGIN_PCT). Absent otherwise. */
   middayReentryHold?: { arrivalPct: number; linePct: number };
@@ -1196,6 +1221,19 @@ export function buyFiguresLogText(expectedKwh: number | null | undefined, worstK
 }
 
 export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
+  const plan = sizeNightChargePlan(inputs);
+  // v1.198.0 — a plan sized on the PROVISIONAL band says so: the field (absent on the full basis, so
+  // that plan's JSON is unchanged) and the rationale's closing sentence. Only a plan that was sized
+  // — a charge or a hold (requiredExtraKwh set): a refused plan, or a night with no window, was
+  // sized on nothing.
+  const w = inputs.pvBandWiden;
+  return w != null && plan.basisComplete && plan.requiredExtraKwh != null
+    ? { ...plan, rationale: `${plan.rationale}${provisionalBandText(w)}`, pvBandWiden: { ...w } }
+    : plan;
+}
+
+/** The sizing itself (computeNightChargePlan's body before v1.198.0, unchanged). */
+function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   const {
     nowMs, fullKwh, socNowPct, reserveFloorPct, cushionPct, socCoherent,
     legEff, dischargeEff, chargeCapKw, gridInputCapKw, window, horizon,
@@ -2434,14 +2472,30 @@ export interface NightChargeInputDeps {
   forecastPresent: boolean;
   calScoredDays: number;
   minCalScoredDays: number; // N_MIN
+  /** v1.198.0 — the fewest scored calibration days a PROVISIONAL plan is sized on (index.ts: 4).
+   *  From here to minCalScoredDays the basis is admitted on a widened solar band
+   *  (PROVISIONAL_BAND_WIDEN); from minCalScoredDays on, the band as published. Absent (every
+   *  caller before v1.198.0) or non-finite ⇒ minCalScoredDays: no provisional range, the gate as
+   *  before. */
+  provisionalMinCalScoredDays?: number;
   bandCoverageFrac: number;
 
   morningPvSurplusP90Kwh: number | null;
   /** v1.168.0 — forwarded verbatim (see NightChargeInputs). */
   morningPvSurplusP50Kwh?: number | null;
   longGapAhead?: boolean;
-  /** v1.186.0 — forwarded verbatim (see NightChargeInputs). */
+  /** v1.186.0 — forwarded verbatim (see NightChargeInputs). v1.198.0 — on the full basis; a
+   *  provisional basis sums it again over `prePeakSurplusBasis` on the widened P10. */
   prePeakPvSurplusP10Kwh?: number | null;
+  /** v1.198.0 — the hours, span and on-peak test `prePeakPvSurplusP10Kwh` was summed over
+   *  (pessimisticPrePeakSurplus), each hour with its P50. Read ONLY on a provisional basis, where
+   *  the surplus is summed again on the widened P10 (provisionalP10W); absent there, the headroom
+   *  is set aside (null: the full long-gap buy). index.ts passes it whenever it passes the surplus. */
+  prePeakSurplusBasis?: {
+    hours: ReadonlyArray<{ ts: number; p10W: number; p50W?: number | null; loadW: number }>;
+    windowEndMs: number;
+    isOnPeakAt: (tsMs: number) => boolean;
+  } | null;
   /** v1.187.1 — forwarded verbatim (see NightChargeInputs). */
   costSurplusLoad?: CostSurplusLoad | null;
   minBuyKwh: number;
@@ -2553,6 +2607,98 @@ export function pessimisticPrePeakSurplus(o: {
   return { kwh: covered ? round2(kwh) : null, untilMs };
 }
 
+/* ── v1.198.0 — THE PROVISIONAL SOLAR BAND ──────────────────────────────────
+ *
+ * The basis gate needs N_MIN (14) scored calibration days before the PV band is trusted. A day on
+ * which a home Core had no readings is a coverage gap and does not score (v1.196.0), so after a
+ * stretch of cloud-offline Cores the gate refused every plan for about two weeks after they
+ * reported again (14 covered days), and the backup pool spent those nights at its reserve floor.
+ *
+ * From PROVISIONAL (index.ts NIGHT_PROVISIONAL_MIN_CAL_DAYS, 4) scored days the basis is admitted
+ * on a deliberately WIDER band: below N_MIN the P10 PV every planner hour is sized on is pushed
+ * below the published P10 by k(n), and the beyond-24 h carry is widened by k × the band's own
+ * lower half-width (realizedDailyErrHalfFrac is null below 14, so the carry was not widened at all
+ * — the `?? 0` index.ts passes). The plan sizes on P10 PV / P90 load, and every reader of the P10
+ * is monotone non-decreasing in it (simulate, packAtWindowEndWith, gridGainKw's acceptance bound,
+ * the long-gap pre-peak surplus), so a lower P10 never lowers the requirement, the write setpoint
+ * or the cost ceiling. P50 and P90 are not touched: the expected buy and start, the morning
+ * surplus, the over-buy flag and held import read the published band.
+ *
+ * What stays: the coverage gate (≥ 78% of the scored days inside the band) is judged on the
+ * PUBLISHED band, before any widening, so the widening never helps a plan pass; at 4 days Math.round
+ * makes it unanimous (3 of 4 is 75%). The published band, the ledger's pv_p10/p50/p90 and every
+ * display keep the band as published: pv_in_band keeps its meaning, so CURRENT_ALGO_VERSION
+ * stays 3. From N_MIN on, nothing here runs and every plan is byte-identical to the planner
+ * before v1.198.0 (legacyIdentity.golden.json; provisionalBand.test.ts).
+ */
+
+/**
+ * v1.198.0 — k(n): the Student-t predictive inflation of a scale estimated from n days,
+ * normalised to exactly 1 at the 14 days the band is trusted on today:
+ *
+ *     k(n) = t₀.₉₀(n − 1) · √(1 + 1/n) / ( t₀.₉₀(13) · √(1 + 1/14) )
+ *
+ * (the √(1 + 1/n) because the P50's own bias correction, pvBiasFactor, is fitted on the same recent
+ * days). Below 14 days the band is the raw one (bandSigmaCal cannot engage), not an order
+ * statistic of the n errors, so this is a deliberate, principled-in-form inflation rather than a
+ * derivation. 4 days is where the table starts: the maximum of n exchangeable daily errors covers
+ * a new day with probability n/(n+1), 0.75 at 3 and 0.80 at 4. √(14/n) (1.87 at 4) was the more
+ * conservative alternative; on a raw lower half-width of 0.40-0.55 it drives most P10 hours to 0.
+ * Hard-coded, as PROB_ENSEMBLE_Z is; provisionalBand.test.ts recomputes it from the t quantiles.
+ */
+export const PROVISIONAL_BAND_WIDEN: Readonly<Record<number, number>> = Object.freeze({
+  4: 1.3102, 5: 1.2018, 6: 1.1407, 7: 1.1013, 8: 1.0738,
+  9: 1.0535, 10: 1.0379, 11: 1.0255, 12: 1.0154, 13: 1.0071,
+});
+/** v1.198.0 — the scored days PROVISIONAL_BAND_WIDEN is normalised to (k = 1): N_MIN. */
+export const PROVISIONAL_BAND_FULL_DAYS = 14;
+
+/** v1.198.0 — k(n) (PROVISIONAL_BAND_WIDEN): the table value for 4 ≤ n ≤ 13, 1 from
+ *  PROVISIONAL_BAND_FULL_DAYS on, and null below 4 or for a non-integer n — no widening is
+ *  defined there, and a basis that would need one is refused, never sized unwidened. PURE. */
+export function provisionalBandWiden(calScoredDays: number): number | null {
+  if (!Number.isInteger(calScoredDays)) return null;
+  if (calScoredDays >= PROVISIONAL_BAND_FULL_DAYS) return 1;
+  return PROVISIONAL_BAND_WIDEN[calScoredDays] ?? null;
+}
+
+/** v1.198.0 — one hour's widened P10 PV, W: min(P10, max(0, P50 − k·(P50 − P10))) — the band's
+ *  lower half-width × k below the median, never above the published P10 (a P10 the ceiling clamp
+ *  put above its P50 is kept, not raised) and never below 0. No finite P50 ⇒ 0: no credit for
+ *  sun the band does not state. A non-finite P10 is returned as it is. PURE. */
+export function provisionalP10W(p10W: number, p50W: number | null | undefined, k: number): number {
+  if (!Number.isFinite(p10W)) return p10W;
+  const p10 = Math.max(0, p10W);
+  if (p50W == null || !Number.isFinite(p50W)) return 0;
+  return Math.min(p10, Math.max(0, p50W - k * (p50W - p10)));
+}
+
+/** v1.198.0 — the band's own daily lower half-width, as a fraction of its P50: Σ max(0, P50 − P10)
+ *  / Σ P50 over the hours that carry both (each P50 and P10 floored at 0). 1 — the widest — when
+ *  those hours hold under 0.5 kWh of P50: a band that states no sun says nothing about its width.
+ *  In [0, 1]. PURE. */
+export function bandLowerHalfFrac(hours: ReadonlyArray<NightForecastHour>): number {
+  let p50Wh = 0;
+  let halfWh = 0;
+  for (const h of hours) {
+    if (h.pvP50W == null || !Number.isFinite(h.pvP50W) || !Number.isFinite(h.pvP10W)) continue;
+    const m = Math.max(0, h.pvP50W);
+    p50Wh += m;
+    halfWh += Math.max(0, m - Math.max(0, h.pvP10W));
+  }
+  return p50Wh < 500 ? 1 : halfWh / p50Wh;
+}
+
+/** v1.198.0 — the sentence a provisional plan closes its rationale with, and the card and the evening
+ *  push state (the card mirrors it word for word: nightChargeText.ts provisionalBandText). '' on the
+ *  full basis. PURE. */
+export function provisionalBandText(w: PvBandWiden | null | undefined): string {
+  if (w == null) return '';
+  return ` PROVISIONAL SOLAR BAND: ${w.calScoredDays} of ${w.fullCalScoredDays} calibration days scored, so the P10 PV this plan is sized on`
+    + ` is widened ×${w.factor.toFixed(2)} (the next 24 h: ~${round1(w.bandP10Kwh)} → ~${round1(w.widenedP10Kwh)} kWh)`
+    + ` and the multi-day carry by ±${Math.round(w.rollupHalfFrac * 100)}% per √day; the full band returns at ${w.fullCalScoredDays} scored days.`;
+}
+
 /**
  * Assemble a NightChargeInputs from injected forecast pieces. PURE. The
  * conservative-worst-case rules (§2.3) live here so they are provable:
@@ -2568,6 +2714,9 @@ export function pessimisticPrePeakSurplus(o: {
  *  - Window from the injected tariff period resolver (OVERNIGHT tier).
  *  - basisComplete = forecast present AND not climatology AND calScoredDays ≥
  *    N_MIN AND band coverage ≥ 0.78 (write-gate floor); a false here forces a null plan downstream.
+ *    v1.198.0 — calScoredDays ≥ the PROVISIONAL minimum (provisionalMinCalScoredDays, 4; absent ⇒
+ *    N_MIN): below N_MIN the basis is admitted on the widened band (PROVISIONAL_BAND_WIDEN) — the
+ *    planner's P10 PV and the beyond-24 h carry, never the coverage the gate judges.
  */
 export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeInputs {
   const {
@@ -2577,8 +2726,10 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     bandHours, dayRollups, realizedDailyErrHalfFrac, nextRechargeMs,
     ev, evMaxLoadW,
     confidenceTier, forecastPresent, calScoredDays, minCalScoredDays, bandCoverageFrac,
+    // v1.198.0 — the provisional band: its minimum, and the pre-peak hours it widens.
+    provisionalMinCalScoredDays, prePeakSurplusBasis,
     morningPvSurplusP90Kwh, minBuyKwh, buyDebiasFactor,
-    morningPvSurplusP50Kwh, longGapAhead, prePeakPvSurplusP10Kwh,
+    morningPvSurplusP50Kwh, longGapAhead, prePeakPvSurplusP10Kwh: publishedPrePeakP10Kwh,
     costSurplusLoad,
     // v1.187.3 — the learner's basis and sample count, carried beside its factor: until
     // v1.187.2 only the factor was copied, so every plan reported 'default' / 0 samples
@@ -2609,6 +2760,58 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
   // configuration says (chargeWindows.ts legObjective / legForceChargeEligible). The cost leg —
   // and a plan with no spec — keeps the configured values exactly as passed.
   const legRole: ChargeLegRole = windowSpec?.role ?? 'cost';
+
+  // v1.48.0 — coverage floor corrected 0.9 → 0.78. The P10–P90 band nominally
+  // covers 80%, and the WRITE gate (nightChargeGate.ts) accepts realized
+  // coverage in [0.78, 0.92] as calibrated. Requiring ≥ 0.9 here meant a
+  // CORRECTLY calibrated forecast (e.g. the live 85%) failed the basis every
+  // night — no plan, no advisory content, nothing scored, readiness starved.
+  // Below 0.78 the band is overconfident (too narrow) and still blocks; above
+  // 0.92 it is over-wide, which is CONSERVATIVE for the P10-PV sizing this
+  // basis feeds, so the advisory basis needs no upper bound (the write gate
+  // keeps its stricter two-sided band).
+  // v1.198.0 — decided BEFORE the band is built: a PROVISIONAL basis (from
+  // provisionalMinCalScoredDays to N_MIN scored days) widens the hours below. The coverage is the
+  // published band's (bandRealizedCoveragePct), judged as before — never on the widened band.
+  const provisionalMinDays = provisionalMinCalScoredDays != null && Number.isFinite(provisionalMinCalScoredDays)
+    ? Math.min(provisionalMinCalScoredDays, minCalScoredDays) : minCalScoredDays;
+  const basisGatePasses =
+    forecastPresent &&
+    confidenceTier !== 'climatology' &&
+    calScoredDays >= provisionalMinDays &&
+    bandCoverageFrac >= BASIS_MIN_BAND_COVERAGE;
+  const provisionalDays = basisGatePasses && calScoredDays < minCalScoredDays;
+  // A provisional day count with no widening defined for it (under the table's first entry, or not
+  // a whole number) is refused: never sized on the band unwidened.
+  const provisionalK = provisionalDays ? provisionalBandWiden(calScoredDays) : null;
+  const basisComplete = basisGatePasses && (!provisionalDays || provisionalK != null);
+  /** v1.198.0 — k(n) on a provisional basis; null on the full basis (and on a refused one): every
+   *  transform below runs only when this is set, so the full basis is the planner as it was. */
+  const bandWidenK: number | null = basisComplete ? provisionalK : null;
+  // v1.148.0 — SAY WHICH GATE FAILED.
+  //
+  // On 2026-09-10 this returned false, the plan was null, and the backup pool sat
+  // at its 16% reserve floor from 22:36 to 07:50 — 9 h 13 m one grid failure from
+  // empty, recovering on morning solar. The reason appeared NOWHERE: not in the
+  // log, not on the plan, not in the evening advisory, not on the dashboard.
+  // Three of the four gates passed; band coverage missed by six points (72% vs
+  // 78%). Reconstructing that took an hour of live probing.
+  //
+  // "forecast/telemetry basis incomplete" is four conditions wearing one coat.
+  const basisBlockedBy: string | null = basisComplete
+    ? null
+    : !forecastPresent
+      ? 'no PV forecast available'
+      : confidenceTier === 'climatology'
+        ? 'forecast is climatology-tier (no site-specific history yet)'
+        : calScoredDays < provisionalMinDays
+          ? `only ${calScoredDays} scored calibration day(s), need ${provisionalMinDays}`
+            + (provisionalMinDays < minCalScoredDays
+              ? ` (a provisional plan on a widened solar band from ${provisionalMinDays}; the full band from ${minCalScoredDays})` : '')
+          : !(bandCoverageFrac >= BASIS_MIN_BAND_COVERAGE)
+            ? `PV band coverage ${Math.round(bandCoverageFrac * 100)}% < ${Math.round(BASIS_MIN_BAND_COVERAGE * 100)}%`
+              + ` (forecast present, tier=${confidenceTier}, calDays ${calScoredDays}/${minCalScoredDays})`
+            : `no provisional band widening is defined for ${calScoredDays} scored calibration day(s)`;
 
   // ★ EV de-dup MUST be atomic with the re-add (§2.3): only STRIP the embedded
   // expected-value EV from the base load when we will actually place the
@@ -2662,9 +2865,37 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
       pvP50W: finiteOrNull(h.pvP50W),
     });
   }
+  // v1.198.0 — THE PROVISIONAL BAND: every band hour is sized on its widened P10 (provisionalP10W),
+  // and the beyond-24 h carry on k × the band's own lower half-width instead of the realized one
+  // (null below N_MIN: index.ts passes 0, which left the carry unwidened). An hour with no P50 goes
+  // to 0, and its P50 walks (expectedCarryKwh, expectedWindowLiftKwh, expectedForceChargeStart)
+  // keep the published P10 they stood on in its absence: the expected figures do not move.
+  let pvBandWiden: PvBandWiden | null = null;
+  let provisionalRollupHalfFrac: number | null = null;
+  if (bandWidenK != null) {
+    let publishedWh = 0;
+    let widenedWh = 0;
+    for (const h of byTs.values()) {
+      if (!Number.isFinite(h.pvP10W)) continue;
+      const widened = provisionalP10W(h.pvP10W, h.pvP50W, bandWidenK);
+      publishedWh += h.pvP10W;
+      widenedWh += widened;
+      if (h.pvP50W == null) h.pvP50W = h.pvP10W;
+      h.pvP10W = widened;
+    }
+    provisionalRollupHalfFrac = bandWidenK * bandLowerHalfFrac(bandHours);
+    pvBandWiden = {
+      factor: bandWidenK,
+      calScoredDays,
+      fullCalScoredDays: minCalScoredDays,
+      bandP10Kwh: round2(publishedWh / 1000),
+      widenedP10Kwh: round2(widenedWh / 1000),
+      rollupHalfFrac: Math.round(provisionalRollupHalfFrac * 1e4) / 1e4,
+    };
+  }
   for (const dr of dayRollups) {
     const da = Math.max(1, dr.daysAhead);
-    const widen = Math.max(0, realizedDailyErrHalfFrac) * Math.sqrt(da);
+    const widen = Math.max(0, provisionalRollupHalfFrac ?? realizedDailyErrHalfFrac) * Math.sqrt(da);
     const p10Frac = Math.max(0, 1 - widen); // pessimistic-low PV
     const p90Frac = 1 + widen; // pessimistic-high load
     for (const hh of dr.hours) {
@@ -2721,44 +2952,24 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
   const end = nextRechargeMs ?? (horizon.length ? horizon[horizon.length - 1].ts + HOUR_MS : nowHour + HOUR_MS);
   const trimmed = horizon.filter((h) => h.ts >= nowHour && h.ts < end);
 
-  // v1.48.0 — coverage floor corrected 0.9 → 0.78. The P10–P90 band nominally
-  // covers 80%, and the WRITE gate (nightChargeGate.ts) accepts realized
-  // coverage in [0.78, 0.92] as calibrated. Requiring ≥ 0.9 here meant a
-  // CORRECTLY calibrated forecast (e.g. the live 85%) failed the basis every
-  // night — no plan, no advisory content, nothing scored, readiness starved.
-  // Below 0.78 the band is overconfident (too narrow) and still blocks; above
-  // 0.92 it is over-wide, which is CONSERVATIVE for the P10-PV sizing this
-  // basis feeds, so the advisory basis needs no upper bound (the write gate
-  // keeps its stricter two-sided band).
-  const basisComplete =
-    forecastPresent &&
-    confidenceTier !== 'climatology' &&
-    calScoredDays >= minCalScoredDays &&
-    bandCoverageFrac >= BASIS_MIN_BAND_COVERAGE;
-  // v1.148.0 — SAY WHICH GATE FAILED.
-  //
-  // On 2026-09-10 this returned false, the plan was null, and the backup pool sat
-  // at its 16% reserve floor from 22:36 to 07:50 — 9 h 13 m one grid failure from
-  // empty, recovering on morning solar. The reason appeared NOWHERE: not in the
-  // log, not on the plan, not in the evening advisory, not on the dashboard.
-  // Three of the four gates passed; band coverage missed by six points (72% vs
-  // 78%). Reconstructing that took an hour of live probing.
-  //
-  // "forecast/telemetry basis incomplete" is four conditions wearing one coat.
-  const basisBlockedBy: string | null = basisComplete
-    ? null
-    : !forecastPresent
-      ? 'no PV forecast available'
-      : confidenceTier === 'climatology'
-        ? 'forecast is climatology-tier (no site-specific history yet)'
-        : calScoredDays < minCalScoredDays
-          ? `only ${calScoredDays} scored calibration day(s), need ${minCalScoredDays}`
-          : `PV band coverage ${Math.round(bandCoverageFrac * 100)}% < ${Math.round(BASIS_MIN_BAND_COVERAGE * 100)}%`
-            + ` (forecast present, tier=${confidenceTier}, calDays ${calScoredDays}/${minCalScoredDays})`;
+  // v1.198.0 — the long-gap headroom on a provisional basis: the same pre-peak hours, span and
+  // on-peak test index.ts summed the published surplus over (prePeakSurplusBasis), on the widened
+  // P10. Without them the headroom is set aside (null: the full long-gap buy) — never the published
+  // surplus, which a provisional plan has not earned. The full basis forwards it verbatim.
+  const prePeakPvSurplusP10Kwh: number | null | undefined = bandWidenK == null
+    ? publishedPrePeakP10Kwh
+    : prePeakSurplusBasis != null
+      ? pessimisticPrePeakSurplus({
+        hours: prePeakSurplusBasis.hours.map((h) => ({ ts: h.ts, p10W: provisionalP10W(h.p10W, h.p50W, bandWidenK), loadW: h.loadW })),
+        windowEndMs: prePeakSurplusBasis.windowEndMs,
+        isOnPeakAt: prePeakSurplusBasis.isOnPeakAt,
+      }).kwh
+      : null;
 
   // v1.186.5 — no forecast, or not ONE scored calibration day: what a start-up leaves
-  // (a skill scored on a partial device map is now empty rather than wrong). 1-13
-  // scored days is a young history and a coverage miss is a real miss: both persistent.
+  // (a skill scored on a partial device map is now empty rather than wrong). 1 to the
+  // provisional minimum − 1 (1-3) scored days is a young history and a coverage miss is a real
+  // miss: both persistent.
   const basisTransient = !basisComplete && (!forecastPresent || calScoredDays === 0);
   return {
     nowMs,
@@ -2766,6 +2977,8 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     ...(windowSpec !== undefined ? { windowSpec } : {}),
     basisBlockedBy,
     basisTransient,
+    // v1.198.0 — only on a provisional basis: the full basis's inputs carry exactly what they did.
+    ...(pvBandWiden != null ? { pvBandWiden } : {}),
     fullKwh,
     socNowPct,
     reserveFloorPct,
