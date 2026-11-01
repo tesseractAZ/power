@@ -17,7 +17,10 @@
  * (D) THE DOOR (runwayBasisContracts.test.ts, SCOPE): the scale reaches the planner only from index.ts
  * measuredCushionScale, on the main thread's own tracker and file, from the planner's own snapshot
  * before its first await; no helper or module launders the measured basis to the planner, the
- * force-charge or the actuator; nothing downstream reads the plan's scale. Mutants D-i..xii.
+ * force-charge or the actuator; nothing downstream reads the plan's scale. Mutants D-i..xii. And no
+ * way to the scale that does not spell `cushionPoolScale` gets past the pins: the ledger helper that
+ * returns it, a ledger row's column, the tracker's own file, or a code line that opens with a block
+ * comment (which the source inventory once skipped as a comment line). Mutants D-xiii..xvi.
  *
  * (R) THE LEDGER: both columns written on every plan row, kept by the allowlist and added to a
  * deployed ledger. Mutants R-i..iii.
@@ -290,6 +293,41 @@ const MUTANTS = [
     find: "import { taperCeilingKwh } from './chargeTaper.js';",
     to: "import { taperCeilingKwh } from './chargeTaper.js';\nimport { panelDrainRunway as _pdr } from './panelRunway.js'; void _pdr; /* MUTANT */",
     why: 'A module the planner imports can carry the measured basis in: the import set is pinned.',
+  },
+  {
+    id: 'D-xiii. ★★★ laundering: the force-charge reads the scale through the ledger helper',
+    file: IDX, tests: [T_SCOPE],
+    find: '  const fullWh: number | null = sp?.backupFullCapWh ?? null;\n  const socNowPct: number | null = sp?.backupBatPercent ?? null;\n  const remainWh: number | null = sp?.backupRemainWh ?? null;\n  const socCoherent =\n',
+    to: '  const fcScale = cushionPoolScaleLedgerColumns(getLatestNightChargePlan() ?? {}).cushion_pool_scale ?? 1; /* MUTANT */\n'
+      + '  const fullWh: number | null = sp?.backupFullCapWh != null ? sp.backupFullCapWh * fcScale : null;\n'
+      + '  const socNowPct: number | null = sp?.backupBatPercent ?? null;\n  const remainWh: number | null = sp?.backupRemainWh ?? null;\n  const socCoherent =\n',
+    why: 'The helper returns the scale and its name is not the token `cushionPoolScale`: the JIT stop moves onto the measured basis unseen.',
+  },
+  {
+    id: 'D-xiv. ★★★ laundering: the reserve actuator reads the scale from a ledger row',
+    file: IDX, tests: [T_SCOPE],
+    find: '      : null;\n  const fullWh: number | null = sp?.backupFullCapWh ?? null;\n  const socNowPct: number | null = sp?.backupBatPercent ?? null;\n  const remainWh: number | null = sp?.backupRemainWh ?? null;\n  // Same I11 coherence',
+    to: '      : null;\n  const acScale = recorder.readNightLedger(2)[0]?.cushion_pool_scale ?? 1; /* MUTANT */\n'
+      + '  const fullWh: number | null = sp?.backupFullCapWh != null ? sp.backupFullCapWh * acScale : null;\n'
+      + '  const socNowPct: number | null = sp?.backupBatPercent ?? null;\n  const remainWh: number | null = sp?.backupRemainWh ?? null;\n  // Same I11 coherence',
+    why: 'The ledger column is the scale under another spelling: the actuator\'s coherence test and writes move onto the measured basis.',
+  },
+  {
+    id: 'D-xv. ★★★ laundering: the force-charge opens the cushion tracker\'s file',
+    file: IDX, tests: [T_SCOPE],
+    find: '  const fullWh: number | null = sp?.backupFullCapWh ?? null;\n  const socNowPct: number | null = sp?.backupBatPercent ?? null;\n  const remainWh: number | null = sp?.backupRemainWh ?? null;\n  const socCoherent =\n',
+    to: '  let fcScale = 1; /* MUTANT */\n'
+      + '  try { fcScale = Number(JSON.parse(readFileSync(defaultPoolEnergyBasisPath(\'pool-energy-basis-cushion\') ?? \'\', \'utf8\')).appliedScale) || 1; } catch { /* none */ }\n'
+      + '  const fullWh: number | null = sp?.backupFullCapWh != null ? sp.backupFullCapWh * fcScale : null;\n'
+      + '  const socNowPct: number | null = sp?.backupBatPercent ?? null;\n  const remainWh: number | null = sp?.backupRemainWh ?? null;\n  const socCoherent =\n',
+    why: 'The persisted basis is the door\'s state read without the door: a second reader of the measured basis.',
+  },
+  {
+    id: 'D-xvi. ★★ a downstream reader of the plan\'s scale on a line that opens with a block comment',
+    file: NCA, tests: [T_SCOPE],
+    find: '  const line = plan.cushionLineSocPct;',
+    to: '  /* v1.199.0 */ const line = plan.cushionLineSocPct ?? (plan as NightChargePlan).cushionPoolScale?.scale; /* MUTANT */',
+    why: 'The source inventory skipped every line that starts like a comment, code after the `*/` included.',
   },
 
   /* ── R: the ledger ── */

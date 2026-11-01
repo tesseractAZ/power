@@ -10,7 +10,7 @@ import {
   type NightChargeInputs, type NightChargePlan, type CushionPoolScale,
 } from '../src/nightChargeAdvisor.js';
 import { armFromPlan, clampReserveTarget, emptyActuationState, RESERVE_WRITE_MAX_PCT } from '../src/nightChargeActuator.js';
-import { PoolEnergyBasisTracker } from '../src/poolEnergyBasis.js';
+import { PoolEnergyBasisTracker, CAPACITY_SCALE_MIN } from '../src/poolEnergyBasis.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
 import type { Shp2Projection } from '../src/ecoflow/project.js';
 import { legacyIdentityCases, planDigest } from './fixtures/legacyIdentityFixtures.js';
@@ -24,7 +24,7 @@ import { FIGURE_FIELDS, figuresOf, measuredFigures, MEASURED_SCALE, type Figures
  * percent is a share of the packs' MEASURED (BMS full-charge) capacity, ~0.944 of nameplate on the
  * reference fleet, so the written line held only ~0.944 of the cushion above the floor: on the
  * scenario below (92.16 kWh, a 10% floor, an 18.85 kWh cushion) the 30.45% line, written 31%, holds
- * 21% × 86.999 = 18.27 kWh, 96.9% of the cushion — about 3.9 of the 4 configured hours of
+ * 21% × 86.999 = 18.27 kWh, 96.9% of the cushion — about 7.75 of the 8 configured hours of
  * load at the scenario's own drain, before the Cores' standby, which the cushion leaves out.
  *
  * The fix (nightChargeAdvisor.ts cushionLineKwh): on the islanded-outage basis the line is
@@ -32,11 +32,12 @@ import { FIGURE_FIELDS, figuresOf, measuredFigures, MEASURED_SCALE, type Figures
  * (index.ts measuredCushionScale). Here: 31.67%, written 32%, holding 22% × 86.999 = 19.14 kWh.
  *
  * These tests pin, in this order: the defect fixed on the scenario, worked by hand; the guarantee
- * (property, and on every islanded charge night of the year); the fail-safe (absent / implausible ⇒
- * today's line exactly, a lower scale never lowers anything below the nameplate plan); the scope of
- * the conversion (legacy-pct, disabled, the cost formula); that every consumer agrees with the one
- * line; the legs; the plumbing; the year against the golden at 0.944 (direction, counts and the
- * per-case figures); the explicit-nameplate digests; the ledger and log helpers; the tracker file.
+ * (property, and on every islanded charge night of the year) and its limit (a scale that is high);
+ * the fail-safe (absent / implausible ⇒ today's line exactly, a lower scale never lowers anything
+ * below the nameplate plan); the scope of the conversion (legacy-pct, disabled, the cost formula);
+ * that every consumer agrees with the one line; the legs; the plumbing; the year against the golden
+ * at 0.944 (direction, counts and the per-case figures); the explicit-nameplate digests; the ledger
+ * and log helpers; the tracker file.
  */
 
 const H = 3_600_000;
@@ -77,6 +78,10 @@ test('★★★ THE DEFECT FIXED: the 30.45% nameplate line (written 31, 18.27 k
   assert.equal(written(before), 31);
   const heldBefore = ((31 - 10) / 100) * MEASURED_KWH;
   assert.ok(Math.abs(heldBefore - 18.27) < 0.005 && heldBefore < 18.85, `held ${heldBefore}`);
+  // In hours of the scenario's own drain, 1.445 kW × 1.5 ÷ 0.92 = 2.356 kW: 7.75 of the 8 configured.
+  const drainKw = (1.445 * 1.5) / 0.92;
+  assert.equal(before.cushionOutageHours, 8);
+  assert.equal(Math.round((heldBefore / drainKw) * 100) / 100, 7.75);
 
   const p = plan({ cushionPoolScale: S944 });
   // The line by hand: 10 + 100 × 18.85 ÷ (92.16 × 0.944) = 10 + 1885 ÷ 86.99904 = 31.6669%.
@@ -90,6 +95,7 @@ test('★★★ THE DEFECT FIXED: the 30.45% nameplate line (written 31, 18.27 k
   assert.equal(armFromPlan(emptyActuationState(), '2026-10-19', p, B, 10)!.targetPct, 32, 'the reserve the actuator arms');
   const held = ((32 - 10) / 100) * MEASURED_KWH; // 19.14 kWh
   assert.ok(Math.abs(held - 19.14) < 0.005 && held >= 18.85, `held ${held}`);
+  assert.equal(Math.round((held / drainKw) * 100) / 100, 8.12, 'the whole 8 h, and the write\'s rounding');
   // The plan agrees with the write: sized to the measured line, reaching it, no shortfall.
   assert.equal(p.targetSocPct, 31.7);
   assert.equal(p.cushionTroughSocPct, 31.67);
@@ -163,6 +169,45 @@ test('★★★ THE GUARANTEE on the year: every islanded charge night written u
     if (((written(b)! - b.reserveFloorPct) / 100) * c.deps.fullKwh * MEASURED_SCALE.scale >= b.cushionKwh! - 1e-9) heldBefore += 1;
   }
   assert.deepEqual({ n, held, heldBefore }, { n: 175, held: 175, heldBefore: 61 });
+});
+
+test('★★ THE GUARANTEE\'S LIMIT — it holds on the capacity the scale states: a held ratio after an unseen drop, or packs under CAPACITY_SCALE_MIN, hold less than the cushion', () => {
+  // (1) A held ratio. Measured at 0.944, then Core A goes cloud-dark while the panel still lists it
+  // as connected, and its packs fall to 0.85 unseen: the tracker holds its last ratio.
+  const t = new PoolEnergyBasisTracker({ path: null });
+  const m = fleet(0.944);
+  t.evaluate(m.devs, m.panel, B);
+  const drop = fleet(0.944);
+  drop.devs['CORE-A'] = { ...fleet(0.85).devs['CORE-A'], online: false } as DeviceSnapshot;
+  const h = t.evaluate(drop.devs, drop.panel, B + H);
+  assert.equal(h.capacityBasis, 'held');
+  assert.ok(Math.abs(h.capacityScale - 0.944) < 1e-12, `${h.capacityScale}`);
+  const ph = plan({ cushionPoolScale: { scale: h.capacityScale, basis: h.capacityBasis } });
+  assert.deepEqual([ph.cushionLineSocPct, written(ph)], [31.67, 32]);
+  // The capacity the panel's percent is a share of: (0.85 + 0.944 + 0.944) ÷ 3 = 0.91267 of nameplate,
+  // 84.111 kWh. 22% of it is 18.50 kWh, under the 18.85 kWh cushion.
+  const trueHeld = ((32 - 10) / 100) * 92.16 * ((0.85 + 2 * 0.944) / 3);
+  assert.ok(Math.abs(trueHeld - 18.50) < 0.005 && trueHeld < 18.85, `${trueHeld}`);
+  // (2) Packs under the clamp. At 0.75 of nameplate the tracker counts them at CAPACITY_SCALE_MIN.
+  assert.equal(CAPACITY_SCALE_MIN, 0.8, 'CAPACITY_SCALE_MIN is unset in the suite');
+  const low = fleet(0.75);
+  const l = new PoolEnergyBasisTracker({ path: null }).evaluate(low.devs, low.panel, B);
+  assert.deepEqual([l.capacityBasis, l.capacityScale], ['measured', 0.8]);
+  const pl = plan({ cushionPoolScale: { scale: l.capacityScale, basis: l.capacityBasis } });
+  // 10 + 1885 ÷ (92.16 × 0.8) = 10 + 1885 ÷ 73.728 = 35.567%, written 36; 26% × 69.12 = 17.97 kWh.
+  assert.deepEqual([pl.cushionLineSocPct, written(pl)], [35.57, 36]);
+  const trueLow = ((36 - 10) / 100) * 92.16 * 0.75;
+  assert.ok(Math.abs(trueLow - 17.97) < 0.005 && trueLow < 18.85, `${trueLow}`);
+  // At the clamp itself the write holds the cushion: the guarantee is exact from CAPACITY_SCALE_MIN up.
+  assert.ok(((36 - 10) / 100) * 92.16 * 0.8 >= 18.85);
+  // Chapter 15 part 1 states the limit with these figures, not a guarantee on every basis.
+  const ch = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../docs/reference/15-1-night-charge-planning.md'), 'utf8');
+  const bullet = ch.split('\n').find((x) => x.startsWith('- **The guarantee and its limit.**'));
+  assert.ok(bullet, 'chapter 15 part 1\'s guarantee bullet');
+  assert.doesNotMatch(bullet, /conservatively/, 'a held or lowest-known ratio is not conservative');
+  assert.match(bullet, /exact on a `measured` basis at or above `CAPACITY_SCALE_MIN`/);
+  assert.match(bullet, /22% × 84\.11 = 18\.50 kWh/);
+  assert.match(bullet, /26% × 69\.12 = 17\.97 kWh/);
 });
 
 /* ══ the fail-safe ════════════════════════════════════════════════════════════ */
@@ -456,6 +501,14 @@ test('★★★ the year at 0.944 against the golden\'s planner: nothing falls, 
       && written(b) === Math.ceil(b.cushionLineSocPct! - 1e-9)) {
       lineSet.writes += 1;
       if (written(p) === written(b)) lineSet.unchanged += 1;
+      // The rule (CHANGELOG 1.199.0): the write stays where the nameplate line L0 sits at least the
+      // shift below the next whole percent, the shift being 100 · cushion ÷ pool × (1/s − 1).
+      const share = (100 * b.cushionKwh!) / c.deps.fullKwh;
+      const L0 = b.reserveFloorPct + share;
+      assert.ok(Math.abs(L0 - b.cushionLineSocPct!) < 0.0051, `${c.label}: L0 ${L0} vs the plan's ${b.cushionLineSocPct}`);
+      const shift = share * (1 / MEASURED_SCALE.scale - 1);
+      assert.equal(written(p) === written(b), Math.ceil(L0 - 1e-9) - L0 >= shift - 1e-9,
+        `${c.label}: L0 ${L0}, shift ${shift}, written ${written(b)} → ${written(p)}`);
     }
     for (const [k, x] of [['base', b], ['fix', p]] as const) {
       if (c.label.endsWith('21:30') && x.chargeTonight && x.cushionBasis === 'islanded-outage' && x.cushionLineSocPct! > RESERVE_WRITE_MAX_PCT

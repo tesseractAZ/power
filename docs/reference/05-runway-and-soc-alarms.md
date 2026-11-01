@@ -178,8 +178,10 @@ The exception (v1.199.0) is the cushion LINE: the panel's reserve percent is a s
 measured capacity, so the planner converts an islanded-outage cushion's energy to a percent on the
 house pool's measured capacity scale, which reaches it through one pinned door (`measuredCushionScale`
 in index.ts, a third tracker on the main thread with its own file, `pool-energy-basis-cushion.json`).
-Every planner walk stays on nameplate kWh per percent (chapter 15 part 1, "The cushion line on the
-measured capacity").
+No other consumer reads the scale under any spelling: `runwayBasisContracts.test.ts` pins every source
+line that names the plan's scale, the ledger helper that returns it or the ledger's `cushion_pool_scale`
+columns, and the tracker's file is named only where its tracker is built. Every planner walk stays on
+nameplate kWh per percent (chapter 15 part 1, "The cushion line on the measured capacity").
 
 #### 1.4 Key constants
 
