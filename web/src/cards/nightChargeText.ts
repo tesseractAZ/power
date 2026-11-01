@@ -204,6 +204,29 @@ export interface ChargeFigurePlan {
    *  (the night then stops at the reserve); absent otherwise. */
   expectedForceChargeStartMs?: number | null;
   setpointSocPct: number | null;
+  /** v1.198.0 — the plan was sized on the provisional solar band; absent on the full basis. */
+  pvBandWiden?: PvBandWidenText | null;
+}
+
+/** v1.198.0 — the server's PvBandWiden (nightChargeAdvisor.ts): how far a provisional plan's P10 PV
+ *  was widened. */
+export interface PvBandWidenText {
+  factor: number;
+  calScoredDays: number;
+  fullCalScoredDays: number;
+  bandP10Kwh: number;
+  widenedP10Kwh: number;
+  rollupHalfFrac: number;
+}
+
+/** v1.198.0 — the server's provisionalBandText (nightChargeAdvisor.ts), word for word: the plan was
+ *  sized on the PROVISIONAL solar band, and how far its P10 PV was widened. '' on the full basis. */
+export function provisionalBandText(w: PvBandWidenText | null | undefined): string {
+  if (w == null) return '';
+  const r1 = (n: number): number => Math.round(n * 10) / 10;
+  return ` PROVISIONAL SOLAR BAND: ${w.calScoredDays} of ${w.fullCalScoredDays} calibration days scored, so the P10 PV this plan is sized on`
+    + ` is widened ×${w.factor.toFixed(2)} (the next 24 h: ~${r1(w.bandP10Kwh)} → ~${r1(w.widenedP10Kwh)} kWh)`
+    + ` and the multi-day carry by ±${Math.round(w.rollupHalfFrac * 100)}% per √day; the full band returns at ${w.fullCalScoredDays} scored days.`;
 }
 
 /** v1.187.22 — below this an expected draw is NO charge (the server's NO_CHARGE_EXPECTED_KWH,
@@ -273,7 +296,9 @@ export function sizingLine(plan: ChargeFigurePlan): string | null {
   const r1 = (n: number): number => Math.round(n * 10) / 10;
   const cal = factor > 1.005 && plan.buyKwh != null && Number.isFinite(plan.buyKwh)
     ? ` (raw estimate ${r1(plan.buyKwh)} kWh × ${factor.toFixed(2)} realized-buy calibration)` : '';
-  return `Sized on an islanded worst case (P10 PV, P90 load including any committed EV session, no grid) of ~${r1(worst)} kWh${cal}.`;
+  // v1.198.0 — and, on a provisional plan, the widened P10 it was sized on.
+  return `Sized on an islanded worst case (P10 PV, P90 load including any committed EV session, no grid) of ~${r1(worst)} kWh${cal}.`
+    + provisionalBandText(plan.pvBandWiden);
 }
 
 /** The plan fields the card's HOLD summary reads (a subset of /api/night-charge/status → plan). */
@@ -289,6 +314,8 @@ export interface HoldSummaryPlan {
   baselineMinSocPct: number | null;
   reserveFloorPct: number;
   cushionPct: number;
+  /** v1.198.0 — the hold was sized on the provisional solar band; absent on the full basis. */
+  pvBandWiden?: PvBandWidenText | null;
 }
 
 /**
@@ -305,6 +332,8 @@ export interface HoldSummaryPlan {
  * v1.189.0 — `writeStands`: the hold is a later recompute's and the write armed from the announced
  * plan still stands (writeStands), so the hold leads with that, each shape says what the
  * recompute would do instead of "nothing will be charged", and the tone is 'warn'.
+ * v1.198.0 — a sized hold on the provisional solar band (pvBandWiden) closes its detail with
+ * provisionalBandText, as the hold push does; before the write-stands note when one stands.
  */
 export function holdSummary(
   plan: HoldSummaryPlan,
@@ -328,18 +357,21 @@ function holdVerdict(plan: HoldSummaryPlan, none: string): { headline: string; d
   if (plan.requiredExtraKwh == null) {
     return { headline: 'No overnight charge tonight.', detail: `No cheap charge window was resolved — ${none}.`, tone: 'muted' };
   }
+  // v1.198.0 — a hold SIZED on the provisional solar band closes its detail with the sentence the
+  // push closes it with ('' on the full basis); a hold with no window, above, was sized on nothing.
+  const provisionalDetail = provisionalBandText(plan.pvBandWiden);
   if (plan.cushionShortfall) {
     return {
       headline: 'No overnight charge tonight — the window cannot cover the cushion.',
       detail: 'The outage cushion needs a charge, but this window cannot deliver enough to clear the minimum buy, '
-        + `so ${none}. Charge/pool limits prevent meeting the cushion — residual risk remains.`,
+        + `so ${none}. Charge/pool limits prevent meeting the cushion — residual risk remains.${provisionalDetail}`,
       tone: 'warn',
     };
   }
   if (plan.requiredExtraKwh > 0) {
     return {
       headline: 'No overnight charge tonight.',
-      detail: `The islanded worst case the plan is sized on needs only a small top-up, under the minimum buy, so ${none}.`,
+      detail: `The islanded worst case the plan is sized on needs only a small top-up, under the minimum buy, so ${none}.${provisionalDetail}`,
       tone: 'ok',
     };
   }
@@ -350,7 +382,7 @@ function holdVerdict(plan: HoldSummaryPlan, none: string): { headline: string; d
     headline: 'No overnight charge needed.',
     detail: `Even if the grid were lost overnight, ${wholeHouse
       ? `the whole-house low would stay at ~${pct(trough)}`
-      : `the pack would close the charge window at ~${pct(trough)}`}, at or above the ${pct(line)} floor+cushion line — ${none}.`,
+      : `the pack would close the charge window at ~${pct(trough)}`}, at or above the ${pct(line)} floor+cushion line — ${none}.${provisionalDetail}`,
     tone: 'ok',
   };
 }

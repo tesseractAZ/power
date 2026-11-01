@@ -183,7 +183,8 @@ const INDEX = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../
   .split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
 
 test('★★★ index.ts feeds the P10 band, bounded by the tariff on-peak, into the planner deps', () => {
-  assert.ok(INDEX.includes('prePeakP10Hours.push({ ts: pb.ts, p10W: pb.p10W, loadW: fh.forecastLoadW });'),
+  // v1.198.0 — each hour also carries its P50 (the provisional band widens the P10 from it).
+  assert.ok(INDEX.includes('prePeakP10Hours.push({ ts: pb.ts, p10W: pb.p10W, p50W: pb.p50W, loadW: fh.forecastLoadW });'),
     'the LOW-PV quantile, against the same forecast load as the median');
   assert.ok(INDEX.includes('isOnPeakAt: (ts) => rateAt(tariffModel, ts).isOnPeak,'),
     'the span stops at the tariff\'s own on-peak start');

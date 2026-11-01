@@ -695,7 +695,13 @@ regression. **NOT an alarm input** (verified by exhaustive consumer census, v1.3
 field into mqttDiscovery/alerts/runwayAlarm requires re-auditing the calibration).
 Consumers: the display, the recommend-only MPC planner, and the night-charge advisor
 (§15), which sizes a charge from the per-hour P10 PV, `realizedDailyErrHalfFrac`
-(multi-day widening) and `bandRealizedCoveragePct` (basis gate).
+(multi-day widening) and `bandRealizedCoveragePct` (basis gate). Below 14 scored
+days the band published here stays the raw one (`uncalibrated`) and
+`realizedDailyErrHalfFrac` is null; from 4 scored days the night-charge advisor
+nevertheless plans, on a widened copy of this band's P10 that it keeps to itself —
+the provisional band ([chapter 15 part 1](15-1-night-charge-planning.md)). Nothing
+published here moves: the display, the alarms and the night ledger read the band as
+it is, and the advisor's coverage gate reads `bandRealizedCoveragePct` on it.
 
 #### PV band per hour
 
