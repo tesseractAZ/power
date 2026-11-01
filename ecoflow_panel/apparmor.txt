@@ -1,7 +1,8 @@
 #include <tunables/global>
 
 # AppArmor profile for the Power add-on (slug ecoflow_panel). First added in
-# v0.9.44; narrowed in v1.187.15 to what the add-on was seen to use.
+# v0.9.44; narrowed in v1.187.15 to what the add-on was seen to use; since
+# v1.197.2 reads are confined to the folders the add-on uses (no `file,`).
 #
 # Home Assistant Supervisor loads this file as the LSM profile for the
 # container (renamed to the installed slug, <repository-hash>_ecoflow_panel).
@@ -14,7 +15,8 @@
 #   - Node 22 + s6-overlay init system; every process runs as root and no
 #     service switches user
 #   - Fastify HTTP + WebSocket on 8787, the SSH TUI on 2323 when enabled
-#   - SQLite database + JSONL writes under /data, the optional snapshot to /share
+#   - SQLite database + JSONL writes under /data; the optional database
+#     snapshot and the backup hook's journal under /share/ecoflow-panel
 #   - Outbound EcoFlow MQTT (8883), HA's MQTT broker (1883), HA/Supervisor
 #     (http://supervisor, 80), HTTPS (EcoFlow, Open-Meteo, NWS) and Wyoming TCP
 #   - Inbound HTTP from HA Core + LAN (speakers fetching alarm audio)
@@ -23,16 +25,30 @@
 #   - every capability except chown and dac_override; kernel module loading,
 #     mount, ptrace, raw IO, sysrq
 #   - raw and packet sockets (only the socket families in use are allowed)
+#   - reading anything outside the folders granted below: other add-ons' files
+#     under /share (only /share/ecoflow-panel is granted), and the Home
+#     Assistant folders this add-on does not map (/config, /ssl, /backup,
+#     /media, /addons, /addon_configs, /homeassistant)
 #   - reading /etc/shadow, /etc/gshadow, /root/**, /home/**, /etc/ssh/**
+#   - running or exec-mapping anything from the writable trees /data, /share,
+#     /tmp and /var/tmp (s6's runtime trees under /run are the one writable and
+#     executable exception: s6 copies its own scripts there at boot)
+#   - writing a process's memory file (/proc/<pid>/mem)
 #   - writing to /proc/sys/* or /sys/** (host kernel tunables)
 #   - writing to the code, system and config directories (write-locks below)
 #
 # If the add-on misbehaves after a profile change, check the host's audit
 # journal (`journalctl _TRANSPORT=audit` on the HAOS host — not
 # /var/log/audit/audit.log, not dmesg). An explicit `deny` rule is silent;
-# only an `audit deny` rule, or an operation no allow rule covers, is logged.
-# Profile a change in complain mode first, and compile it fresh
-# (`apparmor_parser -T -Q -K`) before shipping.
+# only an `audit deny` rule, or an operation no allow rule covers, is logged:
+# since v1.197.2 a read this profile does not grant is refused AND logged
+# (apparmor="DENIED"). Boot-test a change on an isolated container of the
+# image that ships, in complain mode, then enforced, over three starts and
+# three stops, each stop within the Supervisor's 10 s timeout (the v1.7.0
+# failure was at start/restart), and compile it fresh (`apparmor_parser -T -Q
+# -K`) before shipping. The procedure, the rules-only hash and the shipping
+# gate are in docs/reference/12-configuration-deployment-security.md,
+# "AppArmor profile".
 
 profile addon_ecoflow_panel flags=(attach_disconnected,mediate_deleted) {
   #include <abstractions/base>
@@ -59,28 +75,67 @@ profile addon_ecoflow_panel flags=(attach_disconnected,mediate_deleted) {
   deny capability mac_override,
 
   # ─── File system ───────────────────────────────────────────────────
-  # General read access to the container rootfs (app code, libs,
-  # certificates, locale data). The Dockerfile is the source of truth
-  # for what files exist; this profile follows its layout.
+  # v1.197.2 — reads are granted per TOP-LEVEL FOLDER; the blanket `file,` rule
+  # (kept from v1.7.1 to v1.197.0) is gone.
   #
-  # This blanket `file,` rule is INTENTIONALLY RETAINED (do not remove it).
+  # Why it was kept so long: v1.7.0 replaced `file,` with a per-path list that
+  # had `/init ix,` (execute) but no `/init r,`. /init is a /bin/sh script, and
+  # sh opens it for READING once the kernel has started it (s6-overlay
+  # re-opens it again at shutdown/restart): `/bin/sh: can't open '/init':
+  # Permission denied` crash-loop, add-on and alarm down, reverted in v1.7.1.
+  # The failure is invisible in the add-on log (init never reaches the server).
   #
-  # v1.7.0 removed it (security #3) in favour of a per-path allow list, but that
-  # list had `/init ix,` (execute) while s6-overlay re-OPENS /init for READING
-  # during shutdown/restart — the read was denied → `/bin/sh: can't open '/init':
-  # Permission denied` crash-loop → add-on down. Reverted in v1.7.1.
-  #
-  # v1.7.2 tightens #3 the safe way instead: KEEP `file,` (so no read/exec can
-  # ever be denied — the /init crash CANNOT recur) and layer WRITE-immutability
-  # deny rules on the code/binary/library dirs in the deny section below (see the
-  # `deny /app|/usr|/bin|/sbin|/lib|/lib64|/init … wl,` block). That closes the
-  # dominant CWE-732 vector (persisting/tampering via WRITE) with zero read-denial
-  # risk. v1.187.15 write-locked the s6 init trees (/command, /package) and /etc
-  # as well, after a complain-mode boot test showed nothing writes them (see the
-  # deny section). STILL DEFERRED: full READ-confinement (dropping `file,`) —
-  # its failure mode is an invisible init crash-loop, which the add-on log
-  # cannot show.
-  file,
+  # How this list avoids that class:
+  #   - The image's own folders are granted WHOLE, never file by file: /bin,
+  #     /sbin, /lib, /lib64, /usr, /package and /command readable and mappable
+  #     (shared libraries, s6's execline scripts), /etc, /var and /app readable,
+  #     and /init both readable and executable. s6, bashio, jq, npm, tsx, node
+  #     and esbuild cannot meet a read denial in them. Writes to them stay
+  #     refused by the write-locks in the deny section.
+  #   - Execution is granted on the image's program folders and on the scripts
+  #     `npm start` runs, by the path the kernel resolves: AppArmor checks the
+  #     TARGET of a symlink, so /usr/bin/npm is checked as npm-cli.js,
+  #     /usr/bin/bashio as /usr/lib/bashio/bashio, node_modules/.bin/tsx as
+  #     tsx/dist/cli.mjs, and the s6 commands in /command as their files under
+  #     /package. s6 also runs scripts it copies into /run at boot (the
+  #     scandir /run/service, the legacy service under /run/s6, s6-rc's live
+  #     directory /run/s6-rc*), so those stay executable.
+  #   - Writable: /data, /share/ecoflow-panel, /tmp, /var/tmp and /run. Nothing
+  #     may be executed or exec-mapped from /data, /share, /tmp or /var/tmp
+  #     (audit deny below). /run is the exception: s6 copies its scandir and
+  #     service scripts into /run/service, /run/s6 and /run/s6-rc* at boot and
+  #     runs them from there, so those are writable AND executable. A file
+  #     written there can be run, and a new service folder under /run/service
+  #     would be supervised after an s6 rescan; /run is a tmpfs, so nothing
+  #     written there survives a restart. apparmorProfile.test.ts bounds the
+  #     writable-and-executable paths to these three trees.
+  #   - /share holds every add-on's files; only this add-on's own folder is
+  #     granted (and the listing of /share itself, which names the folders).
+  #   - /proc is readable; it is written only for thread names (comm). /sys is
+  #     readable for the thermal zones, the cgroup limits libuv reads, the
+  #     transparent-huge-page settings, the network interfaces and /sys/devices.
+  #     The Go runtime inside esbuild reads the huge-page size at every start
+  #     (tsx starts esbuild in the server and in each worker that loads
+  #     TypeScript). <abstractions/base> grants that file only from AppArmor
+  #     3.0.12 and 3.1.6 on, so the profile grants the folder itself rather than
+  #     depend on the host's AppArmor version.
+  # Boot test, required before any change to these grants ships: an isolated
+  # container of the image that ships under a test-named copy of this profile,
+  # first in complain mode, then enforced, over three starts and three stops,
+  # exercising the API, the workers, the database snapshot, the SSH console and
+  # the backup hook; every ALLOWED record becomes a rule or a documented denial
+  # (docs/reference/12, the "AppArmor profile" section).
+  /init r,
+  /{bin,sbin,lib,lib64,usr,package,command}/{,**} rm,
+  /etc/{,**} r,
+  /var/{,**} r,
+  /app/{,**} r,
+  /share/ r,
+  /share/ecoflow-panel/{,**} rwk,
+  /proc/{,**} r,
+  /sys/class/thermal/{,**} r,
+  /sys/fs/cgroup/{,**} r,
+  /sys/kernel/mm/transparent_hugepage/{,**} r,
   signal,
   # v1.187.15 — the socket families in use: TCP and UDP (DNS) over IPv4/IPv6, unix (s6's
   # IPC), netlink (Node's interface listing). No raw or packet sockets.
@@ -95,10 +150,11 @@ profile addon_ecoflow_panel flags=(attach_disconnected,mediate_deleted) {
   # on /etc/* and /command below is subtracted by the v1.187.15 write-locks.
   # v1.187.20 — the backup hook runs under THIS profile too (the Supervisor
   # `docker exec`s config.yaml backup_pre / backup_post into the container):
-  # /usr/bin/ecoflow-panel-backup-hook (sh, /bin/** ix) runs /usr/bin/node, which
-  # connects to 127.0.0.1:8787 (network inet stream) and may append to
-  # /share/ecoflow-panel/backup-window.jsonl or /data (`file,`). A rule removed
-  # here fails at BACKUP time; apparmorProfile.test.ts pins what the hook needs.
+  # /usr/bin/ecoflow-panel-backup-hook (sh, /usr/bin/** ix) runs /usr/bin/node,
+  # which reads /app/server/src/backupHook.mjs, connects to 127.0.0.1:8787
+  # (network inet stream) and may append to /share/ecoflow-panel/backup-window.jsonl
+  # or /data. A rule removed here fails at BACKUP time; apparmorProfile.test.ts
+  # pins what the hook needs.
   /init ix,
   /bin/** ix,
   /usr/bin/** ix,
@@ -117,6 +173,26 @@ profile addon_ecoflow_panel flags=(attach_disconnected,mediate_deleted) {
   /run/s6-rc** rwix,
   /package/admin/s6/command/** ix,
   /command/** rwix,
+  # v1.197.2 — exec grants `file,` used to cover, each by the path AppArmor checks:
+  #   /package/**        every s6-overlay package; /command/* and /usr/bin/with-contenv
+  #                      resolve here (slashpackage links /package/admin/s6 to a
+  #                      versioned folder, which the line above does not name)
+  #   /run/service/**    s6's scandir, copied into /run at boot: .s6-svscan/{finish,SIG*}
+  #                      on stop and the shutdown daemon's run script
+  #   bashio             the run script's `#!/usr/bin/with-contenv bashio`
+  #   npm-cli.js         `exec npm start` (/usr/bin/npm is a symlink to it)
+  #   tsx cli.mjs        npm's `sh -c "tsx src/index.ts"` (node_modules/.bin/tsx)
+  #   esbuild            tsx's transformer, a child process tsx starts wherever
+  #                      TypeScript is loaded (the server and its worker threads);
+  #                      the second line is the copy esbuild's installer may place
+  #                      in the esbuild package itself
+  /package/** ix,
+  /run/service/** ix,
+  /usr/lib/bashio/bashio ix,
+  /usr/lib/node_modules/npm/bin/npm-cli.js ix,
+  /app/server/node_modules/tsx/dist/cli.mjs ix,
+  /app/server/node_modules/@esbuild/*/bin/esbuild ix,
+  /app/server/node_modules/esbuild/bin/esbuild ix,
 
   # Add-on source + node_modules. Read + execute (node calls dlopen
   # on native modules under node_modules/.../*.node, which need mix).
@@ -126,14 +202,21 @@ profile addon_ecoflow_panel flags=(attach_disconnected,mediate_deleted) {
 
   # Persistent storage (/data is volume-mounted by HA Supervisor).
   # SQLite needs the rwk permission for WAL + shm files.
-  /data/** rwk,
+  # v1.197.2 — `{,**}`: the folder itself too. A `**` at the start of a path
+  # element must match at least one character, so `/data/**` never matched
+  # `/data/`: atomicWrite.ts lists /data to sweep its temp files, and SQLite
+  # opens the folder to fsync it after creating the journal.
+  /data/{,**} rwk,
 
-  # Temp + runtime files.
-  /tmp/** rwk,
+  # Temp + runtime files (tsx's cache and IPC socket are /tmp/tsx-0; bashio's
+  # cache is /tmp/.bashio; SQLite's temp files go to /var/tmp; /run is s6's
+  # runtime tree, the folder itself included since v1.197.2).
+  /tmp/{,**} rwk,
   /var/tmp/** rwk,
-  /run/** rwk,
+  /run/{,**} rwk,
 
-  # Standard config files (read-only system info).
+  # Standard config files (read-only system info). Covered by `/etc/{,**} r`
+  # since v1.197.2; kept as the list of what is known to be read.
   /etc/passwd r,
   /etc/group r,
   /etc/hosts r,
@@ -149,8 +232,11 @@ profile addon_ecoflow_panel flags=(attach_disconnected,mediate_deleted) {
   /etc/os-release r,
   /usr/share/ca-certificates/** r,
 
-  # /proc — Node + s6 need to read process info. Writes to /proc/sys
-  # are denied below.
+  # /proc — Node + s6 need to read process info (all of /proc is readable since
+  # v1.197.2, above). Writes to /proc/sys and to a process's mem file are denied
+  # below. AppArmor names /proc/self/... by the resolved /proc/<pid>/..., so the
+  # /proc/self line grants nothing it names; the comm lines are the real writes
+  # (musl's pthread_setname_np writes /proc/<pid>/task/<tid>/comm).
   /proc/[0-9]*/** r,
   /proc/sys/kernel/random/uuid r,
   /proc/sys/kernel/ngroups_max r,
@@ -162,9 +248,11 @@ profile addon_ecoflow_panel flags=(attach_disconnected,mediate_deleted) {
   /proc/version r,
   /proc/self/** rw,
   /proc/[0-9]*/comm rw,
+  /proc/[0-9]*/task/[0-9]*/comm rw,
 
   # /sys — read-only access to network info (for our diagnostic
-  # endpoints that report interface state).
+  # endpoints that report interface state), the thermal zones (hostThermal.ts,
+  # which resolve to /sys/devices/virtual/thermal) and the CPU topology.
   /sys/class/net/** r,
   /sys/devices/** r,
 
@@ -181,7 +269,9 @@ profile addon_ecoflow_panel flags=(attach_disconnected,mediate_deleted) {
 
   # ─── Deny: dangerous file ops ──────────────────────────────────────
   # Never read secrets, never write to kernel tunables, never touch
-  # the audit subsystem.
+  # the audit subsystem. These are plain (silent) denies: npm looks for its
+  # cache and logs under /root on every start, and that noise stays out of the
+  # audit journal.
   deny /etc/shadow r,
   deny /etc/gshadow r,
   deny /root/** rw,
@@ -193,19 +283,29 @@ profile addon_ecoflow_panel flags=(attach_disconnected,mediate_deleted) {
   deny /sys/kernel/** w,
   deny /sys/firmware/** rw,
 
+  # v1.197.2 — new denies, each `audit deny` (a plain deny is silent; these are
+  # logged, so a probe or a regression shows up in the host audit journal).
+  # NEVER deny `r` on /data/options.json: bashio reads every option from it.
+  #   - The Home Assistant folders this add-on does not map (config.yaml maps
+  #     only data and share): a tripwire, nothing may touch them.
+  #   - Nothing runs from, or is exec-mapped from, /data, /share, /tmp or
+  #     /var/tmp (s6's /run trees are the exception, see the grants above).
+  #   - A process's memory file is never writable (/proc/self/mem resolves to
+  #     /proc/<pid>/mem; the ptrace deny does not cover a process's own memory).
+  audit deny /{config,ssl,backup,media,addons,addon_configs,homeassistant}/{,**} rwlkmx,
+  audit deny /{data,share,tmp,var/tmp}/** mx,
+  audit deny /proc/*/{,task/*/}mem w,
+
   # v1.7.2 (security #3, CWE-732) — code/binary/library WRITE-immutability.
-  # The blanket `file,` rule above is RETAINED, so every READ and EXEC stays
-  # granted (this is why the v1.7.0 `/init` read-denial crash-loop CANNOT recur —
-  # v1.7.0 replaced `file,` with `/init ix,` and denied s6's READ of /init; we do
-  # not touch reads/execs at all). These deny rules subtract `w`+`l` on the
-  # immutable surfaces the add-on process could be coerced into tampering with:
-  # `w` blocks create (O_CREAT), truncate/overwrite (O_TRUNC/O_WRONLY), O_APPEND,
-  # rename-into and unlink; `l` blocks planting a hardlink under a code dir.
-  # m/r/i/x/k are untouched, so .so/.node executable-mmap load + exec still work.
-  # This shuts the dominant CWE-732 vector: a compromised Fastify/SSH/TTS
-  # process persisting a restart-surviving backdoor. chown is capability-mediated
-  # (granted above), NOT `w`-mediated, so s6 fix-attrs is unaffected; fowner and
-  # fsetid were dropped in v1.187.15 after profiling showed no use.
+  # These deny rules subtract `w`+`l` on the immutable surfaces the add-on
+  # process could be coerced into tampering with: `w` blocks create (O_CREAT),
+  # truncate/overwrite (O_TRUNC/O_WRONLY), O_APPEND, rename-into, unlink, mkdir,
+  # chmod and chown (only utimes and xattr changes escape a `w` deny); `l`
+  # blocks planting a hardlink under a code dir. m/r/i/x/k are untouched, so
+  # .so/.node executable-mmap load + exec still work. This shuts the dominant
+  # CWE-732 vector: a compromised Fastify/SSH/TTS process persisting a
+  # restart-surviving backdoor. fowner and fsetid were dropped in v1.187.15
+  # after profiling showed no use.
   #
   # ★★v1.9.1 — the mask is `wl`, NOT `wal`. The append bit `a` and write bit `w`
   # are MUTUALLY EXCLUSIVE in a single apparmor rule on the stricter parser HAOS
