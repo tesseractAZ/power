@@ -8,6 +8,9 @@ import type { NightChargePlan } from './nightChargeAdvisor.js';
 import {
   armedExpectedPhrase, chargeIsWindowBound, chargeLevelPct, chargeReservePct, floorCushionLinePct, fmtPhoenixDayHm,
   noChargeExpected, statedBuyKwh,
+  // v1.198.0 — a plan sized on the provisional solar band says so: beside a charge's confidence
+  // tier, and at the end of a sized hold.
+  provisionalBandText,
 } from './nightChargeAdvisor.js';
 import {
   forceChargeStopPct, partialForceChargeOnFailureSlots, forceChargeFailedSlotsText,
@@ -478,13 +481,17 @@ export function buildNightChargeMessage(
         body: 'No overnight charge tonight — no cheap charge window was resolved. Nothing will be charged.',
       };
     }
+    // v1.198.0 — a hold SIZED on the provisional solar band says so, as the charge shape does: the
+    // sentence closes each sized hold's body. '' on the full basis (the body as before); a hold with
+    // no window, above, was sized on nothing and carries no pvBandWiden.
+    const provisionalHold = provisionalBandText(plan.pvBandWiden);
     if (plan.cushionShortfall) {
       return {
         ...base,
         title: 'Night-charge: no charge tonight (the window cannot cover the cushion)',
         body:
           'No overnight charge tonight — the outage cushion needs a charge, but this window cannot deliver '
-          + `enough to clear the minimum buy, so nothing will be charged.${shortfallNote}${evNote}`,
+          + `enough to clear the minimum buy, so nothing will be charged.${shortfallNote}${evNote}${provisionalHold}`,
       };
     }
     if (plan.requiredExtraKwh > 0) {
@@ -493,7 +500,7 @@ export function buildNightChargeMessage(
         title: 'Night-charge: hold (the need is under the minimum buy)',
         body:
           'No overnight charge tonight — the islanded worst case the plan is sized on needs only a small '
-          + 'top-up, under the minimum buy, so nothing will be charged.',
+          + `top-up, under the minimum buy, so nothing will be charged.${provisionalHold}`,
       };
     }
     // The cushion holds with no charge. Its trough is an islanded projection (no grid, P90 load):
@@ -507,7 +514,7 @@ export function buildNightChargeMessage(
         `No overnight charge needed — even if the grid were lost overnight, ${wholeHouse
           ? `the whole-house low would stay at ~${pct(trough)}`
           : `the pack would close the charge window at ~${pct(trough)}`}, at or above the `
-        + `${pct(line)} floor+cushion line. Nothing will be charged.`,
+        + `${pct(line)} floor+cushion line. Nothing will be charged.${provisionalHold}`,
     };
   }
 
@@ -609,6 +616,8 @@ export function buildNightChargeMessage(
   const projection = `Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~${pct(plan.baselineMinSocPct)} `
     + `without ${held ? "tonight's write" : 'this charge'}, ~${pct(plan.minProjSocPct)} with it; the floor+cushion line is ${pct(line)}. `
     + `Confidence: ${plan.confidenceTier}.${shortfallNote}${overBuyNote}${economicNote}${held ? '' : evNote} `;
+  // v1.198.0 — a plan sized on the provisional solar band says so, after its confidence tier.
+  const provisionalNote = plan.pvBandWiden != null ? `${provisionalBandText(plan.pvBandWiden).trim()} ` : '';
   if (held) {
     // Where the pool is expected to open the window, when that is at or above the reserve (the
     // reason nothing is charged); a figure under it would contradict the clause, so none is given.
@@ -620,7 +629,7 @@ export function buildNightChargeMessage(
       title: `Night-charge: ${supervised ? `reserve held at ${reserveText}` : `reserve hold at ${reserveText} recommended`} tonight — no charge expected`,
       body:
         `${supervised ? 'Holding' : 'Recommended: hold'} the backup reserve at ${reserveText} overnight as a floor; `
-        + `no charge is expected${stays}. ${projection}${tail}`,
+        + `no charge is expected${stays}. ${projection}${provisionalNote}${tail}`,
     };
   }
   return {
@@ -632,6 +641,7 @@ export function buildNightChargeMessage(
       + (bound ? ', as far as the window can deliver' : '')
       + (expected == null ? '. ' : `, ~${kwh(expected)} of grid energy expected. `)
       + projection
+      + provisionalNote
       + tail,
   };
 }

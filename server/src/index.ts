@@ -3581,6 +3581,13 @@ function refreshNightRecentOutcomes(): void {
 // was the constant APS_PERIOD.OVERNIGHT here, which no other plan's period table names.
 /** N_MIN scored calibration days before the band is trusted (design §2.3). */
 const NIGHT_MIN_CAL_DAYS = 14;
+/** v1.198.0 — the fewest scored calibration days a PROVISIONAL plan is sized on: from here to
+ *  NIGHT_MIN_CAL_DAYS the planner sizes on a widened solar band (nightChargeAdvisor.ts
+ *  PROVISIONAL_BAND_WIDEN), so a fleet whose Cores were dark for weeks plans again a few covered
+ *  days after they report, not two weeks after. 4 is where the table starts: the first n at which
+ *  the maximum of n daily errors covers a new day with probability 0.80, and where the 78% coverage
+ *  gate (Math.round) demands every scored day inside the band. */
+const NIGHT_PROVISIONAL_MIN_CAL_DAYS = 4;
 
 /** Extras carried alongside the plan so the evening job can map plan+inputs →
  *  the snake_case NightLedgerRow columns the pure plan doesn't itself carry. */
@@ -3821,6 +3828,9 @@ async function recomputeNightChargePlan(
     hours: d.hours.map((h) => ({ ts: h.ts, pvW: h.pvW, loadW: h.loadW })),
   }));
 
+  // Null below 14 scored days (pvBandRealizedHalfFrac): the full basis needs 14, so it is set there.
+  // v1.198.0 — a provisional basis (4-13 days) never reads it: the planner widens the beyond-24 h
+  // carry by k × the band's own lower half-width instead (buildNightChargeInputs).
   const realizedDailyErrHalfFrac = prob?.realizedDailyErrHalfFrac ?? 0;
   const calScoredDays = prob?.calScoredDays ?? 0;
   const bandCoverageFrac = (prob?.bandRealizedCoveragePct ?? 0) / 100;
@@ -3913,18 +3923,21 @@ async function recomputeNightChargePlan(
   );
   // v1.186.0 — the PESSIMISTIC (P10) surplus from window close to the evening on-peak
   // start: the headroom a long-gap night keeps (null ⇒ set aside, the full buy stands).
-  const prePeakP10Hours: Array<{ ts: number; p10W: number; loadW: number }> = [];
+  // v1.198.0 — each hour with its P50, and the hours, span and on-peak test passed to the planner as
+  // one basis: on a provisional basis it sums the surplus again over them on the widened P10.
+  const prePeakP10Hours: Array<{ ts: number; p10W: number; p50W: number; loadW: number }> = [];
   for (const pb of prob?.hours ?? []) {
     const fh = dayAheadByEpoch.get(Math.floor(pb.ts / HOUR_MS));
-    if (fh) prePeakP10Hours.push({ ts: pb.ts, p10W: pb.p10W, loadW: fh.forecastLoadW });
+    if (fh) prePeakP10Hours.push({ ts: pb.ts, p10W: pb.p10W, p50W: pb.p50W, loadW: fh.forecastLoadW });
   }
-  const prePeakPvSurplusP10Kwh = window && !shadowLeg
-    ? pessimisticPrePeakSurplus({
+  const prePeakSurplusBasis: NightChargeInputDeps['prePeakSurplusBasis'] = window && !shadowLeg
+    ? {
       hours: prePeakP10Hours,
       windowEndMs: window.endMs,
       isOnPeakAt: (ts) => rateAt(tariffModel, ts).isOnPeak,
-    }).kwh
+    }
     : null;
+  const prePeakPvSurplusP10Kwh = prePeakSurplusBasis ? pessimisticPrePeakSurplus(prePeakSurplusBasis).kwh : null;
 
   // Committed-EV worst case: next predicted session start (>= now-hour), the p90
   // session energy, and the observed session count (tail-sufficiency).
@@ -3976,10 +3989,13 @@ async function recomputeNightChargePlan(
     periodIdAt, cheapPeriodId, cheapNight, windowScanHours: 30,
     bandHours, dayRollups, realizedDailyErrHalfFrac, nextRechargeMs,
     ev, evMaxLoadW,
-    confidenceTier, forecastPresent, calScoredDays, minCalScoredDays: NIGHT_MIN_CAL_DAYS, bandCoverageFrac,
+    // v1.198.0 — 4 to 13 scored days plan on the provisional (widened) band; 14 on the band as published.
+    confidenceTier, forecastPresent, calScoredDays, minCalScoredDays: NIGHT_MIN_CAL_DAYS, provisionalMinCalScoredDays: NIGHT_PROVISIONAL_MIN_CAL_DAYS, bandCoverageFrac,
     morningPvSurplusP90Kwh, minBuyKwh,
     morningPvSurplusP50Kwh, longGapAhead: nightLongGapAhead, prePeakPvSurplusP10Kwh,
     costSurplusLoad,
+    // v1.198.0 — the hours that surplus was summed over: a provisional basis sums it again, widened.
+    prePeakSurplusBasis,
     buyDebiasFactor: buyDebiasCal.factor,
     buyDebiasBasis: buyDebiasCal.basis,
     buyDebiasSamples: buyDebiasCal.samples,

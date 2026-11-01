@@ -4,6 +4,74 @@ _Older releases, moved out of the add-on `CHANGELOG.md` so Home Assistant's Chan
 
 _Restored 2026-09-06: the v1.131.2 release commit truncated `CHANGELOG.md` to a single entry (`open(p,'w')` truncates before the `open(p).read()` in the same expression runs), destroying 145 entries — v1.22.0 through v1.131.1. Recovered from git history and re-archived here. Nothing was lost; it was recoverable because every prior revision is in the commit history._
 
+## 1.196.0
+
+### The overnight write charges to the line the plan is sized on; the no-plan and force-charge warnings say why; the cost ceiling counts the measured sun
+
+**Night charge**
+
+- With the islanded-outage cushion (or the cushion disabled), the overnight reserve write is now solved on the test the plan is sized on: the pack at the window close against the reserve floor plus the outage cushion. It was solved on a whole-house walk to the next charge window. On this plant that walk falls below the line from any starting level, so every charge night asked for about 73-100% and wrote the 50% maximum. A resilience night now writes the cushion line, rounded up to the next whole percent. For example, a 16% floor with a 4 h, 2.62 kW, x1.25 cushion now writes 32% where it wrote 50%, and the expected draw falls from about 27.9 kWh to about 10 kWh. `ARB_OUTAGE_CUSHION_HOURS` is unchanged.
+- A cost night writes its cost target where that is higher than the line, so a ceiling under 50% is written as itself (40% for a 40.3% ceiling, where it wrote 50%). A night limited by the charge rate writes the target, never the lower arrival the window can reach. The legacy band, the outage backup leg and the mid-day leg's reserve are unchanged.
+- Of the 1,104 recorded plan cases, 431 setpoints move, all on the islanded-outage cushion. 157 resilience charge nights write a lower reserve (median 13 points), 17 cost charge nights write lower (median 7 points), and 5 cost nights limited by the charge rate write higher (their cost target). No charge night writes under its line, or under 50% where its line is higher. No buy and no requirement changes.
+- The cushion is counted on the panel's nameplate pool, and the reserve percent is a share of the packs' measured capacity (about 0.944 of nameplate). The written line therefore holds about that share of the counted cushion above the reserve (options guide; reference chapter 15 part 1).
+- The reserve sentence says the panel accepts a backup reserve only up to 50% only when the ask is above 50%. Before, it was also printed for asks such as 40.3% or 44.2% that were written as 40% or 44%.
+- The force-charge failure warning, and its log line, now name the Core in each slot that did not take Charge Now. They say when that Core is offline in the cloud, and name its work mode or its own backup reserve when that differs from the other Cores driven that night. For example: "slot(s) 3 (Core 5 — work mode 3 (time-of-use), where the other Cores read 0 (default); its own backup reserve 60%, where the other Cores read 50%)". The warning then suggests comparing those settings in the EcoFlow app. Labels never contain serial digits. The slot-to-Core mapping comes from the fresh panel reading; the settings are each Core's last report. The morning summary keeps slot numbers.
+- The "Night-charge: no plan tonight" push names what refused the plan. For example: "the forecast/telemetry basis is incomplete: PV band coverage 72% < 78% (…)", or "SoC telemetry incoherent (% vs remaining/full mismatch)". A night with no panel reading says the panel's pool readings are unavailable. The reason is on the plan as `basisBlockedBy`, which was declared but never set; it is now set on every refused plan and absent on a complete one. The mid-day preview's "not armed" line and its "no plan" push carry it too.
+
+**Write-readiness gate**
+
+- The realized half of the engine-fault strike is now graded on what the plan claims. With the islanded-outage cushion (or the cushion disabled), the plan claims only that the pool at the window close holds the reserve floor plus the cushion it sized (`cushion_line_soc_pct`). The verdict was the lowest pool over the 16 hours after the close against the reserve floor plus `ARB_OUTAGE_CUSHION_PCT`, measured after the reserve has reverted to the floor. With the write at the line, that verdict would have counted almost every actuated resilience night as a strike and held the gate at `BLOCKED`. On the 2026-10-12 fixture the 32% write has a P50 morning low of about 23.6%, against 16 + 15 = 31%; with a 2.0 kW island the 28% write is under 31% at the close itself.
+- On such a night `cushion_breached` is now the pool measured at the window close (new ledger column `window_close_soc_pct`, the median reading over the window's last 15 minutes) under the line, with 0.05 points allowed for rounding. Without that reading the night is clean when the lowest pool after the close holds the line; otherwise the verdict is unknown. The gate derives the verdict again from the row's columns and keeps the stored flag where the columns cannot decide (fail-closed). It counts the stored flags it overrules in `realizedStrikesSetAside`. A night whose line is above the panel's 50% reserve maximum, with no force-charge to carry the pool past it, now reads as breached: the plan claims a cushion the write cannot reach, because `cushionShortfall` does not count the write envelope (4 of the year fixture's 199 islanded evening charges with no disclosed shortfall; the old rule passed them). The legacy band, the mid-day two-leg row and rows without a recorded line keep the earlier verdict. `score_notes` states the reading against the line. `CURRENT_ALGO_VERSION` is unchanged, so no night leaves the readiness count.
+
+**Night charge (cost mode)**
+
+- The cost ceiling's morning-solar headroom now de-biases the median PV as well as the house load. It uses the median realized/forecast PV ratio from the night ledger (1 + `pv_err_frac`), over forecast-tier nights whose PV verdict stands, whose forecast was at least 5 kWh, and whose pool did not reach the charge taper. On those days output is curtailed, so their actual PV measures nothing.
+- Like the load factor, the PV factor only widens the headroom (at least x1, at most x1.3). It needs 5 nights and takes full effect at 10. It never raises an hour's median PV past that hour's P90. On the 2026-10-12 fixture, ten nights at x1.095 lower the ceiling and the force-charge stop from 56.6% to 50.4%, and the expected buy from about 11.6 to 5.1 kWh.
+- New plan fields: `costSurplusPvFactor`, `costSurplusPvSamples`. New ledger columns: `cost_surplus_pv_factor`, `cost_surplus_pv_samples`, `actual_max_soc_pct` and `pv_saturated`. When only the PV term is de-biased, the load factor is recorded as 1 with its nights.
+
+**Unchanged**
+
+- The runway, SoC and floor alarms do not read the write setpoint. The reserve write still reverts at the window close. Cost mode with a ceiling of 50% or more still writes 50% plus force-charge. The analytics PV forecast that feeds the runway and the alarms is unchanged.
+- Charge and hold plans carry no `basisBlockedBy` key (cost-mode plans gain only the two PV-factor fields above).
+
+**Tests**
+
+- New: `setpointOneTest.test.ts`, `forceChargeFailedCore.test.ts`, `noPlanReason.test.ts`, `costCeilingPvDebias.test.ts` and `realizedCushionAtClose.test.ts` (an M5 resilience night, written 32% with a ~23.6% morning low, through the gate: no strike; a pool under its line at the close still strikes, including a line above the 50% envelope). `middayAnnounce.test.ts` covers the mid-day "no plan" reason.
+- `legacyIdentity.golden.json` is regenerated on purpose, with an `_amended` note: 870 of 1,104 digests move against 1.195.0, by the setpoints (431), the refused plans' `basisBlockedBy` (132) and the cost plans' PV-factor keys (563). The truncation sentence alone moves no case. `overnightTextGolden.json` is regenerated in its evening entries only, and one reserve-only "toward" case is added.
+- The 1.194.0 test that holds the charge leg to its direction now compares against the planner without the charge leg but with this release's setpoint (new `legacyIdentity.withoutChargeLeg.figures.json`), because 1.192.0's setpoints on the islanded-outage cushion were a walk. Every assertion holds. 95 buys rise and one hold becomes a charge, as before. 108 expected buys rise and 64 setpoints move, 5 of them down; when 1.194.0 measured them against 1.192.0 the figures were 118, 264 and 16. A new test checks the release against 1.192.0: no buy and no requirement falls. 85 expected buys rise; the 122 that fall, and the 381 setpoints that fall, are all on the islanded-outage cushion.
+- New harness `scripts/mutate-v1196-night.mjs` (68 mutants; 17 on the realized verdict). Anchors are re-pointed in `mutate-v1187-1f.mjs`, `mutate-ledger-legibility.mjs`, `mutate-zero-cushion.mjs` and `mutate-readiness-gate.mjs`.
+
+### The forecast skill measures each past day on that day's Cores
+
+**Forecast skill (PV band, night-charge basis gate)**
+
+- On the forecast-skill path, a home Core with no readings on a day now makes that day a coverage gap, as it already did for the PV bias factor. The hindcast used to take a Core's first reading inside the 30-day window as the day it joined (v1.93.0/v1.94.0). A Core already dark when the window began, or Cores returning on different days after a fleet-wide outage, then had their missing share scored as a forecast miss: +50% a day with one of three Cores dark, +200% with two. On a 7-day fixture with one of three Cores dark for the first three days, MAE and bias now read 0 kWh and 1.00 (were 1.93 kWh and 0.86).
+- Each past day is now measured on the Cores the pool membership record (`membership-history.json`) shows as wired that day, not on today's Cores applied to 30 days of history. The recorder now stores the panel's slot table with each entry.
+  - A day before a like-for-like swap (a Core moved into the slot a departing Core held, taking over its PV array) is scored on that day's own Cores and marked `predecessorCores`.
+  - A day on which the pool lacked a current Core's array is marked `offRoster` and left out of the error, the bias factor and the PV band calibration. This covers days before a Core was added through an empty slot, a swap recorded before slot tables existed, and the day of a change.
+  - Membership flickers under 15 minutes are ignored.
+  - Days before the record are scored on telemetry coverage alone and counted in `unrecordedRosterDays`.
+- A pre-swap day is scored on the departed Core only if a fresh panel reading confirmed the record through that day. The recorder stamps the newest entry (`confirmedMs`) on a fresh reading of every panel, at most once an hour. A swap made while the panel was cloud-offline or the add-on was stopped is recorded only when the panel next reads fresh. The days in between are `offRoster`, not scored on the departed Core's bench rows.
+- After a Core is added, the night-charge basis gate counts only days measured on the new set of Cores, so it stays closed until 14 such days are scored (at least two weeks). A like-for-like swap loses the day of the swap and any unconfirmed day before it. A removal loses none.
+
+**Unchanged**
+
+- The PV bias factor on the runway and alarm paths: its coverage call and its output are unchanged.
+- `membership-history.json` keeps its format. The new `slots` and `confirmedMs` fields are optional. The newest existing entry gains its slot table on the first rollup after the update, and its stamp on the first fresh panel reading. Neither is a membership change for the curtailment freeze or the pack-DC round-trip check.
+
+**Tests**
+
+- `skillRoster.test.ts` (new) covers:
+  - a dark Core and staggered returns, which are gaps;
+  - swaps scored on that day's Cores, including a departed Core dark on a pre-swap day;
+  - additions, which pause;
+  - a swap hidden behind a stale panel, which is `offRoster`;
+  - flicker folding, superset pools and days before the record;
+  - the production reader and the confirmation stamp;
+  - the recorder writing the slot table, and stamping only on a fresh panel reading.
+- The tests in `pvCoverageGate.test.ts` and `darkCoreCoverage.test.ts` that asserted the join exemption now assert a gap.
+- `mutate-skill-roster.mjs` (new): 29 mutants. `mutate-dark-core.mjs` drops mutants v and vi, whose guard is gone.
+
 ## 1.195.0
 
 ### The forecast cards show the restored solar while Cores are offline; a held panel's circuits are no longer the house load; cell-spread mutes below 85% are bounded
