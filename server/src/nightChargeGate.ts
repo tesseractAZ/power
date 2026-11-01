@@ -83,7 +83,18 @@ function maxYmd(a: string, b: string): string { return a >= b ? a : b; }
  *  keeps the version: the v1.125.0 islanded-outage cushion, the v1.187.22
  *  expected-buy walks, R2's window spec and v1.194.0 — the charge leg on a PV
  *  surplus in every planner walk — all kept 3, and their nights count on the same
- *  readiness clock. (v1.194.0 — the rule stated as practised; it read "bumped on
+ *  readiness clock. So does v1.199.0, the islanded-outage cushion LINE counted on the
+ *  packs' measured capacity (nightChargeAdvisor.ts cushionLineKwh): cushion_line_soc_pct
+ *  is still the line the plan was sized on and wrote, now in the panel's own basis
+ *  (cushion_pool_scale records the scale), and every verdict keeps its rule —
+ *  plan_traj_floor_breached the sized trough against that line, buy_err_kwh its formula
+ *  (the line moves the planned buy and the planner's own need together), cushion_breached
+ *  the pool at the close against that line. A pool held at ⌈line⌉ reads at or above the
+ *  line, EXCEPT where the line is above the 50% reserve envelope: the write is 50, and
+ *  with no force-charge stop at or above the line the close can sit under it with no
+ *  shortfall disclosed — a realized strike, as before v1.199.0 (13 charge plans of
+ *  legacyIdentity's year on the nameplate line, 24 on the measured one at 0.944;
+ *  measuredCushionLine.test.ts counts them). (v1.194.0 — the rule stated as practised; it read "bumped on
  *  ANY planner physics/algorithm change", which no change since v1.105.0 followed.)
  *
  *  v1.194.0 — what the charge leg does to `buy_err_kwh`. The column keeps its

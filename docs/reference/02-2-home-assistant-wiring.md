@@ -499,7 +499,7 @@ are cached (~30 min) on the worker.
 | `GRID_READING_PATH` | `grid-reading.json` beside the DB (supervised), else disabled | persisted not-OK grid reading for the declared-grid veto (v1.180.0); `''` disables |
 | `POOL_UNKNOWN_PATH` | `pool-unknown.json` beside the DB (supervised), else disabled | pool-unknown onsets carried across a restart (v1.187.4); `''` disables |
 | `PACK_GHOSTS_PATH` | `pack-ghosts.json` beside the DB (supervised), else disabled | hidden ghost pack slots carried across a restart (v1.187.1); `''` disables |
-| `POOL_ENERGY_BASIS_DIR` | beside the DB (supervised), else disabled | directory for `pool-energy-basis.json` (the analytics worker's held per-Core capacity ratios and applied scale) and `pool-energy-basis-panels.json` (the main thread's, secondary panels) — v1.187.19, §5.1.3a; `''` disables |
+| `POOL_ENERGY_BASIS_DIR` | beside the DB (supervised), else disabled | directory for `pool-energy-basis.json` (the analytics worker's held per-Core capacity ratios and applied scale) and `pool-energy-basis-panels.json` (the main thread's, secondary panels) — v1.187.19, §5.1.3a; and `pool-energy-basis-cushion.json` (the main thread's, the house panel, read by the night-charge cushion line) — v1.199.0; `''` disables |
 | `SHADOW_WITNESS_PATH` | `shadow-witness.json` beside the DB | last SHP2 shadow witness (v1.148.0) |
 | `POLL_SUMMARY_EVERY` | `30` | polls per poll-duration summary line (v1.148.0) |
 

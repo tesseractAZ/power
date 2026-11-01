@@ -203,6 +203,8 @@ import {
   plannerSizingNeedBuyKwh,
   calibratedLoadBandFactor, calibratedBuyDebiasFactor, buyDebiasUnmeasuredLogLine,
   buildCostSurplusLoad, costSurplusLedgerColumns,
+  // v1.199.0 — the cushion line's measured capacity scale: its ledger columns and its log line.
+  cushionPoolScaleLedgerColumns, cushionScaleLogText, type CushionPoolScale, type CushionScaleBasis,
   // v1.187.22 — the expected buy: its ledger columns, and what a spoken line states (the level
   // the write drives to and the expected draw — never the worst case, which only logs name).
   expectedBuyLedgerColumns, ledgerExpectedBuyKwh, chargeLevelPct, statedBuyKwh, buyFiguresLogText,
@@ -2694,6 +2696,25 @@ const panelDrainSamples = new Map<string, DrainSample[]>();
  *  only (the house runway's lives in the analytics worker). Its own file: the two threads never
  *  share one. */
 const panelPoolBasisTracker = new PoolEnergyBasisTracker({ path: defaultPoolEnergyBasisPath('pool-energy-basis-panels') });
+/** v1.199.0 — the MAIN thread's capacity-basis tracker for the HOUSE panel, with one consumer: the
+ *  night-charge cushion line (measuredCushionScale). Its own file: the worker's runway tracker and
+ *  the secondary panels' tracker keep theirs (one writer per file, its state read in the thread that
+ *  writes it), and a secondary panel's Core can never be the house's lowest known ratio. */
+const cushionPoolBasisTracker = new PoolEnergyBasisTracker({ path: defaultPoolEnergyBasisPath('pool-energy-basis-cushion') });
+/** v1.199.0 — THE PLANNER'S ONE MEASURED INPUT (runwayBasisContracts.test.ts, the SCOPE exception):
+ *  the house pool's measured capacity scale, from the device map the planner read its pool from, at
+ *  the same instant. null when the tracker throws: the planner then keeps the nameplate line. */
+function measuredCushionScale(
+  devs: FleetSnapshot['devices'], panel: NonNullable<ReturnType<typeof findShp2>>, nowMs: number,
+): (CushionPoolScale & { connectedCores: number }) | null {
+  try {
+    const b = cushionPoolBasisTracker.evaluate(devs, panel, nowMs);
+    const basis: CushionScaleBasis = b.capacityBasis; // tsc fails here if the tracker's basis gains a member
+    return { scale: b.capacityScale, basis, connectedCores: b.connectedCores };
+  } catch {
+    return null;
+  }
+}
 const lastPanelRunways = new Map<string, PanelRunway>();
 const panelRunwayAlarms = new Map<string, ReturnType<typeof createRunwayAlarm>>();
 const panelRunwayGrid = new Map<string, GridBackstop>();
@@ -3016,6 +3037,8 @@ let lastLoggedLoadBandKey: string | null = null;
 let lastLoggedBuyDebiasKey: string | null = null;
 // v1.187.1 — the cost ceiling's load de-bias: last logged value (log on change only).
 let lastLoggedCostLoadKey: string | null = null;
+// v1.199.0 — the cushion line's capacity basis: last logged value (log on change only).
+let lastLoggedCushionScaleKey: string | null = null;
 /**
  * v1.125.0 — the ISLANDED load, kW: the SHP2's own circuit sum.
  *
@@ -3644,7 +3667,10 @@ async function recomputeNightChargePlan(
   // R2 — the leg's role sets its objective and force-charge (legObjective, forceChargeOn). Every
   // live caller plans the overnight cost leg.
   const legRole: ChargeLegRole = shadowLeg?.spec.role ?? opts.role ?? 'cost';
-  const shp2 = findShp2(store.get().devices);
+  // v1.199.0 — the device map, read ONCE: the house panel and the cushion line's measured capacity
+  // scale (below) come from the same snapshot.
+  const devs = store.get().devices;
+  const shp2 = findShp2(devs);
   if (!shp2 || shp2.projection?.kind !== 'shp2') return null; // I5 — advisory null
   // v1.174.0 — the R3 freshness gate the actuator and force-charge ticks already apply.
   // A stale panel is NOT an incomplete basis: 'panelStale' tells the caller to retry
@@ -3667,6 +3693,21 @@ async function recomputeNightChargePlan(
     ownerReserveFloorPct(nightActuationMem, sp.backupReserveSoc ?? null, nowMs);
   if (fullWh == null || fullWh <= 0 || socNowPct == null || reserveFloorPct == null) return null; // I5
   const fullKwh = fullWh / 1000;
+  // v1.199.0 — THE CUSHION LINE ON THE PACKS' MEASURED CAPACITY. The panel's reserve percent is a
+  // share of the packs' BMS full-charge capacity (~0.944 of nameplate on the reference fleet), so the
+  // line the plan writes counts the cushion's energy on that capacity (nightChargeAdvisor.ts
+  // cushionLineKwh). Taken from the snapshot fullWh came from, before the first await: the one door
+  // through the SCOPE contract (runwayBasisContracts.test.ts). A shadow leg evaluates it too (the
+  // tracker records the packs it sees, in its own file) but never logs.
+  const cushionPoolScale = measuredCushionScale(devs, shp2, nowMs);
+  if (!shadowLeg) {
+    const scaleKey = cushionPoolScale == null ? 'unavailable'
+      : `${cushionPoolScale.basis}:${cushionPoolScale.scale.toFixed(4)}:${cushionPoolScale.connectedCores}`;
+    if (scaleKey !== lastLoggedCushionScaleKey) {
+      lastLoggedCushionScaleKey = scaleKey;
+      app.log.info(cushionScaleLogText(cushionPoolScale));
+    }
+  }
 
   // I11 — SoC coherence (% vs remainWh/fullWh). false ⇒ the sizer returns null.
   const socCoherent = remainWh != null && Math.abs((remainWh / fullWh) * 100 - socNowPct) <= 8;
@@ -3985,6 +4026,8 @@ async function recomputeNightChargePlan(
     // closed to the legacy flat band rather than granting a weaker guarantee.
     islandedLoadKw: islandedLoadKwNow(),
     outageCushionHours, islandedLoadSafety, objectiveMode, costMaxSocPct,
+    // v1.199.0 — the cushion line's measured capacity scale (null: the nameplate line).
+    cushionPoolScale,
     legEff, dischargeEff, chargeCapKw, gridInputCapKw,
     periodIdAt, cheapPeriodId, cheapNight, windowScanHours: 30,
     bandHours, dayRollups, realizedDailyErrHalfFrac, nextRechargeMs,
@@ -4202,6 +4245,9 @@ function recordNightPlanRow(planDate: string, plan: NightChargePlan, extras: Nig
     // cushion_shortfall.
     cushion_trough_soc_pct: plan.cushionTroughSocPct ?? null,
     cushion_line_soc_pct: plan.cushionLineSocPct ?? null,
+    // v1.199.0 — the measured capacity scale that line was converted on, and its basis. Written
+    // unconditionally (null with none), for the same reason.
+    ...cushionPoolScaleLedgerColumns(plan),
     // v1.187.22 — the expected buy and start beside buy_kwh (the worst case), so the scorer can
     // grade them. Written unconditionally (null with none) for the same reason as above.
     ...expectedBuyLedgerColumns(plan),

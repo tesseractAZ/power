@@ -169,11 +169,17 @@ a surplus hour, so delta stays monotone in PV and the `runwayPvBasisGuard` monot
 `backup_remaining_kwh` / `backup_pool_percent` keep the panel's own figures; the runway hours and
 `projected_low_soc_percent` carry the corrected values.
 
-**Not changed (the change is scoped to the runway and its alarms).** The night-charge planner, its cushion,
-the JIT force-charge, the MPC/dispatch recommendations and `RUNWAY_DISCHARGE_EFFICIENCY` itself.
-The planner reads only the forecast's per-hour PV/load and the band's PV percentiles, which do not
-depend on the basis; `runwayBasisContracts.test.ts` builds every report on the old and the new
-basis and requires the planner's inputs and its plan to be identical.
+**Not changed (the change is scoped to the runway and its alarms), with one exception.** The night-charge
+planner, its cushion, the JIT force-charge, the MPC/dispatch recommendations and
+`RUNWAY_DISCHARGE_EFFICIENCY` itself. The planner reads only the forecast's per-hour PV/load and the
+band's PV percentiles, which do not depend on the basis; `runwayBasisContracts.test.ts` builds every
+report on the old and the new basis and requires the planner's inputs and its plan to be identical.
+The exception (v1.199.0) is the cushion LINE: the panel's reserve percent is a share of the packs'
+measured capacity, so the planner converts an islanded-outage cushion's energy to a percent on the
+house pool's measured capacity scale, which reaches it through one pinned door (`measuredCushionScale`
+in index.ts, a third tracker on the main thread with its own file, `pool-energy-basis-cushion.json`).
+Every planner walk stays on nameplate kWh per percent (chapter 15 part 1, "The cushion line on the
+measured capacity").
 
 #### 1.4 Key constants
 

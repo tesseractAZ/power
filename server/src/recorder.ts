@@ -749,6 +749,15 @@ export interface NightLedgerRow {
    *  see nightChargeGate.ts). */
   cushion_trough_soc_pct: number | null;
   cushion_line_soc_pct: number | null;
+  /** v1.199.0 — the house pool's measured capacity scale the line was converted on
+   *  (NightChargePlan.cushionPoolScale; nightChargeAdvisor.cushionLineKwh) and its basis
+   *  ('measured' | 'held' | 'min-known' | 'nameplate', or 'implausible' where the scale passed was
+   *  ignored). With it the row is self-describing: cushion_line_soc_pct = reserve_floor_pct + 100 ×
+   *  cushion_kwh ÷ (pool_full_kwh × cushion_pool_scale), to the line's rounding. NULL where no scale
+   *  applied (a legacy-pct or disabled cushion, a null plan) and on rows written before v1.199.0,
+   *  whose line is on the nameplate pool. */
+  cushion_pool_scale: number | null;
+  cushion_pool_scale_basis: string | null;
 
   // ── OUTCOME (NULL until ~21:30 next evening) ──
   outcome_captured_at_ms: number | null;
@@ -1117,6 +1126,8 @@ const NIGHT_LEDGER_COLUMNS: readonly (keyof NightLedgerRow)[] = [
   'cost_surplus_pv_factor', 'cost_surplus_pv_samples', 'actual_max_soc_pct', 'pv_saturated',
   // v1.196.0 — the pool at the window close: the realized cushion verdict on the claim the plan made.
   'window_close_soc_pct',
+  // v1.199.0 — the measured capacity scale the cushion line was converted on.
+  'cushion_pool_scale', 'cushion_pool_scale_basis',
   // v1.189.0 — the charge cycle (NightLedgerRow.window_kind).
   ...CHARGE_CYCLE_LEDGER_COLUMNS,
 ];
@@ -1395,6 +1406,8 @@ export function createRecorder(
     'cost_surplus_pv_factor REAL', 'cost_surplus_pv_samples INTEGER', 'actual_max_soc_pct REAL', 'pv_saturated INTEGER',
     // v1.196.0 — see NightLedgerRow.window_close_soc_pct.
     'window_close_soc_pct REAL',
+    // v1.199.0 — see NightLedgerRow.cushion_pool_scale.
+    'cushion_pool_scale REAL', 'cushion_pool_scale_basis TEXT',
     // v1.189.0 — the charge cycle, from the list the allowlist reads (CHARGE_CYCLE_LEDGER_SCHEMA).
     ...CHARGE_CYCLE_LEDGER_SCHEMA.map(([c, t]) => `${c} ${t}`),
     // v1.189.0 (R4) — the mid-day cycle in shadow (MIDDAY_SHADOW_LEDGER_SCHEMA).
