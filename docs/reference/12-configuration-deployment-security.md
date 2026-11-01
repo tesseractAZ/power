@@ -346,7 +346,8 @@ the HA security rating and confines the process even if a Fastify endpoint is ex
   record outside the four probes; the enforced passes logged `DENIED` for the probes only (a read
   and a write under another `/share` folder, an executable in `/data`, a `/proc/<pid>/mem` write),
   with no kernel audit loss. The candidate was then loaded in complain mode in place on the
-  running add-on for 24 h, across a night and a backup, before the release.
+  running add-on for 20 h (2026-10-31 16:22 to 11-01 12:49), across an evening of alarm
+  announcements, a night and a scheduled backup, with no record and no audit loss, before the release.
 - **Boot test for a read or exec change (v1.197.2 onward), required before it ships:**
   - *Preconditions.* Docker on the host is reachable from the shell used (on Home Assistant OS, the
     SSH add-on with protection mode off); the test never changes protection mode or the SSH
