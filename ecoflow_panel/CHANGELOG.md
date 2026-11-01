@@ -1,3 +1,33 @@
+## 1.197.2
+
+### AppArmor confines what the add-on can read
+
+**Security**
+
+- AppArmor confines what the add-on can read. The blanket file rule, kept since 1.7.1, is replaced by grants for each folder the add-on uses. Its own image folders stay readable and executable as a whole, so the start and stop sequence cannot be refused.
+- Under `/share` only the add-on's `ecoflow-panel` folder can be read or written. Other add-ons' files there are refused, and the Home Assistant folders the add-on does not map (`/config`, `/ssl`, `/backup`, `/media`, `/addons`, `/addon_configs`, `/homeassistant`) carry an audited deny.
+- Nothing can run from `/data`, `/share` or `/tmp` (or `/var/tmp`), and a process's memory file cannot be written. Each new deny is audited, so an attempt is logged in the host's audit journal; a read the profile does not grant is refused and logged as well.
+- `/run` is the one folder that stays both writable and executable: s6 copies its own service scripts into `/run/service`, `/run/s6` and `/run/s6-rc*` at boot and runs them from there. A file written there can be run until the next restart (`/run` is a tmpfs). The profile, the engineering reference and `SECURITY.md` say so, and a test keeps every other folder from becoming writable and executable.
+- The transparent-huge-page settings under `/sys/kernel/mm` are readable. The Go runtime inside esbuild reads the huge-page size every time tsx starts esbuild (the server and each worker that loads TypeScript); the host's `abstractions/base` grants that file only from AppArmor 3.0.12 and 3.1.6, so the profile grants it itself.
+- Execution is granted by the path the kernel checks, which is a symlink's target: bashio, npm, tsx and esbuild's service binary are named as the files their links resolve to, and s6's commands as their files under `/package`. s6's own scripts in `/run` stay executable, so a stop runs its finish scripts. The exec grants for s6's script folders under `/etc` (including `/etc/cont-finish.d`, which runs at stop) and for `/sbin`, `/usr/sbin` and `/usr/local/bin` are kept; each is now the only exec grant for its folder.
+- `/data` and `/run` are granted with the folder itself; `/data/**` alone never matched `/data/`, which the atomic writer lists and SQLite fsyncs.
+- A read of `/data/options.json` is never denied, and the netlink rule stays.
+- The profile was boot-tested on isolated containers of the 1.197.0 image and of the 1.197.1 image (this release changes no file the image is built from), first in complain mode and then enforced, over three starts and three stops each, with the API, a WebSocket, the worker reports, the database snapshot, the maintenance endpoints, an SSH console login and both backup-hook phases exercised. Each stop finished within the Supervisor's 10 s stop timeout with the clean-shutdown marker written. No record appeared outside the deliberate probes. It then ran in complain mode in place on a running installation for 24 hours, across a night and a scheduled backup, with no record. The shipped profile's rules-only sha256 equals the tested copies': `7eb370fcc5b41bee746070d26eebfd4d50789ae10e8a1e94bbdfe349ea9325da`.
+
+**Documentation**
+
+- The engineering reference's AppArmor section describes the per-folder grants, the `/run` exception and the boot test a read or exec change needs before it ships: its preconditions (protection mode and the SSH add-on left as found, journal readers that do not log to the journal, outside the night-charge window and backups), stops with the Supervisor's 10 s timeout, a cleanup in a `finally` with the Supervisor health check afterwards, the rules-only hash as a command (comments and blank lines stripped, `#include` kept, the `profile` line normalized) and the shipping gate (the profile ships with the image it was tested on). Its first footgun now reads: `/init` and the s6 trees stay readable and executable, reads are granted per folder and never per file, and never without the boot test. The troubleshooting entry adds the `DENIED` records and the restart check after a deploy. `SECURITY.md` and the pull-request template are updated.
+- A comment in the profile said a `w` deny does not cover chown; it does (and chmod, create, unlink, rename, mkdir and truncate). The comment is corrected; the rules are unchanged by it.
+
+**Unchanged**
+
+- The capability allow list (`chown`, `dac_override`), the socket families, every write-lock, and the silent denies on `/root` and `/home` (npm looks there on every start).
+
+**Tests**
+
+- `apparmorProfile.test.ts` (14, was 6) evaluates the profile with a small AppArmor glob matcher (a `*` or `**` starting a path element never matches an empty name; deny beats allow) over the boot test's inventory: 73 paths that must be granted and 38 that must be refused, 17 of those by an audited deny. It also pins: no blanket file rule, with `/init` readable and executable, all of `/proc` readable, and every exec grant kept for s6's script folders and the program folders; `/data/options.json` never denied for read; `/share` limited to the add-on's folder; the `npm start` chain able to exec; no exec from `/data`, `/share`, `/tmp` or `/var/tmp` and no `/proc` mem write, each by an audited deny; the paths both writable and executable bounded to s6's `/run` trees; every new deny audited; the full list of denied capabilities, and the mount and ptrace denies. The matcher reads the profile's own rules only, not the host's `abstractions/base`.
+- `mutate-v1187-15.mjs` re-anchors A-i on `/init r,` (its `file,` anchor is gone) and gains 31 mutants (35, all killed): the blanket rule back, `/share` widened, the esbuild, bashio, `/run/service` and `/package` exec grants removed, `/data/{,**}` narrowed, the mem deny removed, the writable-tree deny made silent, the tripwire removed, a read deny on `options.json`; each kept exec grant removed (`/etc/cont-finish.d`, `/etc/cont-init.d`, `/etc/s6-overlay`, `/etc/services.d`, `/etc/s6`, `/usr/sbin`, `/sbin`, `/usr/local/bin`), the `/dev/pts` and `/proc` folder grants removed, the huge-page read removed, exec widened to all of `/run`, a new writable and executable folder, a capability deny, the ptrace and mount denies, and the `/lib64`, `/var`, `/sys` and `/sys/firmware` denies removed. `mutate-v1187-20d.mjs` A-i's reason is updated.
+
 ## 1.197.1
 
 ### The house panel's reserve-blind alarm stands while the panel has no reading after a restart
