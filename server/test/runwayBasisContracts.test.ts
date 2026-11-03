@@ -1,6 +1,6 @@
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -28,6 +28,7 @@ import {
   DEFAULT_OUTAGE_CUSHION_HOURS,
   DEFAULT_ISLANDED_LOAD_SAFETY,
   DEFAULT_COST_MAX_SOC_PCT,
+  type CushionPoolScale,
   type NightChargeInputDeps,
   type NightForecastHour,
   type NightDayRollup,
@@ -44,11 +45,16 @@ import type { DeviceSnapshot } from '../src/snapshot.js';
  *
  * (1) SCOPE — the measured basis is scoped to the runway and its alarms: the night-charge
  *     planner, its cushion, the JIT force-charge and the MPC/dispatch recommendations are
- *     UNCHANGED. The day forecast,
+ *     UNCHANGED, with ONE exception (v1.199.0): the cushion LINE's kWh → percent conversion
+ *     takes the house pool's measured capacity scale, so the reserve written at the line holds
+ *     the whole cushion on the packs' measured capacity (nightChargeAdvisor.ts cushionLineKwh).
+ *     It enters through one door, pinned below: index.ts measuredCushionScale, evaluated on the
+ *     main thread's own tracker from the planner's own snapshot. The day forecast,
  *     the probabilistic band and the multi-day forecast now carry a measured SoC trajectory;
  *     everything the planner and the MPC read from them must be byte-identical between the
  *     pre-v1.187.19 basis (the legacy override: nameplate kWh, load/η) and the measured one,
- *     and the planner run on each must produce the identical plan.
+ *     and the planner run on each must produce the identical plan — with the one measured
+ *     input passed to both, too.
  * (2) The band's trajectory inversion, hour-0 seed and per-hour steps use the SAME drain as
  *     the forward integrator that built the trajectory (a reference band near the empty rail).
  *     v1.194.0 — and the same charge leg (chargeLegStep at RUNWAY_CHARGE_EFFICIENCY) on a surplus
@@ -145,8 +151,10 @@ function plannerView({ fc, prob, multi }: Reports) {
   };
 }
 
-/** The planner's input assembly, field for field as recomputeNightChargePlan builds it. */
-function planFrom(r: Reports, nowMs: number) {
+/** The planner's input assembly, field for field as recomputeNightChargePlan builds it. `over`:
+ *  v1.199.0 — the one measured input (cushionPoolScale), and a scored calibration history so the
+ *  plan is sized (the fixture's band has none, so its plan is the refused one). */
+function planFrom(r: Reports, nowMs: number, over: Partial<NightChargeInputDeps> = {}) {
   const tariff = apsREvModelFromEnv();
   const periodIdAt = (ts: number) => rateAt(tariff, ts).periodId;
   const byEpoch = new Map<number, ForecastHour>(r.fc.hours.map((h) => [Math.floor(h.ts / HOUR), h]));
@@ -181,6 +189,7 @@ function planFrom(r: Reports, nowMs: number) {
     confidenceTier: 'forecast', forecastPresent: bandHours.length > 0, calScoredDays: r.prob.calScoredDays ?? 0, minCalScoredDays: 14,
     bandCoverageFrac: (r.prob.bandRealizedCoveragePct ?? 0) / 100,
     morningPvSurplusP90Kwh: morningHas ? Math.round(morning * 100) / 100 : null, minBuyKwh: 1,
+    ...over,
   };
   return computeNightChargePlan(buildNightChargeInputs(deps));
 }
@@ -210,6 +219,21 @@ test('★★★ SCOPE — the planner and MPC inputs are byte-identical on the l
   const planL = planFrom(legacy, nowMs);
   const planM = planFrom(measured, nowMs);
   assert.deepEqual(planM, planL);
+  // v1.199.0 — the same on a plan that is SIZED (the band given a scored history), and with the one
+  // measured input passed to both: the reports' measured trajectory still never reaches the plan.
+  const SCALE: CushionPoolScale = { scale: 0.944, basis: 'measured' };
+  const sized = { calScoredDays: 30, bandCoverageFrac: 0.9 };
+  const sizedL = planFrom(legacy, nowMs, sized);
+  const sizedM = planFrom(measured, nowMs, sized);
+  assert.equal(sizedL.basisComplete, true, sizedL.rationale);
+  assert.ok(sizedL.cushionBasis === 'islanded-outage' && sizedL.cushionLineSocPct != null, 'the fixture sizes an islanded-outage line');
+  assert.deepEqual(sizedM, sizedL);
+  const scaledL = planFrom(legacy, nowMs, { ...sized, cushionPoolScale: SCALE });
+  const scaledM = planFrom(measured, nowMs, { ...sized, cushionPoolScale: SCALE });
+  assert.deepEqual(scaledM, scaledL);
+  // …and the exception is real, not vacuous: the scale moves the line (16% + 12.77 kWh on 92.16 × 0.944).
+  assert.deepEqual(scaledM.cushionPoolScale, SCALE);
+  assert.deepEqual([sizedM.cushionLineSocPct, scaledM.cushionLineSocPct], [29.86, 30.68]);
   // The recommend-only dispatch plan reads the panel's own figures and the PV/load series.
   resetForecastCachesForTesting();
   const dL = computeDispatchPlan(fleet(), legacy.fc);
@@ -218,8 +242,24 @@ test('★★★ SCOPE — the planner and MPC inputs are byte-identical on the l
   assert.deepEqual({ ...dM, generatedAt: 0 }, { ...dL, generatedAt: 0 });
 });
 
-test('★★★ SCOPE — source pins: the planner, JIT force-charge and MPC never read the measured basis', () => {
-  const src = (p: string) => readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src', p), 'utf8');
+/** v1.199.0 — every top-level function and const arrow of a module, by name: from its declaration to
+ *  its closing brace at column 0 (or the next top-level declaration, whichever is first). */
+function topLevelFunctions(text: string): Map<string, string> {
+  const decl = /^(?:export )?(?:async )?function\*? (\w+)\s*[(<]|^(?:export )?const (\w+)\s*(?::[^=\n]+)?=\s*(?:async\s*)?(?:\([^)]*\)|\w+)\s*(?::\s*[^=\n]+?)?=>/gm;
+  const starts: Array<{ name: string; at: number }> = [];
+  for (const m of text.matchAll(decl)) starts.push({ name: m[1] ?? m[2], at: m.index! });
+  const out = new Map<string, string>();
+  starts.forEach((d, i) => {
+    const next = i + 1 < starts.length ? starts[i + 1].at : text.length;
+    const close = text.indexOf('\n}', d.at);
+    out.set(d.name, text.slice(d.at, close >= 0 ? Math.min(close + 2, next) : next));
+  });
+  return out;
+}
+
+test('★★★ SCOPE — source pins: the planner, JIT force-charge and MPC never read the measured basis — except the cushion line, through ONE door', () => {
+  const SRC = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+  const src = (p: string) => readFileSync(resolve(SRC, p), 'utf8');
   const index = src('index.ts');
   /** A top-level function's text: from its declaration to the next top-level function. */
   const fnBody = (name: string): string => {
@@ -230,19 +270,196 @@ test('★★★ SCOPE — source pins: the planner, JIT force-charge and MPC nev
     assert.ok(body.length > 2_000, `${name}: the slice is too short to be the function (${body.length} chars)`);
     return body;
   };
-  const forbidden = /\b(projectedSocPct|minProjectedSoc|minProjectedSocTs|p10SocPct|p50SocPct|p90SocPct|pAboveReservePct|pFullCharge|socPct|poolFullWh|poolCapacityScale|poolCapacityBasis|poolOverheadW|runwayDrainW|runwayEnergyBasis|capacityScale|computeRunway|panelPoolBasisTracker|PoolEnergyBasisTracker)\b|report\('runway'\)|report<[^>]*>\('runway'\)/;
-  // The planner's inputs, the JIT force-charge tick's (fullWh / poolSocPct / chargeRateKw) and the
-  // reserve actuator's (fullWh / socCoherent): all from the panel's own figures.
+  // v1.199.0 — the door's own names are forbidden too: anywhere but the door, they are a second door.
+  // So is every other way to the scale that does not spell `cushionPoolScale` itself: the ledger
+  // helper that returns it (cushionPoolScale\w+: cushionPoolScaleLedgerColumns), the ledger's columns
+  // (cushion_pool_scale, _basis) and the tracker's file (defaultPoolEnergyBasisPath, pool-energy-basis*).
+  const forbidden = /\b(projectedSocPct|minProjectedSoc|minProjectedSocTs|p10SocPct|p50SocPct|p90SocPct|pAboveReservePct|pFullCharge|socPct|poolFullWh|poolCapacityScale|poolCapacityBasis|poolOverheadW|runwayDrainW|runwayEnergyBasis|capacityScale|computeRunway|panelPoolBasisTracker|PoolEnergyBasisTracker|cushionPoolBasisTracker|measuredCushionScale|cushionPoolScale\w+|cushion_pool_scale\w*|defaultPoolEnergyBasisPath|pool-energy-basis)\b|report\('runway'\)|report<[^>]*>\('runway'\)/;
+  /** Every spelling of the scale itself: the plan's field, the ledger helper and the ledger's columns. */
+  const SCALE = /\bcushionPoolScale\w*|\bcushion_pool_scale\w*/;
+
+  // ── (b) THE DOOR, pinned exactly ─────────────────────────────────────────────────────────────
+  // The house panel's own main-thread tracker and file, and the helper that reads it: the scale and
+  // its basis, nothing else of the basis, null when it throws.
+  assert.ok(index.includes("const cushionPoolBasisTracker = new PoolEnergyBasisTracker({ path: defaultPoolEnergyBasisPath('pool-energy-basis-cushion') });"));
+  const DOOR = [
+    'function measuredCushionScale(',
+    "  devs: FleetSnapshot['devices'], panel: NonNullable<ReturnType<typeof findShp2>>, nowMs: number,",
+    '): (CushionPoolScale & { connectedCores: number }) | null {',
+    '  try {',
+    '    const b = cushionPoolBasisTracker.evaluate(devs, panel, nowMs);',
+    "    const basis: CushionScaleBasis = b.capacityBasis; // tsc fails here if the tracker's basis gains a member",
+    '    return { scale: b.capacityScale, basis, connectedCores: b.connectedCores };',
+    '  } catch {',
+    '    return null;',
+    '  }',
+    '}',
+  ].join('\n');
+  const tops = topLevelFunctions(index);
+  assert.equal(tops.get('measuredCushionScale'), DOOR, 'the door, character for character');
+  const count = (s: string, needle: string) => s.split(needle).length - 1;
+  assert.equal(count(index, 'cushionPoolBasisTracker'), 2, 'declared, and read by the door alone');
+  assert.equal(count(index, 'measuredCushionScale('), 2, 'defined, and called once');
+  assert.equal(count(index, 'PoolEnergyBasisTracker('), 2, "the main thread's two trackers: the secondary panels' and the cushion's");
+  assert.equal(count(index, 'panelPoolBasisTracker.evaluate('), 1, "the secondary panels' tracker, in their loop only");
+  // The tracker's file is named once, where the tracker is built: nothing else opens it.
+  assert.equal(count(index, 'defaultPoolEnergyBasisPath('), 2, "the two trackers' files, and no third reader");
+  assert.equal(count(index, 'pool-energy-basis-cushion'), 1, "the cushion tracker's file, on its construction line alone");
+  // The ledger helper returns the scale, so it is a door too: called once, by the ledger writer,
+  // whose line writes it to the row (write-only — no consumer below may reach recordNightPlanRow).
+  const LEDGER = '    ...cushionPoolScaleLedgerColumns(plan),\n';
+  assert.equal(count(index, 'cushionPoolScaleLedgerColumns('), 1, 'the ledger helper, called once');
+  assert.equal(count(tops.get('recordNightPlanRow') ?? '', LEDGER), 1, 'by recordNightPlanRow, into the row');
+  // In the planner: the device map read once, the door called once from it, BEFORE the first await
+  // (the scale and fullWh from one snapshot), its result logged on a live leg and passed as an input.
+  const plan = fnBody('recomputeNightChargePlan');
+  const CALL = '  const cushionPoolScale = measuredCushionScale(devs, shp2, nowMs);\n';
+  assert.ok(plan.includes('  const devs = store.get().devices;\n  const shp2 = findShp2(devs);\n'));
+  assert.equal(count(plan, CALL), 1);
+  assert.equal(count(plan, 'store.get('), 1, 'one snapshot');
+  assert.ok(plan.indexOf(CALL) < plan.indexOf('await '), 'the scale is taken before the first await');
+  assert.ok(plan.indexOf('  const fullKwh = fullWh / 1000;\n') < plan.indexOf(CALL), 'beside the pool it converts on');
+  assert.ok(plan.includes(`${CALL}  if (!shadowLeg) {\n`), 'a shadow leg evaluates the tracker (and writes its file) but never logs');
+  assert.ok(plan.includes('    // v1.199.0 — the cushion line\'s measured capacity scale (null: the nameplate line).\n    cushionPoolScale,\n'), 'passed as the input');
+
+  // ── (a) + (d) the planner, the JIT force-charge, the reserve actuator, the MPC: no forbidden token —
+  // the planner's body with EXACTLY the one pinned call line removed first, the others with none.
   for (const name of ['recomputeNightChargePlan', 'runForceChargeTick', 'runNightActuationTickInner']) {
-    const body = fnBody(name);
+    const body = name === 'recomputeNightChargePlan' ? plan.replace(CALL, '') : fnBody(name);
     assert.ok(body.includes('backupFullCapWh'), `${name} must read the panel's own pool capacity`);
     assert.ok(!forbidden.test(body), `${name} reads ${body.match(forbidden)?.[0]}`);
+    if (name !== 'recomputeNightChargePlan') assert.ok(!SCALE.test(body), `${name} takes the cushion scale (${body.match(SCALE)?.[0]})`);
   }
   const recommend = index.slice(index.indexOf("app.get('/api/dispatch/recommend'"), index.indexOf("app.get('/api/backtest/forecast'"));
   assert.ok(recommend.length > 100 && !forbidden.test(recommend), `MPC reads ${recommend.match(forbidden)?.[0]}`);
-  for (const f of ['nightChargeAdvisor.ts', 'nightForceCharge.ts', 'nightChargeActuator.ts', 'dispatch/mpc.ts']) {
+  assert.ok(!SCALE.test(recommend), `MPC takes the cushion scale (${recommend.match(SCALE)?.[0]})`);
+
+  // ── (c) NO LAUNDERING through a helper. The token check above reads only the consumer's own text,
+  // so a helper holding the tokens would pass it. Every top-level function of index.ts the consumers
+  // reach, by name, at any depth, must hold no forbidden token — except the one allowlisted pair
+  // (recomputeNightChargePlan → measuredCushionScale), which is not descended into.
+  assert.ok(tops.size >= 85, `${tops.size} top-level functions: the walk must see the module`);
+  for (const n of ['recomputeNightChargePlan', 'runForceChargeTick', 'runNightActuationTickInner', 'measuredCushionScale', 'reconnectObsDevices']) {
+    assert.ok(tops.has(n), `the walk sees ${n}`);
+  }
+  const tainted = [...tops].filter(([, b]) => forbidden.test(b)).map(([n]) => n);
+  assert.ok(tainted.includes('reconnectObsDevices') && tainted.includes('measuredCushionScale'), `the walk sees a tainted function (${tainted.join(', ')})`);
+  assert.ok(tainted.includes('recordNightPlanRow'), 'the walk sees the ledger writer, which holds the scale, as tainted');
+  const refs = (body: string, self: string): string[] =>
+    [...new Set([...body.matchAll(/\b([A-Za-z_]\w*)\b/g)].map((m) => m[1]))].filter((n) => n !== self && tops.has(n));
+  const roots: Array<[string, string]> = [
+    ['recomputeNightChargePlan', plan], ['runForceChargeTick', fnBody('runForceChargeTick')],
+    ['runNightActuationTickInner', fnBody('runNightActuationTickInner')], ['/api/dispatch/recommend', recommend],
+  ];
+  for (const [root, body] of roots) {
+    const seen = new Set<string>();
+    const queue = refs(body, root).map((n) => [root, n] as const);
+    while (queue.length) {
+      const [from, n] = queue.shift()!;
+      if (seen.has(n)) continue;
+      seen.add(n);
+      if (from === 'recomputeNightChargePlan' && n === 'measuredCushionScale') continue; // THE door
+      const b = tops.get(n)!;
+      assert.ok(!forbidden.test(b), `${root} reaches ${n} (from ${from}), which reads ${b.match(forbidden)?.[0]}`);
+      assert.ok(!SCALE.test(b), `${root} reaches ${n} (from ${from}), which takes the cushion scale (${b.match(SCALE)?.[0]})`);
+      for (const m of refs(b, n)) queue.push([n, m]);
+    }
+    if (root !== 'recomputeNightChargePlan') assert.ok(!seen.has('measuredCushionScale'), `${root} reaches the door`);
+  }
+
+  // ── (e) THE ADVISOR: nothing of the runway's basis; the scale read once, into the one line ────────
+  const advisor = src('nightChargeAdvisor.ts');
+  assert.ok(!/poolEnergyBasis|runwayDrainW|runwayEnergyBasis|RUNWAY_CORE_OVERHEAD_W/.test(advisor), 'nightChargeAdvisor.ts must not read the runway basis');
+  // Its imports are the ones it had: no module reaches the planner that is not named here. Every module
+  // specifier in the file counts — a static import, a re-export, a dynamic import(), wherever it sits.
+  const advisorImports = [...new Set([...advisor.matchAll(/(?:\bfrom\s+|\bimport\s*\(?\s*)['"]([^'"]+)['"]/g)].map((m) => m[1]))].sort();
+  assert.deepEqual(advisorImports, ['./chargeTaper.js', './chargeWindows.js', './nightChargeActuator.js', './nightForceCharge.js', './physics/chargeLeg.js', './siteTime.js']);
+  const sizing = advisor.slice(advisor.indexOf('function sizeNightChargePlan('), advisor.indexOf('\nexport const MIDDAY_REENTRY_MARGIN_PCT'));
+  assert.ok(sizing.length > 20_000, `sizeNightChargePlan: ${sizing.length} chars`);
+  const LINE = '  const cushionLine = cushionLineKwh({ reserveKwh, cushionKwh, cushionBasis, poolScale: inputs.cushionPoolScale });\n  const targetFloorKwh = cushionLine.kwh;\n';
+  assert.equal(count(sizing, LINE), 1, 'the scale is read once, into the one line every reader below reads');
+  assert.equal(count(sizing, 'inputs.cushionPoolScale'), 1);
+  assert.equal(count(sizing, 'targetFloorKwh ='), 1, 'no second line');
+  assert.ok(!sizing.includes('reserveKwh + cushionKwh'), 'no parallel nameplate line');
+  assert.equal(count(advisor, 'cushionLineKwh('), 2, 'defined, and called once');
+  // Every use of the line object: its kWh once (above), its applied scale only in the two plan fields
+  // and the rationale's clause (whose percent is the line's own, with no second division by the scale).
+  const uses = [...sizing.matchAll(/^.*\bcushionLine\b.*$/gm)].map((m) => m[0].trim());
+  assert.deepEqual(uses, [
+    'const cushionLine = cushionLineKwh({ reserveKwh, cushionKwh, cushionBasis, poolScale: inputs.cushionPoolScale });',
+    'const targetFloorKwh = cushionLine.kwh;',
+    'const measuredCushionNote = cushionLine.applied != null && cushionLine.applied.scale < 1',
+    "? `, ${round1(((targetFloorKwh - reserveKwh) / fullKwh) * 100)}% of the packs' measured capacity at ×${cushionLine.applied.scale.toFixed(3)} of nameplate`",
+    '...(cushionLine.applied != null ? { cushionPoolScale: cushionLine.applied } : {}),',
+    '...(cushionLine.applied != null ? { cushionPoolScale: cushionLine.applied } : {}),',
+  ]);
+  assert.equal(count(advisor, 'cushionLine.'), count(sizing, 'cushionLine.'), 'nowhere outside the sizing');
+
+  // ── (f) EVERY place the scale may appear, across src (code lines; comment lines aside) ───────────
+  // Every spelling (SCALE): the plan's field, the ledger helper that returns it and the ledger's
+  // columns — a ledger-row read or a helper call is the scale as much as the field is. A comment line
+  // is one that starts a comment and carries no code after a closing `*/`.
+  const ALLOWED = new Map<string, string[]>([
+    ['nightChargeAdvisor.ts', [ // in file order
+      'cushionPoolScale?: CushionPoolScale | null;', // NightChargeInputs
+      "cushionPoolScale?: { scale: number; basis: CushionScaleBasis | 'implausible' };", // NightChargePlan
+      'const cushionLine = cushionLineKwh({ reserveKwh, cushionKwh, cushionBasis, poolScale: inputs.cushionPoolScale });',
+      '...(cushionLine.applied != null ? { cushionPoolScale: cushionLine.applied } : {}),', // the hold plan
+      '...(cushionLine.applied != null ? { cushionPoolScale: cushionLine.applied } : {}),', // the charge plan
+      'cushionPoolScale?: CushionPoolScale | null;', // NightChargeInputDeps
+      'cushionPoolScale,', // buildNightChargeInputs' destructure
+      '...(cushionPoolScale !== undefined ? { cushionPoolScale } : {}),', // and its pass-through
+      'export function cushionPoolScaleLedgerColumns(', // the ledger helper: the plan's scale, to the row
+      "plan: Pick<NightChargePlan, 'cushionPoolScale'>,",
+      '): { cushion_pool_scale: number | null; cushion_pool_scale_basis: string | null } {',
+      'cushion_pool_scale: plan.cushionPoolScale?.scale ?? null,',
+      'cushion_pool_scale_basis: plan.cushionPoolScale?.basis ?? null,',
+    ]],
+    ['index.ts', [ // in file order
+      'cushionPoolScaleLedgerColumns, cushionScaleLogText, type CushionPoolScale, type CushionScaleBasis,', // the import
+      'const cushionPoolScale = measuredCushionScale(devs, shp2, nowMs);',
+      "const scaleKey = cushionPoolScale == null ? 'unavailable'",
+      ': `${cushionPoolScale.basis}:${cushionPoolScale.scale.toFixed(4)}:${cushionPoolScale.connectedCores}`;',
+      'app.log.info(cushionScaleLogText(cushionPoolScale));',
+      'cushionPoolScale,', // deps
+      '...cushionPoolScaleLedgerColumns(plan),', // recordNightPlanRow: written, never read back
+    ]],
+    ['recorder.ts', [ // in file order: the row's two fields, the allowlist and the schema migration
+      'cushion_pool_scale: number | null;',
+      'cushion_pool_scale_basis: string | null;',
+      "'cushion_pool_scale', 'cushion_pool_scale_basis',",
+      "'cushion_pool_scale REAL', 'cushion_pool_scale_basis TEXT',",
+    ]],
+  ]);
+  const isComment = (l: string): boolean => /^\/\//.test(l) || (/^(\*|\/\*)/.test(l) && !/\*\/\s*\S/.test(l));
+  assert.ok(isComment('/** v1.199.0 — x. */') && isComment('* cushion_pool_scale') && !isComment('/* x */ const s = 1;'), 'the comment rule');
+  const walk = (dir: string, rel = ''): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+    e.isDirectory() ? walk(resolve(dir, e.name), `${rel}${e.name}/`) : e.name.endsWith('.ts') ? [`${rel}${e.name}`] : []);
+  const files = walk(SRC);
+  assert.ok(files.length > 100 && files.includes('index.ts') && files.includes('dispatch/mpc.ts'), `${files.length} source files`);
+  for (const f of files) {
+    const code = src(f).split('\n').map((l) => l.trim()).filter((l) => SCALE.test(l) && !isComment(l));
+    assert.deepEqual(code, ALLOWED.get(f) ?? [], `${f}: the cushion scale appears where no pin allows it`);
+  }
+
+  // ── (g) NO LAUNDERING through another module ───────────────────────────────────────────────────
+  // The runway's basis module is imported where it was, and by index.ts only for its two trackers'
+  // constructor and path; no other module constructs a tracker or computes a scale.
+  const importers = files.filter((f) => /from '(?:\.\.?\/)+poolEnergyBasis(?:\.js)?'|import\(\s*'(?:\.\.?\/)+poolEnergyBasis/.test(src(f))).sort();
+  assert.deepEqual(importers, ['alertMonitor.ts', 'analytics.ts', 'index.ts', 'panelRunway.ts']);
+  assert.deepEqual([...index.matchAll(/^import [^;]*? from '\.\/poolEnergyBasis\.js';$/gm)].map((m) => m[0]),
+    ["import { PoolEnergyBasisTracker, defaultPoolEnergyBasisPath } from './poolEnergyBasis.js';"]);
+  const constructs = Object.fromEntries(files.map((f): [string, number] => [f, count(src(f), 'new PoolEnergyBasisTracker(')]).filter(([, n]) => n > 0));
+  assert.deepEqual(constructs, { 'analytics.ts': 1, 'index.ts': 2 });
+  for (const fn of ['candidatePoolScale(', 'coreCapacityRatio(']) {
+    const callers = files.filter((f) => f !== 'poolEnergyBasis.ts' && src(f).includes(fn));
+    assert.deepEqual(callers, [], `${fn} is called outside poolEnergyBasis.ts`);
+  }
+
+  for (const f of ['nightForceCharge.ts', 'nightChargeActuator.ts', 'dispatch/mpc.ts']) {
     const s = src(f);
     assert.ok(!/poolEnergyBasis|runwayDrainW|runwayEnergyBasis|RUNWAY_CORE_OVERHEAD_W/.test(s), `${f} must not read the runway basis`);
+    assert.ok(!SCALE.test(s) && !/cushionLineKwh|defaultPoolEnergyBasisPath|pool-energy-basis/.test(s), `${f} must not read the cushion scale`);
   }
   assert.equal(RUNWAY_DISCHARGE_EFFICIENCY, 0.94, "the planner's discharge leg is unchanged");
 });

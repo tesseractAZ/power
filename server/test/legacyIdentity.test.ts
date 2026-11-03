@@ -41,6 +41,13 @@ import {
  * leg's direction is now held against the planner it joins without it
  * (legacyIdentity.withoutChargeLeg.figures.json), and the release as a whole against v1.192.0.
  * Since then the digests are the planner at v1.196.0, and every later plan must reproduce them.
+ *
+ * v1.199.0 — ON THE NAMEPLATE LINE. index.ts now passes the house pool's measured capacity scale
+ * (cushionPoolScale), which converts an islanded-outage cushion to the panel's percent on the packs'
+ * measured capacity and so moves the line of every plan the add-on makes on that basis. These cases
+ * pass no scale, and a plan without one (or with a scale of 1) reproduces the digests byte for byte;
+ * measuredCushionLine.test.ts holds the same year at the reference fleet's 0.944 to its own per-case
+ * figures (measuredCushionLine.figures.json) and to its direction against these digests.
  */
 
 const HERE = dirname(fileURLToPath(import.meta.url));

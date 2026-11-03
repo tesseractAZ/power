@@ -41,7 +41,10 @@
  * THREADING. computeRunway / getDayForecast / computeMultiDayForecast run in the analytics
  * WORKER; they share the worker's tracker (analytics.ts), which is the only writer of
  * pool-energy-basis.json. A secondary panel's drain runway (panelRunway.ts) runs on the main
- * thread with its own tracker and its own file. The state is read and written in the thread that
+ * thread with its own tracker and its own file. v1.199.0 — so does the night-charge cushion line:
+ * index.ts keeps a third tracker for the house panel (pool-energy-basis-cushion.json), evaluated by
+ * the planner from its own snapshot, whose scale converts the outage cushion to the panel's percent
+ * (nightChargeAdvisor.ts cushionLineKwh). The state is read and written in the thread that
  * evaluates it — never set on one thread and read on the other.
  */
 import { existsSync, readFileSync } from 'node:fs';

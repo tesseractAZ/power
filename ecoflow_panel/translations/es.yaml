@@ -358,7 +358,7 @@ configuration:
     description: 'Avanzado. Cuánto pueden separarse, en vatios-hora, los totales de energía acumulada guardados y los contadores de las propias baterías antes de que los totales se reinicien desde los contadores. Déjelo vacío para 50000 Wh, más o menos la capacidad de un Core.'
   CAPACITY_SCALE_MIN:
     name: Escala mínima de capacidad
-    description: 'Avanzado. La proporción mínima de capacidad medida de las baterías (capacidad a carga completa sobre la nominal) que se aplica a las cifras de energía del panel para la autonomía, el pronóstico y la revisión del conjunto inactivo. Déjelo vacío para 0,8. Rango 0,5-1.'
+    description: 'Avanzado. La proporción mínima de capacidad medida de las baterías (capacidad a carga completa sobre la nominal) que se aplica a las cifras de energía del panel para la autonomía, el pronóstico, la revisión del conjunto inactivo y la línea de reserva para cortes de la carga nocturna. Déjelo vacío para 0,8. Rango 0,5-1; 1 mantiene esa línea sobre la capacidad nominal.'
   FORECAST_NIGHT_START_HOUR:
     name: Hora de inicio de la noche del pronóstico
     description: 'Avanzado. Primera hora (0-23) de la franja nocturna en la que el pronóstico de consumo se ajusta hacia el consumo medido en las últimas horas. Déjelo vacío para 21.'

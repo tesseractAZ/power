@@ -54,6 +54,12 @@
  * its sizing basis is unchanged, and a source-pin test keeps the runway's basis out
  * of this module — so its trough and the runway's projection are no longer the
  * same number.
+ * v1.199.0 — ONE EXCEPTION, pinned by that test: the cushion LINE's kWh → percent
+ * conversion. The panel's reserve percent is a share of the packs' measured capacity, so
+ * an islanded-outage cushion counted on nameplate held only ~0.944 of itself once written
+ * (cushionLineKwh). index.ts passes the house pool's measured capacity scale
+ * (cushionPoolScale, from its own main-thread tracker) and cushionLineKwh alone reads it;
+ * every walk here stays on nameplate kWh per percent.
  * v1.194.0 — a POSITIVE change is a surplus the Cores charge the cells with, and it is
  * stored at legEff (chargeLegStep, physics/chargeLeg.ts): every walk here (simulate, the
  * with-buy window walk, expectedCarryKwh, expectedPvChargeWalk, expectedForceChargeStart)
@@ -177,7 +183,9 @@ export interface NightChargeInputs {
 
   // ── Battery state (read from the SHP2 projection upstream) ──
   /** Pool capacity as the SHP2 reports it, kWh (backupFullCapWh/1000): the packs' nameplate sum
-   *  (92.16 at 15 packs), not their measured full-charge capacity and not usable energy. */
+   *  (92.16 at 15 packs), not their measured full-charge capacity and not usable energy. Every walk
+   *  counts a percent on it; only the cushion line's conversion also reads the measured capacity
+   *  (cushionPoolScale, v1.199.0). */
   fullKwh: number;
   /** Current state-of-charge %, as the SHP2 reports it. */
   socNowPct: number;
@@ -194,6 +202,10 @@ export interface NightChargeInputs {
   outageCushionHours?: number;
   /** v1.125.0 — multiplier on the observed islanded load. Higher = stricter. */
   islandedLoadSafety?: number;
+  /** v1.199.0 — the house pool's measured capacity scale (index.ts measuredCushionScale): the ONE
+   *  measured input the planner takes, read only by cushionLineKwh to convert an islanded-outage
+   *  cushion's energy to the panel's percent. Absent / null ⇒ the nameplate line, exactly as before. */
+  cushionPoolScale?: CushionPoolScale | null;
   /** v1.127.0 — 'cost' sizes the buy to minimise the bill; 'resilience' (the
    *  legacy behaviour) sizes it to hold floor+cushion. Cost mode is bounded
    *  BELOW by the resilience answer, so it can never buy less. */
@@ -528,7 +540,10 @@ export interface NightChargePlan {
   /** v1.186.0 — the line that trough was tested against, % of pool: the reserve
    *  floor plus the cushion AS APPLIED (cushionKwh). Not reserveFloorPct +
    *  cushionPct — cushionPct is the legacy flat band, which is the applied cushion
-   *  only on the `legacy-pct` basis. */
+   *  only on the `legacy-pct` basis.
+   *  v1.199.0 — on the islanded-outage basis the cushion is converted on the packs' measured
+   *  capacity where a scale was passed (cushionPoolScale): floor + 100 · cushionKwh ÷ (pool ×
+   *  scale), the share of the panel's own percent that holds the whole cushion. */
   cushionLineSocPct?: number | null;
 
   /** v1.39.0 (§4 honesty): the plan-projected pack SoC % ENTERING the charge
@@ -550,6 +565,10 @@ export interface NightChargePlan {
   /** v1.125.0 — the cushion in kWh, as actually applied. */
   cushionKwh?: number;
   cushionBasis?: CushionBasis;
+  /** v1.199.0 — the scale the cushion line was converted on (cushionLineKwh): present only where one
+   *  was passed and the cushion is an islanded-outage energy; basis 'implausible' (scale 1) where the
+   *  scale passed was ignored. Absent otherwise, so that plan's JSON is unchanged. */
+  cushionPoolScale?: { scale: number; basis: CushionScaleBasis | 'implausible' };
   /** v1.127.0 — which ceiling bound the cost-mode target. R2 — 'pv-curtail' on a mid-day leg. */
   costCeilingBasis?: CostCeilingBasis | null;
   /** v1.165.0 — the economic ceiling itself, % of pool (null in resilience mode).
@@ -1180,6 +1199,8 @@ export function chargeReservePct(plan: Pick<NightChargePlan, 'setpointSocPct'>):
  * sized on 27.6%, pushed as 31%). That sum stands in only on a plan issued before v1.186.0, which
  * has no cushionLineSocPct. The card mirrors it (nightChargeText.floorCushionLinePct). null when
  * neither is finite. PURE.
+ * v1.199.0 — on the islanded-outage basis that line counts the cushion on the packs' measured
+ * capacity (cushionLineKwh), the line the write holds; the surfaces state it as they did.
  */
 export function floorCushionLinePct(
   plan: Pick<NightChargePlan, 'cushionLineSocPct' | 'reserveFloorPct' | 'cushionPct'>,
@@ -1306,7 +1327,13 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   });
   const cushionKwh = cushion.kwh;
   const cushionBasis = cushion.basis;
-  const targetFloorKwh = reserveKwh + cushionKwh; // the line the pack must hold
+  // v1.199.0 — the line the pack must hold, the ONE place the measured capacity scale is read
+  // (cushionLineKwh): an islanded-outage cushion's energy on the packs' measured capacity, so the
+  // written percent holds the whole cushion. Every reader below — the hold test, the requirement,
+  // cushionShortfall, the line and trough reported, the setpoint, T_mid and the backup leg's walk —
+  // reads this one figure; no scale is read anywhere else (runwayBasisContracts.test.ts).
+  const cushionLine = cushionLineKwh({ reserveKwh, cushionKwh, cushionBasis, poolScale: inputs.cushionPoolScale });
+  const targetFloorKwh = cushionLine.kwh;
 
   const socNowKwh = (fullKwh * socNowPct) / 100;
   const windowStart = window.startMs;
@@ -1595,10 +1622,15 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   // v1.133.0 — a disabled cushion MUST announce itself. Without this branch a
   // night with no outage margin at all reads as "already covers the floor+cushion",
   // which is true of a standard that was lowered rather than met.
+  // v1.199.0 — where the measured capacity moved the line, the cushion's share of it: the line's own
+  // percent above the floor (no second division by the scale). Nowhere else: that text is unchanged.
+  const measuredCushionNote = cushionLine.applied != null && cushionLine.applied.scale < 1
+    ? `, ${round1(((targetFloorKwh - reserveKwh) / fullKwh) * 100)}% of the packs' measured capacity at ×${cushionLine.applied.scale.toFixed(3)} of nameplate`
+    : '';
   const cushionDesc = cushionBasis === 'disabled'
     ? `the ${reserveFloorPct}% reserve floor alone — the outage cushion is DISABLED, so nothing is held back for an outage`
     : cushionBasis === 'islanded-outage'
-      ? `the ${reserveFloorPct}% reserve floor plus ${round1(inputs.outageCushionHours ?? DEFAULT_OUTAGE_CUSHION_HOURS)} h of islanded backup load (${round1(cushionKwh)} kWh)`
+      ? `the ${reserveFloorPct}% reserve floor plus ${round1(inputs.outageCushionHours ?? DEFAULT_OUTAGE_CUSHION_HOURS)} h of islanded backup load (${round1(cushionKwh)} kWh${measuredCushionNote})`
       : `the ${round1(reserveFloorPct + cushionPct)}% floor+cushion`;
   const baselineTrough = troughAtLift(0);
   // v1.125.0 — the DISCLOSED trough stays the whole-house one: "if the entire
@@ -1625,6 +1657,8 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
       // carry the applied cushion here too or a HOLD night reports none.
       cushionKwh: round2(cushionKwh),
       cushionBasis,
+      // v1.199.0 — the scale the line was converted on, only where one applied.
+      ...(cushionLine.applied != null ? { cushionPoolScale: cushionLine.applied } : {}),
       cushionOutageHours: inputs.outageCushionHours ?? DEFAULT_OUTAGE_CUSHION_HOURS,
       buyKwh: 0,
       buyKwhDebiased: 0,
@@ -1967,11 +2001,13 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   // v1.196.0 — on the pack-at-close leg the line is asked to the whole percent ABOVE it: the
   // actuator writes Math.round (clampReserveTarget), and a write under the line is a write the
   // plan was not sized on. 0 elsewhere (the walk and the cost-only ask keep their own figure).
-  // The line is the arm test's, on the planner's nameplate fullKwh; the pool percent the panel
-  // holds is a share of the packs' measured capacity (~0.944 of nameplate on this fleet), so the
-  // written percent holds about that share of the counted cushion above the floor, beside the Core
-  // standby the cushion leaves out (header). The measured basis is kept out of the planner
-  // (runwayBasisContracts.test.ts, SCOPE): this ask is on the basis the plan is sized on.
+  // v1.199.0 — the line is the arm test's (targetFloorKwh, from cushionLineKwh). On the
+  // islanded-outage basis its cushion is counted on the packs' measured capacity, the basis of the
+  // pool percent the panel holds (~0.944 of nameplate on this fleet), so ⌈line⌉ − floor points of
+  // that capacity hold the whole cushion wherever the write is under the 50% envelope (a line above
+  // it is truncated, and the reserve sentence below says so). Until v1.199.0 the line was on the
+  // nameplate fullKwh and the write held about 0.944 of the cushion. The Cores' standby is still not
+  // in the cushion (header).
   const lineAskPct = !setpointOnWalk && !baselineHolds
     ? Math.min(100, Math.ceil((targetFloorKwh / fullKwh) * 100 - 1e-9)) : 0;
   const setpointSocPct = middayReserve != null ? middayReserve.pct : Math.max(
@@ -2190,6 +2226,8 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
     // v1.125.0 — how the cushion was derived, so a reader can tell a bounded
     // islanded-outage requirement from the legacy flat band at a glance.
     cushionBasis,
+    // v1.199.0 — the scale the line was converted on, only where one applied.
+    ...(cushionLine.applied != null ? { cushionPoolScale: cushionLine.applied } : {}),
     cushionOutageHours: inputs.outageCushionHours ?? DEFAULT_OUTAGE_CUSHION_HOURS,
     // R2 — a mid-day leg only: which term set its reserve write (middayReserveTargetPct).
     ...(middayReserve != null ? { reserveTargetBasis: middayReserve.basis } : {}),
@@ -2424,6 +2462,8 @@ export interface NightChargeInputDeps {
   outageCushionHours?: number;
   /** v1.125.0 — multiplier on the observed islanded load. Higher = stricter. */
   islandedLoadSafety?: number;
+  /** v1.199.0 — forwarded verbatim (see NightChargeInputs). */
+  cushionPoolScale?: CushionPoolScale | null;
   /** v1.127.0 — buy sizing objective; cost mode is bounded below by resilience. */
   objectiveMode?: 'resilience' | 'cost';
   /** v1.127.0 — hard SoC ceiling for cost mode when no PV surplus is known. */
@@ -2746,6 +2786,9 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     // only the end-to-end test caught it — the unit tests of the pure cushion
     // function all passed.
     islandedLoadKw, outageCushionHours, islandedLoadSafety,
+    // v1.199.0 — the cushion line's measured capacity scale (the same hazard: not copied, it is
+    // undefined and the line silently stays on nameplate).
+    cushionPoolScale,
     objectiveMode, costMaxSocPct,
     // R2 — the leg (WindowSpec): its pinned window, and its role's objective and force-charge.
     windowSpec,
@@ -2993,6 +3036,8 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     islandedLoadKw,
     outageCushionHours,
     islandedLoadSafety,
+    // v1.199.0 — only when given, so inputs built without it carry exactly what they did.
+    ...(cushionPoolScale !== undefined ? { cushionPoolScale } : {}),
     objectiveMode: legObjective(legRole, objectiveMode),
     costMaxSocPct,
     socCoherent,
@@ -3902,6 +3947,95 @@ export function outageCushionKwh(o: {
     kwh: round2((outageHours * islandedLoadKw * safetyFactor) / dischargeEff),
     basis: 'islanded-outage',
   };
+}
+
+/**
+ * v1.199.0 — how the house pool's measured capacity scale was obtained: every connected Core
+ * reported complete packs ('measured'), a Core not reporting took its last measured ratio ('held')
+ * or the lowest ratio known for any Core ('min-known'), or no ratio has ever been measured
+ * ('nameplate', scale 1). The runway's capacity tracker's own vocabulary, restated here so the
+ * planner imports nothing of the runway's basis (runwayBasisContracts.test.ts).
+ */
+export type CushionScaleBasis = 'measured' | 'held' | 'min-known' | 'nameplate';
+/** v1.199.0 — the house pool's measured capacity scale (Σ full-charge ÷ Σ design capacity over the
+ *  panel's connected Cores, after the runway tracker's 24 h increase hold) and its basis. */
+export interface CushionPoolScale { scale: number; basis: CushionScaleBasis }
+/** v1.199.0 — the lowest scale that is a reading at all: CAPACITY_SCALE_MIN's own lower clamp (the
+ *  option is clamped to 0.5..1, and the tracker never answers under it). Below it, a bad reading. */
+export const CUSHION_SCALE_PLAUSIBLE_MIN = 0.5;
+/** v1.199.0 — the line the plan holds and writes, in planner kWh (a percent × the nameplate pool), and
+ *  the scale that converted the cushion: null where none applies (no scale passed, or a cushion that
+ *  is not an energy), basis 'implausible' (scale 1) where the scale passed was ignored. */
+export interface CushionLine {
+  kwh: number;
+  applied: { scale: number; basis: CushionScaleBasis | 'implausible' } | null;
+}
+
+/**
+ * v1.199.0 — THE CUSHION LINE ON THE PACKS' MEASURED CAPACITY. PURE.
+ *
+ * The panel's reserve percent is a share of the packs' BMS full-charge capacity, about 0.944 of
+ * nameplate on the reference fleet, while the planner counts the pool on nameplate (fullKwh). A line
+ * of reserve + cushion in nameplate kWh therefore held only `scale` of the cushion above the floor
+ * once written as a percent: on a 92.16 kWh pool with a 10% floor and an 18.85 kWh cushion the 30.45%
+ * line, written 31%, held 21% × 86.999 = 18.27 kWh. Here the cushion's ENERGY is converted on the
+ * measured capacity:
+ *
+ *     kwh = reserveKwh + cushionKwh / scale        (line % = floor + 100 · cushion / (fullKwh · scale))
+ *
+ * so ⌈line⌉ − floor points of the measured capacity hold the whole cushion (31.67%, written 32%,
+ * holds 19.14 kWh). Only the cushion is divided: the floor is the panel's own percent, already on its
+ * basis. Only an `islanded-outage` cushion is energy: the legacy band is a percent of the pool and a
+ * disabled cushion is 0, so neither moves.
+ *
+ * Fail-safe: a lower scale is a HIGHER line, so a missing scale (null, undefined: every caller before
+ * v1.199.0) is today's nameplate line exactly, and so is an implausible one (not finite, under
+ * CUSHION_SCALE_PLAUSIBLE_MIN, above 1): never a line below the nameplate line. A value a hair above 1
+ * (float noise, ≤ 1e-9) is 1. `cushionKwh / 1` is bit-exact, so scale 1 moves no number.
+ */
+export function cushionLineKwh(o: {
+  reserveKwh: number;
+  cushionKwh: number;
+  cushionBasis: CushionBasis;
+  poolScale: CushionPoolScale | null | undefined;
+}): CushionLine {
+  const nameplate = o.reserveKwh + o.cushionKwh;
+  if (o.cushionBasis !== 'islanded-outage' || o.poolScale == null) return { kwh: nameplate, applied: null };
+  const s = o.poolScale.scale;
+  if (typeof s !== 'number' || !Number.isFinite(s) || s < CUSHION_SCALE_PLAUSIBLE_MIN || s > 1 + 1e-9) {
+    return { kwh: nameplate, applied: { scale: 1, basis: 'implausible' } };
+  }
+  const scale = Math.min(1, s);
+  return { kwh: o.reserveKwh + o.cushionKwh / scale, applied: { scale, basis: o.poolScale.basis } };
+}
+
+/**
+ * v1.199.0 — the night ledger's record of the scale the cushion line was converted on: written
+ * unconditionally by recordNightPlanRow (null with none — a legacy-pct or disabled cushion, a null
+ * plan, a plan snapshot from before v1.199.0) so a re-issued plan never leaves an earlier plan's scale
+ * beside its own line. With it a row is self-describing: cushion_line_soc_pct = reserve_floor_pct +
+ * 100 · cushion_kwh ÷ (pool_full_kwh · cushion_pool_scale), to the line's rounding. PURE.
+ */
+export function cushionPoolScaleLedgerColumns(
+  plan: Pick<NightChargePlan, 'cushionPoolScale'>,
+): { cushion_pool_scale: number | null; cushion_pool_scale_basis: string | null } {
+  return {
+    cushion_pool_scale: plan.cushionPoolScale?.scale ?? null,
+    cushion_pool_scale_basis: plan.cushionPoolScale?.basis ?? null,
+  };
+}
+
+/** v1.199.0 — the log line for the cushion line's capacity basis (index.ts logs it on change, live
+ *  legs only). `s` is the main thread's measurement; null when it could not be taken. PURE. */
+export function cushionScaleLogText(s: (CushionPoolScale & { connectedCores?: number }) | null): string {
+  if (s == null) {
+    return "night-charge: the packs' measured capacity is unavailable (capacity tracker error) — the outage-cushion line is on nameplate";
+  }
+  const cores = s.connectedCores != null ? `, ${s.connectedCores} connected Core(s)` : '';
+  if (s.basis === 'nameplate') {
+    return `night-charge: the outage-cushion line is on nameplate — no pack capacity ratio has been measured yet${cores ? ` (${cores.slice(2)})` : ''}`;
+  }
+  return `night-charge: the outage-cushion line counts the cushion on the packs' measured capacity, ×${s.scale.toFixed(3)} of nameplate (${s.basis}${cores})`;
 }
 
 export function plannerSizingNeedBuyKwh(opts: {

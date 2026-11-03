@@ -487,7 +487,7 @@ const ROWS: readonly OptionRow[] = [
   row({ name: 'SELF_HEAL_MIN_DEVICES', source: 'env-only', canonicalReader: 'sessionSelfHeal.ts:DEFAULT_SELF_HEAL_CONFIG', doc: 'Starved-device quorum for a session self-heal. Bare Number().', parse: numOr(2) }),
   row({ name: 'BATTERY_SOC_MAX_DROP_PCT', source: 'env-only', canonicalReader: 'batterySocAlarm.ts:MAX_PLAUSIBLE_DROP_PCT', doc: 'Largest plausible one-tick SoC fall. Bare Number().', parse: numOr(25) }),
   row({ name: 'CAPACITY_SCALE_MIN', source: 'option', exportForm: 'has_value', canonicalReader: 'poolEnergyBasis.ts:CAPACITY_SCALE_MIN', clamp: { min: 0.5, max: 1 },
-    doc: 'Lowest measured capacity scale applied to the panel\'s nameplate energies (runway, forecast, idle-pool check, secondary-panel runway); absent, blank or malformed reads as 0.8; clamped to 0.5..1.',
+    doc: 'Lowest measured capacity scale applied to the panel\'s nameplate energies (runway, forecast, idle-pool check, secondary-panel runway, the night-charge outage-cushion line); absent, blank or malformed reads as 0.8; clamped to 0.5..1.',
     parse: numClamped(0.8, 0.5, 1) }),
   row({ name: 'OPPORTUNISTIC_LOADS', source: 'option', exportForm: 'has_value', canonicalReader: 'limits.ts:parseOpportunisticLoads', structuredBy: 'limits.ts:parseOpportunisticLoads',
     doc: 'Curtailment suggestions, id:watts:category[:label] per entry (category pool|ev|water|hvac|other, else other); `none` = no suggestions; absent or no valid entry keeps the built-in list.',
