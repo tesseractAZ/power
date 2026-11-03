@@ -168,7 +168,8 @@ const MUTANTS = [
     id: 'C-xiv. ★★ a night that does not arm states a positive expected buy',
     file: NCA,
     find: '    : { buyKwh: 0, levelPct: null };',
-    to: '    : expectedBuyFromPlan({ setpointSocPct, costCeilingSocPct, forceChargeEligible: inputs.forceChargeEligible === true, startKwh: expectedStartKwh, deliverableKwh: expectedDeliverableKwh, fullKwh, legEff, window: { hours: horizon, fromMs: effChargeStartMs, windowEndMs: windowEnd, dischargeEff, chargeCapKw, envelopeKw } }); /* MUTANT */',
+    // v1.200.0 — the mutant passes the tick's pool too (expectedBuyFromPlan's required tickPoolKwh).
+    to: '    : expectedBuyFromPlan({ setpointSocPct, costCeilingSocPct, forceChargeEligible: inputs.forceChargeEligible === true, tickPoolKwh: fullKwh, startKwh: expectedStartKwh, deliverableKwh: expectedDeliverableKwh, fullKwh, legEff, window: { hours: horizon, fromMs: effChargeStartMs, windowEndMs: windowEnd, dischargeEff, chargeCapKw, envelopeKw } }); /* MUTANT */',
     why: 'A buy under the minimum arms nothing, yet the ledger and the sensor would say ~35 kWh is expected.',
   },
   {
