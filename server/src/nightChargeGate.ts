@@ -90,12 +90,19 @@ function maxYmd(a: string, b: string): string { return a >= b ? a : b; }
  *  plan_traj_floor_breached the sized trough against that line, buy_err_kwh its formula
  *  (the line moves the planned buy and the planner's own need together), cushion_breached
  *  the pool at the close against that line. A pool held at ⌈line⌉ reads at or above the
- *  line, EXCEPT where the line is above the 50% reserve envelope: the write is 50, and
- *  with no force-charge stop at or above the line the close can sit under it with no
- *  shortfall disclosed — a realized strike, as before v1.199.0 (13 charge plans of
- *  legacyIdentity's year on the nameplate line, 24 on the measured one at 0.944;
- *  measuredCushionLine.test.ts counts them). (v1.194.0 — the rule stated as practised; it read "bumped on
- *  ANY planner physics/algorithm change", which no change since v1.105.0 followed.)
+ *  line. v1.200.0 — so does a line above the 50% reserve envelope, which the 50% write cannot hold: such a
+ *  charge plan is CARRIED by the night force-charge, which runs to the window close in line mode
+ *  (cushion_line_force_charge_pct records its ask), or DISCLOSED (cushion_shortfall = 1 with
+ *  cushion_envelope_shortfall = 1: advisory mode, the backup leg, a line within 10 points of full), and a
+ *  disclosed row is exempt like any other. v1.200.0 also kept 3: no scored column's formula or sign
+ *  moved — buy_err_kwh (the buy is unchanged), plan_traj_floor_breached (the SIZED trough against the line,
+ *  never capped), cushion_breached (the close against the line), cushion_shortfall (still "the plan
+ *  disclosed it cannot hold its line", now with a second cause). A CARRIED night that closes under its
+ *  line — a run-time refusal (the ceiling refused, Charge Now already on, the grid unknown, vitals red),
+ *  an ON that never took, or a pack slower than the start was timed for — remains a STRIKE, fail-closed;
+ *  `lineForceChargeStrikes` counts them so they read apart from the planner's. (v1.194.0 — the rule stated
+ *  as practised; it read "bumped on ANY planner physics/algorithm change", which no change since v1.105.0
+ *  followed.)
  *
  *  v1.194.0 — what the charge leg does to `buy_err_kwh`. The column keeps its
  *  formula, −netMiss/legEff (plannerSizingNeedBuyKwh), which converts every kWh of
@@ -523,6 +530,10 @@ export function computeNightChargeReadiness(
   });
   const strikeWindowStart = siteYmd(nowMs - STRIKE_WINDOW_DAYS * DAY_MS);
   const windowStrikes = strikeRows.filter((r) => String(r.plan_date) >= strikeWindowStart);
+  /** v1.200.0 — in-window strikes on rows whose plan carried its line with the night force-charge
+   *  (cushion_line_force_charge_pct set): diagnostic, so a line night's miss reads apart. Already in
+   *  activeStrikes — never exempted. */
+  const lineForceChargeStrikes = windowStrikes.filter((r) => asNum(r.cushion_line_force_charge_pct) != null).length;
   /** v1.186.0 — in-window trajectory flags set aside as graded on the disclosure trough. */
   // v1.186.0 — a stored flag the sizing columns overrule is set aside too, and counted.
   const trajStrikesSetAside = currentAlgo.filter((r) =>
@@ -586,6 +597,7 @@ export function computeNightChargeReadiness(
     strikesMeasurable: currentAlgo.length > 0 && currentAlgo.some((r) => !truthy(r.cushion_shortfall)) ? 1 : 0,
     trajStrikesSetAside, // v1.186.0 — see the strike rule
     realizedStrikesSetAside, // v1.196.0 — see realizedCushionBreach
+    lineForceChargeStrikes, // v1.200.0 — see the strike rule
     buyBiasKwh: buyBiasKwh != null ? round(buyBiasKwh) : null,
     pvMae: pvMae != null ? round(pvMae) : null,
     pvBias: pvBias != null ? round(pvBias) : null,

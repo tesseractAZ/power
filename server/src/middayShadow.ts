@@ -36,7 +36,7 @@ import { saturationThresholdPct, meanChargeCeilingPct, surplusSpanEndMs } from '
 import {
   chargeIsWindowBound, chargeLevelPct, statedBuyKwh, type NightChargePlan, type WindowSpec, type MiddayReserveBasis,
 } from './nightChargeAdvisor.js';
-import { APPLY_LEAD_MS, clampReserveTarget, MAX_SPOKEN_ADVISORY_CHARS, revertDueMs, type NightChargeMode } from './nightChargeActuator.js';
+import { APPLY_LEAD_MS, clampReserveTarget, MAX_SPOKEN_ADVISORY_CHARS, RESERVE_WRITE_MAX_PCT, revertDueMs, type NightChargeMode } from './nightChargeActuator.js';
 import { eveningAnnouncement } from './chargeAnnounce.js';
 import { buildMiddayRefreshMessage, type MiddayAnnounceInput } from './chargeText.js';
 import type { NotifyMessage } from './notify.js';
@@ -301,6 +301,13 @@ export interface ShadowLegSummary {
    *  hold the cushion: what the evening's words say of it. Absent on a record from before R5. */
   toward?: boolean;
   cushionShortfall?: boolean;
+  /** v1.200.0 — the plan's cushionShortfallCause: the line is above the 50% reserve and no force-charge
+   *  carries it on this leg (the backup leg writes the reserve only). Absent where the envelope does not
+   *  contribute, and on a record from before v1.200.0. */
+  cushionShortfallCause?: 'envelope' | 'envelope+caps';
+  /** v1.200.0 — the outage line's ask the leg would carry to its close (the plan's forceChargeLine.askPct):
+   *  a mid-day cost leg in shadow. Absent otherwise. */
+  lineAskPct?: number;
   /** v1.196.0 — the gate that refused the leg's plan (plan.basisBlockedBy): on a refused plan that
    *  names one only. Absent on a complete leg, an unsized one and a record from before v1.196.0. */
   basisBlockedBy?: string;
@@ -411,6 +418,8 @@ export function summariseLeg(
     windowPvP50Kwh: fin(sized?.windowPvP50Kwh),
     windowLoadP50Kwh: fin(sized?.windowLoadP50Kwh),
     ...(p != null ? { toward: chargeIsWindowBound(p) === true, cushionShortfall: p.cushionShortfall === true } : {}),
+    ...(p?.cushionShortfallCause != null ? { cushionShortfallCause: p.cushionShortfallCause } : {}),
+    ...(p?.forceChargeLine != null ? { lineAskPct: p.forceChargeLine.askPct } : {}),
     ...(p != null && !p.basisComplete && typeof p.basisBlockedBy === 'string' && p.basisBlockedBy !== ''
       ? { basisBlockedBy: p.basisBlockedBy } : {}),
     heldImport: sized?.heldImport ?? null,
@@ -863,7 +872,10 @@ export function middayShadowLogLines(rec: MiddayShadowRecord): string[] {
   const b = rec.backup;
   if (b != null) {
     out.push(`${t} ${rec.day} backup ${at(b.windowStartMs)}→${at(b.windowEndMs)} — ${b.disposition}: reserve ${pct(b.reservePct)}, `
-      + `expected ${kwh(b.expectedBuyKwh)} (worst-case sizing ${kwh(b.buyKwh)}); the islanded walk it is sized on, to the next overnight open, troughs at ${pct(b.cushionTroughSocPct)} against the ${pct(b.cushionLineSocPct)} line.${heldImportText(b.heldImport)} Shadow only: nothing is armed, written or announced for it.`);
+      + `expected ${kwh(b.expectedBuyKwh)} (worst-case sizing ${kwh(b.buyKwh)}); troughs at ${pct(b.cushionTroughSocPct)} against the ${pct(b.cushionLineSocPct)} line (the islanded walk it is sized on, to the next overnight open)`
+      // v1.200.0 — the envelope, where it contributes: the line is above what a reserve write can hold.
+      + `${b.cushionShortfallCause != null ? `; the line is above the ${RESERVE_WRITE_MAX_PCT}% the panel accepts as a reserve, and the backup leg writes the reserve only — residual risk remains` : ''}.`
+      + `${heldImportText(b.heldImport)} Shadow only: nothing is armed, written or announced for it.`);
   }
   const bb = rec.backupB;
   if (bb != null) {
@@ -912,10 +924,12 @@ export function middayShadowAnnounceInput(rec: MiddayShadowRecord, model: Tariff
       toward: c.toward === true, forceCharge, charges: c.chargeTonight, basisComplete: c.basisComplete,
       basisBlockedBy: c.basisComplete ? null : (c.basisBlockedBy ?? null),
       cushionShortfall: c.cushionShortfall === true,
+      ...(c.cushionShortfallCause != null ? { cushionShortfallCause: c.cushionShortfallCause } : {}),
     },
     backup: backupNamed && b != null ? {
       windowStartMs: b.windowStartMs, windowEndMs: b.windowEndMs, reservePct: b.reservePct,
       expectedKwh: b.expectedBuyKwh, buyKwh: b.buyKwh, cushionShortfall: b.cushionShortfall === true,
+      ...(b.cushionShortfallCause != null ? { cushionShortfallCause: b.cushionShortfallCause } : {}),
     } : null,
     onPeak,
     refreshAtMs: c.windowStartMs - REFRESH_LEAD_MS,
@@ -1003,6 +1017,8 @@ const coerceLeg = (raw: unknown): ShadowLegSummary | null => {
     windowPvP50Kwh: fin(o.windowPvP50Kwh), windowLoadP50Kwh: fin(o.windowLoadP50Kwh),
     ...(typeof o.toward === 'boolean' ? { toward: o.toward } : {}),
     ...(typeof o.cushionShortfall === 'boolean' ? { cushionShortfall: o.cushionShortfall } : {}),
+    ...(o.cushionShortfallCause === 'envelope' || o.cushionShortfallCause === 'envelope+caps' ? { cushionShortfallCause: o.cushionShortfallCause } : {}),
+    ...(fin(o.lineAskPct) != null ? { lineAskPct: fin(o.lineAskPct)! } : {}),
     ...(typeof o.basisBlockedBy === 'string' && o.basisBlockedBy !== '' ? { basisBlockedBy: o.basisBlockedBy } : {}),
     ...('heldImport' in o ? { heldImport: coerceHeldImport(o.heldImport) } : {}),
   };

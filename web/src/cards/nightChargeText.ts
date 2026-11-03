@@ -208,6 +208,47 @@ export interface ChargeFigurePlan {
   pvBandWiden?: PvBandWidenText | null;
 }
 
+/** v1.200.0 — the plan fields the card's outage-cushion notes read (/api/night-charge/status → plan). */
+export interface CushionNotePlan {
+  cushionShortfall?: boolean;
+  /** The server's NightChargePlan.cushionShortfallCause: the 50% reserve envelope contributes. */
+  cushionShortfallCause?: 'envelope' | 'envelope+caps';
+  cushionLineSocPct?: number | null;
+  /** The outage line the night force-charge carries to the window close. */
+  forceChargeLine?: { askPct: number; linePct: number } | null;
+  /** 'line' when the expected walk ran the line force-charge (never on a cost-dominant night). */
+  expectedForceChargeMode?: 'line';
+  expectedWriteLevelPct?: number | null;
+  expectedForceChargeStartMs?: number | null;
+}
+
+/** v1.200.0 — the "charge/pool caps" row: only where the plan's SIZING fell short (the server's
+ *  cushionShortfall less an envelope-only cause), never on a plan whose only shortfall is the envelope. */
+export function capsShortfallShown(plan: CushionNotePlan): boolean {
+  return plan.cushionShortfall === true && plan.cushionShortfallCause !== 'envelope';
+}
+
+/**
+ * v1.200.0 — the outage line above the panel's 50% reserve, in one row: disclosed ("not held tonight"),
+ * or carried by the force-charge to the window close (line mode only, with the expected close — the
+ * level the charge figure names). null otherwise, a cost-dominant night included. `maxPct` is the
+ * panel's reserve maximum (status.reserveWriteMaxPct); 50 when unknown.
+ */
+export function outageLineRow(plan: CushionNotePlan, maxPct: number | null = null): string | null {
+  const r1 = (n: number): number => Math.round(n * 10) / 10;
+  const max = maxPct ?? 50;
+  if (plan.cushionShortfallCause != null) {
+    const l = plan.cushionLineSocPct;
+    return `outage line ${l != null && Number.isFinite(l) ? `${r1(l)}% ` : ''}is above the ${max}% the panel accepts as a reserve — not held tonight; residual risk remains`;
+  }
+  if (plan.expectedForceChargeMode === 'line' && plan.forceChargeLine != null) {
+    const lvl = plan.expectedWriteLevelPct;
+    const tail = lvl != null && Number.isFinite(lvl) && plan.expectedForceChargeStartMs != null ? `, ~${r1(lvl)}% expected at the close` : '';
+    return `outage line ${r1(plan.forceChargeLine.linePct)}% is above the ${max}% reserve — the panel's force-charge stays on to the window close${tail}`;
+  }
+  return null;
+}
+
 /** v1.198.0 — the server's PvBandWiden (nightChargeAdvisor.ts): how far a provisional plan's P10 PV
  *  was widened. */
 export interface PvBandWidenText {

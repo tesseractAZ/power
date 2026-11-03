@@ -738,7 +738,8 @@ test('★★ the escalation is audible, and its text no longer promises retries 
 test('★★★ every declined START says WHY — a reserve-only night is a decision, not a fault', () => {
   const why = (n: NightActuationState, o = opts()) => (decideForceCharge(n, MID, o) as { why?: string }).why ?? '';
   assert.match(why(verifiedNight({ forceChargeCeilingPct: 48 })), /48% target is at or below the 50% reserve — the reserve alone reaches it/);
-  assert.match(why(verifiedNight({ forceChargeCeilingPct: null })), /no economic ceiling was announced/);
+  // v1.200.0 (L8) — re-worded: the old text was false on a line night (a resilience night can force-charge).
+  assert.match(why(verifiedNight({ forceChargeCeilingPct: null })), /no force-charge target tonight \(no cost ceiling and no outage line above the 50% reserve\) — reserve-only night/);
   assert.match(why(verifiedNight(), opts({ enabled: false })), /^disabled/);
   assert.match(why(verifiedNight(), opts({ slotsOn: [2] })), /Charge Now is already ON for slot\(s\) 2 — that is the operator's/);
   assert.match(why(verifiedNight(), opts({ gridPresent: null })), /grid presence is unknown/);
@@ -757,7 +758,8 @@ test('★★ the "why not" line fires only while a night is LIVE, once per reaso
 });
 
 test('★★ the 21:30 ARMED line states tonight\'s force-charge decision up front', () => {
-  assert.ok(INDEX.includes('cancellable until the write moment. ${forceChargeArmNote(armedCandidate)}'));
+  // v1.200.0 — the note reads the plan too (a line night's expected start).
+  assert.ok(INDEX.includes('cancellable until the write moment. ${forceChargeArmNote(armedCandidate, plan)}'));
   const note = INDEX.slice(INDEX.indexOf('function forceChargeArmNote('), INDEX.indexOf('async function runForceChargeTick('));
   assert.ok(note.includes('which reaches it alone') && note.includes('ELIGIBLE — just in time'), 'both outcomes are named');
 });

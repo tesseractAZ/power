@@ -31,7 +31,7 @@
  *    and keeps its own protection throughout.
  * ═════════════════════════════════════════════════════════════════════════ */
 
-import { RESERVE_WRITE_MIN_PCT, RESERVE_WRITE_MAX_PCT, SHP2_SOURCE_SLOTS } from './hwSpec.js';
+import { RESERVE_WRITE_MIN_PCT, RESERVE_WRITE_MAX_PCT, SHP2_SOURCE_SLOTS, FORCE_CHARGE_CEILING_MIN_PCT, FORCE_CHARGE_CEILING_MAX_PCT } from './hwSpec.js';
 
 export type NightChargeMode = 'advisory' | 'supervised' | 'auto';
 
@@ -171,6 +171,11 @@ export function nightChargeSpokenNotice(o: {
   deadlineText: string;
   deadlineTextEs: string;
   cushionShortfall: boolean;
+  /** v1.200.0 — on a LINE night (the force-charge carries the pool above the panel's reserve to the
+   *  window close): the reserve the panel itself holds, RESERVE_WRITE_MAX_PCT. The notice then says so —
+   *  "The panel keeps only 50 percent in reserve." — on the plain charge shape only (neither the shortfall
+   *  clause nor "toward" is spoken), within MAX_SPOKEN_ADVISORY_CHARS. Absent ⇒ today's words. */
+  reserveOnlyPct?: number | null;
 }): { en: string; es: string } {
   // The shortfall clause stays on the audible path — it must never be quieter
   // about residual risk than the text channel — but as a clause, not a sentence,
@@ -197,16 +202,23 @@ export function nightChargeSpokenNotice(o: {
     : kwh < 1 ? ', menos de 1 kilovatio hora'
       : kwh === 1 ? ', alrededor de 1 kilovatio hora' : `, unos ${kwh} kilovatios hora`;
   const toward = o.toward === true;
-  return {
+  const words = (reserveEn: string, reserveEs: string) => ({
     en:
       `Night charge notice. Charging the backup pool ${toward ? 'toward' : 'to about'} ${level} percent${kwhEn}, `
       + `in the charge window that opens ${o.deadlineText}${toward ? ', which ends before it gets there' : ''}.`
-      + `${shortEn} Cancel on the Power panel before then.`,
+      + `${shortEn}${reserveEn} Cancel on the Power panel before then.`,
     es:
       `Aviso de carga nocturna. Se cargarán las baterías de respaldo ${toward ? 'rumbo al' : 'hasta cerca del'} ${level} por ciento`
       + `${kwhEs}, en la ventana de carga que comienza ${o.deadlineTextEs}${toward ? ' y termina antes de alcanzar ese nivel' : ''}.`
-      + `${shortEs} Cancele en el panel Power antes de esa hora.`,
-  };
+      + `${shortEs}${reserveEs} Cancele en el panel Power antes de esa hora.`,
+  });
+  // v1.200.0 — a line night: the panel's own reserve, said on the plain shape only, and only where it fits.
+  const r = o.reserveOnlyPct;
+  if (r != null && Number.isFinite(r) && !o.cushionShortfall && !toward) {
+    const withIt = words(` The panel keeps only ${Math.round(r)} percent in reserve.`, ` El panel solo mantiene el ${Math.round(r)} por ciento en reserva.`);
+    if (withIt.en.length + withIt.es.length <= MAX_SPOKEN_ADVISORY_CHARS) return withIt;
+  }
+  return words('', '');
 }
 
 /**
@@ -585,6 +597,22 @@ export interface NightActuationState {
    *  armed-to-ride night into "reserve only" beside a figure that counts the force-charge leg.
    *  Arming does not change what decideForceCharge does. null = a record armed before the stamp. */
   forceChargeRides: boolean | null;
+  /** v1.200.0 — STAMPED AT ARM TIME: the outage line's ask, ⌈L⌉ (NightChargePlan.forceChargeLine.askPct),
+   *  where the plan carried a line above the 50% reserve and the line force-charge was enabled at the arm
+   *  (lineForceChargeEnabled). A field of its own beside the cost ceiling (forceChargeCeilingPct, whose
+   *  meaning is unchanged): each tick composes the mode from both and the LIVE gates (forceChargeModeOf).
+   *  null = no line tonight, and every record armed before v1.200.0. */
+  forceChargeLineAskPct: number | null;
+  /** v1.200.0 — the line itself, L (texts and the morning summary); null with no ask. */
+  forceChargeLinePct: number | null;
+  /** v1.200.0 — the panel ceiling tonight's sync actually wrote (a line night's is ⌈L⌉ + 10 at least, not
+   *  desiredForceChargeCeilingPct of the cost ceiling): the ON verify's at-the-ceiling exemption and the
+   *  settings-drift own-write list read it. null until a sync, and on a record from before the field (the
+   *  readers then fall back to the value the sync always wrote there). */
+  forceChargeCeilingSyncedPct: number | null;
+  /** v1.200.0 — the mode the force-charge was switched ON in (forceChargeModeOf at the ON): 'cost' or
+   *  'line'. null = never ON, and every record from before v1.200.0. The ledger's force_charge_mode. */
+  forceChargeMode: 'cost' | 'line' | null;
   /** STAMPED AT ARM TIME: the start of the first on-peak period at or after the window open
    *  (chargeWindows.nextOnPeakStartMs). Raises stop, and the restore and force-charge OFF fall
    *  due, ON_PEAK_RAISE_GUARD_MS before it. null = no on-peak period ahead, or a record armed
@@ -656,6 +684,7 @@ export function emptyActuationState(): NightActuationState {
     forceChargeCeilingRestoredAtMs: null, forceChargeCeilingRestoreAttempts: 0,
     forceChargeCeilingRestoreLastAttemptMs: null,
     forceChargeRides: null,
+    forceChargeLineAskPct: null, forceChargeLinePct: null, forceChargeCeilingSyncedPct: null, forceChargeMode: null,
     nextOnPeakStartMs: null,
     foreignReservePct: null, foreignSeenAtMs: null, foreignSettledAtMs: null,
     revertDeadlinePagedAtMs: null, revertDeadlineOnPeakPagedAtMs: null,
@@ -742,6 +771,15 @@ export function coerceActuationState(raw: unknown): NightActuationState {
     forceChargeCeilingRestoreLastAttemptMs: num(o.forceChargeCeilingRestoreLastAttemptMs),
     // v1.187.22 — a record armed before the stamp has none: null, never a guess.
     forceChargeRides: typeof o.forceChargeRides === 'boolean' ? o.forceChargeRides : null,
+    // v1.200.0 — a finite ask is KEPT (never lowered: a corrupt value cannot shrink the line); only a
+    // non-number is dropped, which with the cost gate off is a 'disabled' OFF (fail-closed, a strike).
+    forceChargeLineAskPct: coerceLineAskPct(o.forceChargeLineAskPct),
+    forceChargeLinePct: num(o.forceChargeLinePct),
+    // A synced ceiling the panel cannot hold (outside 80-100) is no ceiling: it would exempt every slot.
+    forceChargeCeilingSyncedPct: num(o.forceChargeCeilingSyncedPct) != null
+      && (o.forceChargeCeilingSyncedPct as number) >= FORCE_CHARGE_CEILING_MIN_PCT && (o.forceChargeCeilingSyncedPct as number) <= FORCE_CHARGE_CEILING_MAX_PCT
+      ? o.forceChargeCeilingSyncedPct as number : null,
+    forceChargeMode: o.forceChargeMode === 'cost' || o.forceChargeMode === 'line' ? o.forceChargeMode : null,
     nextOnPeakStartMs: num(o.nextOnPeakStartMs),
     foreignReservePct: num(o.foreignReservePct),
     foreignSeenAtMs: num(o.foreignSeenAtMs),
@@ -760,6 +798,13 @@ export function coerceActuationState(raw: unknown): NightActuationState {
     restoreSummaryHeldAtMs: num(o.restoreSummaryHeldAtMs),
     lastError: str(o.lastError),
   };
+}
+
+/** v1.200.0 — a line ask as the record keeps it: a finite number, ceiled, in [RESERVE_WRITE_MAX_PCT + 1,
+ *  100] (raised, never lowered, below 51); anything else null. PURE. */
+export function coerceLineAskPct(v: unknown): number | null {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return null;
+  return Math.min(100, Math.max(RESERVE_WRITE_MAX_PCT + 1, Math.ceil(v - 1e-9)));
 }
 
 /** The plan fields the actuator needs at announce time. */
@@ -781,6 +826,9 @@ export interface ArmablePlan {
    *  far it gets. Still clamped to the write envelope below. */
   setpointSocPct: number | null;
   window: { startMs: number; endMs: number } | null;
+  /** v1.200.0 — the outage line above the 50% reserve this plan carries (NightChargePlan.forceChargeLine):
+   *  armFromPlan records its ask where the line force-charge is enabled. Absent/null ⇒ none. */
+  forceChargeLine?: { askPct: number; linePct: number } | null;
 }
 
 /** v1.187.22 — the force-charge ceiling armFromPlan records from a plan: its economic ceiling
@@ -820,6 +868,9 @@ export function armFromPlan(
   /** The start of the on-peak period after the window open (chargeWindows.nextOnPeakStartMs),
    *  stamped as `nextOnPeakStartMs`. Omitted ⇒ null: the window-only schedule. */
   nextOnPeakStartMs?: number | null,
+  /** v1.200.0 — the outage-line force-charge enabled at arm time (index.ts lineForceChargeOn(role)): the
+   *  plan's line ask is recorded only then. Omitted ⇒ no line, today's record. */
+  lineForceChargeEnabled?: boolean,
 ): NightActuationState | null {
   // Unresolved (armOpenItem, below — one definition, which the charge cycle's legResolved reads too):
   //  - applied and not restored — unless the reserve settled as someone else's (foreignSettledAtMs),
@@ -836,6 +887,10 @@ export function armFromPlan(
   if (plan.buyKwh == null || plan.buyKwh <= 0) return null;
   if (plan.window.endMs <= plan.window.startMs || plan.window.startMs <= nowMs - APPLY_LATE_MS) return null;
   const ceiling = armedForceChargeCeilingPct(plan);
+  // v1.200.0 — the line rides on its own gate, in its own field: never folded into the cost ceiling.
+  const lineAsk = lineForceChargeEnabled === true && plan.forceChargeLine != null ? coerceLineAskPct(plan.forceChargeLine.askPct) : null;
+  const lineRides = lineAsk != null;
+  const costRides = forceChargeEnabled === true && ceiling != null && ceiling > RESERVE_WRITE_MAX_PCT;
   return {
     ...emptyActuationState(),
     day,
@@ -847,8 +902,10 @@ export function armFromPlan(
     forceChargeCeilingPct: ceiling,
     // v1.187.22 — whether force-charge rides this night, as the evening push names it: enabled,
     // and the armed ceiling above the reserve maximum (at or below it the reserve reaches it alone).
-    forceChargeRides: forceChargeEnabled === undefined ? null
-      : forceChargeEnabled && ceiling != null && ceiling > RESERVE_WRITE_MAX_PCT,
+    // v1.200.0 — or the outage line rides it.
+    forceChargeRides: forceChargeEnabled === undefined ? (lineRides ? true : null) : costRides || lineRides,
+    forceChargeLineAskPct: lineAsk,
+    forceChargeLinePct: lineRides && Number.isFinite(plan.forceChargeLine!.linePct) ? plan.forceChargeLine!.linePct : null,
     nextOnPeakStartMs: nextOnPeakStartMs != null && Number.isFinite(nextOnPeakStartMs) ? nextOnPeakStartMs : null,
     // An unrestored original survives the fresh record, so tonight's restore still
     // returns the OWNER's ceiling, never a value we left behind.

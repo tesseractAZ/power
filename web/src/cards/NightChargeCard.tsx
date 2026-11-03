@@ -2,6 +2,7 @@ import { memo, useEffect, useState } from 'react';
 import {
   actuationBannerState, actuationBannerVisible, actuationKey, cancelOutcome, cancelRequestInit, chargeFigureParts, floorCushionLinePct, fmtLinePct,
   holdSummary, noChargeExpected, noPlanText, refusedArmLead, reserveWriteLabel, sizingLine, withConfirmedCancel, writeStands,
+  capsShortfallShown, outageLineRow,
   writtenReservePct, middayShadowView, type MiddayShadowStatus, type MiddayShadowPreviewStatus,
 } from './nightChargeText';
 import { apiUrl } from '../api';
@@ -54,6 +55,11 @@ interface NightChargePlan {
   requiredExtraKwh: number | null;
   bindingCap: 'requirement' | 'chargePower' | 'evContention' | 'poolHeadroom' | 'overBuy' | null;
   cushionShortfall: boolean;
+  /** v1.200.0 — the 50% reserve envelope's part in the shortfall, the line the force-charge carries, and
+   *  whether the expected walk ran it (nightChargeText.outageLineRow). Absent on older plans. */
+  cushionShortfallCause?: 'envelope' | 'envelope+caps';
+  forceChargeLine?: { askPct: number; linePct: number } | null;
+  expectedForceChargeMode?: 'line';
   /** v1.60.0 — EV-contention disclosure. `basis: 'unavailable'` means no EVSE
    *  prediction covered the window, so contention was NOT modelled — it is not
    *  a prediction of zero, and the card must not render it as reassurance. */
@@ -325,9 +331,16 @@ export const NightChargeCard = memo(function NightChargeCard() {
 
       {sizing && <div className="text-xs text-muted mb-3 -mt-2">{sizing}</div>}
 
-      {plan.cushionShortfall && (
+      {capsShortfallShown(plan) && (
         <div className="text-xs text-warn mb-3 -mt-1">
           charge/pool caps prevent fully meeting the cushion — residual risk remains
+        </div>
+      )}
+
+      {/* v1.200.0 — the outage line above the panel's 50% reserve: disclosed, or carried to the close. */}
+      {outageLineRow(plan, status.reserveWriteMaxPct ?? null) != null && (
+        <div className={`text-xs ${plan.cushionShortfallCause != null ? 'text-warn' : 'text-muted'} mb-3 -mt-1`}>
+          {outageLineRow(plan, status.reserveWriteMaxPct ?? null)}
         </div>
       )}
 
@@ -347,7 +360,7 @@ export const NightChargeCard = memo(function NightChargeCard() {
           .
         </div>
       )}
-      {!noChargeNight && plan.evContention?.basis === 'unavailable' && plan.cushionShortfall && (
+      {!noChargeNight && plan.evContention?.basis === 'unavailable' && capsShortfallShown(plan) && (
         <div className="text-xs text-muted mb-3 -mt-1">
           no EVSE prediction covers this window — EV contention is not modelled; if the car charges
           overnight the packs will receive less than planned

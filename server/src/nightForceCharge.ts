@@ -76,6 +76,32 @@
  * just-in-time start shrinks the nightly exposure from ~6 h to ~1 h; v1.168.0's coast
  * lengthens it again for 80+ targets (a Thursday: ~4-6 h). Neither settles the question. Settle it with one attended test: Charge Now ON for one slot, open the
  * main breaker, confirm the backed-up loads stay up and the pack discharges.
+ * ★★★ v1.200.0 — THE LINE NIGHT LENGTHENS THE EXPOSURE, AND REACHES PLANTS THAT NEVER HAD IT. On a night
+ * whose outage-cushion line is above the 50% reserve (forceChargeModeOf 'line'), Charge Now is ON from its
+ * timed start to the window close, in supervised or auto mode, whatever ARB_OBJECTIVE says: a resilience-
+ * objective plant gets Charge Now for the first time. Emulated over the year's line shapes the ON lasts
+ * 75 min on average (169 min for lines of 70-90%). The off switches: NIGHT_CHARGE_MODE advisory, the
+ * per-night cancel, or a cushion whose line is at or under 50%. The attended test above is recommended
+ * before a resilience plant runs line nights.
+ *
+ * ★★★ v1.200.0 — THE OUTAGE LINE ABOVE THE RESERVE ENVELOPE (forceChargeModeOf). A charge plan whose
+ * islanded-outage line, asked to the whole percent above it (⌈L⌉), is above the 50% the panel accepts as a
+ * reserve carries that ask (NightChargePlan.forceChargeLine); the armed record keeps it in its own field
+ * (forceChargeLineAskPct) beside the cost ceiling (forceChargeCeilingPct, unchanged in meaning). Each tick
+ * composes the mode from the LIVE gates — the cost force-charge (forceChargeEnabled) and the line
+ * (lineForceChargeEnabled: any write mode) — never from one stored target:
+ *  - 'cost' — today's force-charge exactly: no line, or a cost stop already at ⌈L⌉ + 2H or above;
+ *  - 'line' — the start is timed to reach max(target, ⌈L⌉ + H) at the close − FORCE_CHARGE_MIN_RUN_MS
+ *    (forceChargeLineStartAtMs), so even a one-point lift starts outside the dead zone; there is NO
+ *    software stop — it runs to the window close (or the on-peak guard, grid loss, the gates off, max
+ *    run); the panel ceiling is desiredForceChargeCeilingPct(max(target, ⌈L⌉ + 2H)). While Charge Now is ON
+ *    under that ceiling the house and an EV ride the grid, so a load that starts after the start cannot
+ *    draw the pool under the line (lineForceChargeClose.test.ts: 0 nights under on the year's shapes).
+ *    Design A's drain-aware hold (a stop at ⌈L⌉ plus the drain to the close) closed under the line on
+ *    197 of 200 nights with a 7 kW EV plugging in 30 minutes before the close; the price of running to
+ *    the close is the overshoot (~⌈L⌉ + 13 on average, emulated) — overnight energy stored, not lost.
+ * The measured capacity scale never reaches this module: the record carries one whole percent (⌈L⌉), a
+ * plan output like the setpoint (runwayBasisContracts.test.ts pin 6).
  *
  * ★★★ SAFETY RAILS (each pinned by nightForceCharge.test.ts + the committed harness):
  *  - ON only rides a night whose reserve write was applied AND readback-verified, so
@@ -268,8 +294,12 @@ export type ForceChargeOffReason =
   | 'foreign';
 
 export interface ForceChargeOpts {
-  /** Feature gate — see forceChargeEnabled. Gates ONLY the start. */
+  /** Feature gate — see forceChargeEnabled. Gates ONLY the start. v1.200.0 — the COST force-charge's
+   *  gate; the line's is `lineEnabled`, and the mode is composed from both every tick (forceChargeModeOf). */
   enabled: boolean;
+  /** v1.200.0 — the outage-line force-charge's gate (lineForceChargeEnabled: a write mode; never the
+   *  backup leg), read LIVE each tick. Absent ⇒ false: a record with a line ask rides the cost gate alone. */
+  lineEnabled?: boolean;
   /** Live grid presence (null = unknown). ON needs true; OFF fires on false. */
   gridPresent: boolean | null;
   /** SHP2 `gridSta` read directly: connected is `=== 1` ONLY (2 is islanded/EPS, 0 is
@@ -372,6 +402,120 @@ export function desiredForceChargeCeilingPct(costMaxSocPct: number): number {
     Math.max(FORCE_CHARGE_CEILING_MIN_PCT, Math.round(costMaxSocPct)));
 }
 
+/** v1.200.0 — H, the headroom of the outage-line force-charge: its start is timed to ⌈L⌉ + H at the close
+ *  less FORCE_CHARGE_MIN_RUN_MS, and its panel ceiling is at least ⌈L⌉ + 2H. A line rides only where
+ *  ⌈L⌉ + 2H ≤ 100 (nightChargeAdvisor.ts discloses the rest). */
+export const FORCE_CHARGE_LINE_HEADROOM_PCT = 5;
+
+/**
+ * v1.200.0 — the outage-line force-charge's gate: any write mode (supervised or auto). Not the cost
+ * objective, not ARB_COST_MAX_SOC_PCT: those gate the COST force-charge only (forceChargeEnabled). The
+ * off switches are NIGHT_CHARGE_MODE advisory and the per-night cancel. A backup leg never rides it
+ * (chargeWindows.legForceChargeEligible). PURE.
+ */
+export function lineForceChargeEnabled(i: { mode: 'advisory' | 'supervised' | 'auto' }): boolean {
+  return i.mode !== 'advisory';
+}
+
+/** v1.200.0 — the two force-charge gates as they read NOW (index.ts forceChargeOn / lineForceChargeOn). */
+export interface ForceChargeGates { cost: boolean; line: boolean }
+
+/** v1.200.0 — the force-charge a tick runs (forceChargeModeOf). */
+export type ForceChargeMode =
+  | { kind: 'cost'; targetPct: number; panelCeilingPct: number }
+  | { kind: 'line'; targetPct: number; askPct: number; startTargetPct: number; panelCeilingPct: number };
+
+/**
+ * v1.200.0 — PURE. The force-charge a record rides under the LIVE gates:
+ *  - the cost force-charge rides when its gate is on and its ceiling is above the reserve maximum;
+ *  - the line rides when its gate is on and the record carries a line ask;
+ *  - LINE mode, unless the cost stop already reaches ⌈L⌉ + 2H: the target is max(cost, ⌈L⌉) (the ask
+ *    alone with the cost gate off — never the cost ceiling), the start is timed to max(target, ⌈L⌉ + H),
+ *    and the panel ceiling is desiredForceChargeCeilingPct(max(target, ⌈L⌉ + 2H));
+ *  - else COST mode: today's force-charge exactly;
+ *  - null: neither rides.
+ * One stored target for both would let a cost ceiling outlive its own kill switch, and lower the
+ * night's target below today's on a restart with the option changed (critique A R4).
+ */
+export function forceChargeModeOf(
+  s: Pick<NightActuationState, 'forceChargeCeilingPct' | 'forceChargeLineAskPct'>,
+  gates: ForceChargeGates,
+): ForceChargeMode | null {
+  const c = s.forceChargeCeilingPct;
+  const costOk = gates.cost && c != null && Number.isFinite(c) && c > RESERVE_WRITE_MAX_PCT;
+  const ask = s.forceChargeLineAskPct;
+  const lineOk = gates.line && ask != null && Number.isFinite(ask) && ask > RESERVE_WRITE_MAX_PCT;
+  const H = FORCE_CHARGE_LINE_HEADROOM_PCT;
+  if (lineOk && !(costOk && forceChargeStopPct(c!) >= ask! + 2 * H)) {
+    const t = costOk ? Math.max(c!, ask!) : ask!;
+    return {
+      kind: 'line', targetPct: t, askPct: ask!, startTargetPct: Math.max(t, ask! + H),
+      panelCeilingPct: desiredForceChargeCeilingPct(Math.max(t, ask! + 2 * H)),
+    };
+  }
+  if (costOk) return { kind: 'cost', targetPct: c!, panelCeilingPct: desiredForceChargeCeilingPct(c!) };
+  return null;
+}
+
+/** v1.200.0 — PURE. Whether either force-charge may ride the record at all under these gates: the cost
+ *  gate (today's `enabled`), or the line gate on a record with a line ask. A record with no ask reads
+ *  exactly today's `enabled` (I-A2). */
+function anyForceChargeGate(s: Pick<NightActuationState, 'forceChargeLineAskPct'>, gates: ForceChargeGates): boolean {
+  return gates.cost || (gates.line && s.forceChargeLineAskPct != null && Number.isFinite(s.forceChargeLineAskPct));
+}
+
+/** v1.200.0 — the gates a tick's opts carry. */
+function gatesOf(o: Pick<ForceChargeOpts, 'enabled' | 'lineEnabled'>): ForceChargeGates {
+  return { cost: o.enabled, line: o.lineEnabled === true };
+}
+
+/**
+ * v1.200.0 — PURE. When the LINE force-charge should switch on: timed to reach `startTargetPct` at
+ * FORCE_CHARGE_MIN_RUN_MS before the window end (forceChargeStartAtMs counted back from there), so a lift
+ * of a single point still starts outside the "not worth starting" dead zone, and the pool is at the
+ * start target before the close with the last twenty minutes still ON.
+ */
+export function forceChargeLineStartAtMs(
+  writeEndMs: number, startTargetPct: number, poolSocPct: number, tickPoolKwh: number,
+  rateKw?: number | null, evDisplacedKwh?: number | null, slotCount?: number | null,
+): number {
+  return forceChargeStartAtMs(writeEndMs - FORCE_CHARGE_MIN_RUN_MS, startTargetPct, poolSocPct, tickPoolKwh, rateKw, evDisplacedKwh, slotCount);
+}
+
+/** v1.200.0 — the "why not" of a start declined by something other than the pool or the clock: the ceiling
+ *  refused, Charge Now already on, the grid unknown or absent, vitals red, no slot readback, an incoherent
+ *  SoC. On a line night the first of these pushes (index.ts, buildLineForceChargeDeclinedStart). */
+export const FORCE_CHARGE_BLOCKER_WHY = Object.freeze({
+  vitals: 'host vitals are critical — no new device writes',
+  incoherent: 'the pool SoC reading is incoherent',
+  gridSta: 'the panel reports the grid is not connected (gridSta ≠ 1)',
+  gridPresence: 'grid presence is ',
+  noReadback: 'no live slot readback from the panel',
+  alreadyOn: 'Charge Now is already ON for slot(s) ',
+  ceilingRefused: 'the panel would not take the ',
+});
+
+/** v1.200.0 — PURE. Is a declined start's `why` one of FORCE_CHARGE_BLOCKER_WHY's (never the clock or the pool)? */
+export function isForceChargeStartBlocker(why: string | null | undefined): boolean {
+  if (typeof why !== 'string') return false;
+  return Object.values(FORCE_CHARGE_BLOCKER_WHY).some((w) => why.startsWith(w));
+}
+
+/** v1.200.0 — the 21:30 ARMED line's force-charge sentence on a LINE night. PURE. */
+export function forceChargeLineArmNote(o: {
+  linePct: number; startTargetPct: number; panelCeilingPct: number;
+  /** The plan's expected start (expectedForceChargeStartMs), as clock text; null ⇒ "just in time". */
+  expectedStartText: string | null;
+  /** The close less FORCE_CHARGE_MIN_RUN_MS, as clock text. */
+  timedByText: string;
+}): string {
+  const from = o.expectedStartText != null ? `on from ~${o.expectedStartText}` : 'on just in time';
+  return `Force-charge: LINE — tonight's ${round1(o.linePct)}% outage line is above the ${RESERVE_WRITE_MAX_PCT}% reserve: `
+    + `${from} (timed to ${round1(o.startTargetPct)}% by ${o.timedByText}) to the window close; panel ceiling ${o.panelCeilingPct}% as backstop.`;
+}
+
+function round1(n: number): number { return Math.round(n * 10) / 10; }
+
 /** True while a force-charge of ours is on, or its OFF has not yet verified. */
 export function forceChargeInFlight(s: NightActuationState): boolean {
   return s.forceChargeOnAtMs != null && s.forceChargeOffVerifiedAtMs == null;
@@ -390,13 +534,23 @@ export function forceChargeCommandsOf(s: NightActuationState): ForceChargeComman
   const onSlots = s.forceChargeOnAtMs == null ? null
     : (s.forceChargeSlots != null && s.forceChargeSlots.length > 0 ? [...s.forceChargeSlots] : [...ALL_SOURCE_SLOTS]);
   const ceilingPcts: number[] = [];
-  if (s.forceChargeCeilingAttemptedAtMs != null && s.forceChargeCeilingPct != null && Number.isFinite(s.forceChargeCeilingPct)) {
-    ceilingPcts.push(desiredForceChargeCeilingPct(s.forceChargeCeilingPct));
-  }
+  // v1.200.0 — the value the sync actually wrote (forceChargeCeilingSyncedPct: a line night's is
+  // ⌈L⌉ + 2H, not the cost ceiling's); a record from before the field, the value the sync always wrote.
+  const synced = syncedCeilingPct(s);
+  if (s.forceChargeCeilingAttemptedAtMs != null && synced != null) ceilingPcts.push(synced);
   if (s.forceChargeCeilingRestoreLastAttemptMs != null && s.forceChargeCeilingPriorPct != null) {
     ceilingPcts.push(s.forceChargeCeilingPriorPct);
   }
   return { onSlots, offIssued: s.forceChargeOffAtMs != null, ceilingPcts };
+}
+
+/** v1.200.0 — the panel ceiling tonight's sync wrote: the stamped value (forceChargeCeilingSyncedPct), or —
+ *  on a record from before the field — desiredForceChargeCeilingPct of the cost ceiling, the value the
+ *  sync always wrote there. null when neither is known. PURE. */
+function syncedCeilingPct(s: Pick<NightActuationState, 'forceChargeCeilingSyncedPct' | 'forceChargeCeilingPct'>): number | null {
+  const v = s.forceChargeCeilingSyncedPct;
+  if (v != null && Number.isFinite(v)) return v;
+  return s.forceChargeCeilingPct != null && Number.isFinite(s.forceChargeCeilingPct) ? desiredForceChargeCeilingPct(s.forceChargeCeilingPct) : null;
 }
 
 /**
@@ -474,12 +628,21 @@ export function forceChargeStopPct(targetPct: number): number {
  * alone reaches it). null with no setpoint.
  */
 export function armedWriteLevelPct(
-  plan: { setpointSocPct: number | null; costCeilingSocPct?: number | null },
-  eligible: boolean,
+  plan: { setpointSocPct: number | null; costCeilingSocPct?: number | null; forceChargeLine?: { askPct: number } | null },
+  /** The cost gate (forceChargeEnabled) — or, v1.200.0, both gates (ForceChargeGates). */
+  eligible: boolean | ForceChargeGates,
 ): number | null {
   if (plan.setpointSocPct == null || !Number.isFinite(plan.setpointSocPct)) return null;
   const reservePct = clampReserveTarget(plan.setpointSocPct);
-  const ceiling = eligible ? armedForceChargeCeilingPct(plan) : null;
+  const gates: ForceChargeGates = typeof eligible === 'boolean' ? { cost: eligible, line: false } : eligible;
+  // v1.200.0 — a LINE night has no software stop: the level its start is timed to (max(target, ⌈L⌉ + H)).
+  // The expected close is the walk's (nightChargeAdvisor.expectedBuyFromPlan); this is its floor.
+  const lineAsk = gates.line && plan.forceChargeLine != null ? plan.forceChargeLine.askPct : null;
+  if (lineAsk != null) {
+    const mode = forceChargeModeOf({ forceChargeCeilingPct: armedForceChargeCeilingPct(plan), forceChargeLineAskPct: lineAsk }, gates);
+    if (mode?.kind === 'line') return Math.max(reservePct, mode.startTargetPct);
+  }
+  const ceiling = gates.cost ? armedForceChargeCeilingPct(plan) : null;
   if (ceiling == null || ceiling <= RESERVE_WRITE_MAX_PCT) return reservePct;
   return Math.max(reservePct, forceChargeStopPct(ceiling));
 }
@@ -489,9 +652,14 @@ export function armedWriteLevelPct(
  *  (forceChargeEnabled) — the evening push's own condition; null = reserve only. Whether it ever
  *  ran is the actuation record's (forceChargeNightOutcome), not this. */
 export function armedForceChargeStopPct(
-  s: Pick<NightActuationState, 'forceChargeCeilingPct'>,
-  enabled: boolean,
+  s: Pick<NightActuationState, 'forceChargeCeilingPct'> & Partial<Pick<NightActuationState, 'forceChargeLineAskPct'>>,
+  /** The cost gate — or, v1.200.0, both gates: a LINE night has no software stop (null). */
+  enabled: boolean | ForceChargeGates,
 ): number | null {
+  if (typeof enabled !== 'boolean') {
+    const mode = forceChargeModeOf({ forceChargeCeilingPct: s.forceChargeCeilingPct, forceChargeLineAskPct: s.forceChargeLineAskPct ?? null }, enabled);
+    return mode?.kind === 'cost' ? forceChargeStopPct(mode.targetPct) : null;
+  }
   const c = s.forceChargeCeilingPct;
   return enabled && c != null && Number.isFinite(c) && c > RESERVE_WRITE_MAX_PCT ? forceChargeStopPct(c) : null;
 }
@@ -521,28 +689,47 @@ export function armedForceChargeStopPct(
  * when no armed ceiling sat above the reserve maximum (no leg was possible), else null (unknown).
  * The morning push names the figure only beside an account of the same legs. PURE.
  */
+/** v1.200.0 — on a LINE night (forceChargeModeOf 'line'): the outage line it ran for (no software stop,
+ *  so `stopPct` is null). Absent on every other night, whose outcome is unchanged. */
+export interface ForceChargeOutcomeLine { askPct: number; linePct: number }
+
 export type ForceChargeNightOutcome =
   | { kind: 'none'; expectedLeg: boolean | null }
-  | { kind: 'neverStarted' | 'ran' | 'unconfirmed'; stopPct: number | null; expectedLeg: boolean | null }
-  | { kind: 'failed'; stopPct: number | null; expectedLeg: boolean | null; partialSlots: number[] | null };
+  | { kind: 'neverStarted' | 'ran' | 'unconfirmed'; stopPct: number | null; expectedLeg: boolean | null; line?: ForceChargeOutcomeLine }
+  | { kind: 'failed'; stopPct: number | null; expectedLeg: boolean | null; partialSlots: number[] | null; line?: ForceChargeOutcomeLine };
 
 export function forceChargeNightOutcome(
   s: Pick<NightActuationState,
     | 'forceChargeCeilingPct' | 'forceChargeOnAtMs' | 'forceChargeOnVerifiedAtMs' | 'forceChargeOnFailedAtMs'
-    | 'forceChargeRides' | 'forceChargeSlots' | 'forceChargeOnFailedSlots'>,
-  /** Force-charge enabled NOW: read only for a record armed before the stamp. */
-  enabled: boolean,
+    | 'forceChargeRides' | 'forceChargeSlots' | 'forceChargeOnFailedSlots'>
+    & Partial<Pick<NightActuationState, 'forceChargeLineAskPct' | 'forceChargeLinePct' | 'forceChargeMode'>>,
+  /** Force-charge enabled NOW: read only for a record armed before the stamp. v1.200.0 — or both gates
+   *  now (ForceChargeGates), which also say whether a night that never started was a line night. */
+  enabled: boolean | ForceChargeGates,
 ): ForceChargeNightOutcome {
+  const gates: ForceChargeGates = typeof enabled === 'boolean' ? { cost: enabled, line: false } : enabled;
   const c = s.forceChargeCeilingPct;
   const above = c != null && Number.isFinite(c) && c > RESERVE_WRITE_MAX_PCT;
   const expectedLeg = s.forceChargeRides ?? (above ? null : false);
   const on = forceChargeOnReadbackStatus(s);
+  // v1.200.0 — a LINE night: the mode stamped at its ON, or (never started) the mode it rode the night in.
+  const ask = s.forceChargeLineAskPct;
+  const line: ForceChargeOutcomeLine | null = ask != null && Number.isFinite(ask)
+    ? { askPct: ask, linePct: s.forceChargeLinePct != null && Number.isFinite(s.forceChargeLinePct) ? s.forceChargeLinePct : ask } : null;
+  if (on != null && line != null && s.forceChargeMode === 'line') {
+    if (on === 'failed') return { kind: 'failed', stopPct: null, expectedLeg, partialSlots: partialForceChargeOnFailureSlots(s), line };
+    return { kind: on === 'verified' ? 'ran' : 'unconfirmed', stopPct: null, expectedLeg, line };
+  }
+  if (on == null && line != null && (s.forceChargeRides ?? (gates.cost || gates.line))
+    && forceChargeModeOf({ forceChargeCeilingPct: c, forceChargeLineAskPct: ask! }, { cost: gates.cost, line: true })?.kind === 'line') {
+    return { kind: 'neverStarted', stopPct: null, expectedLeg, line };
+  }
   if (on != null) {
     const stopPct = armedForceChargeStopPct(s, true);
     if (on === 'failed') return { kind: 'failed', stopPct, expectedLeg, partialSlots: partialForceChargeOnFailureSlots(s) };
     return { kind: on === 'verified' ? 'ran' : 'unconfirmed', stopPct, expectedLeg };
   }
-  const armedStop = armedForceChargeStopPct(s, s.forceChargeRides ?? enabled);
+  const armedStop = armedForceChargeStopPct(s, s.forceChargeRides ?? gates.cost);
   return armedStop == null ? { kind: 'none', expectedLeg } : { kind: 'neverStarted', stopPct: armedStop, expectedLeg };
 }
 
@@ -717,13 +904,19 @@ function offReason(s: NightActuationState, nowMs: number, o: ForceChargeOpts): F
   if (s.windowEndMs == null || nowMs >= s.windowEndMs) return 'windowEnd';
   if (nowMs >= writeWindowEndMs(s)!) return 'onPeakGuard';
   if (o.gridPresent === false || o.gridStaLost) return 'gridLoss';
-  if (!o.enabled) return 'disabled';
+  // v1.200.0 — off when neither force-charge may ride the record under the LIVE gates (today: the cost
+  // gate; a record with a line ask also rides its line gate). A non-number ask was coerced away, so with
+  // the cost gate off that record stops here (fail-closed; the night strikes).
+  const gates = gatesOf(o);
+  if (!anyForceChargeGate(s, gates)) return 'disabled';
   if (s.forceChargeOnAtMs != null && nowMs - s.forceChargeOnAtMs >= forceChargeRunCapMs(o)) return 'maxRun';
   // v1.167.0 — stop once the desired percentage is reached. A stale or
   // incoherent SoC never ends it early; the window end and the panel's ceiling still do.
   // v1.170.0 — at EVERY target again (the 80+ coast is retired), against forceChargeStopPct.
+  // v1.200.0 — never in LINE mode: it runs to the window close (no software stop).
   if (
-    o.poolSocPct != null && s.forceChargeCeilingPct != null
+    forceChargeModeOf(s, gates)?.kind !== 'line'
+    && o.poolSocPct != null && s.forceChargeCeilingPct != null
     && o.poolSocPct >= forceChargeStopPct(s.forceChargeCeilingPct)
   ) return 'target';
   return null;
@@ -733,8 +926,8 @@ function offReason(s: NightActuationState, nowMs: number, o: ForceChargeOpts): F
  *  itself: tonight's synced ceiling, or the live readback when that is LOWER (a ceiling
  *  lowered in the app mid-night stops a Core sooner). Null when neither is known. */
 function panelStopCeilingPct(s: NightActuationState, o: ForceChargeOpts): number | null {
-  const synced = s.forceChargeCeilingPct != null && Number.isFinite(s.forceChargeCeilingPct)
-    ? desiredForceChargeCeilingPct(s.forceChargeCeilingPct) : null;
+  // v1.200.0 — the ceiling the sync wrote (a line night's ⌈L⌉ + 2H), not the cost ceiling's.
+  const synced = syncedCeilingPct(s);
   // v1.186.0 — a readback outside the panel's documented [80, 100] range (a reconnect 0, a
   // stray low value) is not a ceiling: it would exempt every slot and stamp a false ON
   // VERIFIED. Such a reading is ignored and the synced ceiling stands.
@@ -900,17 +1093,26 @@ export function decideForceCharge(s: NightActuationState, nowMs: number, o: Forc
 
   // ── 4. ON. At most once per night, and only riding a VERIFIED reserve write. ──
   if (s.forceChargeOnAtMs != null) return { kind: 'none' };
-  if (!o.enabled) return { kind: 'none', why: 'disabled (NIGHT_CHARGE_MODE advisory, ARB_OBJECTIVE not cost, or ARB_COST_MAX_SOC_PCT at or below the 50% reserve)' };
+  // v1.200.0 — the mode from the LIVE gates (forceChargeModeOf): the cost force-charge, the outage line,
+  // or neither. A record with no line ask reads exactly today's gate and target.
+  const gates = gatesOf(o);
+  if (!anyForceChargeGate(s, gates)) {
+    return { kind: 'none', why: `disabled (NIGHT_CHARGE_MODE advisory; or, with no outage line above the reserve tonight, ARB_OBJECTIVE not cost or ARB_COST_MAX_SOC_PCT at or below the ${RESERVE_WRITE_MAX_PCT}% reserve)` };
+  }
   // v1.167.0 — the target is the announced plan's economic ceiling. Anything above the
   // reserve is reachable: the software stop ends it at the target, whatever the panel's
   // 80% force-charge minimum. At or below the reserve there is nothing to add.
-  const target = s.forceChargeCeilingPct;
-  if (target == null || !Number.isFinite(target)) {
-    return { kind: 'none', why: 'no economic ceiling was announced for this night (resilience mode, or armed before v1.165.0) — reserve-only night' };
+  // v1.200.0 — or, on a line night, max(that ceiling where it rides, ⌈L⌉). Above the reserve maximum or
+  // nothing: forceChargeModeOf rides neither a cost ceiling nor a line ask at or below it.
+  const mode = forceChargeModeOf(s, gates);
+  if (mode == null) {
+    const c = s.forceChargeCeilingPct;
+    if (c == null || !Number.isFinite(c)) {
+      return { kind: 'none', why: `no force-charge target tonight (no cost ceiling and no outage line above the ${RESERVE_WRITE_MAX_PCT}% reserve) — reserve-only night` };
+    }
+    return { kind: 'none', why: `tonight's ${c}% target is at or below the ${RESERVE_WRITE_MAX_PCT}% reserve — the reserve alone reaches it` };
   }
-  if (target <= RESERVE_WRITE_MAX_PCT) {
-    return { kind: 'none', why: `tonight's ${target}% target is at or below the ${RESERVE_WRITE_MAX_PCT}% reserve — the reserve alone reaches it` };
-  }
+  const target = mode.targetPct;
   if (s.appliedAtMs == null || s.applyVerifiedAtMs == null) return { kind: 'none', why: 'waiting for the reserve write to be verified by readback' };
   if (s.cancelled || s.revertedAtMs != null) return { kind: 'none', why: s.cancelled ? 'the night was cancelled' : 'the reserve has already been reverted' };
   if (s.foreignSettledAtMs != null) return { kind: 'none', why: 'the reserve was set outside the add-on — the night\'s write no longer holds it' };
@@ -924,19 +1126,21 @@ export function decideForceCharge(s: NightActuationState, nowMs: number, o: Forc
       ? `under ${Math.round(FORCE_CHARGE_MIN_RUN_MS / 60_000)} min left before the on-peak guard (an hour before on-peak) — not worth starting`
       : `under ${Math.round(FORCE_CHARGE_MIN_RUN_MS / 60_000)} min of window left — not worth starting` };
   }
-  if (o.vitalsRed) return { kind: 'none', why: 'host vitals are critical — no new device writes' };
-  if (!o.socCoherent) return { kind: 'none', why: 'the pool SoC reading is incoherent' };
+  const W = FORCE_CHARGE_BLOCKER_WHY;
+  if (o.vitalsRed) return { kind: 'none', why: W.vitals };
+  if (!o.socCoherent) return { kind: 'none', why: W.incoherent };
   if (o.gridPresent !== true || o.gridStaLost) { // unknown grid never starts a grid charge
-    return { kind: 'none', why: o.gridStaLost ? 'the panel reports the grid is not connected (gridSta ≠ 1)' : `grid presence is ${o.gridPresent === false ? 'ABSENT' : 'unknown'}` };
+    return { kind: 'none', why: o.gridStaLost ? W.gridSta : `${W.gridPresence}${o.gridPresent === false ? 'ABSENT' : 'unknown'}` };
   }
-  if (o.slotsOn == null) return { kind: 'none', why: 'no live slot readback from the panel' }; // need a live readback to start
-  if (o.slotsOn.length > 0) return { kind: 'none', why: `Charge Now is already ON for slot(s) ${o.slotsOn.join(', ')} — that is the operator's, never taken over` }; // someone else's Charge Now — never take ownership
+  if (o.slotsOn == null) return { kind: 'none', why: W.noReadback }; // need a live readback to start
+  if (o.slotsOn.length > 0) return { kind: 'none', why: `${W.alreadyOn}${o.slotsOn.join(', ')} — that is the operator's, never taken over` }; // someone else's Charge Now — never take ownership
   const slots = o.connectedSlots.filter((n) => Number.isInteger(n) && n >= 1 && n <= SHP2_SOURCE_SLOTS);
   if (slots.length === 0) return { kind: 'none', why: 'no battery slots are connected' };
   // The panel must READ its backstop ceiling before ON. Issuing ON in the same tick as an
   // unverified ceiling write leaves a failed software stop to fill to whatever the panel
   // holds (100 live) — past the owner's ceiling and past the solar headroom.
-  const desired = desiredForceChargeCeilingPct(target);
+  // v1.200.0 — the mode's: the cost ceiling's (today), or a line night's ⌈L⌉ + 2H at least.
+  const desired = mode.panelCeilingPct;
   if (o.ceilingReadbackPct == null) return { kind: 'none', why: 'no live readback of the panel\'s force-charge ceiling' };
   if (o.ceilingReadbackPct !== desired) {
     // The first capture of the panel's own value is kept (and carried across nights
@@ -945,12 +1149,24 @@ export function decideForceCharge(s: NightActuationState, nowMs: number, o: Forc
     if (s.forceChargeCeilingAttemptedAtMs == null) return { kind: 'syncCeiling', pct: desired, prior };
     if (nowMs - s.forceChargeCeilingAttemptedAtMs < FORCE_CHARGE_CEILING_VERIFY_AFTER_MS) return { kind: 'none', why: `waiting for the panel's ceiling to read ${desired}% (reads ${o.ceilingReadbackPct}%)` };
     if (s.forceChargeCeilingSyncRetries < FORCE_CHARGE_CEILING_SYNC_RETRIES) return { kind: 'syncCeiling', pct: desired, prior };
-    return { kind: 'none', why: `the panel would not take the ${desired}% ceiling (still reads ${o.ceilingReadbackPct}%) — reserve-only tonight rather than overfill` };
+    return { kind: 'none', why: `${W.ceilingRefused}${desired}% ceiling (still reads ${o.ceilingReadbackPct}%) — reserve-only tonight rather than overfill` };
   }
   // v1.167.0 — JUST IN TIME. The ceiling above is synced the moment the night is live,
   // hours before this, so its readback never delays the start.
   if (o.poolSocPct == null || o.fullKwh == null || !(o.fullKwh > 0)) {
     return { kind: 'none', why: 'no live pool reading to time the start from' };
+  }
+  if (mode.kind === 'line') {
+    // v1.200.0 — LINE: "already there" is the panel ceiling (above it the panel would not import), so a
+    // pool above the line but under the ceiling still gets its final segment ON; the start is timed to
+    // the start target at the close less FORCE_CHARGE_MIN_RUN_MS; nothing stops it before the close.
+    if (o.poolSocPct >= mode.panelCeilingPct) {
+      return { kind: 'none', why: `the pool already reads the ${mode.panelCeilingPct}% panel ceiling — above tonight's ${mode.askPct}% outage line` };
+    }
+    if (nowMs < forceChargeLineStartAtMs(endMs, mode.startTargetPct, o.poolSocPct, o.fullKwh, o.chargeRateKw, o.evDisplacedKwh, slots.length)) {
+      return { kind: 'none', why: `just in time — holding off so the pool reaches ~${mode.startTargetPct}% ${Math.round(FORCE_CHARGE_MIN_RUN_MS / 60_000)} min before the window closes, then stays on to the close for the ${mode.askPct}% outage line` };
+    }
+    return { kind: 'on', slots };
   }
   if (o.poolSocPct >= forceChargeStopPct(target)) return { kind: 'none', why: `the pack is already at tonight's ${target}% target` };
   if (nowMs < forceChargeStartAtMs(endMs, target, o.poolSocPct, o.fullKwh, o.chargeRateKw, o.evDisplacedKwh, slots.length)) { // window checked above

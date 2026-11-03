@@ -164,7 +164,7 @@ test('★★ expectedForceChargeStart: sun in the window lifts the pool at legEf
   // t = 3.71 / 0.8 = 4.638 h, pool 79.28 kWh.
   const hours: NightChargeHour[] = [0, 1, 2, 3, 4].map((i) => ({ ts: i * H, pvP10W: 0, loadP90W: 9_000, loadP50W: 4_000, pvP50W: 6_000 }));
   const r = expectedForceChargeStart({
-    startKwh: 70, reserveKwh: 50, fullKwh: 100, ceilingPct: 80.4, hours, fromMs: 0, windowEndMs: 5 * H,
+    startKwh: 70, reserveKwh: 50, fullKwh: 100, tickPoolKwh: 100, ceilingPct: 80.4, hours, fromMs: 0, windowEndMs: 5 * H,
     dischargeEff: 1, chargeCapKw: 20, envelopeKw: null, legEff: 0.9,
   })!;
   assert.ok(Math.abs(r.startMs! / H - 4.524) < 0.02, `start ${r.startMs! / H} h`);

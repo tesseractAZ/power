@@ -25,7 +25,7 @@
  */
 import type { NotifyMessage } from './notify.js';
 import type { ForceChargeNightOutcome } from './nightForceCharge.js';
-import { MAX_SPOKEN_ADVISORY_CHARS, NO_CHARGE_EXPECTED_KWH, revertRetryText, type RevertResendOnReport, type RestoreSummaryKind } from './nightChargeActuator.js';
+import { MAX_SPOKEN_ADVISORY_CHARS, NO_CHARGE_EXPECTED_KWH, RESERVE_WRITE_MAX_PCT, revertRetryText, type RevertResendOnReport, type RestoreSummaryKind } from './nightChargeActuator.js';
 
 // v1.191.0 (lane A, T18) — the site zone (siteTime.ts), read at call time; it was a literal here.
 import { siteTimeZone } from './siteTime.js';
@@ -205,6 +205,8 @@ export interface MiddayCostText {
    *  overnight "no plan tonight" push states it. null/omitted ⇒ the basis sentence alone. */
   basisBlockedBy?: string | null;
   cushionShortfall: boolean;
+  /** v1.200.0 — the plan's cushionShortfallCause (the 50% reserve envelope); absent ⇒ the caps alone. */
+  cushionShortfallCause?: 'envelope' | 'envelope+caps';
 }
 
 /** The overnight outage-backup leg as the evening announces it (reserve only). */
@@ -215,6 +217,8 @@ export interface MiddayBackupText {
   expectedKwh: number | null;
   buyKwh: number | null;
   cushionShortfall: boolean;
+  /** v1.200.0 — the plan's cushionShortfallCause (the 50% reserve envelope); absent ⇒ the caps alone. */
+  cushionShortfallCause?: 'envelope' | 'envelope+caps';
 }
 
 /** What the evening's mid-day notice is told. */
@@ -285,8 +289,14 @@ export function buildMiddayPlanMessage(i: MiddayAnnounceInput): NotifyMessage {
     ? `${dayTextCap(day)} (${phxParts(c.windowStartMs).weekdayShort}) ${span}, APS super off-peak`
     : `${dayTextCap(day)} ${span}, APS super off-peak`;
   const supervised = i.mode !== 'advisory' && i.refused == null;
-  const shortNote = c.cushionShortfall || i.backup?.cushionShortfall
-    ? ' NOTE: charge/pool limits prevent fully meeting the cushion — residual risk remains.' : '';
+  // v1.200.0 — keyed on the cause: the caps note where a leg's SIZING fell short, the envelope note where a
+  // leg's line is above the 50% the panel accepts as a reserve and no force-charge carries it.
+  const capsShort = (l: { cushionShortfall: boolean; cushionShortfallCause?: string } | null | undefined): boolean =>
+    l != null && l.cushionShortfall && l.cushionShortfallCause !== 'envelope';
+  const shortNote = (capsShort(c) || capsShort(i.backup)
+    ? ' NOTE: charge/pool limits prevent fully meeting the cushion — residual risk remains.' : '')
+    + (c.cushionShortfallCause != null || i.backup?.cushionShortfallCause != null
+      ? ` NOTE: the outage line is above the ${RESERVE_WRITE_MAX_PCT}% the panel accepts as a reserve and no force-charge carries it on ${c.cushionShortfallCause != null ? 'this leg' : 'the backup leg'} — residual risk remains.` : '');
   const backupLine = i.backup != null ? ` ${backupPushLine(i.backup, i.backupApplyAtMs, now, supervised)}` : '';
   if (!c.basisComplete) {
     // v1.196.0 — what refused the plan, as the overnight push says it (notify.buildNightChargeMessage).

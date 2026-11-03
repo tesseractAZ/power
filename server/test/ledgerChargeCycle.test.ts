@@ -51,7 +51,8 @@ test('★★★ an old-schema ledger gains every charge-cycle column with its ty
   try {
     const info = new DatabaseSync(DB).prepare('PRAGMA table_info(night_charge_ledger)').all() as Array<{ name: string; type: string }>;
     const types = new Map(info.map((c) => [c.name, c.type]));
-    assert.equal(CHARGE_CYCLE_LEDGER_SCHEMA.length, 26);
+    // v1.200.0 — 27: force_charge_mode (the mode the force-charge was switched ON in).
+    assert.equal(CHARGE_CYCLE_LEDGER_SCHEMA.length, 27);
     for (const [c, t] of CHARGE_CYCLE_LEDGER_SCHEMA) assert.equal(types.get(c), t, `${c} ${t} added by the migration`);
     const at = (d: string) => rec.readNightLedger(3650).find((r) => r.plan_date === d) as unknown as Record<string, unknown>;
     assert.equal(at('2026-09-01').buy_kwh, 30.5, 'kept as recorded');

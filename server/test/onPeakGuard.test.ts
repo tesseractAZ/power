@@ -631,8 +631,8 @@ test('★★★ index.ts: the arm stamps the on-peak start from the plan\'s wind
   const idx = SRC('index.ts');
   // v1.191.0 — the tariff of the plan in effect (tariffModelFromEnv; the APS preset while TARIFF_PLAN is unset).
   assert.ok(idx.includes('const armOnPeakStartMs = plan.window != null ? nextOnPeakStartMs(tariffModelFromEnv(), plan.window.startMs) : null;'));
-  // v1.189.0 — armed through armCycle (chargeCycle.ts), the stamp on the leg.
-  assert.ok(idx.includes("role: 'cost', kind: 'overnight', plan, forceChargeEnabled: forceChargeOn(), nextOnPeakStartMs: armOnPeakStartMs,"));
+  // v1.189.0 — armed through armCycle (chargeCycle.ts), the stamp on the leg. v1.200.0 — beside the line gate.
+  assert.ok(idx.includes("role: 'cost', kind: 'overnight', plan, forceChargeEnabled: forceChargeOn(), lineForceChargeEnabled: lineForceChargeOn(), nextOnPeakStartMs: armOnPeakStartMs,"));
 });
 
 test('★★★ index.ts: revertDeadline is decided ahead of the reserve decision and of the no-panel return, and stamped before it speaks', () => {

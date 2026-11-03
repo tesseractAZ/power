@@ -276,6 +276,9 @@ export interface LegCandidate {
   plan: ArmablePlan;
   /** Force-charge enabled for this leg (index.ts forceChargeOn(role)); a backup leg never is. */
   forceChargeEnabled?: boolean;
+  /** v1.200.0 — the outage-line force-charge enabled for this leg (index.ts lineForceChargeOn(role)); a
+   *  backup leg never is. */
+  lineForceChargeEnabled?: boolean;
   /** The on-peak start after the leg's window open (chargeWindows.nextOnPeakStartMs). */
   nextOnPeakStartMs?: number | null;
   announcedLevelPct?: number | null;
@@ -312,7 +315,8 @@ export function onlyForceChargeOffOpen(prev: NightActuationState, liveReservePct
  *  - Any other open item refuses every leg, with the same words.
  *  - Later legs arm from an empty record (the open-item check is the cycle's, made once); the
  *    first leg that arms carries the ceiling original, so one leg owns its restore.
- *  - A backup leg never force-charges: its ceiling is null and force-charge never rides it.
+ *  - A backup leg never force-charges: its ceiling is null, it carries no outage line (v1.200.0), and
+ *    force-charge never rides it.
  * With one cost leg this is armFromPlan / armRefusalReason against the active leg, unchanged.
  */
 export function armCycle(
@@ -335,12 +339,13 @@ export function armCycle(
   const legs: ChargeLegState[] = [];
   candidates.forEach((c, i) => {
     const backup = c.role === 'backup';
-    const plan: ArmablePlan = backup ? { ...c.plan, costCeilingSocPct: null } : c.plan;
+    const plan: ArmablePlan = backup ? { ...c.plan, costCeilingSocPct: null, forceChargeLine: null } : c.plan;
     const fc = backup ? false : c.forceChargeEnabled;
+    const lineFc = backup ? false : c.lineForceChargeEnabled;
     // The trailing exception: only when the backup itself arms. A backup that does not leaves the
     // open item in place, and every later leg is refused on it.
     const over = i === 0 && backup && onlyForceChargeOffOpen(prev.active, liveReservePct) ? emptyActuationState() : carrier;
-    const armed = armFromPlan(over, day, plan, nowMs, liveReservePct, fc, c.nextOnPeakStartMs);
+    const armed = armFromPlan(over, day, plan, nowMs, liveReservePct, fc, c.nextOnPeakStartMs, lineFc);
     if (armed == null) {
       refused.push({ role: c.role, reason: armRefusalReason(over, plan, nowMs, liveReservePct) ?? 'the plan does not arm' });
       return;

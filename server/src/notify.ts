@@ -402,8 +402,12 @@ export function buildNightChargeMessage(
     cancelDeadlineText: string;
     targetPct: number;
     /** v1.167.0 — set when force-charge will ride tonight's window: the TARGET it
-     *  charges to, just in time. null/omitted = reserve only. */
+     *  charges to, just in time. null/omitted = reserve only. v1.200.0 — the COST force-charge only. */
     forceChargeTargetPct?: number | null;
+    /** v1.200.0 — set when tonight's force-charge rides in LINE mode (forceChargeModeOf on the armed record
+     *  and the live gates): the outage line it runs for, to the window close, and the panel ceiling.
+     *  null/omitted = none. */
+    forceChargeLine?: { askPct: number; linePct: number; panelCeilingPct: number } | null;
   } | null,
   /** v1.187.22 — set when a supervised/auto mode REFUSED to arm tonight's charge plan
    *  (armRefusalReason): the push says no write is armed, and why, instead of recommending the
@@ -459,12 +463,14 @@ export function buildNightChargeMessage(
     plan.bindingCap === 'evContention' && ev?.windowEvKwh != null
       ? ` NOTE: EV charging is predicted inside the window (~${round1(ev.windowEvKwh)} kWh, peak ~${ev.peakEvKw ?? '—'} kW);`
         + ` it shares the grid input, leaving ~${ev.minChargeRateKw ?? '—'} kW for the packs while the car charges.`
-      : ev?.basis === 'unavailable' && plan.cushionShortfall
+      : ev?.basis === 'unavailable' && sizingShortfall(plan)
         ? ' NOTE: no EVSE prediction covers this window, so EV contention is NOT modelled — if the car charges overnight the packs will receive less than planned.'
         : '';
-  const shortfallNote = plan.cushionShortfall
+  // v1.200.0 — keyed on the cause: the caps note only where the SIZING fell short; the envelope note
+  // where the line is above the 50% the panel accepts as a reserve and no force-charge carries it.
+  const shortfallNote = (sizingShortfall(plan)
     ? ' NOTE: charge/pool limits prevent fully meeting the cushion — residual risk remains.'
-    : '';
+    : '') + envelopeShortfallNote(plan);
 
   if (shape === 'hold') {
     // v1.187.22 — SAY WHICH HOLD THIS IS, on the figure it was decided on. The body said "the
@@ -563,6 +569,7 @@ export function buildNightChargeMessage(
   // the level when the window cannot get there (chargeIsWindowBound); the worst-case arrival is
   // the rationale's and the card's, labelled.
   const forceCeiling = supervised?.forceChargeTargetPct ?? null;
+  const forceLine = supervised?.forceChargeLine ?? null;
   // v1.187.22 — the level the night is expected to reach (chargeLevelPct): on a force-charge night
   // with no just-in-time start expected, the reserve, not the force-charge stop it stands by for.
   const level = chargeLevelPct(plan);
@@ -594,11 +601,24 @@ export function buildNightChargeMessage(
       : `Then, at ~${at}, timed to finish by the window close, it switches the panel's force-charge ON just long enough to `
         + `reach ${stop}, and OFF when it gets there (or when the window closes). `;
   };
+  // v1.200.0 — a LINE night: the force-charge runs to the window close for the outage line, and the level
+  // it names is the title's (chargeLevelPct: the expected close). No software stop is promised.
+  const lineClause = (l: { linePct: number; panelCeilingPct: number }): string => {
+    const why = `for tonight's ${round1(l.linePct)}% outage line (above the ${RESERVE_WRITE_MAX_PCT}% the panel holds as a reserve)`;
+    const lineStartMs = plan.expectedForceChargeStartMs;
+    if (held || lineStartMs === null) {
+      return `It also arms the panel's force-charge ${why}, on until the window closes; it is not expected to start. `;
+    }
+    const at = lineStartMs === undefined ? 'just in time' : `at ~${fmtPhoenixDayHm(lineStartMs, plan.generatedAt)}`;
+    return `Then, ${at}, it switches the panel's force-charge ON and keeps it on until the window closes, ${why}, `
+      + `taking the pool ${to} ${levelText}; the panel's ${l.panelCeilingPct}% force-charge ceiling is the backstop. `
+      + `After the window the reserve returns to ${round1(plan.reserveFloorPct)}% and the house uses the pool as usual. `;
+  };
   const tail = supervised
     ? `SUPERVISED: ${supervised.cancelDeadlineText} the add-on raises the backup reserve to `
       + `${supervised.targetPct}% (bounded write; auto-restores after the charge window closes). `
       // v1.170.0 — one wording for every target: the 80+ coast is retired.
-      + (forceCeiling != null ? forceChargeClause(forceCeiling) : '')
+      + (forceLine != null ? lineClause(forceLine) : forceCeiling != null ? forceChargeClause(forceCeiling) : '')
       + 'Cancel from the night-charge card on the panel before then.'
     : 'Advisory only — the add-on will NOT charge. Wire your HA automation to the '
       + 'night_charge_recommended (charge_tonight) entity, gated on night_charge_write_ready '
@@ -683,6 +703,9 @@ export function buildNightChargeMorningSummary(o: {
   ended?: 'window' | 'cancelled' | 'gridLoss';
   /** The restore read back (default), or was sent and acknowledged with no readback yet. */
   restore?: RestoreSummaryKind;
+  /** v1.200.0 — the pool reading at the restore (a fresh, coherent one), for a LINE night's account of
+   *  where it closed. null/omitted ⇒ not stated. */
+  closePoolPct?: number | null;
 }): NotifyMessage {
   const base = { severity: 'info' as const, dedupId: 'night_charge_actuation' };
   const day = o.day ?? '—';
@@ -722,7 +745,11 @@ export function buildNightChargeMorningSummary(o: {
         : `reserve raised to ${raised}${note} and restored to ${o.restorePct}%. `;
   } else {
     const reserve = held ? `the reserve was held at ${raised} overnight as a floor (no charge was expected)` : `reserve raised to ${raised}`;
-    const toward = fc.stopPct != null && Number.isFinite(fc.stopPct) ? ` toward ~${round1(fc.stopPct)}%` : '';
+    // v1.200.0 — a LINE night ran to the window close for its outage line (no stop to name).
+    const line = 'line' in fc ? fc.line : undefined;
+    const toward = line != null ? ` for the ${round1(line.linePct)}% outage line`
+      : fc.stopPct != null && Number.isFinite(fc.stopPct) ? ` toward ~${round1(fc.stopPct)}%` : '';
+    const close = o.closePoolPct != null && Number.isFinite(o.closePoolPct) ? `; the pool read ${Math.round(o.closePoolPct)}% at the close` : '';
     // v1.187.22 — a PARTIAL failure (the other slots took the ON) is not "did not take effect":
     // the slots, as the ON-failure push named them ("will not happen on those slot(s)").
     const failedOn = fc.kind === 'failed' && fc.partialSlots != null
@@ -731,7 +758,9 @@ export function buildNightChargeMorningSummary(o: {
     // (`note` is decided once, by figureFits: empty beside a force-charge that never started,
     // failed or never confirmed.)
     night = fc.kind === 'ran'
-      ? `${reserve}, and force-charge ran${toward}${note}; ${restored}`
+      ? (line != null
+        ? `${reserve}, and force-charge ran to the window close${toward}${close}${note}; ${restored}`
+        : `${reserve}, and force-charge ran${toward}${note}; ${restored}`)
       : `${reserve}${note}; force-charge${toward} ${fc.kind === 'neverStarted' ? 'never started'
         : fc.kind === 'failed' ? failedOn
           : 'was switched ON but the panel never confirmed it'}; ${restored}`;
@@ -894,6 +923,9 @@ export function buildNightForceChargeOnFailure(o: {
    *  fresh panel readback the verify read, each Core's settings its last reported DPU projection).
    *  null/omitted ⇒ the slot numbers alone, as before. */
   cores?: ReadonlyArray<ForceChargeSlotCore> | null;
+  /** v1.200.0 — on a LINE night: the outage line the force-charge was to carry (the record's
+   *  forceChargeLinePct). The warning then says the pool will close near the reserve, under it. */
+  lineLinePct?: number | null;
 }): NotifyMessage {
   const partial = partialForceChargeOnFailureSlots({ forceChargeSlots: o.ourSlots, forceChargeOnFailedSlots: o.slots }) != null;
   const toward = o.ceilingPct != null && Number.isFinite(o.ceilingPct) ? ` (toward ~${round1(forceChargeStopPct(o.ceilingPct))}%)` : '';
@@ -909,8 +941,43 @@ export function buildNightForceChargeOnFailure(o: {
       `The night-charge for ${o.day ?? '—'} switched force-charge ("Charge Now") ON, but the Smart Home Panel 2 `
       + `still reads slot(s) ${named.text} OFF after ${o.retries} re-issue(s)${o.noRetry ? ' (too close to the window end to re-issue)' : ''}. `
       + `Tonight's buy above the ${RESERVE_WRITE_MAX_PCT}% reserve${toward} will not happen${partial ? ' on those slot(s)' : ''}; `
-      + `the reserve charge is unaffected. No action needed tonight — but if this repeats, check the SHP2 cloud link${compare}.`,
+      + `the reserve charge is unaffected. No action needed tonight — but if this repeats, check the SHP2 cloud link${compare}.`
+      // v1.200.0 — a line night: what that means for the outage cushion.
+      + (o.lineLinePct != null && Number.isFinite(o.lineLinePct)
+        ? ` Without it the pool will close the window near the ${RESERVE_WRITE_MAX_PCT}% reserve, under tonight's ${round1(o.lineLinePct)}% outage line.` : ''),
   };
+}
+
+/**
+ * v1.200.0 — the push when a LINE night's force-charge cannot start for a reason other than the clock or
+ * the pool (nightForceCharge.isForceChargeStartBlocker: the ceiling refused, Charge Now already on, the
+ * grid unknown or absent, vitals red, no slot readback, an incoherent SoC), sent once, as soon as it is
+ * known after the reserve verifies — while there is still time to act. `latestStartText` is the start the
+ * line is timed to (forceChargeLineStartAtMs), as clock text. PURE.
+ */
+export function buildLineForceChargeDeclinedStart(o: {
+  day: string | null; linePct: number; why: string; latestStartText: string;
+}): NotifyMessage {
+  return {
+    severity: 'warning',
+    dedupId: 'night_charge_line_force_charge_declined',
+    title: 'Night-charge: the force-charge for the outage line cannot start',
+    body: `Night-charge: the force-charge for tonight's ${round1(o.linePct)}% outage line cannot start yet — ${o.why}. `
+      + `If it has not started by ~${o.latestStartText}, the pool will close near the ${RESERVE_WRITE_MAX_PCT}% reserve, under the line.`,
+  };
+}
+
+/** v1.200.0 — the plan's SIZING fell short (the caps note): a shortfall the envelope alone did not make. PURE. */
+function sizingShortfall(plan: Pick<NightChargePlan, 'cushionShortfall' | 'cushionShortfallCause'>): boolean {
+  return plan.cushionShortfall === true && plan.cushionShortfallCause !== 'envelope';
+}
+
+/** v1.200.0 — the envelope note: the line is above the 50% the panel accepts as a reserve and no
+ *  force-charge carries it tonight (plan.cushionShortfallCause). '' otherwise. PURE. */
+function envelopeShortfallNote(plan: Pick<NightChargePlan, 'cushionShortfallCause' | 'cushionLineSocPct'>): string {
+  if (plan.cushionShortfallCause == null) return '';
+  const line = plan.cushionLineSocPct != null && Number.isFinite(plan.cushionLineSocPct) ? `tonight's ${round1(plan.cushionLineSocPct)}% outage line` : "tonight's outage line";
+  return ` NOTE: ${line} is above the ${RESERVE_WRITE_MAX_PCT}% the panel accepts as a reserve, and no force-charge rides tonight — residual risk remains.`;
 }
 
 /** One-decimal rounding for the human-facing advisory strings. */

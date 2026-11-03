@@ -1,0 +1,770 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import * as nca from '../src/nightChargeAdvisor.js';
+import {
+  computeNightChargePlan, buildNightChargeInputs, chargeLevelPct, chargeReservePct, statedBuyKwh,
+  type NightChargeInputs, type NightChargePlan, type CushionPoolScale,
+} from '../src/nightChargeAdvisor.js';
+import * as nfc from '../src/nightForceCharge.js';
+import {
+  decideForceCharge, desiredForceChargeCeilingPct, forceChargeCommandsOf, forceChargeStopPct,
+  FORCE_CHARGE_MIN_RUN_MS, FORCE_CHARGE_JIT_BUFFER_MS, type ForceChargeOpts, type ForceChargeAction,
+} from '../src/nightForceCharge.js';
+import * as act from '../src/nightChargeActuator.js';
+import {
+  armFromPlan, coerceActuationState, emptyActuationState, nightChargeSpokenNotice, RESERVE_WRITE_MAX_PCT,
+  MAX_SPOKEN_ADVISORY_CHARS, type NightActuationState, type ArmablePlan,
+} from '../src/nightChargeActuator.js';
+import { armCycle, emptyCycle, asChargeLeg } from '../src/chargeCycle.js';
+import { liveRefreshOutcome, applyLiveRefresh } from '../src/morningRefresh.js';
+import * as notify from '../src/notify.js';
+import { buildNightChargeMessage, buildNightForceChargeOnFailure, buildNightChargeMorningSummary } from '../src/notify.js';
+import { eveningAnnouncement } from '../src/chargeAnnounce.js';
+import { legacyIdentityCases, planDigest } from './fixtures/legacyIdentityFixtures.js';
+import { MEASURED_SCALE } from './fixtures/measuredCushionLineFigures.js';
+import { goldenPlan } from './fixtures/overnightTextCases.js';
+import * as cardText from '../../web/src/cards/nightChargeText.js';
+
+/**
+ * v1.200.0 — AN OUTAGE-CUSHION LINE ABOVE THE PANEL'S 50% RESERVE IS CARRIED BY THE NIGHT FORCE-CHARGE TO
+ * THE WINDOW CLOSE, OR DISCLOSED.
+ *
+ * The panel accepts a backup reserve of at most 50% (RESERVE_WRITE_MAX_PCT). A charge night whose
+ * islanded-outage line, asked to the whole percent above it (⌈L⌉), is above 50 wrote 50, claimed the
+ * cushion held (no shortfall), and closed near 50 — a realized strike, and an unheld cushion — wherever no
+ * cost force-charge stop sat at or above the line (13 charge plans of legacyIdentity's year on the
+ * nameplate line, 24 on the measured one; measuredCushionLine.test.ts). Two of them said nothing about
+ * the 50% write at all (2026-10-29 21:30: setpoint = target = 66).
+ *
+ * The fix, in three parts:
+ *  - THE PLAN (nightChargeAdvisor.ts): such a plan carries `forceChargeLine { askPct: ⌈L⌉, linePct: L }`
+ *    where a write mode can force-charge it (lineForceChargeEligible, never the backup leg, ⌈L⌉ + 10 ≤
+ *    100); elsewhere it DISCLOSES the envelope (cushionShortfall, cause 'envelope'). No sizing figure
+ *    moves.
+ *  - THE RECORD (nightChargeActuator.ts): the line's ask in its own field beside the cost ceiling; the
+ *    tick composes the mode from the LIVE gates (forceChargeModeOf).
+ *  - THE TICK (nightForceCharge.ts): in line mode the force-charge starts timed to reach ⌈L⌉ + 5 twenty
+ *    minutes before the close, has no software stop and runs to the window close; the panel ceiling is at
+ *    least ⌈L⌉ + 10. The close guarantee is lineForceChargeClose.test.ts.
+ */
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const INDEX = readFileSync(resolve(HERE, '../src/index.ts'), 'utf8');
+const H = 3_600_000;
+const M = 60_000;
+const S944: CushionPoolScale = MEASURED_SCALE;
+const GOLDEN = JSON.parse(readFileSync(resolve(HERE, 'fixtures/legacyIdentity.golden.json'), 'utf8')) as { digests: Record<string, string> };
+/** Measured when the change was made (v1.200.0): the 2027-01-04 21:30 line night's expected walk. */
+const PIN_T1 = { level: 78.4, startMs: Date.UTC(2027, 0, 5, 10, 25), buyKwh: 28.18, at: '03:25' };
+/** Measured when the change was made (v1.200.0): the year's carried / disclosed split, nameplate and 0.944. */
+const PIN_T4 = { carried: [22, 37], disclosedOn: [0, 0], lineMode: [14, 25], expectedRose: 36 };
+
+/** The sizing fields no part of v1.200.0 may move (I-A1). */
+const SIZING = ['chargeTonight', 'buyKwh', 'buyKwhDebiased', 'requiredExtraKwh', 'targetSocPct', 'setpointSocPct',
+  'costCeilingSocPct', 'cushionTroughSocPct', 'cushionLineSocPct', 'bindingCap', 'minProjSocPct'] as const;
+const sizing = (p: NightChargePlan) => Object.fromEntries(SIZING.map((k) => [k, p[k] ?? null]));
+
+const CASES = legacyIdentityCases();
+const caseOf = (label: string) => CASES.find((c) => c.label === label)!;
+const yearPlan = (label: string, line: boolean | undefined, scale: CushionPoolScale | null = S944): NightChargePlan => {
+  const c = caseOf(label);
+  const deps = { ...c.deps, ...(scale != null ? { cushionPoolScale: scale } : {}), ...(line !== undefined ? { lineForceChargeEligible: line } : {}) };
+  return computeNightChargePlan(buildNightChargeInputs(deps as never));
+};
+type LinePlan = NightChargePlan & {
+  forceChargeLine?: { askPct: number; linePct: number };
+  cushionShortfallCause?: 'envelope' | 'envelope+caps';
+  expectedForceChargeMode?: 'line';
+};
+const L = (p: NightChargePlan): LinePlan => p as LinePlan;
+
+/* ══ T1 — the 2027-01-04 21:30 shape at 0.944 (line 55.55) ═════════════════════════════════════════ */
+
+test('★★★ T1 2027-01-04 21:30 at 0.944: eligible ⇒ carried {56, 55.55} to the window close; sizing untouched', () => {
+  const base = yearPlan('2027-01-04 21:30', undefined);
+  const p = L(yearPlan('2027-01-04 21:30', true));
+  // The defect as it stands: a charge night, the line 55.55, written 50, no shortfall, "no charge expected".
+  assert.equal(base.chargeTonight, true);
+  assert.equal(base.cushionLineSocPct, 55.55);
+  assert.equal(chargeReservePct(base), 50);
+  assert.equal(base.cushionShortfall, false);
+  assert.match(base.rationale, /^Hold the reserve at 50% in the /);
+
+  assert.deepEqual(p.forceChargeLine, { askPct: 56, linePct: 55.55 });
+  assert.deepEqual(Object.keys(p.forceChargeLine!), ['askPct', 'linePct'], 'one whole percent and the line — no capacity, no load');
+  assert.equal(p.cushionShortfall, false, 'carried: the plan claims the cushion, and the force-charge holds it');
+  assert.equal('cushionShortfallCause' in p, false);
+  assert.equal(chargeReservePct(p), 50, 'the written reserve is still the panel maximum');
+  assert.deepEqual(sizing(p), sizing(base), 'I-A1: no sizing figure moves');
+  assert.equal(p.expectedForceChargeMode, 'line');
+  // The expected walk: the reserve leg is done (the pool opens ~50.8%), the house draws it to the reserve,
+  // the line force-charge starts timed to 61% twenty minutes before the 05:00 close and runs to it.
+  assert.equal(p.expectedWriteLevelPct, PIN_T1.level);
+  assert.equal(p.expectedForceChargeStartMs, PIN_T1.startMs);
+  assert.equal(p.expectedBuyKwh, PIN_T1.buyKwh);
+  assert.ok(p.expectedWriteLevelPct! >= 61, 'the expected close is at least the timed level');
+  assert.equal(chargeLevelPct(p), p.expectedWriteLevelPct, 'every line states the expected close');
+  // The rationale (§5.7 wording).
+  assert.ok(p.rationale.includes(
+    `The reserve is set to 50%, the most the panel accepts as a backup reserve; tonight's 55.55% outage line is above it, so the panel's force-charge switches on at ~${PIN_T1.at} and stays on until the window closes, taking the pool to ~${PIN_T1.level}%. After the window the reserve returns to 30% and the house can draw the pool down as usual.`),
+  p.rationale);
+  assert.doesNotMatch(p.rationale, /only accepts a backup reserve up to 50%|residual risk|charge\/pool caps/);
+  assert.match(p.rationale, new RegExp(`^Charge to ~${PIN_T1.level}% in the `), 'the headline names the expected close');
+});
+
+test('★★★ T1 not eligible (advisory) ⇒ DISCLOSED: cushionShortfall with the cause "envelope", the sized trough unchanged', () => {
+  const base = yearPlan('2027-01-04 21:30', undefined);
+  const p = L(yearPlan('2027-01-04 21:30', false));
+  assert.equal(p.cushionShortfall, true);
+  assert.equal(p.cushionShortfallCause, 'envelope');
+  assert.equal('forceChargeLine' in p, false);
+  assert.equal('expectedForceChargeMode' in p, false);
+  assert.equal(p.cushionTroughSocPct, base.cushionTroughSocPct, 'L1: the trough stays the sized one');
+  assert.equal(p.cushionTroughSocPct, 55.55);
+  assert.deepEqual(sizing(p), sizing(base));
+  assert.equal(p.expectedBuyKwh, base.expectedBuyKwh, 'advisory: the expected walk is today\'s');
+  assert.ok(p.rationale.includes("The reserve is set to 50%, the most the panel accepts as a backup reserve; tonight's 55.55% outage line is above it and no force-charge runs in advisory mode, so the cushion is not fully held — residual risk remains."), p.rationale);
+  assert.doesNotMatch(p.rationale, /charge\/pool caps/, 'the caps note only where the sizing itself fell short');
+  assert.doesNotMatch(p.rationale, /only accepts a backup reserve up to 50%/, 'one sentence about the envelope, not two');
+});
+
+test('★★★ T1 absent ⇒ v1.199.1 byte for byte (the nameplate golden digest; the measured figures unchanged)', () => {
+  const c = caseOf('2027-01-04 21:30');
+  assert.equal(planDigest(computeNightChargePlan(buildNightChargeInputs(c.deps))), GOLDEN.digests[c.label]);
+  const p = yearPlan('2027-01-04 21:30', undefined);
+  assert.equal('forceChargeLine' in p || 'cushionShortfallCause' in p || 'expectedForceChargeMode' in p, false);
+});
+
+/* ══ T2 — 2026-10-29 21:30 at 0.944: the plan that said nothing about the 50% write ═════════════════ */
+
+test('★★★ T2 2026-10-29 21:30 at 0.944 (line 65.95, setpoint = target = 66): the envelope is stated either way', () => {
+  const base = yearPlan('2026-10-29 21:30', undefined);
+  assert.equal(base.cushionLineSocPct, 65.95);
+  assert.equal(base.setpointSocPct, 66);
+  assert.equal(base.targetSocPct, 66);
+  assert.doesNotMatch(base.rationale, /outage line|only accepts/, 'precondition: today the rationale is silent');
+  const carried = L(yearPlan('2026-10-29 21:30', true));
+  assert.deepEqual(carried.forceChargeLine, { askPct: 66, linePct: 65.95 });
+  assert.match(carried.rationale, /tonight's 65\.95% outage line is above it, so the panel's force-charge switches on at ~\S+ and stays on until the window closes, taking the pool to ~[\d.]+%\./);
+  const disclosed = L(yearPlan('2026-10-29 21:30', false));
+  assert.equal(disclosed.cushionShortfallCause, 'envelope');
+  assert.match(disclosed.rationale, /tonight's 65\.95% outage line is above it and no force-charge runs in advisory mode, so the cushion is not fully held — residual risk remains\./);
+});
+
+/* ══ T3 — what does not qualify, and the edges ═════════════════════════════════════════════════════ */
+
+const B = Date.UTC(2026, 9, 20, 4); // 21:00 MST
+const horizon = (loadP90W: number) =>
+  Array.from({ length: 30 }, (_, i) => ({ ts: B + i * H, pvP10W: 0, loadP90W, loadP50W: loadP90W / 1.35, pvP50W: 0 }));
+/** A 92.16 kWh pool, a 30% floor, 8 h × 2.09 kW × 1.25 ÷ 0.94 = 22.23 kWh of cushion (line 54.12%), 30% at
+ *  21:00, a 23:00–05:00 window, a 2 kW P90 house, no sun, resilience. */
+const inputs = (o: Partial<NightChargeInputs> & { lineForceChargeEligible?: boolean } = {}): NightChargeInputs => ({
+  nowMs: B, fullKwh: 92.16, socNowPct: 30, reserveFloorPct: 30, cushionPct: 15, socCoherent: true,
+  islandedLoadKw: 2.09, outageCushionHours: 8, islandedLoadSafety: 1.25,
+  legEff: 0.927, dischargeEff: 0.94, chargeCapKw: 17.8, gridInputCapKw: 17,
+  window: { startMs: B + 2 * H, endMs: B + 8 * H }, horizon: horizon(2000),
+  morningPvSurplusP90Kwh: null, confidenceTier: 'forecast', basisComplete: true, minBuyKwh: 1,
+  objectiveMode: 'resilience',
+  ...o,
+} as NightChargeInputs);
+const plan = (o: Parameters<typeof inputs>[0] = {}): LinePlan => L(computeNightChargePlan(inputs(o)));
+
+test('★★★ T3 the scenario qualifies: line 54.12, ask 55 — carried when eligible, disclosed when not, today\'s when absent', () => {
+  const absent = plan();
+  assert.equal(absent.cushionLineSocPct, 54.12);
+  assert.equal(absent.chargeTonight, true);
+  assert.deepEqual(plan({ lineForceChargeEligible: true }).forceChargeLine, { askPct: 55, linePct: 54.12 });
+  assert.equal(plan({ lineForceChargeEligible: false }).cushionShortfallCause, 'envelope');
+  assert.equal(planDigest(plan({ lineForceChargeEligible: undefined })), planDigest(absent));
+});
+
+test('★★★ T3 non-qualifying: ask = 50, legacy-pct, disabled, economic-only cost, a hold — no field, no disclosure, today\'s plan', () => {
+  const same = (o: Parameters<typeof inputs>[0], why: string) => {
+    const a = plan(o);
+    for (const e of [true, false]) {
+      const p = plan({ ...o, lineForceChargeEligible: e });
+      assert.equal(planDigest(p), planDigest(a), `${why} (eligible ${e})`);
+    }
+    return a;
+  };
+  // 8 h × 1.73 kW × 1.25 ÷ 0.94 = 18.40 kWh: line 49.97, ask 50 — the reserve holds it; P-i (`>=`) would carry it.
+  const at50 = same({ islandedLoadKw: 1.73 }, 'ask 50');
+  assert.equal(at50.cushionLineSocPct, 49.97);
+  assert.equal(Math.ceil(at50.cushionLineSocPct! - 1e-9), 50);
+  assert.equal(at50.chargeTonight, true);
+  // …and 1.74 kW (line 50.08, ask 51) is above it.
+  assert.deepEqual(plan({ islandedLoadKw: 1.74, lineForceChargeEligible: true }).forceChargeLine, { askPct: 51, linePct: 50.08 });
+  // legacy-pct (no islanded measurement), a 25% band: the setpoint is the whole-house walk, not a line at the close.
+  const legacy = same({ islandedLoadKw: null, cushionPct: 25 }, 'legacy-pct');
+  assert.equal(legacy.cushionBasis, 'legacy-pct');
+  // disabled: the line is the floor.
+  assert.equal(same({ outageCushionHours: 0 }, 'disabled').cushionBasis, 'disabled');
+  // economic-only cost: the pack already holds the line with no buy; the buy is the cost target's.
+  const econ = same({ socNowPct: 92, objectiveMode: 'cost', costMaxSocPct: 100, forceChargeEligible: true }, 'economic-only');
+  assert.equal(econ.chargeTonight, true);
+  assert.equal(econ.requiredExtraKwh, 0, 'precondition: economic only (P-ii drops this test)');
+  // a resilience hold: nothing is armed.
+  assert.equal(same({ socNowPct: 95 }, 'hold').chargeTonight, false);
+});
+
+test('★★★ T3 the backup leg is DISCLOSED whatever the eligibility; ask + 10 > 100 is disclosed even when eligible', () => {
+  const backup = { kind: 'overnight' as const, role: 'backup' as const };
+  for (const e of [true, false]) {
+    const p = plan({ windowSpec: backup, lineForceChargeEligible: e });
+    assert.equal('forceChargeLine' in p, false, `backup (eligible ${e})`);
+    assert.ok(p.cushionShortfallCause === 'envelope' || p.cushionShortfallCause === 'envelope+caps', `backup cause ${p.cushionShortfallCause}`);
+    assert.match(p.rationale, /outage line is above it and the outage backup leg writes the reserve only, so the cushion is not fully held — residual risk remains\./);
+  }
+  // buildNightChargeInputs never hands the backup leg an eligible line (legForceChargeEligible).
+  const c = caseOf('2027-01-04 21:30');
+  assert.equal(buildNightChargeInputs({ ...c.deps, lineForceChargeEligible: true, windowSpec: backup } as never).lineForceChargeEligible, false);
+  // 8 h × 5.4 kW: line 92.33, ask 93 — 93 + 10 > 100: no headroom for the panel ceiling over the line.
+  const high = plan({ islandedLoadKw: 5.4, lineForceChargeEligible: true });
+  assert.ok(high.cushionLineSocPct! > 90, `${high.cushionLineSocPct}`);
+  assert.equal('forceChargeLine' in high, false);
+  assert.ok(high.cushionShortfallCause === 'envelope' || high.cushionShortfallCause === 'envelope+caps');
+  assert.match(high.rationale, /outage line is above it and too close to a full pool for the force-charge to carry, so the cushion is not fully held — residual risk remains\./);
+  // The ask the plan carries and the line it qualifies on are one expression (askOf).
+  assert.equal(nca.askOf(54.12 / 100 * 92.16, 92.16), 55);
+  assert.equal(nca.askOf(0.5 * 92.16, 92.16), 50, 'a line exactly at 50 asks 50');
+});
+
+test('★★★ T3 the envelope is OR-ed in AFTER the cost block: a disclosed cost night keeps its de-biased ceiling', () => {
+  // A cost night over the envelope (line 54.12) whose de-biased morning surplus widens the headroom: the
+  // cost ceiling reads the SIZED flag (debiasedCostSurplusKwh), so the disclosure must not move it (P-iv).
+  const cost = {
+    objectiveMode: 'cost' as const, costMaxSocPct: 90, forceChargeEligible: true, morningPvSurplusP50Kwh: 20, morningPvSurplusP90Kwh: 30,
+    costSurplusLoad: { factor: 0.8, basis: 'measured' as const, samples: 10, p50Kwh: 35, p90Kwh: 45 },
+  };
+  const absent = plan(cost);
+  assert.equal(absent.chargeTonight, true);
+  assert.ok((absent.requiredExtraKwh ?? 0) > 0, 'precondition: not economic-only');
+  assert.equal(absent.costCeilingSurplusKwh, 35, 'precondition: the de-biased surplus set the ceiling');
+  const disclosed = plan({ ...cost, lineForceChargeEligible: false });
+  assert.equal(disclosed.cushionShortfallCause, 'envelope');
+  assert.equal(disclosed.costCeilingSocPct, absent.costCeilingSocPct);
+  assert.equal(disclosed.costCeilingSurplusKwh, 35);
+});
+
+/* ══ T4 — the year (I-A1, I-A4, I-A5, I-A6) ══════════════════════════════════════════════════════════ */
+
+test('★★★ T4 the year: no sizing figure moves, every over-envelope charge plan is carried or disclosed, counts as measured', () => {
+  const counts: Record<string, number> = {};
+  const add = (k: string) => { counts[k] = (counts[k] ?? 0) + 1; };
+  let expectedRose = 0;
+  for (const c of CASES) {
+    for (const [scaleName, scale] of [['np', null], ['m', S944]] as const) {
+      const deps = scale != null ? { ...c.deps, cushionPoolScale: scale } : c.deps;
+      const base = computeNightChargePlan(buildNightChargeInputs(deps));
+      const on = L(computeNightChargePlan(buildNightChargeInputs({ ...deps, lineForceChargeEligible: true } as never)));
+      const off = L(computeNightChargePlan(buildNightChargeInputs({ ...deps, lineForceChargeEligible: false } as never)));
+      for (const [k, p] of [['on', on], ['off', off]] as const) {
+        assert.deepEqual(sizing(p), sizing(base), `${c.label} ${scaleName} ${k}: I-A1`);
+        assert.equal(p.cushionTroughSocPct ?? null, base.cushionTroughSocPct ?? null, `${c.label}: I-A5 trough`);
+        assert.ok(!(base.cushionShortfall && !p.cushionShortfall), `${c.label}: I-A5 a shortfall vanished`);
+        if (p.cushionShortfall !== base.cushionShortfall) assert.ok(p.cushionShortfallCause != null, `${c.label}: a new shortfall names its cause`);
+      }
+      const lineAsk = base.cushionLineSocPct != null ? Math.ceil(base.cushionLineSocPct - 1e-9) : 0;
+      const qualifies = base.chargeTonight && base.cushionBasis === 'islanded-outage' && (base.requiredExtraKwh ?? 0) > 0
+        && nca.askOf((base.cushionLineSocPct! / 100) * c.deps.fullKwh, c.deps.fullKwh) > RESERVE_WRITE_MAX_PCT;
+      assert.ok(Math.abs(lineAsk - (qualifies ? Math.ceil(base.cushionLineSocPct! - 1e-9) : lineAsk)) < 1e-9);
+      const at2130 = c.label.endsWith('21:30');
+      if (qualifies) {
+        add(`q.${scaleName}`); if (at2130) add(`q2130.${scaleName}`);
+        if (base.cushionShortfall) add(`sized.${scaleName}`);
+        // I-A4 — the carrier invariant (tripwire): carried, or disclosed; never neither.
+        assert.ok(on.forceChargeLine != null || on.cushionShortfallCause != null, `${c.label} ${scaleName}: uncarried and undisclosed (eligible)`);
+        assert.ok(off.cushionShortfallCause != null, `${c.label} ${scaleName}: undisclosed (not eligible)`);
+        if (on.forceChargeLine != null) add(`carried.${scaleName}`); else add(`disclosedOn.${scaleName}`);
+        if (on.expectedForceChargeMode === 'line') add(`lineMode.${scaleName}`);
+        // R6d — the line sentence only in line mode: a cost-dominant night's cost force-charge already
+        // clears ⌈L⌉ + 10, and its rationale says nothing of the line.
+        if (on.forceChargeLine != null && on.expectedForceChargeMode !== 'line') {
+          assert.doesNotMatch(on.rationale, /outage line/, `${c.label} ${scaleName}: a cost-dominant night names the line`);
+          assert.equal(on.rationale, base.rationale, `${c.label}: a cost-dominant carried night reads as today`);
+        }
+      } else {
+        assert.equal(planDigest(on), planDigest(base), `${c.label} ${scaleName}: a non-qualifying plan moved (eligible)`);
+        assert.equal(planDigest(off), planDigest(base), `${c.label} ${scaleName}: a non-qualifying plan moved (not eligible)`);
+      }
+      // I-A6 — with eligibility the expected buy never falls below v1.199.1 (pinned, not assumed: L6).
+      if (base.expectedBuyKwh != null && on.expectedBuyKwh != null) {
+        assert.ok(on.expectedBuyKwh >= base.expectedBuyKwh - 1e-9, `${c.label} ${scaleName}: expected buy fell ${base.expectedBuyKwh} → ${on.expectedBuyKwh}`);
+        if (on.expectedBuyKwh > base.expectedBuyKwh + 1e-9) expectedRose += 1;
+      }
+      assert.equal(off.expectedBuyKwh ?? null, base.expectedBuyKwh ?? null, `${c.label}: not eligible, the expected figure is today's`);
+    }
+  }
+  // Design A measured qualifying 22 (nameplate) / 37 (0.944), 8 / 13 at 21:30, 9 / 13 already a sizing shortfall.
+  assert.deepEqual(
+    { q: [counts['q.np'], counts['q.m']], q2130: [counts['q2130.np'], counts['q2130.m']], sized: [counts['sized.np'], counts['sized.m']] },
+    { q: [22, 37], q2130: [8, 13], sized: [9, 13] },
+  );
+  assert.deepEqual(
+    { carried: [counts['carried.np'] ?? 0, counts['carried.m'] ?? 0], disclosedOn: [counts['disclosedOn.np'] ?? 0, counts['disclosedOn.m'] ?? 0],
+      lineMode: [counts['lineMode.np'] ?? 0, counts['lineMode.m'] ?? 0], expectedRose },
+    PIN_T4,
+  );
+});
+
+/* ══ T5 — arm and record ═══════════════════════════════════════════════════════════════════════════ */
+
+const WIN_START = Date.UTC(2026, 8, 17, 6, 0); // 23:00 MST
+const WIN_END = WIN_START + 6 * H;             // 05:00 MST
+const LINE = { askPct: 56, linePct: 55.55 };
+const armable = (o: Partial<ArmablePlan> & { forceChargeLine?: typeof LINE | null } = {}): ArmablePlan => ({
+  chargeTonight: true, basisComplete: true, buyKwh: 28.3, costCeilingSocPct: null, setpointSocPct: 56,
+  window: { startMs: WIN_START, endMs: WIN_END }, forceChargeLine: LINE, ...o,
+} as ArmablePlan);
+type LineState = NightActuationState & {
+  forceChargeLineAskPct: number | null; forceChargeLinePct: number | null;
+  forceChargeCeilingSyncedPct: number | null; forceChargeMode: 'cost' | 'line' | null;
+};
+const arm = (p: ArmablePlan, cost?: boolean, line?: boolean): LineState | null =>
+  (armFromPlan as (...a: unknown[]) => NightActuationState | null)(emptyActuationState(), '2026-09-16', p, WIN_START - 2 * H, 30, cost, null, line) as LineState | null;
+
+test('★★★ T5 the record keeps the cost ceiling and the line\'s ask in SEPARATE fields; rides = cost or line', () => {
+  const lineOnly = arm(armable(), false, true)!;
+  assert.equal(lineOnly.forceChargeLineAskPct, 56);
+  assert.equal(lineOnly.forceChargeLinePct, 55.55);
+  assert.equal(lineOnly.forceChargeCeilingPct, null, 'the cost ceiling keeps its meaning');
+  assert.equal(lineOnly.forceChargeRides, true, 'the line rides the night');
+  assert.equal(lineOnly.targetPct, 50);
+  const both = arm(armable({ costCeilingSocPct: 60, setpointSocPct: 60 }), true, true)!;
+  assert.equal(both.forceChargeCeilingPct, 60, 'A-i: never one stored max(cost, ask)');
+  assert.equal(both.forceChargeLineAskPct, 56);
+  assert.equal(both.forceChargeRides, true);
+  // The line gate off (advisory): no ask recorded; rides only on the cost gate.
+  const off = arm(armable(), false, false)!;
+  assert.equal(off.forceChargeLineAskPct, null, 'A-ii: the line rides only on its gate');
+  assert.equal(off.forceChargeRides, false);
+  // Cost off at arm (ARB_COST_MAX_SOC_PCT 50): the line alone.
+  const costOff = arm(armable({ costCeilingSocPct: 90, setpointSocPct: 90 }), false, true)!;
+  assert.equal(costOff.forceChargeCeilingPct, 90);
+  assert.equal(costOff.forceChargeLineAskPct, 56);
+  assert.equal(costOff.forceChargeRides, true, 'A-iv: rides ⇐ the line');
+  // A plan with no line: today's record exactly (the four new fields null).
+  const plain = arm(armable({ forceChargeLine: null, costCeilingSocPct: 90 }), true, true)!;
+  assert.deepEqual([plain.forceChargeLineAskPct, plain.forceChargeLinePct, plain.forceChargeCeilingSyncedPct, plain.forceChargeMode], [null, null, null, null]);
+  // Omitted gates (every caller before v1.200.0): no line recorded.
+  assert.equal(arm(armable())!.forceChargeLineAskPct, null);
+  // The empty record has the four fields, null.
+  const e = emptyActuationState() as LineState;
+  assert.deepEqual([e.forceChargeLineAskPct, e.forceChargeLinePct, e.forceChargeCeilingSyncedPct, e.forceChargeMode], [null, null, null, null]);
+});
+
+test('★★★ T5 the backup strip drops the line; a cost leg keeps it (armCycle)', () => {
+  const p = armable();
+  const r = armCycle(emptyCycle(), '2026-09-16', [
+    { role: 'backup', kind: 'overnight', plan: p, forceChargeEnabled: true, lineForceChargeEnabled: true } as never,
+  ], WIN_START - 2 * H, 30);
+  assert.equal(r.legs.length, 1);
+  assert.equal((r.legs[0] as LineState).forceChargeLineAskPct, null, 'A-iii: a backup leg never force-charges the line');
+  assert.equal(r.legs[0].forceChargeRides, false);
+  const cost = armCycle(emptyCycle(), '2026-09-16', [
+    { role: 'cost', kind: 'overnight', plan: p, forceChargeEnabled: false, lineForceChargeEnabled: true } as never,
+  ], WIN_START - 2 * H, 30);
+  assert.equal((cost.legs[0] as LineState).forceChargeLineAskPct, 56);
+});
+
+test('★★★ T5 coercion: a finite ask is kept (ceil, [51, 100]); a non-number is dropped; the synced ceiling only in [80, 100]', () => {
+  const raw = (o: Record<string, unknown>) => coerceActuationState(JSON.parse(JSON.stringify({ ...emptyActuationState(), day: '2026-09-16', ...o }))) as LineState;
+  assert.equal(raw({ forceChargeLineAskPct: 56 }).forceChargeLineAskPct, 56);
+  assert.equal(raw({ forceChargeLineAskPct: 55.2 }).forceChargeLineAskPct, 56, 'never lowered');
+  assert.equal(raw({ forceChargeLineAskPct: 40 }).forceChargeLineAskPct, 51);
+  assert.equal(raw({ forceChargeLineAskPct: 150 }).forceChargeLineAskPct, 100);
+  assert.equal(raw({ forceChargeLineAskPct: '56' }).forceChargeLineAskPct, null);
+  assert.equal(raw({}).forceChargeLineAskPct, null);
+  assert.equal(raw({ forceChargeLinePct: 55.55 }).forceChargeLinePct, 55.55);
+  assert.equal(raw({ forceChargeLinePct: 'x' }).forceChargeLinePct, null);
+  assert.equal(raw({ forceChargeCeilingSyncedPct: 88 }).forceChargeCeilingSyncedPct, 88);
+  assert.equal(raw({ forceChargeCeilingSyncedPct: 20 }).forceChargeCeilingSyncedPct, null, 'a synced value the panel cannot hold is no ceiling');
+  assert.equal(raw({ forceChargeMode: 'line' }).forceChargeMode, 'line');
+  assert.equal(raw({ forceChargeMode: 'cost' }).forceChargeMode, 'cost');
+  assert.equal(raw({ forceChargeMode: 'bogus' }).forceChargeMode, null);
+});
+
+/* ══ T6 — decide ═══════════════════════════════════════════════════════════════════════════════════ */
+
+const night = (over: Partial<LineState> = {}): LineState => ({
+  ...emptyActuationState(),
+  day: '2026-09-16', targetPct: 50, buyKwh: 28,
+  windowStartMs: WIN_START, windowEndMs: WIN_END,
+  applyAttemptedAtMs: WIN_START - 5 * M, attemptBaselinePct: 30,
+  appliedAtMs: WIN_START - 5 * M, priorReservePct: 30,
+  applyVerifiedAtMs: WIN_START + M,
+  forceChargeCeilingPct: null, forceChargeLineAskPct: 56, forceChargeLinePct: 55.55,
+  forceChargeCeilingSyncedPct: null, forceChargeMode: null, forceChargeRides: true,
+  ...over,
+} as LineState);
+const onNight = (over: Partial<LineState> = {}): LineState => night({
+  forceChargeOnAtMs: WIN_START + 2 * H, forceChargeSlots: [1, 2, 3], forceChargeOnVerifiedAtMs: WIN_START + 2 * H + 5 * M,
+  forceChargeMode: 'line', ...over,
+});
+const fo = (over: Partial<ForceChargeOpts> & { lineEnabled?: boolean } = {}): ForceChargeOpts => ({
+  enabled: false, lineEnabled: true, gridPresent: true, gridStaLost: false,
+  slotsOn: [], connectedSlots: [1, 2, 3], vitalsRed: false, socCoherent: true,
+  ceilingReadbackPct: 80, poolSocPct: 50, fullKwh: 92.16, chargeRateKw: 14,
+  ...over,
+} as ForceChargeOpts);
+/** The first tick (one a minute across the window) whose decision is `on`, as minutes before the close. */
+const firstOnBeforeClose = (s: LineState, o: ForceChargeOpts): number | null => {
+  for (let t = WIN_START; t < WIN_END; t += M) if (decideForceCharge(s, t, o).kind === 'on') return (WIN_END - t) / M;
+  return null;
+};
+
+test('★★★ T6 forceChargeModeOf: cost alone is today; the line; cost-dominant at ⌈L⌉ + 10; the live gates decide', () => {
+  const mode = (c: number | null, ask: number | null, cost: boolean, line: boolean) =>
+    nfc.forceChargeModeOf({ forceChargeCeilingPct: c, forceChargeLineAskPct: ask } as never, { cost, line });
+  assert.deepEqual(mode(90, null, true, true), { kind: 'cost', targetPct: 90, panelCeilingPct: 90 });
+  assert.deepEqual(mode(72.8, null, true, false), { kind: 'cost', targetPct: 72.8, panelCeilingPct: 80 });
+  assert.deepEqual(mode(null, 56, false, true), { kind: 'line', targetPct: 56, askPct: 56, startTargetPct: 61, panelCeilingPct: 80 });
+  assert.deepEqual(mode(66, 56, true, true), { kind: 'cost', targetPct: 66, panelCeilingPct: 80 }, 'a cost stop at ⌈L⌉ + 10 already clears the line');
+  assert.deepEqual(mode(65.9, 56, true, true), { kind: 'line', targetPct: 65.9, askPct: 56, startTargetPct: 65.9, panelCeilingPct: 80 }, 'F-vi: under ⌈L⌉ + 10 the line runs to the close');
+  assert.deepEqual(mode(90, 56, false, true), { kind: 'line', targetPct: 56, askPct: 56, startTargetPct: 61, panelCeilingPct: 80 }, 'R4: the cost gate off ⇒ the ask, never the cost ceiling');
+  assert.deepEqual(mode(48, 56, true, true), { kind: 'line', targetPct: 56, askPct: 56, startTargetPct: 61, panelCeilingPct: 80 });
+  assert.deepEqual(mode(null, 78, false, true), { kind: 'line', targetPct: 78, askPct: 78, startTargetPct: 83, panelCeilingPct: 88 }, 'F-v: ⌈L⌉ + 10, never + 5');
+  assert.deepEqual(mode(null, 90, false, true), { kind: 'line', targetPct: 90, askPct: 90, startTargetPct: 95, panelCeilingPct: 100 });
+  assert.equal(mode(90, 56, false, false), null, 'advisory: no mode');
+  assert.equal(mode(null, null, true, true), null);
+  assert.equal(mode(50, null, true, true), null, 'a cost ceiling at the reserve is no mode');
+  assert.equal(nfc.FORCE_CHARGE_LINE_HEADROOM_PCT, 5);
+  assert.equal(nfc.lineForceChargeEnabled({ mode: 'advisory' }), false);
+  assert.equal(nfc.lineForceChargeEnabled({ mode: 'supervised' }), true);
+  assert.equal(nfc.lineForceChargeEnabled({ mode: 'auto' }), true);
+});
+
+test('★★★ T6 a cost-dominant record decides exactly as today (the line rides no tick there)', () => {
+  const s = (ask: number | null) => night({ forceChargeCeilingPct: 90, forceChargeLineAskPct: ask, forceChargeLinePct: ask == null ? null : 55.55 });
+  for (const pool of [20, 45, 60, 85, 89, 90, 95]) {
+    for (let t = WIN_START - H; t <= WIN_END + H; t += 20 * M) {
+      for (const ceil of [80, 90]) {
+        const o = fo({ enabled: true, poolSocPct: pool, ceilingReadbackPct: ceil });
+        assert.deepEqual(decideForceCharge(s(56), t, o), decideForceCharge(s(null), t, o), `pool ${pool} t ${(t - WIN_START) / M}`);
+        const on = { forceChargeOnAtMs: WIN_START + H, forceChargeSlots: [1, 2, 3], forceChargeOnVerifiedAtMs: WIN_START + H + 5 * M };
+        assert.deepEqual(decideForceCharge({ ...s(56), ...on }, t, o), decideForceCharge({ ...s(null), ...on }, t, o));
+      }
+    }
+  }
+});
+
+test('★★★ T6 I-A2: a record with no line ask decides exactly as before, whatever the line gate', () => {
+  for (const target of [null, 40, 48, 50, 51, 60, 80.4, 90, 100]) {
+    for (const pool of [null, 0, 30, 49, 50, 51, 61, 79, 80, 90, 100]) {
+      for (let t = WIN_START - 30 * M; t <= WIN_END + 30 * M; t += 25 * M) {
+        for (const enabled of [true, false]) {
+          for (const onAt of [null, WIN_START + H]) {
+            const s = night({ forceChargeCeilingPct: target, forceChargeLineAskPct: null, forceChargeLinePct: null, forceChargeOnAtMs: onAt, forceChargeSlots: onAt == null ? null : [1, 2, 3] });
+            const base = decideForceCharge(s, t, { ...fo({ enabled, poolSocPct: pool }), lineEnabled: undefined } as ForceChargeOpts);
+            for (const line of [true, false]) assert.deepEqual(decideForceCharge(s, t, fo({ enabled, lineEnabled: line, poolSocPct: pool })), base);
+          }
+        }
+      }
+    }
+  }
+});
+
+test('★★★ T6 the start: a 1-point lift STARTS (outside the dead zone), timed to ⌈L⌉ + 5 at the close − 20 min', () => {
+  // ⌈L⌉ 51 from a 50% pool: 6 points to 56% of 92.16 kWh = 5.53 kWh at 14 kW = 23.7 min, + the 15 min buffer,
+  // counted back from 20 min before the close: 58.7 min ⇒ the first whole-minute tick 58 min before it.
+  assert.equal(firstOnBeforeClose(night({ forceChargeLineAskPct: 51, forceChargeLinePct: 50.08 }), fo({ poolSocPct: 50 })), 58);
+  // Today's path for the same ask as a cost ceiling: 0.92 kWh ⇒ 19 min before the close, in the dead zone — never.
+  assert.equal(firstOnBeforeClose(night({ forceChargeCeilingPct: 51, forceChargeLineAskPct: null }), fo({ enabled: true, lineEnabled: false, poolSocPct: 50 })), null);
+  // A pool at ⌈L⌉ + 3 still starts (F-iv): 2 points ⇒ 7.9 min + 15 + 20 ⇒ 42 min before the close.
+  assert.equal(firstOnBeforeClose(night({ forceChargeLineAskPct: 51 }), fo({ poolSocPct: 54 })), 42);
+  // At or above the start target: due at the close − 20 − 15 min; under the panel ceiling still due.
+  assert.equal(firstOnBeforeClose(night(), fo({ poolSocPct: 61 })), 35);
+  assert.equal(firstOnBeforeClose(night(), fo({ poolSocPct: 79 })), 35);
+  // At the panel ceiling the panel would not import: nothing starts.
+  assert.equal(firstOnBeforeClose(night(), fo({ poolSocPct: 80 })), null);
+  const why = (decideForceCharge(night(), WIN_END - 2 * H, fo({ poolSocPct: 80 })) as { why?: string }).why ?? '';
+  assert.match(why, /80% panel ceiling/);
+  // The helper: the same start, counted back from 20 min before the end.
+  assert.equal(nfc.forceChargeLineStartAtMs(WIN_END, 61, 61, 92.16, 14, null, 3), WIN_END - FORCE_CHARGE_MIN_RUN_MS - FORCE_CHARGE_JIT_BUFFER_MS);
+});
+
+test('★★★ T6 line mode has no software stop: ON to the window close; OFF at windowEnd (and the other OFF triggers)', () => {
+  for (const pool of [56, 61, 70, 79, 80, 95]) {
+    const a = decideForceCharge(onNight(), WIN_END - 10 * M, fo({ poolSocPct: pool, slotsOn: [1, 2, 3] }));
+    assert.notEqual(a.kind, 'off', `pool ${pool}: ${JSON.stringify(a)}`);
+  }
+  // With a cost ceiling under ⌈L⌉ + 10 riding too (line mode, target max(60, 56)): no stop at 60 either (F-x).
+  const both = onNight({ forceChargeCeilingPct: 60 });
+  for (const pool of [60, 66, 75]) assert.notEqual(decideForceCharge(both, WIN_END - 10 * M, fo({ enabled: true, poolSocPct: pool, slotsOn: [1, 2, 3] })).kind, 'off', `cost 60 + line, pool ${pool}`);
+  assert.deepEqual(decideForceCharge(onNight(), WIN_END, fo({ poolSocPct: 70 })), { kind: 'off', slots: [1, 2, 3], reason: 'windowEnd' });
+  assert.equal((decideForceCharge(onNight(), WIN_END - H, fo({ gridPresent: false })) as { reason?: string }).reason, 'gridLoss');
+  // The cost mode keeps today's stop at its target.
+  const cost = onNight({ forceChargeCeilingPct: 90, forceChargeMode: 'cost' });
+  assert.deepEqual(decideForceCharge(cost, WIN_END - H, fo({ enabled: true, poolSocPct: 90 })), { kind: 'off', slots: [1, 2, 3], reason: 'target' });
+});
+
+test('★★★ T6 the panel ceiling is max(80, ⌈L⌉ + 10): ask 78 syncs 88, and the own-write list names 88', () => {
+  const s = night({ forceChargeLineAskPct: 78, forceChargeLinePct: 77.1 });
+  assert.deepEqual(decideForceCharge(s, WIN_START + H, fo({ ceilingReadbackPct: 100 })), { kind: 'syncCeiling', pct: 88, prior: 100 });
+  const synced = { ...s, forceChargeCeilingAttemptedAtMs: WIN_START + H, forceChargeCeilingPriorPct: 100, forceChargeCeilingSyncedPct: 88 };
+  assert.deepEqual(forceChargeCommandsOf(synced).ceilingPcts, [88], 'settings drift: our own 88 write is not foreign');
+  // With a cost ceiling under the line as well, still 88 (F-ix: never desired(cost)).
+  assert.deepEqual(forceChargeCommandsOf({ ...synced, forceChargeCeilingPct: 60 }).ceilingPcts, [88]);
+  // A record from before the field: the value the sync always wrote.
+  assert.deepEqual(forceChargeCommandsOf({ ...synced, forceChargeCeilingSyncedPct: null, forceChargeCeilingPct: 85.3 } as never).ceilingPcts, [desiredForceChargeCeilingPct(85.3)]);
+  assert.equal(forceChargeStopPct(85.3), 85);
+});
+
+test('★★★ T6 R4 — the gates are read LIVE each tick: a restart with an option flipped, both directions', () => {
+  const persisted = () => coerceActuationState(JSON.parse(JSON.stringify(onNight({ forceChargeCeilingPct: 90, forceChargeMode: 'cost' })))) as LineState;
+  assert.equal(persisted().forceChargeLineAskPct, 56);
+  // Cost gate on: a cost-dominant night stops at its target (today).
+  assert.equal((decideForceCharge(persisted(), WIN_END - H, fo({ enabled: true, poolSocPct: 91 })) as { reason?: string }).reason, 'target');
+  // ARB_COST_MAX_SOC_PCT set to 50 and a restart: the cost force-charge is off; the line runs to the close.
+  assert.notEqual(decideForceCharge(persisted(), WIN_END - H, fo({ enabled: false, poolSocPct: 91 })).kind, 'off');
+  // Advisory and a restart: both gates off — 'disabled' OFF.
+  assert.deepEqual(decideForceCharge(persisted(), WIN_END - H, fo({ enabled: false, lineEnabled: false, poolSocPct: 70 })), { kind: 'off', slots: [1, 2, 3], reason: 'disabled' });
+  // Before the ON: the cost gate off ⇒ the start is timed to the line's 61%, never the 90% cost ceiling (F-viii).
+  const pre = night({ forceChargeCeilingPct: 90, forceChargeRides: true });
+  // 11 points = 10.14 kWh at 14 kW = 43.4 min + 15 + 20 ⇒ 78 min before the close.
+  assert.equal(firstOnBeforeClose(pre, fo({ enabled: false, poolSocPct: 50, ceilingReadbackPct: 80 })), 78);
+  // …and with it on, today's 90% cost path (its ceiling 90, its start hours earlier).
+  assert.deepEqual(decideForceCharge(pre, WIN_START + H, fo({ enabled: true, ceilingReadbackPct: 80 })), { kind: 'syncCeiling', pct: 90, prior: 80 });
+  assert.ok(firstOnBeforeClose(pre, fo({ enabled: true, poolSocPct: 50, ceilingReadbackPct: 90 }))! > 150);
+});
+
+test('★★★ T6 L2 — a malformed line stamp while ON: a finite ask keeps riding; a non-number with the cost gate off is a disabled OFF', () => {
+  const rec = (ask: unknown) => coerceActuationState(JSON.parse(JSON.stringify({ ...onNight(), forceChargeLineAskPct: ask }))) as LineState;
+  assert.notEqual(decideForceCharge(rec(55.5), WIN_END - H, fo({ poolSocPct: 70 })).kind, 'off');
+  assert.deepEqual(decideForceCharge(rec('56'), WIN_END - H, fo({ poolSocPct: 70 })), { kind: 'off', slots: [1, 2, 3], reason: 'disabled' });
+});
+
+test('★★ T6 the why-texts (L8) and the ON-step texts in line mode', () => {
+  const why = (s: LineState, o: ForceChargeOpts) => (decideForceCharge(s, WIN_START + H, o) as { why?: string }).why ?? '';
+  assert.equal(why(night(), fo({ enabled: false, lineEnabled: false })),
+    'disabled (NIGHT_CHARGE_MODE advisory; or, with no outage line above the reserve tonight, ARB_OBJECTIVE not cost or ARB_COST_MAX_SOC_PCT at or below the 50% reserve)');
+  assert.equal(why(night({ forceChargeLineAskPct: null }), fo({ enabled: true })),
+    'no force-charge target tonight (no cost ceiling and no outage line above the 50% reserve) — reserve-only night');
+  assert.match(why(night(), fo({ poolSocPct: 50 })), /just in time — holding off so the pool reaches ~61% 20 min before the window closes, then stays on to the close for the 56% outage line/);
+});
+
+/* ══ T8 — the morning refresh never lowers or drops the line ═══════════════════════════════════════ */
+
+test('★★ T8 a refresh with a lower cost ceiling, or none, keeps the line ask: the leg still rides the line', () => {
+  const leg = asChargeLeg(night({ forceChargeCeilingPct: 60 }), { leg: 'cost', windowKind: 'super_off_peak', announcedLevelPct: 70, announcedExpectedKwh: 20 });
+  const replan = (c: number | null, line: typeof LINE | null) => ({
+    basisComplete: true, chargeTonight: true, setpointSocPct: 50, expectedWriteLevelPct: 62, expectedForceChargeStartMs: WIN_END - H,
+    expectedBuyKwh: 12, buyKwh: 25, costCeilingSocPct: c, ...(line != null ? { forceChargeLine: line } : {}),
+  }) as unknown as NightChargePlan;
+  for (const [c, line] of [[52, null], [null, null], [52, { askPct: 52, linePct: 51.2 }]] as const) {
+    const o = liveRefreshOutcome(leg, replan(c, line));
+    assert.equal(o.disposition, 'lowered');
+    assert.equal((o as { forceChargeLineAskPct?: number | null }).forceChargeLineAskPct, 56, 'the outcome carries the armed ask');
+    const after = applyLiveRefresh(leg, o, WIN_START - 3 * H) as LineState;
+    assert.equal(after.forceChargeCeilingPct, c, 'the cost ceiling is lowered or dropped, as before');
+    assert.equal(after.forceChargeLineAskPct, 56, 'M-i / M-ii: never nulled, never lowered to the re-plan\'s');
+    assert.equal(after.forceChargeLinePct, 55.55);
+    const m = nfc.forceChargeModeOf(after as never, { cost: true, line: true });
+    assert.equal(m?.kind, 'line');
+    assert.equal(m?.targetPct, 56);
+  }
+  const replanLine = liveRefreshOutcome(leg, replan(52, { askPct: 52, linePct: 51.2 })) as { neededLineAskPct?: number | null };
+  assert.equal(replanLine.neededLineAskPct, 52, 'what the re-plan asked is recorded, not applied');
+});
+
+/* ══ T9 — texts and parity ═════════════════════════════════════════════════════════════════════════ */
+
+/** The 2026-10-12 evening as a resilience night with an 8 h × 4.5 kW island on a 30% floor: line > 50. */
+const LINE_DEPS = { objectiveMode: 'resilience' as const, forceChargeEligible: false, islandedLoadKw: 4.5, outageCushionHours: 4, reserveFloorPct: 30, socNowPct: 40 };
+const linePlan = (eligible: boolean | undefined) => L(goldenPlan({ ...LINE_DEPS, ...(eligible !== undefined ? { lineForceChargeEligible: eligible } : {}) } as never));
+
+test('★★ T9 the supervised push: the title, the clause, the spoken notice and the card state ONE level, the expected close', () => {
+  const p = linePlan(true);
+  assert.equal(p.expectedForceChargeMode, 'line', JSON.stringify(p.forceChargeLine));
+  const level = chargeLevelPct(p)!;
+  const supervised = {
+    cancelDeadlineText: 'tonight at 11:55 PM', targetPct: 50, forceChargeTargetPct: null,
+    forceChargeLine: { askPct: p.forceChargeLine!.askPct, linePct: p.forceChargeLine!.linePct, panelCeilingPct: 80 },
+  };
+  const msg = buildNightChargeMessage(p, 'charge', supervised as never);
+  const title = /~([\d.]+)%/.exec(msg.title)?.[1];
+  assert.equal(Number(title), Math.round(level * 10) / 10, msg.title);
+  assert.ok(msg.body.includes(`for tonight's ${Math.round(p.forceChargeLine!.linePct * 10) / 10}% outage line`), msg.body);
+  assert.ok(msg.body.includes(`taking the pool to ~${Math.round(level * 10) / 10}%`), 'the clause names the title\'s level');
+  assert.doesNotMatch(msg.body, /just long enough to|OFF when it gets there/, 'no software stop to promise');
+  // The spoken notice names the same level, and the reserve clause.
+  const ann = eveningAnnouncement({ cycle: 'overnight', plan: p, shape: 'charge', supervised: { ...supervised, cancelDeadlineTextEs: 'esta noche a las 11:55 PM' }, armRefused: null, mode: 'supervised' } as never);
+  assert.ok(ann.spoken!.en.includes(`about ${Math.round(level)} percent`), ann.spoken!.en);
+  assert.ok(ann.spoken!.en.endsWith(' The panel keeps only 50 percent in reserve. Cancel on the Power panel before then.')
+    || ann.spoken!.en.includes(' The panel keeps only 50 percent in reserve.'), ann.spoken!.en);
+  assert.ok(ann.spoken!.es.includes(' El panel solo mantiene el 50 por ciento en reserva.'), ann.spoken!.es);
+  // The card's row names the line and the same level.
+  const row = (cardText as unknown as { outageLineRow: (p: unknown) => string | null }).outageLineRow(p);
+  assert.ok(row != null && row.includes(`~${Math.round(level * 10) / 10}%`), String(row));
+});
+
+test('★★ T9 the spoken clause fits the 560-character bound at the longest deadline; never beside the shortfall or "toward"', () => {
+  const longest = { en: 'Monday, December 28 at 11:55 PM', es: 'el lunes 28 de diciembre a las 11:55 PM' };
+  const n = (o: Partial<Parameters<typeof nightChargeSpokenNotice>[0]> & { reserveOnlyPct?: number }) => {
+    const t = nightChargeSpokenNotice({ levelPct: 69.4, reservePct: 50, expectedKwh: 17.6, deadlineText: longest.en, deadlineTextEs: longest.es, cushionShortfall: false, ...o } as never);
+    return t;
+  };
+  const withClause = n({ reserveOnlyPct: 50 });
+  assert.ok(withClause.en.includes(' The panel keeps only 50 percent in reserve.'));
+  assert.ok(withClause.en.length + withClause.es.length <= MAX_SPOKEN_ADVISORY_CHARS, `${withClause.en.length + withClause.es.length}`);
+  // Never beside the shortfall clause or "toward": on a short shape where it would still fit (no energy
+  // figure, tonight's deadline), so the rule — not the length bound — is what keeps it out.
+  const clause = ' The panel keeps only 50 percent in reserve.'.length + ' El panel solo mantiene el 50 por ciento en reserva.'.length;
+  for (const o of [{ cushionShortfall: true }, { toward: true }]) {
+    const short = { ...o, expectedKwh: null, deadlineText: 'tonight at 11:00 PM', deadlineTextEs: 'esta noche a las 11:00 PM' };
+    const bare = n(short);
+    assert.ok(bare.en.length + bare.es.length + clause <= MAX_SPOKEN_ADVISORY_CHARS, `precondition: it would fit (${bare.en.length + bare.es.length + clause})`);
+    const t = n({ ...short, reserveOnlyPct: 50 });
+    assert.ok(!t.en.includes('keeps only') && !t.es.includes('solo mantiene'), 'the clause only on the plain shape');
+    assert.deepEqual(t, bare);
+    assert.ok(n({ ...o, reserveOnlyPct: 50 }).en.length + n({ ...o, reserveOnlyPct: 50 }).es.length <= MAX_SPOKEN_ADVISORY_CHARS);
+  }
+  assert.deepEqual(n({}), n({ reserveOnlyPct: undefined }), 'absent: today\'s words');
+});
+
+test('★★ T9 envelope-only disclosure: the advisory push and the card name the envelope, never "charge/pool caps"', () => {
+  const p = linePlan(false);
+  assert.equal(p.cushionShortfallCause, 'envelope');
+  const msg = buildNightChargeMessage(p, 'charge', null);
+  assert.ok(msg.body.includes(`NOTE: tonight's ${Math.round(p.cushionLineSocPct! * 10) / 10}% outage line is above the 50% the panel accepts as a reserve, and no force-charge rides tonight — residual risk remains.`), msg.body);
+  assert.doesNotMatch(msg.body, /charge\/pool limits/);
+  const ct = cardText as unknown as { capsShortfallShown: (p: unknown) => boolean; outageLineRow: (p: unknown) => string | null };
+  assert.equal(ct.capsShortfallShown(p), false);
+  assert.match(ct.outageLineRow(p)!, /not held tonight/);
+  // A sizing shortfall keeps its caps note, and an envelope on top of it says both.
+  assert.equal(ct.capsShortfallShown({ cushionShortfall: true }), true);
+  assert.equal(ct.capsShortfallShown({ cushionShortfall: true, cushionShortfallCause: 'envelope+caps' }), true);
+  const both = buildNightChargeMessage({ ...p, cushionShortfallCause: 'envelope+caps' } as never, 'charge', null);
+  assert.match(both.body, /charge\/pool limits/);
+  assert.match(both.body, /outage line is above the 50% the panel accepts/);
+  // The line sentence only in line mode: a carried cost-dominant plan says nothing of the line.
+  assert.equal(ct.outageLineRow({ ...linePlan(true), expectedForceChargeMode: undefined }), null);
+});
+
+test('★★ T9 the ON failure, the declined start (L3), the morning summary and the ARMED line on a line night', () => {
+  const fail = buildNightForceChargeOnFailure({ day: '2026-09-16', slots: [1, 2, 3], ourSlots: [1, 2, 3], retries: 1, noRetry: false, ceilingPct: null, lineLinePct: 55.55 } as never);
+  assert.ok(fail.body.includes(' Without it the pool will close the window near the 50% reserve, under tonight\'s 55.6% outage line.'), fail.body);
+  const declined = (notify as unknown as { buildLineForceChargeDeclinedStart: (o: unknown) => { title: string; body: string } })
+    .buildLineForceChargeDeclinedStart({ day: '2026-09-16', linePct: 55.55, why: 'grid presence is unknown', latestStartText: '04:01' });
+  assert.equal(declined.body, "Night-charge: the force-charge for tonight's 55.6% outage line cannot start yet — grid presence is unknown. If it has not started by ~04:01, the pool will close near the 50% reserve, under the line.");
+  // Which declines push: the non-pool blockers, never the timing or the pool.
+  const blocker = (nfc as unknown as { isForceChargeStartBlocker: (w: string) => boolean }).isForceChargeStartBlocker;
+  for (const s of [night(), night({ applyVerifiedAtMs: WIN_START + M })]) {
+    const w = (o: ForceChargeOpts) => ((decideForceCharge(s, WIN_END - 2 * H, o) as { why?: string }).why ?? '');
+    for (const o of [fo({ gridPresent: null }), fo({ vitalsRed: true }), fo({ slotsOn: [2] }), fo({ slotsOn: null }), fo({ socCoherent: false }), fo({ gridStaLost: true })]) {
+      assert.equal(blocker(w(o)), true, w(o));
+    }
+    assert.equal(blocker(w(fo({ poolSocPct: 50 }))), false, 'just in time is no blocker');
+    assert.equal(blocker(w(fo({ poolSocPct: 85 }))), false, 'at the panel ceiling is no blocker');
+  }
+  // index.ts pushes it on the first such tick after the reserve verifies, once per night (never held to a latest start).
+  assert.ok(INDEX.includes("if (lineMode?.kind === 'line' && state.applyVerifiedAtMs != null && isForceChargeStartBlocker(action.why)\n        && !forceChargeWhyLogged.reasons.has('push:line-declined')) {"));
+  const refused = { ...night(), forceChargeCeilingAttemptedAtMs: WIN_START, forceChargeCeilingSyncRetries: 1 };
+  assert.equal(blocker((decideForceCharge(refused, WIN_START + H, fo({ ceilingReadbackPct: 100 })) as { why?: string }).why ?? ''), true, 'the ceiling refused');
+  // The morning summary: ran to the close for the line, and the pool there.
+  const ran = nfc.forceChargeNightOutcome(onNight(), { cost: false, line: true } as never);
+  const sum = buildNightChargeMorningSummary({ day: '2026-09-16', targetPct: 50, restorePct: 30, expectedKwh: 17.6, forceCharge: ran, closePoolPct: 63 } as never);
+  assert.ok(sum.body.includes('force-charge ran to the window close for the 55.6% outage line; the pool read 63% at the close'), sum.body);
+  const never = nfc.forceChargeNightOutcome(night(), { cost: false, line: true } as never);
+  assert.equal(never.kind, 'neverStarted');
+  assert.match(buildNightChargeMorningSummary({ day: '2026-09-16', targetPct: 50, restorePct: 30, expectedKwh: 17.6, forceCharge: never } as never).body,
+    /force-charge for the 55\.6% outage line never started/);
+  // A cost night's outcome is today's.
+  const cost = nfc.forceChargeNightOutcome({ ...onNight({ forceChargeCeilingPct: 90, forceChargeLineAskPct: null, forceChargeLinePct: null, forceChargeMode: 'cost' }) }, true);
+  assert.equal((cost as { stopPct?: number | null }).stopPct, 90);
+  // The ARMED line.
+  const note = (nfc as unknown as { forceChargeLineArmNote: (o: unknown) => string }).forceChargeLineArmNote({
+    linePct: 55.55, startTargetPct: 61, panelCeilingPct: 80, expectedStartText: '04:01', timedByText: '04:40',
+  });
+  assert.equal(note, 'Force-charge: LINE — tonight\'s 55.6% outage line is above the 50% reserve: on from ~04:01 (timed to 61% by 04:40) to the window close; panel ceiling 80% as backstop.');
+});
+
+/* ══ T10 — the gate ════════════════════════════════════════════════════════════════════════════════ */
+
+test('★★ T10 the gate: a carried row closing at its line is clean; an envelope row is exempt; a carried row under is a strike, and counted', async () => {
+  const { computeNightChargeReadiness, CURRENT_ALGO_VERSION, phoenixYmd } = await import('../src/nightChargeGate.js');
+  const NOW = Date.UTC(2026, 9, 31, 4, 30);
+  const row = (daysAgo: number, f: Record<string, unknown>) => ({
+    plan_date: phoenixYmd(NOW - daysAgo * 86_400_000), algo_version: String(CURRENT_ALGO_VERSION), confidence_tier: 'forecast',
+    issued_at_ms: NOW - daysAgo * 86_400_000, outcome_captured_at_ms: NOW - (daysAgo - 1) * 86_400_000,
+    scored: 1, actuated: 1, cushion_shortfall: 0, plan_traj_floor_breached: 0, cushion_breached: 0,
+    buy_err_kwh: 0.5, pv_err_frac: 0.05, load_err_frac: -0.05, pv_in_band: 1, load_in_band: 1, grid_home_coverage_frac: 0.95,
+    reserve_floor_pct: 30, cushion_pct: 15, cushion_line_soc_pct: 55.55, cushion_trough_soc_pct: 55.55, window_kind: 'overnight',
+    ...f,
+  });
+  const run = (f: Record<string, unknown>) => computeNightChargeReadiness([row(3, f)] as never, NOW).metrics;
+  const held = run({ cushion_line_force_charge_pct: 56, window_close_soc_pct: 63, actual_min_soc_pct: 40 });
+  assert.equal(held.activeStrikes, 0);
+  assert.equal(held.lineForceChargeStrikes, 0);
+  const envelope = run({ cushion_shortfall: 1, cushion_envelope_shortfall: 1, window_close_soc_pct: 50, actual_min_soc_pct: 40 });
+  assert.equal(envelope.activeStrikes, 0, 'disclosed: physics, not fault');
+  const under = run({ cushion_line_force_charge_pct: 56, window_close_soc_pct: 51, actual_min_soc_pct: 40 });
+  assert.equal(under.activeStrikes, 1, 'G-i: a carried night that closed under its line is a strike (fail-closed)');
+  assert.equal(under.lineForceChargeStrikes, 1);
+  assert.equal(run({ window_close_soc_pct: 51, actual_min_soc_pct: 40 }).lineForceChargeStrikes, 0, 'a strike with no line force-charge is not counted as one');
+});
+
+/* ══ T11 — the ledger ══════════════════════════════════════════════════════════════════════════════ */
+
+test('★★ T11 the plan columns: the ask where carried, the envelope flag where disclosed, NULL on a null plan', () => {
+  const cols = (p: NightChargePlan | null) => (nca as unknown as { lineForceChargeLedgerColumns: (p: unknown) => Record<string, unknown> }).lineForceChargeLedgerColumns(p);
+  assert.deepEqual(cols(yearPlan('2027-01-04 21:30', true)), { cushion_line_force_charge_pct: 56, cushion_envelope_shortfall: 0 });
+  assert.deepEqual(cols(yearPlan('2027-01-04 21:30', false)), { cushion_line_force_charge_pct: null, cushion_envelope_shortfall: 1 });
+  assert.deepEqual(cols(yearPlan('2027-01-04 21:30', undefined)), { cushion_line_force_charge_pct: null, cushion_envelope_shortfall: 0 });
+  assert.deepEqual(cols(null), { cushion_line_force_charge_pct: null, cushion_envelope_shortfall: null });
+  // Wiring: written unconditionally beside the line; force_charge_mode where force_charge_on_at_ms is.
+  const fn = INDEX.slice(INDEX.indexOf('function recordNightPlanRow('), INDEX.indexOf('\n}\n', INDEX.indexOf('function recordNightPlanRow(')));
+  assert.equal(fn.split('...lineForceChargeLedgerColumns(plan),').length - 1, 1);
+  assert.match(INDEX, /stampLegOutcome\(state, \{ force_charge_on_at_ms: nowMs, force_charge_mode: [^}]+\}\)/);
+  const rec = readFileSync(resolve(HERE, '../src/recorder.ts'), 'utf8');
+  assert.ok(rec.includes("'cushion_line_force_charge_pct REAL', 'cushion_envelope_shortfall INTEGER',"));
+  assert.ok(rec.includes("'cushion_line_force_charge_pct', 'cushion_envelope_shortfall',"));
+  assert.ok(rec.includes("['force_charge_mode', 'TEXT']"));
+});
+
+test('★★ T11 the columns round-trip through the recorder, and an older row reads null', async () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ef-line-fc-'));
+  const prev = process.env.DB_PATH;
+  process.env.DB_PATH = join(tmp, 'ecoflow.db');
+  try {
+    const { createRecorder } = await import('../src/recorder.js');
+    const { SnapshotStore } = await import('../src/snapshot.js');
+    const rec = createRecorder(new SnapshotStore(), () => {});
+    try {
+      const base = (d: string) => ({ plan_date: d, issued_at_ms: 1, algo_version: '3', posture: 'auto', objective: 'resilience_cushion', rationale: 'x',
+        confidence_tier: 'forecast', horizon_hours: 30, soc_now_pct: 30, target_soc_pct: 55.6, buy_kwh: 28, required_extra_kwh: 26,
+        reserve_floor_pct: 30, cushion_pct: 15, cushion_kwh: 22.2, binding_cap: 'requirement', cushion_shortfall: 0,
+        cushion_trough_soc_pct: 55.55, cushion_line_soc_pct: 55.55 });
+      rec.recordNightPlan({ ...base('2027-01-04'), cushion_line_force_charge_pct: 56, cushion_envelope_shortfall: 0 } as never);
+      rec.recordNightPlan(base('2027-01-03') as never);
+      rec.recordNightOutcome('2027-01-04', { force_charge_mode: 'line' } as never);
+      const at = (d: string) => rec.readNightLedger(3650).find((r) => r.plan_date === d) as unknown as Record<string, unknown>;
+      assert.equal(at('2027-01-04').cushion_line_force_charge_pct, 56);
+      assert.equal(at('2027-01-04').cushion_envelope_shortfall, 0);
+      assert.equal(at('2027-01-04').force_charge_mode, 'line');
+      assert.equal(at('2027-01-03').cushion_line_force_charge_pct, null);
+      assert.equal(at('2027-01-03').force_charge_mode, null);
+    } finally { rec.close(); }
+  } finally {
+    if (prev === undefined) delete process.env.DB_PATH; else process.env.DB_PATH = prev;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+/* ══ T12 — plumbing and wiring pins ════════════════════════════════════════════════════════════════ */
+
+test('★★ T12 buildNightChargeInputs forwards the line gate (never on a backup leg); index.ts passes it on every leg and every tick', () => {
+  const c = caseOf('2027-01-04 21:30');
+  assert.equal(buildNightChargeInputs({ ...c.deps, lineForceChargeEligible: true } as never).lineForceChargeEligible, true);
+  assert.equal(buildNightChargeInputs({ ...c.deps, lineForceChargeEligible: false } as never).lineForceChargeEligible, false);
+  assert.equal('lineForceChargeEligible' in buildNightChargeInputs(c.deps) && buildNightChargeInputs(c.deps).lineForceChargeEligible !== undefined, false);
+  assert.match(INDEX, /const lineForceChargeOn = \(role: ChargeLegRole = 'cost'\): boolean => legForceChargeEligible\(role, lineForceChargeEnabled\(\{ mode: NIGHT_CHARGE_MODE \}\)\);/);
+  assert.ok(INDEX.includes('    lineForceChargeEligible: lineForceChargeOn(legRole),\n'), 'the planner input');
+  assert.ok(INDEX.includes('lineEnabled: !opts.forceDisabled && lineForceChargeOn(legRoleOf(state)),'), 'the tick');
+  assert.equal(INDEX.split('lineForceChargeEnabled: lineForceChargeOn(').length - 1, 2, 'both arm candidates');
+  assert.ok(INDEX.includes('forceChargeCeilingSyncedPct: action.pct'), 'the sync persists what it wrote');
+});

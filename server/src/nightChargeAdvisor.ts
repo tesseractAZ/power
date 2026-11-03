@@ -79,6 +79,8 @@ import { clampReserveTarget, RESERVE_WRITE_MAX_PCT, armedForceChargeCeilingPct, 
 import {
   armedWriteLevelPct, forceChargeStartAtMs, forceChargeStopPct, evDisplacedPackKwh,
   FORCE_CHARGE_MIN_RUN_MS, FORCE_CHARGE_MIN_RATE_KW,
+  // v1.200.0 — the outage line above the reserve envelope: the mode the tick will run, and its start.
+  FORCE_CHARGE_LINE_HEADROOM_PCT, forceChargeModeOf, forceChargeLineStartAtMs,
 } from './nightForceCharge.js';
 // R2 — the window resolver and the per-leg rules live with the cycle chooser; the taper ceiling
 // with the curtailment engine's taper band. (chargeWindows.ts imports only tariff.ts;
@@ -253,6 +255,11 @@ export interface NightChargeInputs {
    *  expected-buy disclosure, to know which level the armed write drives the pool to.
    *  absent/false ⇒ the reserve setpoint alone. */
   forceChargeEligible?: boolean;
+  /** v1.200.0 — the outage-line force-charge will ride an armed plan (nightForceCharge
+   *  lineForceChargeEnabled: a write mode; never the backup leg). A charge night whose islanded-outage
+   *  line is asked above the 50% reserve envelope is then CARRIED (forceChargeLine) — else DISCLOSED
+   *  (cushionShortfall, cause 'envelope'). Absent (undefined) ⇒ neither: today's plan byte for byte. */
+  lineForceChargeEligible?: boolean;
 
   // ── The cheap charge window tonight (resolved upstream via tariff.rateAt) ──
   window: { startMs: number; endMs: number } | null;
@@ -310,6 +317,21 @@ export interface NightChargeInputs {
 
   /** Below this buy, treat the night as "hold" (no meaningful charge). kWh. */
   minBuyKwh: number;
+}
+
+/** v1.200.0 — the outage line above the 50% reserve envelope a charge plan carries (NightChargePlan.
+ *  forceChargeLine): the whole percent the force-charge runs for (⌈L⌉) and the line itself. */
+export interface ForceChargeLine { askPct: number; linePct: number }
+/** v1.200.0 — NightChargePlan.cushionShortfallCause. */
+export type CushionShortfallCause = 'envelope' | 'envelope+caps';
+
+/**
+ * v1.200.0 — PURE. The whole percent a line asks for (⌈L⌉), %: the reserve path's ask (lineAskPct) and
+ * the line force-charge's qualification read this ONE expression, so they cannot drift. 1e-9 below the
+ * ceiling keeps a line on a whole percent (50.000000001 from float noise) at that percent.
+ */
+export function askOf(targetFloorKwh: number, fullKwh: number): number {
+  return Math.min(100, Math.ceil((targetFloorKwh / fullKwh) * 100 - 1e-9));
 }
 
 /** v1.198.0 — how a plan's PROVISIONAL solar band was widened (buildNightChargeInputs). */
@@ -511,8 +533,29 @@ export interface NightChargePlan {
   /** Why buyKwh is what it is (which cap bound). */
   bindingCap: BindingCap;
   /** true when charge-power / pool caps prevented reaching floor+cushion —
-   *  the cushion is NOT fully met and residual risk remains (surfaced honestly). */
+   *  the cushion is NOT fully met and residual risk remains (surfaced honestly).
+   *  v1.200.0 — true when the sized trough is under the line (cushionTroughSocPct < cushionLineSocPct), OR
+   *  when `cushionShortfallCause` names the envelope: the line is above the 50% the panel accepts as a
+   *  reserve and no force-charge can carry it tonight (advisory mode, the backup leg, a line within 10
+   *  points of full). OR-ed in after the cost block, so the cost ceiling and its de-bias bound read the
+   *  sized flag alone. */
   cushionShortfall: boolean;
+  /** v1.200.0 — why the envelope contributes to `cushionShortfall`: 'envelope' (the sizing held the line;
+   *  only the 50% envelope does not), 'envelope+caps' (the sizing fell short too). Absent wherever the
+   *  envelope does not contribute — that plan's JSON is unchanged. Every surface prints the caps note
+   *  only when `cushionShortfall && cause !== 'envelope'`, and the envelope note when a cause is present. */
+  cushionShortfallCause?: CushionShortfallCause;
+  /** v1.200.0 — the outage line above the 50% reserve, CARRIED by the night force-charge to the window
+   *  close: ⌈L⌉ (askOf, the reserve path's own ask) and L. Present only on a charge plan whose
+   *  islanded-outage line asks above the envelope, not economic-only, with the line force-charge eligible
+   *  and ⌈L⌉ + 10 ≤ 100. One whole percent and the line — no capacity, no load (runwayBasisContracts).
+   *  armFromPlan records the ask beside the cost ceiling. */
+  forceChargeLine?: ForceChargeLine;
+  /** v1.200.0 — 'line' when the expected walk (expectedBuyFromPlan) ran the LINE force-charge (its stop is
+   *  not already ⌈L⌉ + 10 or more from the cost ceiling): the start is timed to ⌈L⌉ + 5 at the close less
+   *  20 min, it runs to the close, and expectedWriteLevelPct is the expected CLOSE. Every surface states
+   *  the line sentence only then (never on a cost-dominant night). Absent otherwise. */
+  expectedForceChargeMode?: 'line';
 
   /** v1.60.0 — EV-contention disclosure for tonight's window (see the type).
    *  null only on a null plan (no window was even resolved). */
@@ -528,8 +571,9 @@ export interface NightChargePlan {
   /** v1.186.0 — the trough the CUSHION TEST was judged on, % of pool, under the
    *  resilience lift: the whole-house forward trough on the `legacy-pct` basis, the
    *  pack at window close (outage onset) on `islanded-outage` / `disabled`.
-   *  `cushionShortfall` is exactly this figure against `cushionLineSocPct`, and the
-   *  scorer grades the plan-trajectory verdict on it.
+   *  `cushionShortfall` is exactly this figure against `cushionLineSocPct` — v1.200.0: or the envelope
+   *  (cushionShortfallCause); this stays the SIZED trough, never capped at what a 50% write can reach —
+   *  and the scorer grades the plan-trajectory verdict on it.
    *
    *  ★ NOT `minProjSocPct`. Since v1.125.0 that field is the whole-house DISCLOSURE
    *  trough, which sits at ~0% on a plant whose pool is smaller than a day of
@@ -963,6 +1007,10 @@ export function expectedForceChargeStart(o: {
   fullKwh: number;
   /** The ceiling armFromPlan records (armedForceChargeCeilingPct): decideForceCharge's target. */
   ceilingPct: number;
+  /** v1.200.0 — the pool the TICK times its start on, kWh: the panel's own backupFullCapWh (index.ts
+   *  runForceChargeTick), the nameplate pool. Required, so a walk on another pool (design C) keeps the
+   *  tick's mirror apart from its own `fullKwh`. Equal to fullKwh until then. */
+  tickPoolKwh: number;
   hours: ReadonlyArray<NightChargeHour>;
   fromMs: number;
   windowEndMs: number;
@@ -990,7 +1038,7 @@ export function expectedForceChargeStart(o: {
           : Math.max(FORCE_CHARGE_MIN_RATE_KW, (o.envelopeKw - loadW / 1000) * o.legEff),
         legEff: o.legEff,
       });
-      if (t >= forceChargeStartAtMs(o.windowEndMs, o.ceilingPct, poolPct, o.fullKwh, rateKw, evDisplacedKwh)) {
+      if (t >= forceChargeStartAtMs(o.windowEndMs, o.ceilingPct, poolPct, o.tickPoolKwh, rateKw, evDisplacedKwh)) {
         return { packKwh: pack, startMs: t };
       }
     }
@@ -1048,6 +1096,80 @@ export interface ExpectedBuy {
   forceChargeFromPct?: number;
   /** The window cannot deliver the whole draw: the figure is what it can pass on the median load. */
   deliverableBound?: boolean;
+  /** v1.200.0 — the walk ran the LINE force-charge (forceChargeModeOf 'line'): `levelPct` is the expected
+   *  CLOSE. Absent otherwise. */
+  mode?: 'line';
+}
+
+/**
+ * v1.200.0 — PURE. The LINE force-charge's night on the MEDIAN load, walked minute by minute from `fromMs`
+ * the way decideForceCharge decides it in line mode: until the start the house runs from the pool, held
+ * at the written reserve; the start comes once the clock reaches forceChargeLineStartAtMs(window end,
+ * the start target, the pool %, the TICK's pool, the rate, the EV displacement) with the pool under the
+ * panel ceiling and before the dead zone; from the start to the close the pack rises at the hour's
+ * median contended rate × legEff (the house on the grid), the P50 PV on top, capped at the panel
+ * ceiling. No software stop: the close is where the walk ends. `gridKwh` is the pack-side grid share
+ * of the rise (what is bought). null when a minute has no P50 basis.
+ */
+export function expectedLineForceChargeWalk(o: {
+  startKwh: number;
+  reserveKwh: number;
+  fullKwh: number;
+  tickPoolKwh: number;
+  startTargetPct: number;
+  panelCeilingPct: number;
+  hours: ReadonlyArray<NightChargeHour>;
+  fromMs: number;
+  windowEndMs: number;
+  dischargeEff: number;
+  chargeCapKw: number;
+  envelopeKw: number | null;
+  legEff: number;
+  acceptKw?: number | null;
+}): { closeKwh: number; startMs: number | null; startPackKwh: number; gridKwh: number } | null {
+  const byHour = hoursByEpoch(o.hours);
+  let pack = Math.max(0, Math.min(o.fullKwh, o.startKwh));
+  const floor = Math.min(Math.max(0, o.reserveKwh), pack);
+  const capKwh = (Math.min(100, o.panelCeilingPct) / 100) * o.fullKwh;
+  const lineLastStartMs = o.windowEndMs - FORCE_CHARGE_MIN_RUN_MS;
+  let startMs: number | null = null;
+  let startPackKwh = pack;
+  let gridKwh = 0;
+  for (let t = o.fromMs; t < o.windowEndMs; t += EXPECTED_JIT_STEP_MS) {
+    const h = p50HourAt(byHour, Math.floor(t / HOUR_MS) * HOUR_MS, o.fromMs);
+    if (h == null) return null;
+    const loadW = Math.max(0, h.loadP50W!);
+    const dtH = Math.min(EXPECTED_JIT_STEP_MS, o.windowEndMs - t) / HOUR_MS;
+    const pvW = p50PvW(h);
+    const poolPct = (pack / o.fullKwh) * 100;
+    if (startMs == null && t < lineLastStartMs && poolPct < o.panelCeilingPct) {
+      const lineRateKw = o.envelopeKw == null ? null : p50ChargeRateKw(loadW, o.chargeCapKw, o.envelopeKw) * o.legEff;
+      const ev = remainingEvP90(byHour, t, o.windowEndMs, o.fromMs);
+      const evDisplacedKwh = ev == null ? null : evDisplacedPackKwh({
+        evKwh: ev.kwh, peakEvKw: ev.peakKw, rateKw: lineRateKw,
+        unboundedRateKw: o.envelopeKw == null ? null
+          : Math.max(FORCE_CHARGE_MIN_RATE_KW, (o.envelopeKw - loadW / 1000) * o.legEff),
+        legEff: o.legEff,
+      });
+      if (t >= forceChargeLineStartAtMs(o.windowEndMs, o.startTargetPct, poolPct, o.tickPoolKwh, lineRateKw, evDisplacedKwh)) {
+        startMs = t;
+        startPackKwh = pack;
+      }
+    }
+    if (startMs != null) {
+      if (pack < capKwh) {
+        const gainKw = gridGainKw(p50ChargeRateKw(loadW, o.chargeCapKw, o.envelopeKw) * o.legEff, pvW, o.acceptKw ?? null);
+        const pvStep = Math.min(chargeLegStep((pvW / 1000) * dtH, o.legEff), capKwh - pack);
+        const gridStep = Math.max(0, Math.min(gainKw * dtH, capKwh - pack - pvStep));
+        pack += pvStep + gridStep;
+        gridKwh += gridStep;
+      }
+    } else {
+      const pv = h.pvP50W != null && Number.isFinite(h.pvP50W) ? h.pvP50W : h.pvP10W;
+      pack = Math.max(floor, Math.min(o.fullKwh, pack + chargeLegStep(((pv - loadW / o.dischargeEff) / 1000) * dtH, o.legEff)));
+    }
+  }
+  return { closeKwh: pack, startMs, startPackKwh: startMs != null ? startPackKwh : pack, gridKwh };
 }
 
 /**
@@ -1082,6 +1204,13 @@ export function expectedBuyFromPlan(o: {
   setpointSocPct: number | null;
   costCeilingSocPct: number | null;
   forceChargeEligible: boolean;
+  /** v1.200.0 — the outage line the plan carries (NightChargePlan.forceChargeLine), and whether the line
+   *  force-charge rides (lineForceChargeEligible): the walk is then mode-aware through the same
+   *  forceChargeModeOf the tick uses. Absent ⇒ today's walk. */
+  forceChargeLine?: ForceChargeLine | null;
+  lineForceChargeEligible?: boolean;
+  /** v1.200.0 — the pool the TICK times its start on (expectedForceChargeStart's tickPoolKwh). */
+  tickPoolKwh: number;
   /** The expected pack when the window's write takes effect (expectedCarryKwh to the window
    *  open, or the live pack mid-window). */
   startKwh: number | null;
@@ -1091,6 +1220,13 @@ export function expectedBuyFromPlan(o: {
   legEff: number;
   window: ExpectedBuyWindow;
 }): ExpectedBuy {
+  // v1.200.0 — a LINE night (forceChargeModeOf with the plan's own gates): its own walk, to the close.
+  const lineGate = o.lineForceChargeEligible === true && o.forceChargeLine != null;
+  const mode = lineGate ? forceChargeModeOf(
+    { forceChargeCeilingPct: armedForceChargeCeilingPct({ costCeilingSocPct: o.costCeilingSocPct }), forceChargeLineAskPct: o.forceChargeLine!.askPct },
+    { cost: o.forceChargeEligible, line: true },
+  ) : null;
+  if (mode?.kind === 'line' && o.setpointSocPct != null && Number.isFinite(o.setpointSocPct)) return expectedLineBuy(o, mode);
   const levelPct = armedWriteLevelPct(
     { setpointSocPct: o.setpointSocPct, costCeilingSocPct: o.costCeilingSocPct }, o.forceChargeEligible,
   );
@@ -1114,7 +1250,7 @@ export function expectedBuyFromPlan(o: {
   if (levelPct > reservePct && ceilingPct != null) {
     // The force-charge leg: the drain to the just-in-time start, bought back with the rest.
     const jit = expectedForceChargeStart({
-      startKwh: Math.max(o.startKwh, reserveKwh), reserveKwh, fullKwh: o.fullKwh, ceilingPct,
+      startKwh: Math.max(o.startKwh, reserveKwh), reserveKwh, fullKwh: o.fullKwh, ceilingPct, tickPoolKwh: o.tickPoolKwh,
       ...o.window, legEff: o.legEff,
       ...(reserveLeg.creditKwh > 0 ? { fromMs: reserveLeg.doneMs } : {}),
     });
@@ -1130,6 +1266,46 @@ export function expectedBuyFromPlan(o: {
   const deliverableKwh = Math.max(0, o.deliverableKwh);
   if (liftKwh > deliverableKwh + 1e-9) out.deliverableBound = true;
   out.buyKwh = round2(Math.min(liftKwh, deliverableKwh) / o.legEff);
+  return out;
+}
+
+/**
+ * v1.200.0 — expectedBuyFromPlan on a LINE night: the reserve leg as on any night, then the line
+ * force-charge's own walk (expectedLineForceChargeWalk) — the drain to its start, the rise to the close.
+ * The level is the expected CLOSE (round1); with no P50 basis, the level the start is timed to (the
+ * floor of what the night reaches: armedWriteLevelPct with both gates). The buy is the reserve leg plus
+ * the grid share of the rise, ÷ legEff, bounded by what the window can deliver.
+ */
+function expectedLineBuy(
+  o: Parameters<typeof expectedBuyFromPlan>[0],
+  mode: { startTargetPct: number; panelCeilingPct: number },
+): ExpectedBuy {
+  const reservePct = clampReserveTarget(o.setpointSocPct!);
+  const floorLevel = Math.max(reservePct, mode.startTargetPct);
+  if (o.startKwh == null || o.deliverableKwh == null) return { buyKwh: null, levelPct: floorLevel, mode: 'line' };
+  const reserveKwh = (reservePct / 100) * o.fullKwh;
+  let liftKwh = Math.max(0, reserveKwh - o.startKwh);
+  const reserveLeg = expectedPvChargeWalk({
+    liftKwh, hours: o.window.hours, fromMs: o.window.fromMs, windowEndMs: o.window.windowEndMs,
+    chargeCapKw: o.window.chargeCapKw, envelopeKw: o.window.envelopeKw, legEff: o.legEff, acceptKw: o.window.acceptKw ?? null,
+  });
+  liftKwh = liftKwh - reserveLeg.creditKwh;
+  const walk = expectedLineForceChargeWalk({
+    startKwh: Math.max(o.startKwh, reserveKwh), reserveKwh, fullKwh: o.fullKwh, tickPoolKwh: o.tickPoolKwh,
+    startTargetPct: mode.startTargetPct, panelCeilingPct: mode.panelCeilingPct,
+    hours: o.window.hours, fromMs: reserveLeg.creditKwh > 0 ? reserveLeg.doneMs : o.window.fromMs, windowEndMs: o.window.windowEndMs,
+    dischargeEff: o.window.dischargeEff, chargeCapKw: o.window.chargeCapKw, envelopeKw: o.window.envelopeKw, legEff: o.legEff,
+    acceptKw: o.window.acceptKw ?? null,
+  });
+  if (walk == null) return { buyKwh: null, levelPct: floorLevel, mode: 'line' };
+  const out: ExpectedBuy = {
+    buyKwh: null, levelPct: round1(Math.max(reservePct, (walk.closeKwh / o.fullKwh) * 100)), mode: 'line',
+    forceChargeStartMs: walk.startMs, forceChargeFromPct: round1((walk.startPackKwh / o.fullKwh) * 100),
+  };
+  liftKwh += walk.gridKwh;
+  const deliverable = Math.max(0, o.deliverableKwh);
+  if (liftKwh > deliverable + 1e-9) out.deliverableBound = true;
+  out.buyKwh = round2(Math.min(liftKwh, deliverable) / o.legEff);
   return out;
 }
 
@@ -2068,9 +2244,30 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   // v1.187.22 — the EXPECTED buy beside the worst case (NightChargePlan.expectedBuyKwh): what
   // the write armFromPlan arms from this plan would draw. A night that does not arm (under the
   // minimum buy, below) writes nothing, so its expected draw is 0.
+  // ── v1.200.0 — THE OUTAGE LINE ABOVE THE RESERVE ENVELOPE ──
+  // A charge night (not economic-only) whose islanded-outage line asks above the 50% the panel accepts as a
+  // reserve: the 50% write cannot hold it. Where a write mode can force-charge it (lineForceChargeEligible,
+  // never the backup leg, ⌈L⌉ + 2H ≤ 100) the plan CARRIES it (forceChargeLine: the tick runs the line
+  // force-charge to the window close); otherwise it DISCLOSES it (cushionShortfall, cause 'envelope').
+  // Absent eligibility (every caller before v1.200.0): neither — today's plan byte for byte. No sizing
+  // figure reads this block: chargeTonight, the buy, the setpoint and the written reserve are above.
+  // Mid-day and backup qualification read askOf directly (lineAskPct is 0 where the setpoint is on the walk).
+  const lineAsk = askOf(targetFloorKwh, fullKwh);
+  const lineQualifies = cushionBasis === 'islanded-outage' && chargeTonight && !baselineHolds && lineAsk > RESERVE_WRITE_MAX_PCT;
+  const lineEligible = backupLeg && inputs.lineForceChargeEligible !== undefined ? false : inputs.lineForceChargeEligible;
+  const lineTooHigh = lineAsk + 2 * FORCE_CHARGE_LINE_HEADROOM_PCT > 100;
+  const lineCarried = lineQualifies && lineEligible === true && !lineTooHigh;
+  const lineDisclosed = lineQualifies && lineEligible !== undefined && !lineCarried;
+  const forceChargeLine: ForceChargeLine | null = lineCarried ? { askPct: lineAsk, linePct: cushionLineSocPct } : null;
+  // The envelope is OR-ed in here, AFTER the cost block: the cost ceiling and its de-bias bound
+  // (debiasedCostSurplusKwh) read the sized flag alone. The trough stays the sized one (never capped).
+  const planCushionShortfall = cushionShortfall || lineDisclosed;
+  const cushionShortfallCause: CushionShortfallCause | null = lineDisclosed ? (cushionShortfall ? 'envelope+caps' : 'envelope') : null;
+
   const expected: ExpectedBuy = chargeTonight
     ? expectedBuyFromPlan({
       setpointSocPct, costCeilingSocPct, forceChargeEligible: inputs.forceChargeEligible === true,
+      forceChargeLine, lineForceChargeEligible: inputs.lineForceChargeEligible === true, tickPoolKwh: fullKwh,
       startKwh: expectedStartKwh, deliverableKwh: expectedDeliverableKwh, fullKwh, legEff,
       window: { hours: horizon, fromMs: effChargeStartMs, windowEndMs: windowEnd, dischargeEff, chargeCapKw, envelopeKw, acceptKw },
     })
@@ -2130,6 +2327,10 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
       return `${start < writtenPct ? `, and tonight's write charges it to the ${writtenPct}% reserve` : `, above the ${writtenPct}% reserve`}; the just-in-time force-charge to ${level}% is not expected to start`;
     }
     const at = fmtSiteDayHm(fcAt, nowMs);
+    // v1.200.0 — a line night's force-charge runs to the window close.
+    if (expected.mode === 'line') {
+      return `${start < writtenPct ? `, and tonight's write charges it to the ${writtenPct}% reserve` : `, above the ${writtenPct}% reserve`}; the force-charge for the outage line runs from ~${at} to the window close and takes it ${to}${asFar}`;
+    }
     if (start < writtenPct) return `, and tonight's write charges it ${to} (the ${writtenPct}% reserve, then force-charge from ~${at})${asFar}`;
     return fcAt <= effChargeStartMs
       ? `, above the ${writtenPct}% reserve; the force-charge is due at once (~${at}) and charges it ${to}${asFar}`
@@ -2176,11 +2377,24 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
     && costHeadroomKwh > costSurplusKwh + 0.005
     ? ` (~${round1(costHeadroomKwh)} kWh, counting ${debiasTerms.join(' and ')}; ~${round1(costSurplusKwh)} kWh on the forecast as is)`
     : '';
+  // v1.200.0 — the reserve sentence on a night whose line is above the envelope: what carries it (the line
+  // force-charge to the window close), or that nothing does. Emitted whenever the line is carried in line
+  // mode or disclosed — never gated on the setpoint over the arrival (2026-10-29: setpoint = target = 66,
+  // and the rationale said nothing of the 50% write). A cost-dominant carried night keeps today's sentence.
+  const lineText = `tonight's ${cushionLineSocPct}% outage line is above it`;
+  const envelopeHead = `The reserve is set to ${writtenPct}%, the most the panel accepts as a backup reserve; ${lineText}`;
+  const lineStartText = expected.forceChargeStartMs != null ? `switches on at ~${fmtSiteDayHm(expected.forceChargeStartMs, nowMs)} and ` : expected.forceChargeStartMs === null ? 'stands by and ' : 'switches on just in time and ';
+  const envelopeNote: string | null = lineDisclosed
+    ? ` ${envelopeHead} and ${backupLeg ? 'the outage backup leg writes the reserve only' : lineTooHigh && lineEligible === true ? 'too close to a full pool for the force-charge to carry' : 'no force-charge runs in advisory mode'}, so the cushion is not fully held — residual risk remains.`
+    : expected.mode === 'line'
+      ? ` ${envelopeHead}, so the panel's force-charge ${lineStartText}stays on until the window closes${expected.levelPct != null && expected.forceChargeStartMs != null ? `, taking the pool to ~${expected.levelPct}%` : ''}. After the window the reserve returns to ${round1(reserveFloorPct)}% and the house can draw the pool down as usual.`
+      : null;
+  const reserveNote = envelopeNote ?? setpointNote;
   const holdReason = starved
     ? `this window can deliver only ~${round1(buyKwh)} kWh, under the ${round1(minBuyKwh)} kWh minimum-buy threshold${holdCapName} — against a requirement of ${meetable ? `~${round1(requiredExtraKwh)} kWh` : 'more than the pool can hold'}. The window cannot serve the need; this is not a night with little worth buying.`
     : `the buy this window would make (~${round1(buyKwh)} kWh) is under the ${round1(minBuyKwh)} kWh minimum-buy threshold — the projected need is genuinely small.`;
   const rationale = chargeTonight
-    ? `${chargeHeadline}${expectedNote}${sizingNote}${setpointNote} ${costMode ? `Objective: COST — buying cheap ${midday ? 'super off-peak' : 'overnight'} energy to displace dearer grid energy later, up to the ${costCeilingBasis === 'pv-headroom' ? `morning-solar headroom${headroomNote}` : costCeilingBasis === 'pv-curtail' ? `solar headroom under the ${round1(spec?.curtailFromPct ?? 0)}% charge taper${headroomNote}` : `${inputs.costMaxSocPct ?? DEFAULT_COST_MAX_SOC_PCT}% state-of-charge ceiling`}${longGap ? longGapNote : ''}. ` : ''}The cushion is ${cushionDesc}; without the buy a whole-house island would trough at ~${baselineMinSocPct}%.${baselineHolds ? ` Resilience needs no buy tonight — the pack at window close (${noBuyPct}%) already covers the cushion; this buy is economic only.` : ''}${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${bindingCap === 'overBuy' ? ' NOTE: buy exceeds morning-PV headroom; a small clip is accepted to hold resilience.' : ''}${evNote}${preWindowNote}`
+    ? `${chargeHeadline}${expectedNote}${sizingNote}${reserveNote} ${costMode ? `Objective: COST — buying cheap ${midday ? 'super off-peak' : 'overnight'} energy to displace dearer grid energy later, up to the ${costCeilingBasis === 'pv-headroom' ? `morning-solar headroom${headroomNote}` : costCeilingBasis === 'pv-curtail' ? `solar headroom under the ${round1(spec?.curtailFromPct ?? 0)}% charge taper${headroomNote}` : `${inputs.costMaxSocPct ?? DEFAULT_COST_MAX_SOC_PCT}% state-of-charge ceiling`}${longGap ? longGapNote : ''}. ` : ''}The cushion is ${cushionDesc}; without the buy a whole-house island would trough at ~${baselineMinSocPct}%.${baselineHolds ? ` Resilience needs no buy tonight — the pack at window close (${noBuyPct}%) already covers the cushion; this buy is economic only.` : ''}${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${bindingCap === 'overBuy' ? ' NOTE: buy exceeds morning-PV headroom; a small clip is accepted to hold resilience.' : ''}${evNote}${preWindowNote}`
     : `Hold — ${holdReason}${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${evNote}${preWindowNote}`;
 
   return {
@@ -2202,7 +2416,12 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
     setpointSocPct,
     requiredExtraKwh: round2(requiredExtraKwh),
     bindingCap,
-    cushionShortfall,
+    cushionShortfall: planCushionShortfall,
+    // v1.200.0 — only where the envelope contributes, the line carried, the walk in line mode: a plan
+    // without them is byte-identical.
+    ...(cushionShortfallCause != null ? { cushionShortfallCause } : {}),
+    ...(forceChargeLine != null ? { forceChargeLine } : {}),
+    ...(expected.mode === 'line' ? { expectedForceChargeMode: 'line' as const } : {}),
     evContention,
     minProjSocPct,
     minProjSocTsMs: houseWithBuy.minTs,   // v1.125.0 — matches the disclosed house trough
@@ -2545,6 +2764,8 @@ export interface NightChargeInputDeps {
   buyDebiasSamples?: number;
   /** v1.187.22 — forwarded verbatim (see NightChargeInputs). */
   forceChargeEligible?: boolean;
+  /** v1.200.0 — forwarded per leg (see NightChargeInputs): never eligible on a backup leg. */
+  lineForceChargeEligible?: boolean;
 }
 
 /** v1.169.0 — PURE. The fraction of the window hour starting at `hourTs` that is still
@@ -2778,6 +2999,9 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     buyDebiasBasis, buyDebiasSamples,
     // v1.187.22 — read by the expected-buy disclosure; copied through like the fields below.
     forceChargeEligible,
+    // v1.200.0 — the outage-line force-charge's gate (the same hazard as below: not copied, it is
+    // undefined and every line above the envelope stays uncarried and undisclosed).
+    lineForceChargeEligible,
     // v1.125.0 — the islanded-outage cushion inputs. Destructuring here is not
     // decoration: NightChargeInputs is built field-by-field below, so a field
     // added to the deps interface and to the inputs interface but NOT copied
@@ -3057,6 +3281,8 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     buyDebiasSamples,
     // v1.187.22 — forwarded verbatim; see the destructure note above. R2 — never on a backup leg.
     forceChargeEligible: forceChargeEligible === undefined ? undefined : legForceChargeEligible(legRole, forceChargeEligible),
+    // v1.200.0 — the line too: a backup leg is never eligible, so its line above the envelope is disclosed.
+    lineForceChargeEligible: lineForceChargeEligible === undefined ? undefined : legForceChargeEligible(legRole, lineForceChargeEligible),
     confidenceTier,
     basisComplete,
     minBuyKwh,
@@ -4022,6 +4248,21 @@ export function cushionPoolScaleLedgerColumns(
   return {
     cushion_pool_scale: plan.cushionPoolScale?.scale ?? null,
     cushion_pool_scale_basis: plan.cushionPoolScale?.basis ?? null,
+  };
+}
+
+/** v1.200.0 — the plan's line force-charge columns (recorder.ts NightLedgerRow): the ask the night
+ *  force-charge carries (cushion_line_force_charge_pct, NULL where none) and whether the plan disclosed
+ *  the 50% envelope (cushion_envelope_shortfall, 1/0). Written unconditionally beside the line, so a
+ *  re-issued plan never leaves an earlier plan's figures beside its own; both NULL on a null or refused
+ *  plan. PURE. */
+export function lineForceChargeLedgerColumns(
+  plan: Pick<NightChargePlan, 'basisComplete' | 'forceChargeLine' | 'cushionShortfallCause'> | null,
+): { cushion_line_force_charge_pct: number | null; cushion_envelope_shortfall: number | null } {
+  if (plan == null || !plan.basisComplete) return { cushion_line_force_charge_pct: null, cushion_envelope_shortfall: null };
+  return {
+    cushion_line_force_charge_pct: plan.forceChargeLine?.askPct ?? null,
+    cushion_envelope_shortfall: plan.cushionShortfallCause != null ? 1 : 0,
   };
 }
 

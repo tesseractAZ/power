@@ -466,7 +466,7 @@ const win = (loadW: number, envelopeKw: number | null = null) => ({
 test('expectedForceChargeStart: the house drains the pool, held at the reserve, until the just-in-time start', () => {
   // 4 kW from 70 of a 100 kWh pool; no envelope ⇒ the write's fixed 10 kW plan rate. The start is
   // where t = 5 h − ((80.4 − pool(t)) / 10 h + 15 min), pool(t) = 70 − 4t: t ≈ 2.65 h, pool ≈ 59.4.
-  const o = { startKwh: 70, reserveKwh: 50, fullKwh: 100, ceilingPct: 80.4, ...win(4000), legEff: 0.9 };
+  const o = { startKwh: 70, reserveKwh: 50, fullKwh: 100, tickPoolKwh: 100, ceilingPct: 80.4, ...win(4000), legEff: 0.9 };
   const r = expectedForceChargeStart(o)!;
   assert.ok(Math.abs(r.startMs! / H - 2.65) < 0.02, `start ${r.startMs! / H} h`);
   assert.ok(Math.abs(r.packKwh - 59.4) < 0.1, `pack ${r.packKwh}`);
@@ -499,7 +499,7 @@ test('★ the walk reads the in-progress hour\'s EV from the hour that stands in
   // 11.52 kW of EV against a (10 − 4) × 0.9 kW rate is due at once from 75 of a 100 kWh pool.
   const evHours = flatWindow(4000).map((h) => ({ ...h, evP90W: 11520 }));
   const o = {
-    startKwh: 75, reserveKwh: 50, fullKwh: 100, ceilingPct: 80.4, hours: evHours,
+    startKwh: 75, reserveKwh: 50, fullKwh: 100, tickPoolKwh: 100, ceilingPct: 80.4, hours: evHours,
     fromMs: 0.5 * H, windowEndMs: 5 * H, dischargeEff: 1, chargeCapKw: 20, envelopeKw: 10, legEff: 0.9,
   };
   const withHour = expectedForceChargeStart(o)!;
@@ -514,7 +514,7 @@ test('★ the walk reads the in-progress hour\'s EV from the hour that stands in
 });
 
 test('expectedBuyFromPlan: the reserve leg, the drain-and-refill force-charge leg, bounded, null without a basis', () => {
-  const base = { setpointSocPct: 80.4, costCeilingSocPct: 80.4, forceChargeEligible: true, fullKwh: 100, legEff: 0.9, window: win(2000) };
+  const base = { setpointSocPct: 80.4, costCeilingSocPct: 80.4, forceChargeEligible: true, fullKwh: 100, tickPoolKwh: 100, legEff: 0.9, window: win(2000) };
   // Below the reserve: 44 → 50 (the reserve), then 50 → 80 at the just-in-time start = F − S.
   const below = expectedBuyFromPlan({ ...base, startKwh: 44, deliverableKwh: 1e9 });
   assert.equal(below.buyKwh, 40);
@@ -1189,11 +1189,13 @@ test('★★ wiring (index.ts is not reachable from a unit test): the refused ar
   // R1 (v1.189.0) — the arm also stamps the on-peak start (armOnPeakStartMs; onPeakGuard.test.ts).
   // v1.189.0 — through armCycle (chargeCycle.ts): with one leg, armFromPlan / armRefusalReason against the
   // active leg (chargeCycle.test.ts holds the two equal).
-  assert.match(idx, /const arm = armCycle\(nightCycleView\(\), today, \[\{\n\s+role: 'cost', kind: 'overnight', plan, forceChargeEnabled: forceChargeOn\(\), nextOnPeakStartMs: armOnPeakStartMs,\n[^\n]*\n\s+\}\], nowMs, plan\.reserveFloorPct\);\n\s+armedCycle = arm\.cycle;\n\s+armedCandidate = arm\.cycle\?\.active \?\? null;\n\s+if \(!armedCandidate\) armRefused = arm\.refused\[0\]\?\.reason \?\? null;/);
+  // v1.200.0 — and the outage-line force-charge's gate (lineForceCharge.test.ts T12).
+  assert.match(idx, /const arm = armCycle\(nightCycleView\(\), today, \[\{\n\s+role: 'cost', kind: 'overnight', plan, forceChargeEnabled: forceChargeOn\(\), lineForceChargeEnabled: lineForceChargeOn\(\), nextOnPeakStartMs: armOnPeakStartMs,\n[^\n]*\n\s+\}\], nowMs, plan\.reserveFloorPct\);\n\s+armedCycle = arm\.cycle;\n\s+armedCandidate = arm\.cycle\?\.active \?\? null;\n\s+if \(!armedCandidate\) armRefused = arm\.refused\[0\]\?\.reason \?\? null;/);
   assert.match(idx, /const msg = buildNightChargeMessage\(plan, shape, supervisedCtx, armRefused, NIGHT_CHARGE_MODE\);/);
   assert.match(idx, /\n\s+expectedKwh: statedBuyKwh\(plan\),\n\s+toward: chargeIsWindowBound\(plan\),\n/);
   // v1.189.0 (review) — the summary goes after the ACK: the grid-loss abort is kept on the record with it.
-  assert.match(idx, /\n\s+expectedKwh: armedExpectedBuyKwh\(state\.day\),\n\s+forceCharge: forceChargeNightOutcome\(state, forceChargeOn\(\)\),\n\s+ended: endedBy, restore,\n/);
+  // v1.200.0 — both gates (a line night's outcome), and a line night's pool at the close.
+  assert.match(idx, /\n\s+expectedKwh: armedExpectedBuyKwh\(state\.day\),\n\s+forceCharge: forceChargeNightOutcome\(state, forceChargeGatesOn\(\)\),\n\s+ended: endedBy, restore,\n/);
   assert.match(idx, /\n  const endedBy = state\.revertGridLossAbort \? 'gridLoss' as const : state\.cancelled \? 'cancelled' as const : 'window' as const;\n/);
   assert.match(idx, /persistNightActuation\(\{ \.\.\.state, revertedAtMs: nowMs, lastError: null, revertGridLossAbort: action\.gridLossAbort === true \}\);/);
   // What the force-charge did is read from the record, never from the armed ceiling and the option alone.
@@ -1651,7 +1653,8 @@ test('★★★ the morning push reads whether force-charge rode the night from 
   }
   // index.ts arms with the gate and names the force-charge on the evening push from the stamp.
   const idx = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
-  assert.match(idx, /\n\s+forceChargeTargetPct: armedCandidate\.forceChargeRides === true \? armedCandidate\.forceChargeCeilingPct : null,\n/);
+  // v1.200.0 — the COST force-charge's target, unless tonight rides in line mode (then forceChargeLine).
+  assert.match(idx, /\n\s+forceChargeTargetPct: armedCandidate\.forceChargeRides === true && fcMode\?\.kind !== 'line' \? armedCandidate\.forceChargeCeilingPct : null,\n/);
   assert.doesNotMatch(idx, /forceChargeOn\(\) && armedCandidate\.forceChargeCeilingPct/);
 });
 
@@ -1717,7 +1720,8 @@ test('★★ the force-charge ON-failure push names where the force-charge stops
   // index.ts builds it from the record: the slots, ours, the armed ceiling — and, v1.196.0, each
   // slot's Core (forceChargeFailedCore.test.ts).
   const idx = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
-  assert.match(idx, /buildNightForceChargeOnFailure\(\{\n\s+day: state\.day, slots: action\.slots, ourSlots: state\.forceChargeSlots, retries: state\.forceChargeOnRetries,\n\s+noRetry: action\.noRetry === true, ceilingPct: state\.forceChargeCeilingPct,\n\s+cores: slotCores,\n\s+\}\)\)/);
+  // v1.200.0 — a cost night's ceiling as before; a line night names its line (lineForceCharge.test.ts T9).
+  assert.match(idx, /buildNightForceChargeOnFailure\(\{\n\s+day: state\.day, slots: action\.slots, ourSlots: state\.forceChargeSlots, retries: state\.forceChargeOnRetries,\n\s+noRetry: action\.noRetry === true,\n(\s+\/\/[^\n]*\n)*\s+ceilingPct: state\.forceChargeMode === 'line' \? null : state\.forceChargeCeilingPct,\n\s+lineLinePct: state\.forceChargeMode === 'line' \? \(state\.forceChargeLinePct \?\? state\.forceChargeLineAskPct\) : null,\n\s+cores: slotCores,\n\s+\}\)\)/);
   assert.doesNotMatch(idx, /\(toward \$\{state\.forceChargeCeilingPct/);
   // The stop is the one the morning push and the evening push name.
   assert.match(buildNightChargeMorningSummary({ day: '2026-10-12', targetPct: 50, restorePct: 16, expectedKwh: null,
@@ -1833,5 +1837,6 @@ test('★★ no EV-contention note on a night expected to charge nothing — on 
   const card = readFileSync(new URL('../../web/src/cards/NightChargeCard.tsx', import.meta.url), 'utf8');
   assert.match(card, /\n\s+const noChargeNight = noChargeExpected\(plan\);\n/);
   assert.match(card, /\{!noChargeNight && plan\.bindingCap === 'evContention' && plan\.evContention\?\.windowEvKwh != null && \(/);
-  assert.match(card, /\{!noChargeNight && plan\.evContention\?\.basis === 'unavailable' && plan\.cushionShortfall && \(/);
+  // v1.200.0 — keyed on a SIZING shortfall (capsShortfallShown): an envelope-only disclosure is no EV matter.
+  assert.match(card, /\{!noChargeNight && plan\.evContention\?\.basis === 'unavailable' && capsShortfallShown\(plan\) && \(/);
 });

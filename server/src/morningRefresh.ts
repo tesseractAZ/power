@@ -88,6 +88,12 @@ export interface LiveRefreshOutcome {
   reservePct: number | null;
   /** The force-charge ceiling after the refresh (≤ the armed one; null: none rides the leg). */
   forceChargeCeilingPct: number | null;
+  /** v1.200.0 — the outage line's ask the leg was armed with (forceChargeLineAskPct), carried unchanged:
+   *  the refresh works on the cost ceiling only, and never lowers or drops the line while the leg carries
+   *  one (critique A R1). null: no line on the leg. */
+  forceChargeLineAskPct: number | null;
+  /** v1.200.0 — the line ask the re-plan carried (its forceChargeLine), recorded, never applied. */
+  neededLineAskPct: number | null;
   buyKwh: number | null;
   expectedBuyKwh: number | null;
   /** The level the re-plan asked for (above the announced one when capped). */
@@ -104,6 +110,7 @@ const fin = (v: unknown): number | null => (typeof v === 'number' && Number.isFi
 export function standingLiveRefresh(leg: ChargeLegState, reason: string): LiveRefreshOutcome {
   return {
     disposition: 'stood', levelPct: leg.announcedLevelPct, reservePct: leg.targetPct, forceChargeCeilingPct: leg.forceChargeCeilingPct,
+    forceChargeLineAskPct: leg.forceChargeLineAskPct ?? null, neededLineAskPct: null,
     buyKwh: leg.buyKwh, expectedBuyKwh: leg.announcedExpectedKwh, neededLevelPct: null, neededReservePct: null, wouldPush: false, reason,
   };
 }
@@ -120,7 +127,9 @@ export function standingLiveRefresh(leg: ChargeLegState, reason: string): LiveRe
  * (as a higher level is) and writes nothing — its expected figure is not stated, since it was sized
  * on a reserve that will not be written. That rule is refreshLeg's, the one the shadow records. The
  * force-charge ceiling is lowered to the re-plan's when that is lower, and dropped when the re-plan
- * needs none; it is never raised. Whether a live refresh pushes is judged on the values it will
+ * needs none; it is never raised. v1.200.0 — that is the COST ceiling only: the outage line's ask the leg
+ * carries (forceChargeLineAskPct) rides through unchanged, never lowered or dropped, so a leg armed to
+ * carry its line still does after a refresh. Whether a live refresh pushes is judged on the values it will
  * actually write.
  */
 export function liveRefreshOutcome(leg: ChargeLegState, plan: NightChargePlan | null): LiveRefreshOutcome {
@@ -140,12 +149,17 @@ export function liveRefreshOutcome(leg: ChargeLegState, plan: NightChargePlan | 
   });
   const neededLevelPct = plan != null ? fin(chargeLevelPct(plan)) : null;
   const neededReservePct = refreshedReserve;
+  // v1.200.0 — the line is the leg's own (its ask is never lowered or nulled by a refresh); the re-plan's
+  // is recorded beside it.
+  const lineAsk = leg.forceChargeLineAskPct ?? null;
+  const neededLineAskPct = plan != null ? fin(plan.forceChargeLine?.askPct) : null;
   if (r.disposition === 'stood' || r.disposition === 'cancelled') {
     return {
       disposition: r.disposition,
       levelPct: r.levelPct,
       reservePct: r.disposition === 'cancelled' ? null : leg.targetPct,
       forceChargeCeilingPct: r.disposition === 'cancelled' ? null : leg.forceChargeCeilingPct,
+      forceChargeLineAskPct: r.disposition === 'cancelled' ? null : lineAsk, neededLineAskPct,
       buyKwh: r.buyKwh, expectedBuyKwh: r.expectedBuyKwh, neededLevelPct, neededReservePct, wouldPush: r.wouldPush, reason: r.reason,
     };
   }
@@ -173,6 +187,8 @@ export function liveRefreshOutcome(leg: ChargeLegState, plan: NightChargePlan | 
     levelPct: level,
     reservePct: reserve,
     forceChargeCeilingPct: ceiling,
+    forceChargeLineAskPct: lineAsk,
+    neededLineAskPct,
     buyKwh: r.buyKwh,
     expectedBuyKwh,
     neededLevelPct,
@@ -196,6 +212,8 @@ export function applyLiveRefresh(leg: ChargeLegState, o: LiveRefreshOutcome, now
     ...stamped,
     targetPct: min(leg.targetPct, o.reservePct),
     forceChargeCeilingPct: leg.forceChargeCeilingPct == null ? null : o.forceChargeCeilingPct == null ? null : Math.min(leg.forceChargeCeilingPct, o.forceChargeCeilingPct),
+    // v1.200.0 — the outage line's ask stays as armed: never nulled, never lowered to the re-plan's.
+    forceChargeLineAskPct: leg.forceChargeLineAskPct,
   };
 }
 

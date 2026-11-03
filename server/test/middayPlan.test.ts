@@ -334,7 +334,7 @@ function engineBuy(scale: number, openPct: number, acceptKw: number | null) {
   const w = { hours, fromMs: COST.startMs, windowEndMs: COST.endMs, chargeCapKw: 17.8, envelopeKw: 17, acceptKw };
   return expectedBuyFromPlan({
     setpointSocPct: 50, costCeilingSocPct: 90, forceChargeEligible: true, startKwh: (openPct / 100) * POOL,
-    deliverableKwh: expectedWindowLiftKwh({ ...w, legEff: LEG }), fullKwh: POOL, legEff: LEG,
+    deliverableKwh: expectedWindowLiftKwh({ ...w, legEff: LEG }), fullKwh: POOL, tickPoolKwh: POOL, legEff: LEG,
     window: { ...w, dischargeEff: ETA },
   });
 }
