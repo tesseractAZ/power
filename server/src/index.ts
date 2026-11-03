@@ -57,8 +57,11 @@ import {
   forceChargeNightOutcome, partialForceChargeOnFailureSlots, FORCE_CHARGE_MAX_RUN_MS,
   forceChargeSlotCores, forceChargeFailedSlotsText,
   // v1.200.0 — the outage line above the reserve envelope: its gate, the mode a tick runs, its texts.
-  lineForceChargeEnabled, forceChargeModeOf, forceChargeLineArmNote, forceChargeLineStartAtMs, isForceChargeStartBlocker,
+  lineForceChargeEnabled, forceChargeModeOf, forceChargeLineArmNote,
   FORCE_CHARGE_MIN_RUN_MS,
+  // v1.200.0 (review) — the ON's write-ahead stamp, the line re-ON's budget.
+  forceChargeOnStamp, FORCE_CHARGE_LINE_REON_MAX, armedForceChargeAnnouncement,
+  lineDeclinedPushStep, EMPTY_LINE_DECLINED_PUSH, lineLatestStartMs, FORCE_CHARGE_LINE_DECLINED_PERSIST_MS, type LineDeclinedPushState,
 } from './nightForceCharge.js';
 import {
   extractSettingsSurface, evaluateDrift, freshDriftState, loadConfirmedSurface,
@@ -5092,8 +5095,8 @@ async function runNightChargeEveningJobInner(): Promise<void> {
         // it is persisted (below): an undelivered arm replaces nothing.
         supersededPending = supersededLegs(nightCycleView(), arm.legs, today, nowMs).filter(({ leg }) => leg !== nightActuationMem);
         // v1.200.0 — the mode tonight's force-charge rides (forceChargeModeOf on the armed record and the
-        // gates now): a LINE night is announced as the line force-charge to the close, never as a cost stop.
-        const fcMode = forceChargeModeOf(armedCandidate, forceChargeGatesOn());
+        // gates now, inside armedForceChargeAnnouncement): a LINE night is announced as the line force-charge
+        // to the close, never as a cost stop.
         supervisedCtx = {
           // Day-qualified: a weekend plan's window can be ~28 h out, and a bare
           // clock time would read as tonight (see fmtDeadlineSpoken).
@@ -5101,11 +5104,9 @@ async function runNightChargeEveningJobInner(): Promise<void> {
           cancelDeadlineTextEs: fmtDeadlineSpokenEs(armedCandidate.windowStartMs! - APPLY_LEAD_MS, nowMs),
           targetPct: armedCandidate.targetPct!,
           // v1.165.0 — say so when force-charge will ride this window. v1.187.22 — from the stamp
-          // the morning push reads back (forceChargeRides): one decision, made once.
-          forceChargeTargetPct: armedCandidate.forceChargeRides === true && fcMode?.kind !== 'line' ? armedCandidate.forceChargeCeilingPct : null,
-          forceChargeLine: armedCandidate.forceChargeRides === true && fcMode?.kind === 'line'
-            ? { askPct: fcMode.askPct, linePct: armedCandidate.forceChargeLinePct ?? fcMode.askPct, panelCeilingPct: fcMode.panelCeilingPct }
-            : null,
+          // the morning push reads back (forceChargeRides): one decision, made once. v1.200.0 — a LINE night
+          // (the mode the gates now compose) is announced as the line force-charge to the close (review: pinned).
+          ...armedForceChargeAnnouncement(armedCandidate, forceChargeGatesOn()),
         };
       } else if (
         nightActuationMem.forceChargeOnAtMs != null && nightActuationMem.forceChargeOffVerifiedAtMs == null
@@ -6042,6 +6043,9 @@ async function runNightActuationTick(): Promise<void> {
 
 /** v1.166.0 — reasons already logged for the current night (one line per reason). */
 let forceChargeWhyLogged: { day: string | null; reasons: Set<string> } = { day: null, reasons: new Set() };
+/** v1.200.0 (review) — a LINE night's declined-start push: the blocker class held and since when, and the
+ *  classes pushed tonight (nightForceCharge.lineDeclinedPushStep). In memory, like the reasons above. */
+let lineDeclinedPush: { day: string | null; st: LineDeclinedPushState } = { day: null, st: EMPTY_LINE_DECLINED_PUSH };
 
 /** The shared grid-input envelope (ARB_GRID_INPUT_CAP_KW; see the planner's note on why
  *  17 kW): ≤0 or unparseable ⇒ null (contention not modelled). One reader for the planner
@@ -6186,24 +6190,28 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
         forceChargeWhyLogged.reasons.add(action.why);
         app.log.info(`night-charge: force-charge NOT starting for ${state.day} — ${action.why}.`);
       }
-      // v1.200.0 (L3) — a LINE night whose start a non-pool blocker holds (the ceiling refused, Charge Now
-      // already on, the grid unknown, vitals red, no readback, an incoherent SoC): pushed once, as soon as
-      // it is known after the reserve verifies, with the start it is timed to — time to act.
-      const lineMode = forceChargeModeOf(state, { cost: forceChargeOn(legRoleOf(state)), line: !opts.forceDisabled && lineForceChargeOn(legRoleOf(state)) });
-      if (lineMode?.kind === 'line' && state.applyVerifiedAtMs != null && isForceChargeStartBlocker(action.why)
-        && !forceChargeWhyLogged.reasons.has('push:line-declined')) {
-        forceChargeWhyLogged.reasons.add('push:line-declined');
-        const endMs = writeWindowEndMs(state);
-        const fullKwhNow = fullWh != null && fullWh > 0 ? fullWh / 1000 : null;
-        const startAt = endMs != null && fullKwhNow != null
-          ? forceChargeLineStartAtMs(endMs, lineMode.startTargetPct, socCoherent && socNowPct != null ? socNowPct : RESERVE_WRITE_MAX_PCT, fullKwhNow, chargeRateKw, evDisplacedKwh, connectedSlots.length)
-          : endMs != null ? endMs - FORCE_CHARGE_MIN_RUN_MS : null;
-        void sendNotification(loadNotifyConfig(), buildLineForceChargeDeclinedStart({
-          day: state.day, linePct: state.forceChargeLinePct ?? lineMode.askPct, why: action.why,
-          latestStartText: startAt != null ? fmtSiteClock(startAt) : 'the window close',
-        })).catch((e: any) => app.log.debug(`night-charge: line force-charge declined-start notify failed (${e?.message ?? e})`));
-        app.log.warn(`night-charge: the force-charge for ${state.day}'s ${state.forceChargeLinePct ?? lineMode.askPct}% outage line cannot start yet — ${action.why}; pushed once.`);
-      }
+    }
+    // v1.200.0 (L3; review) — a LINE night whose start a non-pool blocker holds (the ceiling refused or unread,
+    // Charge Now already on, the grid unknown, vitals red, no readback, no slot connected, an incoherent SoC):
+    // each blocker CLASS pushed once a night, once it has held unbroken (lineDeclinedPushStep), with the
+    // latest start that still reaches the line (lineLatestStartMs) — time to act.
+    const lineMode = live && action.why != null && state.applyVerifiedAtMs != null
+      ? forceChargeModeOf(state, { cost: forceChargeOn(legRoleOf(state)), line: !opts.forceDisabled && lineForceChargeOn(legRoleOf(state)) })
+      : null;
+    if (lineDeclinedPush.day !== state.day) lineDeclinedPush = { day: state.day, st: EMPTY_LINE_DECLINED_PUSH };
+    const step = lineDeclinedPushStep(lineDeclinedPush.st, lineMode?.kind === 'line' ? action.why : null, nowMs);
+    lineDeclinedPush = { day: state.day, st: step.state };
+    if (step.push != null && lineMode?.kind === 'line' && action.why != null) {
+      const endMs = writeWindowEndMs(state);
+      const fullKwhNow = fullWh != null && fullWh > 0 ? fullWh / 1000 : null;
+      const latestAt = endMs != null && fullKwhNow != null
+        ? lineLatestStartMs(endMs, lineMode.askPct, socCoherent && socNowPct != null ? socNowPct : RESERVE_WRITE_MAX_PCT, fullKwhNow, chargeRateKw, evDisplacedKwh, connectedSlots.length)
+        : endMs != null ? endMs - FORCE_CHARGE_MIN_RUN_MS : null;
+      void sendNotification(loadNotifyConfig(), buildLineForceChargeDeclinedStart({
+        day: state.day, linePct: state.forceChargeLinePct ?? lineMode.askPct, why: action.why,
+        latestStartText: latestAt != null ? fmtSiteClock(latestAt) : 'the window close',
+      })).catch((e: any) => app.log.debug(`night-charge: line force-charge declined-start notify failed (${e?.message ?? e})`));
+      app.log.warn(`night-charge: the force-charge for ${state.day}'s ${state.forceChargeLinePct ?? lineMode.askPct}% outage line cannot start yet — ${action.why}; held ${Math.round(FORCE_CHARGE_LINE_DECLINED_PERSIST_MS / 60_000)} min, pushed once for this cause.`);
     }
     return;
   }
@@ -6222,7 +6230,9 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
       forceChargeCeilingSyncedPct: action.pct,
     });
     const rc = await setForceChargeCeiling({ sn: shp2.sn, pct: action.pct, source: { ua: 'night-force-charge' } });
-    app.log.info(`night-charge: force-charge ceiling → ${action.pct}% (panel's own was ${action.prior ?? '?'}%, restored after the night)${retry ? ' — retry' : ''}: ${rc.outcome === 'success' ? 'ACK' : `${rc.code}: ${rc.message}`}. Force-charge waits for it to read back.`);
+    // v1.200.0 (review) — while ON it is the line mode lowering a cost ceiling (lineCeilingLoweringDue).
+    const whileOn = state.forceChargeOnAtMs != null;
+    app.log.info(`night-charge: force-charge ceiling → ${action.pct}% (panel's own was ${action.prior ?? '?'}%, restored after the night)${retry && !whileOn ? ' — retry' : ''}: ${rc.outcome === 'success' ? 'ACK' : `${rc.code}: ${rc.message}`}.${whileOn ? ` Lowered while ON: the cost force-charge is off, so tonight runs for the ${state.forceChargeLinePct ?? state.forceChargeLineAskPct ?? '?'}% outage line under its own ceiling.` : ' Force-charge waits for it to read back.'}`);
     return;
   }
 
@@ -6253,9 +6263,11 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     if (blocked) { app.log.warn(`night-charge: force-charge ON refused — ${blocked}`); return; }
     // WRITE-AHEAD: persist the intent BEFORE the writes. A lost confirmation can
     // then never orphan a force-charge — the OFF covers every slot attempted.
-    // v1.200.0 — and the mode it is switched ON in (forceChargeModeOf now): the ledger and the morning push.
-    const onMode = forceChargeModeOf(state, { cost: forceChargeOn(legRoleOf(state)), line: lineForceChargeOn(legRoleOf(state)) })?.kind ?? null;
-    persistNightActuation({ ...nightActuationMem, forceChargeOnAtMs: nowMs, forceChargeSlots: action.slots, forceChargeMode: onMode });
+    // v1.200.0 — and the mode it is switched ON in (forceChargeModeOf now): the ledger and the morning push;
+    // (review) and the panel ceiling this tick read back, which the ON verify then reads (forceChargeOnStamp).
+    const onStamp = forceChargeOnStamp(state, nowMs, action.slots, forceChargeGatesOn(legRoleOf(state)));
+    const onMode = onStamp.forceChargeMode;
+    persistNightActuation({ ...nightActuationMem, ...onStamp });
     const results: string[] = [];
     let rejected = 0;
     for (const slot of action.slots) {
@@ -6325,6 +6337,36 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     });
     if (unspent) results.push('all rate-limited — re-issue not counted');
     app.log.warn(`night-charge: force-charge ON NOT APPLIED — slot(s) ${action.slots.join(',')} still read FORCE_CHARGE_OFF ${Math.round((nowMs - (state.forceChargeOnLastAttemptMs ?? state.forceChargeOnAtMs ?? nowMs)) / 60_000)}m after the ON; re-issuing ON (retry ${state.forceChargeOnRetries + 1}/${FORCE_CHARGE_ON_MAX_RETRIES}): ${results.join(', ')}.`);
+    return;
+  }
+
+  if (action.kind === 'lineReOn') {
+    // v1.200.0 (review) — a LINE night the panel switched off at its ceiling, its pool back under the start
+    // target (nightForceCharge.lineReOnDue). Write-ahead like the re-issue: the budget is spent BEFORE the
+    // writes, so a cloud that keeps refusing cannot loop; one whose every write came back rate-limited
+    // never reached the panel and is handed back.
+    const blocked = multiPanelWriteBlock();
+    if (blocked) { app.log.warn(`night-charge: line force-charge re-ON refused — ${blocked}`); return; }
+    persistNightActuation({
+      ...nightActuationMem,
+      forceChargeLineReOns: nightActuationMem.forceChargeLineReOns + 1,
+      forceChargeLineReOnAtMs: nowMs,
+    });
+    const results: string[] = [];
+    let limited = 0;
+    for (const slot of action.slots) {
+      const r = await setChannelForceCharge({ sn: shp2.sn, slot, on: true, source: { ua: 'night-force-charge-line-reon' } });
+      if (r.rateLimited === true) limited++;
+      results.push(`ch${slot} ${r.outcome === 'success' ? 'ok' : `${r.code}`}`);
+    }
+    const allLimited = limited === action.slots.length;
+    persistNightActuation({
+      ...nightActuationMem,
+      forceChargeLineReOnAtMs: Date.now(),
+      ...(allLimited ? { forceChargeLineReOns: Math.max(0, nightActuationMem.forceChargeLineReOns - 1) } : {}),
+    });
+    if (allLimited) results.push('all rate-limited — re-ON not counted');
+    app.log.warn(`night-charge: LINE force-charge re-ON for ${state.day} — slot(s) ${action.slots.join(',')} read FORCE_CHARGE_OFF (the panel switches a slot off at its ${state.forceChargeCeilingSyncedPct ?? '?'}% ceiling) and the pool reads ${socNowPct ?? '?'}%, back under the start target for the ${state.forceChargeLinePct ?? state.forceChargeLineAskPct ?? '?'}% outage line; switching them back ON (${state.forceChargeLineReOns + 1}/${FORCE_CHARGE_LINE_REON_MAX}): ${results.join(', ')}.`);
     return;
   }
 

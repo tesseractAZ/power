@@ -34,11 +34,11 @@ import * as cardText from '../../web/src/cards/nightChargeText.js';
  * THE WINDOW CLOSE, OR DISCLOSED.
  *
  * The panel accepts a backup reserve of at most 50% (RESERVE_WRITE_MAX_PCT). A charge night whose
- * islanded-outage line, asked to the whole percent above it (⌈L⌉), is above 50 wrote 50, claimed the
- * cushion held (no shortfall), and closed near 50 — a realized strike, and an unheld cushion — wherever no
- * cost force-charge stop sat at or above the line (13 charge plans of legacyIdentity's year on the
- * nameplate line, 24 on the measured one; measuredCushionLine.test.ts). Two of them said nothing about
- * the 50% write at all (2026-10-29 21:30: setpoint = target = 66).
+ * islanded-outage line, asked to the whole percent above it (⌈L⌉), is above 50 wrote 50 and claimed the
+ * cushion held (no shortfall): 13 charge plans of legacyIdentity's year on the nameplate line, 24 on the
+ * measured one (measuredCushionLine.test.ts). Of them, 10 / 15 had no cost force-charge stop at or above
+ * the line and closed near 50 — a realized strike, and an unheld cushion. One (2026-10-29 21:30 at 0.944:
+ * setpoint = target = 66) said nothing about the 50% write and had no cost stop covering the line (T4).
  *
  * The fix, in three parts:
  *  - THE PLAN (nightChargeAdvisor.ts): such a plan carries `forceChargeLine { askPct: ⌈L⌉, linePct: L }`
@@ -60,8 +60,15 @@ const S944: CushionPoolScale = MEASURED_SCALE;
 const GOLDEN = JSON.parse(readFileSync(resolve(HERE, 'fixtures/legacyIdentity.golden.json'), 'utf8')) as { digests: Record<string, string> };
 /** Measured when the change was made (v1.200.0): the 2027-01-04 21:30 line night's expected walk. */
 const PIN_T1 = { level: 78.4, startMs: Date.UTC(2027, 0, 5, 10, 25), buyKwh: 28.18, at: '03:25' };
+/** Measured (v1.200.0 review): 2026-10-29 21:30 at 0.944, the expected close once the walk latches at the 80%
+ *  panel ceiling and the house draws it back for the rest of the window (before the review it read 80). */
+const PIN_T2_CLOSE = 72.1;
 /** Measured when the change was made (v1.200.0): the year's carried / disclosed split, nameplate and 0.944. */
 const PIN_T4 = { carried: [22, 37], disclosedOn: [0, 0], lineMode: [14, 25], expectedRose: 36 };
+/** Measured (v1.200.0 review) on the same year: carried plans whose setpoint is the force-charge's own ask; and of
+ *  the line-mode plans with an expected figure, those whose expected buy exceeds the worst case (and the de-biased
+ *  one), with and without a predicted window EV. */
+const PIN_T4_REVIEW = { setpointIsAsk: 32, expLine: 39, expOverWorst: 24, expOverDebiased: 20, expLineNoEv: 20, expOverWorstNoEv: 12 };
 
 /** The sizing fields no part of v1.200.0 may move (I-A1). */
 const SIZING = ['chargeTonight', 'buyKwh', 'buyKwhDebiased', 'requiredExtraKwh', 'targetSocPct', 'setpointSocPct',
@@ -233,6 +240,30 @@ test('★★★ T3 the backup leg is DISCLOSED whatever the eligibility; ask + 1
   assert.equal(nca.askOf(0.5 * 92.16, 92.16), 50, 'a line exactly at 50 asks 50');
 });
 
+test('★★★ T3 (review) a minimum-buy HOLD that is not economic-only is never carried or disclosed; ⌈L⌉ 90 is carried and 91 disclosed', () => {
+  // A 100 kWh minimum buy holds the 54.12% line's 36.7 kWh charge: chargeTonight false, though the pack does NOT
+  // hold the line on its own (baselineHolds false) — nothing is armed, so nothing rides and nothing is claimed.
+  const starved = plan({ minBuyKwh: 100 });
+  assert.equal(starved.chargeTonight, false);
+  assert.ok((starved.requiredExtraKwh ?? 0) > 0, 'precondition: not economic-only (the P-x mutant reaches it)');
+  assert.equal(starved.cushionLineSocPct, 54.12);
+  for (const e of [true, false]) {
+    const p = plan({ minBuyKwh: 100, lineForceChargeEligible: e });
+    assert.equal(planDigest(p), planDigest(starved), `a hold (eligible ${e}) moved`);
+    assert.equal('forceChargeLine' in p, false);
+    assert.equal(p.cushionShortfallCause ?? null, null);
+  }
+  // The edge of the panel ceiling's headroom: ⌈L⌉ + 10 ≤ 100 (P-xi: >= would disclose 90).
+  const at90 = plan({ islandedLoadKw: 5.19, lineForceChargeEligible: true });
+  assert.equal(at90.cushionLineSocPct, 89.91);
+  assert.deepEqual(at90.forceChargeLine, { askPct: 90, linePct: 89.91 });
+  assert.equal(at90.cushionShortfallCause ?? null, null);
+  const at91 = plan({ islandedLoadKw: 5.2, lineForceChargeEligible: true });
+  assert.equal(at91.cushionLineSocPct, 90.03);
+  assert.equal('forceChargeLine' in at91, false);
+  assert.equal(at91.cushionShortfallCause, 'envelope');
+});
+
 test('★★★ T3 the envelope is OR-ed in AFTER the cost block: a disclosed cost night keeps its de-biased ceiling', () => {
   // A cost night over the envelope (line 54.12) whose de-biased morning surplus widens the headroom: the
   // cost ceiling reads the SIZED flag (debiasedCostSurplusKwh), so the disclosure must not move it (P-iv).
@@ -268,6 +299,15 @@ test('★★★ T4 the year: no sizing figure moves, every over-envelope charge 
         assert.ok(!(base.cushionShortfall && !p.cushionShortfall), `${c.label}: I-A5 a shortfall vanished`);
         if (p.cushionShortfall !== base.cushionShortfall) assert.ok(p.cushionShortfallCause != null, `${c.label}: a new shortfall names its cause`);
       }
+      // Review 16 — the defect's own counts (v1.199.1's plans, no eligibility): over-envelope charge plans that
+      // CLAIMED the cushion; of them, those with no cost force-charge stop at or above the line; and the SILENT
+      // ones — no statement of the 50% write AND no cost stop covering the line.
+      if (base.chargeTonight && base.cushionBasis === 'islanded-outage' && (base.cushionLineSocPct ?? 0) > 50.05 && !base.cushionShortfall) {
+        add(`claimed.${scaleName}`);
+        const fcCovers = base.costCeilingSocPct != null && forceChargeStopPct(base.costCeilingSocPct) >= base.cushionLineSocPct!;
+        if (!fcCovers) add(`claimedNoFc.${scaleName}`);
+        if (!fcCovers && !/only accepts a backup reserve up to 50%/.test(base.rationale)) add(`silent.${scaleName}`);
+      }
       const lineAsk = base.cushionLineSocPct != null ? Math.ceil(base.cushionLineSocPct - 1e-9) : 0;
       const qualifies = base.chargeTonight && base.cushionBasis === 'islanded-outage' && (base.requiredExtraKwh ?? 0) > 0
         && nca.askOf((base.cushionLineSocPct! / 100) * c.deps.fullKwh, c.deps.fullKwh) > RESERVE_WRITE_MAX_PCT;
@@ -281,6 +321,18 @@ test('★★★ T4 the year: no sizing figure moves, every over-envelope charge 
         assert.ok(off.cushionShortfallCause != null, `${c.label} ${scaleName}: undisclosed (not eligible)`);
         if (on.forceChargeLine != null) add(`carried.${scaleName}`); else add(`disclosedOn.${scaleName}`);
         if (on.expectedForceChargeMode === 'line') add(`lineMode.${scaleName}`);
+        // Review 8 — ONE ask: where the setpoint is the line's own ask (the line binds it), the force-charge
+        // carries that very percent (askOf on both paths).
+        if (on.forceChargeLine != null && on.setpointSocPct === on.forceChargeLine.askPct) add('setpointIsAsk');
+        // Review 10 — on a line night the expected buy runs to the close (the overshoot), so it usually EXCEEDS
+        // the worst-case figure the plan is sized on — with or without a predicted EV.
+        if (on.expectedForceChargeMode === 'line' && on.expectedBuyKwh != null) {
+          add('expLine');
+          const noEv = !((on.evContention?.windowEvKwh ?? 0) > 0);
+          if (noEv) add('expLineNoEv');
+          if (on.expectedBuyKwh > (on.buyKwh ?? Infinity)) { add('expOverWorst'); if (noEv) add('expOverWorstNoEv'); }
+          if (on.expectedBuyKwh > (on.buyKwhDebiased ?? Infinity)) add('expOverDebiased');
+        }
         // R6d — the line sentence only in line mode: a cost-dominant night's cost force-charge already
         // clears ⌈L⌉ + 10, and its rationale says nothing of the line.
         if (on.forceChargeLine != null && on.expectedForceChargeMode !== 'line') {
@@ -308,6 +360,17 @@ test('★★★ T4 the year: no sizing figure moves, every over-envelope charge 
     { carried: [counts['carried.np'] ?? 0, counts['carried.m'] ?? 0], disclosedOn: [counts['disclosedOn.np'] ?? 0, counts['disclosedOn.m'] ?? 0],
       lineMode: [counts['lineMode.np'] ?? 0, counts['lineMode.m'] ?? 0], expectedRose },
     PIN_T4,
+  );
+  assert.deepEqual(
+    { claimed: [counts['claimed.np'] ?? 0, counts['claimed.m'] ?? 0], claimedNoFc: [counts['claimedNoFc.np'] ?? 0, counts['claimedNoFc.m'] ?? 0],
+      silent: [counts['silent.np'] ?? 0, counts['silent.m'] ?? 0] },
+    { claimed: [13, 24], claimedNoFc: [10, 15], silent: [0, 1] },
+    'the defect: 13 / 24 claimed the cushion over the envelope; 10 / 15 with no cost stop at the line; 0 / 1 silent (2026-10-29 21:30 at 0.944)',
+  );
+  assert.deepEqual(
+    { setpointIsAsk: counts.setpointIsAsk ?? 0, expLine: counts.expLine ?? 0, expOverWorst: counts.expOverWorst ?? 0,
+      expOverDebiased: counts.expOverDebiased ?? 0, expLineNoEv: counts.expLineNoEv ?? 0, expOverWorstNoEv: counts.expOverWorstNoEv ?? 0 },
+    PIN_T4_REVIEW,
   );
 });
 
@@ -538,6 +601,152 @@ test('★★★ T6 L2 — a malformed line stamp while ON: a finite ask keeps ri
   assert.deepEqual(decideForceCharge(rec('56'), WIN_END - H, fo({ poolSocPct: 70 })), { kind: 'off', slots: [1, 2, 3], reason: 'disabled' });
 });
 
+test('★★★ T6 (review) the LINE re-ON: a verified ON the panel switched off at its ceiling, the pool back under ⌈L⌉ + 5 — switched back on, under the start\'s gates, within the budget', () => {
+  // The night's ON verified; the panel latched the slots OFF at its 80% ceiling; a late EV drew the pool to 60%.
+  const latched = onNight({ forceChargeCeilingSyncedPct: 80, forceChargeOnLastAttemptMs: WIN_START + 2 * H });
+  const t = WIN_END - H;
+  const o = (over: Partial<ForceChargeOpts> = {}) => fo({ poolSocPct: 60, slotsOn: [], slotSocPct: { 1: 60, 2: 60, 3: 60 }, ceilingReadbackPct: 80, ...over });
+  assert.deepEqual(decideForceCharge(latched, t, o()), { kind: 'lineReOn', slots: [1, 2, 3] });
+  assert.equal(nfc.FORCE_CHARGE_LINE_REON_MAX, 2);
+  // Under the START target (⌈L⌉ + 5 = 61), not the line: 61 is not yet; 60.9 is.
+  assert.equal(decideForceCharge(latched, t, o({ poolSocPct: 61 })).kind, 'none');
+  assert.equal(decideForceCharge(latched, t, o({ poolSocPct: 60.9 })).kind, 'lineReOn');
+  // Only ours that read OFF, are connected, and whose Core is under the ceiling.
+  assert.deepEqual(decideForceCharge(latched, t, o({ slotsOn: [1], slotSocPct: { 1: 62, 2: 80, 3: 58 } })), { kind: 'lineReOn', slots: [3] });
+  assert.deepEqual(decideForceCharge(latched, t, o({ connectedSlots: [1, 2] })), { kind: 'lineReOn', slots: [1, 2] });
+  assert.deepEqual(decideForceCharge({ ...latched, forceChargeSlots: [2] }, t, o()), { kind: 'lineReOn', slots: [2] });
+  assert.equal(decideForceCharge(latched, t, o({ slotsOn: [1, 2, 3] })).kind, 'none', 'still ON: nothing to switch back');
+  // The start's own gates (a re-ON is a new grid-charge write).
+  for (const [label, bad] of [
+    ['grid unknown', { gridPresent: null }], ['vitals red', { vitalsRed: true }], ['incoherent SoC', { socCoherent: false }],
+    ['no slot readback', { slotsOn: null }], ['no pool reading', { poolSocPct: null }], ['no ceiling readback', { ceilingReadbackPct: null }],
+    ['a ceiling readback out of the panel range', { ceilingReadbackPct: 70 }], ['a ceiling the pool is not under', { poolSocPct: 60, ceilingReadbackPct: 80, slotSocPct: { 1: 60, 2: 60, 3: 60 } } as never],
+  ] as Array<[string, Partial<ForceChargeOpts>]>) {
+    if (label.startsWith('a ceiling the pool')) continue;
+    assert.equal(decideForceCharge(latched, t, o(bad)).kind, 'none', label);
+  }
+  assert.equal((decideForceCharge(latched, t, o({ gridPresent: false })) as { reason?: string }).reason, 'gridLoss', 'grid absent: the OFF, never a re-ON');
+  // The budget: two a night, FORCE_CHARGE_ON_VERIFY_AFTER_MS apart (from the ON's writes, then each re-ON's).
+  assert.equal(decideForceCharge({ ...latched, forceChargeLineReOns: 1, forceChargeLineReOnAtMs: t - 15 * M }, t, o()).kind, 'lineReOn');
+  assert.equal(decideForceCharge({ ...latched, forceChargeLineReOns: 1, forceChargeLineReOnAtMs: t - 15 * M + 1 }, t, o()).kind, 'none');
+  assert.equal(decideForceCharge({ ...latched, forceChargeLineReOns: 2, forceChargeLineReOnAtMs: t - H }, t, o()).kind, 'none', 'spent');
+  assert.equal(decideForceCharge({ ...latched, forceChargeOnLastAttemptMs: t - 15 * M + 1 }, t, o()).kind, 'none', 'not within the ON\'s own grace');
+  // Never inside the last FORCE_CHARGE_ON_RETRY_CUTOFF_MS (a re-ON shares each slot's cooldown with the close's OFF).
+  assert.equal(decideForceCharge(latched, WIN_END - nfc.FORCE_CHARGE_ON_RETRY_CUTOFF_MS - 1, o()).kind, 'lineReOn');
+  assert.equal(decideForceCharge(latched, WIN_END - nfc.FORCE_CHARGE_ON_RETRY_CUTOFF_MS, o()).kind, 'none');
+  // Never before the ON verified (the ON verify owns that), never after an OFF, never in cost mode.
+  assert.notEqual(decideForceCharge({ ...latched, forceChargeOnVerifiedAtMs: null }, t, o()).kind, 'lineReOn');
+  assert.equal(decideForceCharge({ ...latched, forceChargeOnVerifiedAtMs: null, forceChargeOnFailedAtMs: t - H, forceChargeOnRetries: 1 }, t, o()).kind, 'none',
+    'over a failed ON (the warning went): never a re-ON');
+  assert.notEqual(decideForceCharge({ ...latched, forceChargeOffAtMs: t - M, forceChargeOffReason: 'onPeakGuard' }, t, o()).kind, 'lineReOn');
+  const cost = onNight({ forceChargeCeilingPct: 90, forceChargeMode: 'cost', forceChargeCeilingSyncedPct: 90 });
+  assert.equal(decideForceCharge(cost, t, o({ enabled: true, ceilingReadbackPct: 90 })).kind, 'none', 'a cost night has its own stop: no re-ON');
+  assert.equal(decideForceCharge({ ...latched, forceChargeLineAskPct: null } as LineState, t, o({ enabled: true })).kind, 'none', 'a record with no line: today (no re-ON)');
+  // The count survives a restart, as a count.
+  for (const [raw, want] of [[2, 2], [1.5, 1], [-1, 0], ['2', 0], [undefined, 0]] as const) {
+    assert.equal((coerceActuationState(JSON.parse(JSON.stringify({ ...latched, forceChargeLineReOns: raw }))) as LineState).forceChargeLineReOns, want, String(raw));
+  }
+  // index.ts executes it write-ahead: the budget is spent BEFORE the writes; all rate-limited hands it back.
+  const exec = INDEX.slice(INDEX.indexOf("if (action.kind === 'lineReOn') {"), INDEX.indexOf("if (action.kind === 'onFailed') {"));
+  const spend = exec.indexOf('forceChargeLineReOns: nightActuationMem.forceChargeLineReOns + 1,');
+  const write = exec.indexOf("on: true, source: { ua: 'night-force-charge-line-reon' }");
+  assert.ok(spend > 0 && write > spend, 'spent before the writes');
+  assert.ok(exec.includes('...(allLimited ? { forceChargeLineReOns: Math.max(0, nightActuationMem.forceChargeLineReOns - 1) } : {}),'));
+});
+
+test('★★★ T6 (review) the expected walk is the tick\'s: at the panel ceiling the slots latch OFF and the house draws the pool, until the re-ON — the stated close is no longer the ceiling', () => {
+  // 2026-10-29 21:30 at 0.944: a ~36 kWh P90 EV pulls the start to the window open; the walk reaches the 80%
+  // ceiling hours before the close. It once held there (a close of 80%); the panel does not.
+  const p = L(yearPlan('2026-10-29 21:30', true));
+  assert.equal(p.expectedForceChargeMode, 'line');
+  assert.equal(p.expectedWriteLevelPct, PIN_T2_CLOSE, 'drawn back under the ceiling (still above ⌈L⌉ + 5 = 71: no re-ON)');
+  assert.ok(p.expectedWriteLevelPct! < 80 && p.expectedWriteLevelPct! >= 71 - 1, String(p.expectedWriteLevelPct));
+  assert.match(p.rationale, new RegExp(`taking the pool to ~${PIN_T2_CLOSE}%`));
+  // The walk itself: a pool that reaches the ceiling early latches, drains, and is switched back on once.
+  // A quiet house until the last hour, when 6 kW arrives: the start (pool ≥ 61%) is due 35 min before the close,
+  // the pool reaches 80% and latches; the house then draws it for the last minutes (no re-ON so late).
+  const hours = Array.from({ length: 8 }, (_, i) => ({ ts: WIN_START + i * H, pvP10W: 0, pvP50W: 0, loadP90W: 4000, loadP50W: i === 5 ? 6000 : 300, evP90W: 0 }));
+  const walk = (nca as unknown as { expectedLineForceChargeWalk: (o: unknown) => { closeKwh: number; startMs: number | null } }).expectedLineForceChargeWalk({
+    startKwh: 0.75 * 92.16, reserveKwh: 0.5 * 92.16, fullKwh: 92.16, tickPoolKwh: 92.16, startTargetPct: 61, panelCeilingPct: 80,
+    hours, fromMs: WIN_START, windowEndMs: WIN_END, dischargeEff: 0.94, chargeCapKw: 17, envelopeKw: 17, legEff: 0.927,
+  });
+  assert.equal(walk.startMs, WIN_END - 35 * M);
+  assert.ok(walk.closeKwh < 0.8 * 92.16 - 0.5, `the close ${(walk.closeKwh / 92.16 * 100).toFixed(1)}% is under the ceiling (it once held there)`);
+  assert.ok(walk.closeKwh >= 0.61 * 92.16, `the close ${(walk.closeKwh / 92.16 * 100).toFixed(1)}% stays at or above the start target`);
+  // An EV predicted for the whole window starts the walk at the open; a 9 kW median load then latches it at 80%
+  // by ~02:45 and draws it under 61% before the last 20 min: the walk switches it back on, as the tick does
+  // (closing ~64.4%, ~30.9 kWh bought); with no re-ON it would close ~56.5% on ~27.7 kWh.
+  const evHours = Array.from({ length: 8 }, (_, i) => ({ ts: WIN_START + i * H, pvP10W: 0, pvP50W: 0, loadP90W: 9000, loadP50W: 9000, evP90W: 8000 }));
+  const reOn = (nca as unknown as { expectedLineForceChargeWalk: (o: unknown) => { closeKwh: number; startMs: number | null; gridKwh: number } }).expectedLineForceChargeWalk({
+    startKwh: 0.5 * 92.16, reserveKwh: 0.5 * 92.16, fullKwh: 92.16, tickPoolKwh: 92.16, startTargetPct: 61, panelCeilingPct: 80,
+    hours: evHours, fromMs: WIN_START, windowEndMs: WIN_END, dischargeEff: 0.94, chargeCapKw: 17, envelopeKw: 17, legEff: 0.927,
+  });
+  assert.equal(reOn.startMs, WIN_START);
+  assert.ok(reOn.closeKwh >= 0.61 * 92.16 && reOn.closeKwh < 0.8 * 92.16, `the close ${(reOn.closeKwh / 92.16 * 100).toFixed(2)}%`);
+  assert.ok(reOn.gridKwh > 0.3 * 92.16 + 1, `bought again after the re-ON: ${reOn.gridKwh.toFixed(2)} kWh`);
+});
+
+test('★★★ T6 (review) the ON stamps the panel ceiling it read back: a line night that needed no sync verifies against the panel\'s ceiling, never desired(cost)', () => {
+  // Cost gate on with c = 70 and an ask of 90: line mode, panel ceiling 100 — the panel already reads 100, so no sync.
+  const s = night({ forceChargeCeilingPct: 70, forceChargeLineAskPct: 90, forceChargeLinePct: 89.4 });
+  const gates = { cost: true, line: true };
+  const pre = fo({ enabled: true, ceilingReadbackPct: 100, poolSocPct: 60 });
+  let onAt: number | null = null;
+  for (let t = WIN_START; t < WIN_END && onAt == null; t += M) {
+    const a = decideForceCharge(s, t, pre);
+    assert.notEqual(a.kind, 'syncCeiling');
+    if (a.kind === 'on') onAt = t;
+  }
+  assert.ok(onAt != null);
+  const stamp = nfc.forceChargeOnStamp(s, onAt!, [1, 2, 3], gates);
+  assert.deepEqual(stamp, { forceChargeOnAtMs: onAt, forceChargeSlots: [1, 2, 3], forceChargeMode: 'line', forceChargeCeilingSyncedPct: 100 });
+  const on = { ...s, ...stamp, forceChargeOnLastAttemptMs: onAt! };
+  // Slot 2 refused the ON (reads OFF) with its Core at 84%: under the panel's 100, so NOT at the ceiling.
+  const verify = fo({ enabled: true, ceilingReadbackPct: 100, poolSocPct: 62, slotsOn: [1, 3], slotSocPct: { 1: 60, 2: 84, 3: 55 } });
+  assert.deepEqual(decideForceCharge(on, onAt! + 2 * M, verify), { kind: 'none' }, 'waits — never a false ON VERIFIED');
+  assert.deepEqual(decideForceCharge(on, onAt! + 16 * M, verify), { kind: 'onRetry', slots: [2] }, 'then re-issues');
+  // The record as the ON once persisted it (no ceiling stamp): desired(70) = 80 exempted slot 2 — the defect.
+  assert.equal(decideForceCharge({ ...on, forceChargeCeilingSyncedPct: null }, onAt! + 2 * M, verify).kind, 'onVerified');
+  // The mode stamp follows the LIVE gates; a cost night stamps its own ceiling (the fallback's value).
+  assert.equal(nfc.forceChargeOnStamp(s, onAt!, [1], { cost: true, line: false }).forceChargeMode, 'cost');
+  assert.equal(nfc.forceChargeOnStamp(s, onAt!, [1], { cost: true, line: false }).forceChargeCeilingSyncedPct, desiredForceChargeCeilingPct(70));
+  assert.deepEqual(nfc.forceChargeOnStamp({ ...s, forceChargeCeilingSyncedPct: 85 } as LineState, onAt!, [1], { cost: false, line: false }),
+    { forceChargeOnAtMs: onAt, forceChargeSlots: [1], forceChargeMode: null, forceChargeCeilingSyncedPct: 85 });
+});
+
+test('★★★ T6 (review) the cost gate turned off mid-run on a cost-dominant night: line mode lowers the panel ceiling to its own, and the pool stops by 80, never at the stale cost 90', () => {
+  // Armed cost 90, ask 56 (cost-dominant: 90 ≥ 66); synced 90; ON in cost mode; then ARB_COST_MAX_SOC_PCT 50 + a restart.
+  const s = onNight({ forceChargeCeilingPct: 90, forceChargeMode: 'cost', forceChargeCeilingAttemptedAtMs: WIN_START + 10 * M, forceChargeCeilingPriorPct: 100, forceChargeCeilingSyncedPct: 90 });
+  const gatesOff = (pool: number, ceiling: number) => fo({ enabled: false, lineEnabled: true, poolSocPct: pool, slotsOn: [1, 2, 3], ceilingReadbackPct: ceiling });
+  assert.deepEqual(decideForceCharge(s, WIN_END - 2 * H, gatesOff(60, 90)), { kind: 'syncCeiling', pct: 80, prior: 100 });
+  // A minute-by-minute walk of the pool from 60, the panel's ceiling following our writes the minute after.
+  let rec: LineState = s;
+  let ceiling = 90;
+  let pending: number | null = null;
+  let pool = 60;
+  let on = true;
+  for (let t = WIN_END - 2 * H; t < WIN_END; t += M) {
+    if (pending != null) { ceiling = pending; pending = null; }
+    const a = decideForceCharge(rec, t, fo({ enabled: false, lineEnabled: true, poolSocPct: Math.round(pool), slotsOn: on ? [1, 2, 3] : [], ceilingReadbackPct: ceiling, slotSocPct: { 1: pool, 2: pool, 3: pool } }));
+    assert.notEqual(a.kind, 'off', `no software stop in line mode (t − close ${(t - WIN_END) / M} min)`);
+    if (a.kind === 'syncCeiling') { rec = { ...rec, forceChargeCeilingAttemptedAtMs: t, forceChargeCeilingSyncedPct: a.pct }; pending = a.pct; }
+    if (on && pool < ceiling) pool = Math.min(ceiling, pool + 12 / 60 / 0.92); else on = false;
+  }
+  assert.ok(pool <= 80, `the pool stopped at ${pool.toFixed(1)}%, by the line mode's 80% ceiling`);
+  assert.equal(rec.forceChargeCeilingSyncedPct, 80);
+  // One write: once stamped at the mode's ceiling it never repeats, whatever the panel reads.
+  const lowered = { ...s, forceChargeCeilingSyncedPct: 80 };
+  for (const p of [60, 79, 85]) for (const c of [80, 90]) assert.notEqual(decideForceCharge(lowered, WIN_END - H, gatesOff(p, c)).kind, 'syncCeiling');
+  // Only ever LOWER, and only in line mode: the cost gate on keeps today's stop at 90; a line night synced at its own never moves.
+  assert.deepEqual(decideForceCharge(s, WIN_END - H, fo({ enabled: true, poolSocPct: 90, slotsOn: [1, 2, 3], ceilingReadbackPct: 90 })), { kind: 'off', slots: [1, 2, 3], reason: 'target' });
+  assert.notEqual(decideForceCharge(s, WIN_END - H, fo({ enabled: true, poolSocPct: 70, slotsOn: [1, 2, 3], ceilingReadbackPct: 90 })).kind, 'syncCeiling');
+  assert.notEqual(decideForceCharge(onNight({ forceChargeCeilingSyncedPct: 80 }), WIN_END - H, gatesOff(70, 80)).kind, 'syncCeiling');
+  assert.notEqual(decideForceCharge(onNight({ forceChargeLineAskPct: 78, forceChargeCeilingSyncedPct: 88 }), WIN_END - H, gatesOff(70, 88)).kind, 'syncCeiling');
+  assert.notEqual(decideForceCharge(onNight({ forceChargeLineAskPct: 78, forceChargeCeilingSyncedPct: 80 }), WIN_END - H, gatesOff(70, 80)).kind, 'syncCeiling', 'never RAISES while ON');
+  // No live ceiling readback: nothing to write against (and no prior to keep).
+  assert.notEqual(decideForceCharge(s, WIN_END - H, fo({ enabled: false, poolSocPct: 70, slotsOn: [1, 2, 3], ceilingReadbackPct: null })).kind, 'syncCeiling');
+});
+
 test('★★ T6 the why-texts (L8) and the ON-step texts in line mode', () => {
   const why = (s: LineState, o: ForceChargeOpts) => (decideForceCharge(s, WIN_START + H, o) as { why?: string }).why ?? '';
   assert.equal(why(night(), fo({ enabled: false, lineEnabled: false })),
@@ -630,11 +839,12 @@ test('★★ T9 envelope-only disclosure: the advisory push and the card name th
   const p = linePlan(false);
   assert.equal(p.cushionShortfallCause, 'envelope');
   const msg = buildNightChargeMessage(p, 'charge', null);
-  assert.ok(msg.body.includes(`NOTE: tonight's ${Math.round(p.cushionLineSocPct! * 10) / 10}% outage line is above the 50% the panel accepts as a reserve, and no force-charge rides tonight — residual risk remains.`), msg.body);
+  assert.equal(p.cushionEnvelopeReason, 'advisory');
+  assert.ok(msg.body.includes(`NOTE: tonight's ${Math.round(p.cushionLineSocPct! * 10) / 10}% outage line is above the 50% the panel accepts as a reserve, and no force-charge runs in advisory mode — residual risk remains.`), msg.body);
   assert.doesNotMatch(msg.body, /charge\/pool limits/);
   const ct = cardText as unknown as { capsShortfallShown: (p: unknown) => boolean; outageLineRow: (p: unknown) => string | null };
   assert.equal(ct.capsShortfallShown(p), false);
-  assert.match(ct.outageLineRow(p)!, /not held tonight/);
+  assert.match(ct.outageLineRow(p)!, /— not held tonight \(advisory mode\); residual risk remains$/);
   // A sizing shortfall keeps its caps note, and an envelope on top of it says both.
   assert.equal(ct.capsShortfallShown({ cushionShortfall: true }), true);
   assert.equal(ct.capsShortfallShown({ cushionShortfall: true, cushionShortfallCause: 'envelope+caps' }), true);
@@ -645,34 +855,136 @@ test('★★ T9 envelope-only disclosure: the advisory push and the card name th
   assert.equal(ct.outageLineRow({ ...linePlan(true), expectedForceChargeMode: undefined }), null);
 });
 
-test('★★ T9 the ON failure, the declined start (L3), the morning summary and the ARMED line on a line night', () => {
-  const fail = buildNightForceChargeOnFailure({ day: '2026-09-16', slots: [1, 2, 3], ourSlots: [1, 2, 3], retries: 1, noRetry: false, ceilingPct: null, lineLinePct: 55.55 } as never);
-  assert.ok(fail.body.includes(' Without it the pool will close the window near the 50% reserve, under tonight\'s 55.6% outage line.'), fail.body);
+test('★★ T9 (review) the envelope note is worded by its reason: a line above 90 whose COST force-charge rides is never told "no force-charge rides"', () => {
+  // Line 92.34 (8 h × 5.4 kW), the cost objective to 100%, both gates on: ⌈L⌉ + 10 > 100, so disclosed — while the
+  // cost force-charge rides to its own ~100% stop.
+  const tooHigh = plan({ islandedLoadKw: 5.4, objectiveMode: 'cost', costMaxSocPct: 100, forceChargeEligible: true, lineForceChargeEligible: true });
+  assert.equal(tooHigh.cushionLineSocPct, 92.34);
+  assert.equal(tooHigh.cushionEnvelopeReason, 'tooHigh');
+  assert.ok(tooHigh.cushionShortfallCause != null);
+  const supervised = { cancelDeadlineText: 'by 23:00', targetPct: 50, forceChargeTargetPct: tooHigh.costCeilingSocPct };
+  const push = buildNightChargeMessage(tooHigh, 'charge', supervised as never);
+  assert.match(push.body, /switches the panel's force-charge ON/, 'precondition: the cost force-charge rides');
+  assert.doesNotMatch(push.body, /no force-charge rides/);
+  assert.ok(push.body.includes("NOTE: tonight's 92.3% outage line is above the 50% the panel accepts as a reserve, and it is too close to a full pool for the force-charge to carry it to the window close — residual risk remains."), push.body);
+  const ct = cardText as unknown as { outageLineRow: (p: unknown) => string | null };
+  assert.equal(ct.outageLineRow(tooHigh), 'outage line 92.3% is above the 50% the panel accepts as a reserve — too close to a full pool for the force-charge to carry it to the window close; residual risk remains');
+  assert.doesNotMatch(ct.outageLineRow(tooHigh)!, /not held tonight/);
+  // The backup leg, and advisory: each its own words; the reason rides only beside a cause.
+  const backup = plan({ windowSpec: { kind: 'overnight', role: 'backup' }, lineForceChargeEligible: true });
+  assert.equal(backup.cushionEnvelopeReason, 'backupLeg');
+  assert.ok(buildNightChargeMessage(backup, 'charge', null).body.includes('and the outage backup leg writes the reserve only — residual risk remains.'));
+  assert.equal(plan({ lineForceChargeEligible: false }).cushionEnvelopeReason, 'advisory');
+  for (const e of [true, undefined]) assert.equal('cushionEnvelopeReason' in plan({ lineForceChargeEligible: e }), false);
+});
+
+test('★★ T9 (review) a line night NOT expected to start (the pool stays at or above the panel ceiling): armed, never "stays on until the window closes"', () => {
+  const quiet = Array.from({ length: 30 }, (_, i) => ({ ts: B + i * H, pvP10W: 0, loadP90W: 5000, loadP50W: 300, pvP50W: 0 }));
+  const p = plan({ socNowPct: 90, horizon: quiet, lineForceChargeEligible: true });
+  assert.equal(p.expectedForceChargeMode, 'line', JSON.stringify(p.forceChargeLine));
+  assert.equal(p.expectedForceChargeStartMs, null, 'precondition: no start expected');
+  assert.ok(p.rationale.includes('so the panel\'s force-charge is armed for it, but is not expected to start: the pool is expected to stay at or above the panel\'s 80% force-charge ceiling.'), p.rationale);
+  assert.doesNotMatch(p.rationale, /stays on until the window closes|stands by/);
+  assert.match(p.rationale, /the force-charge for the outage line is armed but not expected to start \(the pool is expected to stay at or above the panel's 80% force-charge ceiling\), and the house draws it to ~[\d.]+% by the close/);
+  assert.doesNotMatch(p.rationale, /force-charge to [\d.]+% is not expected to start/, 'the expected close is no force-charge target');
+  const ct = cardText as unknown as { outageLineRow: (p: unknown) => string | null };
+  assert.equal(ct.outageLineRow(p), `outage line ${Math.round(p.forceChargeLine!.linePct * 10) / 10}% is above the 50% reserve — the panel's force-charge is armed for it, not expected to start (the pool stays at or above its ceiling)`);
+  const push = buildNightChargeMessage(p, 'charge', { cancelDeadlineText: 'by 23:00', targetPct: 50, forceChargeTargetPct: null, forceChargeLine: { askPct: p.forceChargeLine!.askPct, linePct: p.forceChargeLine!.linePct, panelCeilingPct: 80 } } as never);
+  assert.ok(push.body.includes("; it is not expected to start (the pool is expected to stay at or above the panel's 80% force-charge ceiling). "), push.body);
+  assert.doesNotMatch(push.body, /on until the window closes/);
+});
+
+test('★★ T9 the ON failure on a line night (review): all slots ⇒ near the 50% reserve and what would hold the line; some ⇒ the others still charge — never "no action needed"', () => {
+  const fail = (slots: number[], line: number | null) => buildNightForceChargeOnFailure({ day: '2026-09-16', slots, ourSlots: [1, 2, 3], retries: 1, noRetry: false, ceilingPct: line == null ? 90 : null, lineLinePct: line } as never);
+  const all = fail([1, 2, 3], 55.55);
+  assert.equal(all.title, 'Night-charge: the outage-line force-charge did not take effect');
+  assert.ok(all.body.includes("Tonight's force-charge for the 55.6% outage line will not happen: without it the pool will close the window near the 50% reserve, under the line."), all.body);
+  assert.ok(all.body.includes('To hold the line tonight, switch Charge Now on for slot(s) 1, 2, 3 in the EcoFlow app (the add-on switches it off at the window close); if this repeats, check the SHP2 cloud link.'), all.body);
+  assert.doesNotMatch(all.body, /No action needed/);
+  const some = fail([2], 55.55);
+  assert.ok(some.body.includes("Tonight's force-charge for the 55.6% outage line will not happen on those slot(s); the other slot(s) still charge, so the pool may close the window short of the line."), some.body);
+  assert.doesNotMatch(some.body, /near the 50% reserve|No action needed/, 'two slots keep charging: never "near 50%"');
+  assert.ok(some.body.includes('switch Charge Now on for slot(s) 2 in the EcoFlow app'), some.body);
+  // A cost night's warning is today's, word for word.
+  const cost = fail([2], null);
+  assert.equal(cost.title, 'Night-charge: force-charge did not take effect');
+  assert.ok(cost.body.includes("Tonight's buy above the 50% reserve (toward ~90%) will not happen on those slot(s); the reserve charge is unaffected. No action needed tonight — but if this repeats, check the SHP2 cloud link."), cost.body);
+});
+
+test('★★ T9 the declined start (L3; review): every all-night blocker is one; each CLASS pushes once it has held 10 min unbroken; the time quoted is the latest start that still reaches the line', () => {
   const declined = (notify as unknown as { buildLineForceChargeDeclinedStart: (o: unknown) => { title: string; body: string } })
-    .buildLineForceChargeDeclinedStart({ day: '2026-09-16', linePct: 55.55, why: 'grid presence is unknown', latestStartText: '04:01' });
-  assert.equal(declined.body, "Night-charge: the force-charge for tonight's 55.6% outage line cannot start yet — grid presence is unknown. If it has not started by ~04:01, the pool will close near the 50% reserve, under the line.");
-  // Which declines push: the non-pool blockers, never the timing or the pool.
-  const blocker = (nfc as unknown as { isForceChargeStartBlocker: (w: string) => boolean }).isForceChargeStartBlocker;
+    .buildLineForceChargeDeclinedStart({ day: '2026-09-16', linePct: 55.55, why: 'grid presence is unknown', latestStartText: '04:24' });
+  assert.equal(declined.body, "Night-charge: the force-charge for tonight's 55.6% outage line cannot start yet — grid presence is unknown. If it has not started by ~04:24, the pool is expected to close under the line; if it never starts, near the 50% reserve.");
+  // Which declines are blockers: the non-pool ones — and (review 17) no ceiling readback, no slot connected.
+  const cls = nfc.forceChargeBlockerClass;
   for (const s of [night(), night({ applyVerifiedAtMs: WIN_START + M })]) {
     const w = (o: ForceChargeOpts) => ((decideForceCharge(s, WIN_END - 2 * H, o) as { why?: string }).why ?? '');
-    for (const o of [fo({ gridPresent: null }), fo({ vitalsRed: true }), fo({ slotsOn: [2] }), fo({ slotsOn: null }), fo({ socCoherent: false }), fo({ gridStaLost: true })]) {
-      assert.equal(blocker(w(o)), true, w(o));
+    for (const [o, want] of [
+      [fo({ gridPresent: null }), 'gridPresence'], [fo({ vitalsRed: true }), 'vitals'], [fo({ slotsOn: [2] }), 'alreadyOn'], [fo({ slotsOn: null }), 'noReadback'],
+      [fo({ socCoherent: false }), 'incoherent'], [fo({ gridStaLost: true }), 'gridSta'], [fo({ ceilingReadbackPct: null }), 'ceilingReadback'], [fo({ connectedSlots: [] }), 'noSlots'],
+    ] as Array<[ForceChargeOpts, string]>) {
+      assert.equal(cls(w(o)), want, w(o));
+      assert.equal(nfc.isForceChargeStartBlocker(w(o)), true);
     }
-    assert.equal(blocker(w(fo({ poolSocPct: 50 }))), false, 'just in time is no blocker');
-    assert.equal(blocker(w(fo({ poolSocPct: 85 }))), false, 'at the panel ceiling is no blocker');
+    assert.equal(cls(w(fo({ poolSocPct: 50 }))), null, 'just in time is no blocker');
+    assert.equal(cls(w(fo({ poolSocPct: 85 }))), null, 'at the panel ceiling is no blocker');
   }
-  // index.ts pushes it on the first such tick after the reserve verifies, once per night (never held to a latest start).
-  assert.ok(INDEX.includes("if (lineMode?.kind === 'line' && state.applyVerifiedAtMs != null && isForceChargeStartBlocker(action.why)\n        && !forceChargeWhyLogged.reasons.has('push:line-declined')) {"));
   const refused = { ...night(), forceChargeCeilingAttemptedAtMs: WIN_START, forceChargeCeilingSyncRetries: 1 };
-  assert.equal(blocker((decideForceCharge(refused, WIN_START + H, fo({ ceilingReadbackPct: 100 })) as { why?: string }).why ?? ''), true, 'the ceiling refused');
-  // The morning summary: ran to the close for the line, and the pool there.
+  assert.equal(cls((decideForceCharge(refused, WIN_START + H, fo({ ceilingReadbackPct: 100 })) as { why?: string }).why ?? ''), 'ceilingRefused');
+  // The push: per class, once it has held FORCE_CHARGE_LINE_DECLINED_PERSIST_MS unbroken.
+  const STALE = nfc.FORCE_CHARGE_BLOCKER_WHY.incoherent;
+  const VITALS = nfc.FORCE_CHARGE_BLOCKER_WHY.vitals;
+  assert.equal(nfc.FORCE_CHARGE_LINE_DECLINED_PERSIST_MS, 10 * M);
+  let st = nfc.EMPTY_LINE_DECLINED_PUSH;
+  const pushes: Array<[number, string]> = [];
+  const tick = (t: number, why: string | null) => { const r = nfc.lineDeclinedPushStep(st, why, t); st = r.state; if (r.push) pushes.push([t, r.push]); };
+  // 22:07: a stale readback for three ticks, then the start is merely timed — no push.
+  const T0 = WIN_START - 53 * M;
+  for (let i = 0; i < 3; i++) tick(T0 + i * M, STALE);
+  for (let i = 3; i < 60; i++) tick(T0 + i * M, 'just in time — holding off');
+  assert.deepEqual(pushes, [], 'a transient blocker never pushes');
+  // 03:20: vitals critical, and it lasts: pushed once, 10 min in — the earlier transient did not spend it.
+  const T1 = WIN_END - 100 * M;
+  for (let i = 0; i <= 40; i++) tick(T1 + i * M, VITALS);
+  assert.deepEqual(pushes, [[T1 + 10 * M, 'vitals']]);
+  // A second, different class that persists pushes too; the same class again never does.
+  for (let i = 41; i <= 60; i++) tick(T1 + i * M, STALE);
+  for (let i = 61; i <= 80; i++) tick(T1 + i * M, VITALS);
+  assert.deepEqual(pushes, [[T1 + 10 * M, 'vitals'], [T1 + 51 * M, 'incoherent']]);
+  // A class that flickers (blocker, then not) never accumulates.
+  st = nfc.EMPTY_LINE_DECLINED_PUSH; pushes.length = 0;
+  for (let i = 0; i < 60; i++) tick(T0 + i * M, i % 5 === 4 ? null : STALE);
+  assert.deepEqual(pushes, []);
+  // index.ts steps it on every declined tick of a line night after the reserve verifies, keyed by the night.
+  assert.ok(INDEX.includes("    const step = lineDeclinedPushStep(lineDeclinedPush.st, lineMode?.kind === 'line' ? action.why : null, nowMs);\n"));
+  assert.ok(INDEX.includes("    if (lineDeclinedPush.day !== state.day) lineDeclinedPush = { day: state.day, st: EMPTY_LINE_DECLINED_PUSH };\n"));
+  assert.ok(!INDEX.includes("'push:line-declined'"), 'no single per-night key');
+  // The latest start (review 15): to ⌈L⌉ at the rate now, never after the dead zone; 2027-01-04 at 50.8%,
+  // 14 kW: 4.79 kWh ⇒ 20.5 min + 15 ⇒ 35.5 min before the close — a start well after the 03:25 timed one.
+  assert.equal(nfc.lineLatestStartMs(WIN_END, 56, 50.8, 92.16, 14, null, 3), WIN_END - ((0.052 * 92.16) / 14) * H - nfc.FORCE_CHARGE_JIT_BUFFER_MS);
+  assert.equal(nfc.lineLatestStartMs(WIN_END, 56, 56, 92.16, 14, null, 3), WIN_END - FORCE_CHARGE_MIN_RUN_MS, 'at the ask: the last start the tick makes');
+  assert.ok(INDEX.includes('lineLatestStartMs(endMs, lineMode.askPct, '), 'the push quotes the latest start for ⌈L⌉');
+});
+
+test('★★ T9 the morning summary (review): "ran to the window close" only when the OFF was the window\'s; any other OFF says when and why', () => {
   const ran = nfc.forceChargeNightOutcome(onNight(), { cost: false, line: true } as never);
-  const sum = buildNightChargeMorningSummary({ day: '2026-09-16', targetPct: 50, restorePct: 30, expectedKwh: 17.6, forceCharge: ran, closePoolPct: 63 } as never);
-  assert.ok(sum.body.includes('force-charge ran to the window close for the 55.6% outage line; the pool read 63% at the close'), sum.body);
+  const sum = (fc: unknown, close?: number) => buildNightChargeMorningSummary({ day: '2026-09-16', targetPct: 50, restorePct: 30, expectedKwh: 17.6, forceCharge: fc, ...(close != null ? { closePoolPct: close } : {}) } as never).body;
+  assert.ok(sum(ran, 63).includes('force-charge ran to the window close for the 55.6% outage line; the pool read 63% at the close'), sum(ran, 63));
+  const atClose = nfc.forceChargeNightOutcome(onNight({ forceChargeOffAtMs: WIN_END, forceChargeOffReason: 'windowEnd' }), { cost: false, line: true } as never);
+  assert.ok(sum(atClose, 63).includes('force-charge ran to the window close for the 55.6% outage line'));
+  for (const [reason, words] of [
+    ['disabled', 'the force-charge was disabled by the options'], ['maxRun', 'the run backstop'], ['onPeakGuard', 'the on-peak guard, an hour before on-peak'],
+    ['foreign', 'the reserve was set outside the add-on'], ['gridLoss', 'the grid was lost'],
+  ] as const) {
+    const fc = nfc.forceChargeNightOutcome(onNight({ forceChargeOffAtMs: WIN_END - 90 * M, forceChargeOffReason: reason }), { cost: false, line: false } as never);
+    assert.equal(fc.kind, 'ran');
+    const body = sum(fc, 58);
+    assert.doesNotMatch(body, /to the window close/, `${reason}: ${body}`);
+    assert.ok(body.includes(`force-charge ran for the 55.6% outage line until 3:30am (switched off: ${words}); the pool read 58% at the close`), body);
+  }
   const never = nfc.forceChargeNightOutcome(night(), { cost: false, line: true } as never);
   assert.equal(never.kind, 'neverStarted');
-  assert.match(buildNightChargeMorningSummary({ day: '2026-09-16', targetPct: 50, restorePct: 30, expectedKwh: 17.6, forceCharge: never } as never).body,
-    /force-charge for the 55\.6% outage line never started/);
+  assert.match(sum(never), /force-charge for the 55\.6% outage line never started/);
   // A cost night's outcome is today's.
   const cost = nfc.forceChargeNightOutcome({ ...onNight({ forceChargeCeilingPct: 90, forceChargeLineAskPct: null, forceChargeLinePct: null, forceChargeMode: 'cost' }) }, true);
   assert.equal((cost as { stopPct?: number | null }).stopPct, 90);
@@ -767,4 +1079,33 @@ test('★★ T12 buildNightChargeInputs forwards the line gate (never on a backu
   assert.ok(INDEX.includes('lineEnabled: !opts.forceDisabled && lineForceChargeOn(legRoleOf(state)),'), 'the tick');
   assert.equal(INDEX.split('lineForceChargeEnabled: lineForceChargeOn(').length - 1, 2, 'both arm candidates');
   assert.ok(INDEX.includes('forceChargeCeilingSyncedPct: action.pct'), 'the sync persists what it wrote');
+});
+
+test('★★ T12 (review) the line-night surfaces are wired: the ON\'s mode stamp, the evening push\'s forceChargeLine, the morning close', () => {
+  // W1 — the ON persists forceChargeOnStamp on the leg's LIVE gates (its behaviour: T6 above), and the ledger
+  // and the ON-failure push read the mode it stamped.
+  const tick = INDEX.slice(INDEX.indexOf('async function runForceChargeTick('), INDEX.indexOf('async function escalateForceChargeStuck('));
+  assert.ok(tick.includes('const onStamp = forceChargeOnStamp(state, nowMs, action.slots, forceChargeGatesOn(legRoleOf(state)));\n'));
+  assert.ok(tick.includes('    const onMode = onStamp.forceChargeMode;\n'));
+  assert.ok(tick.includes('    persistNightActuation({ ...nightActuationMem, ...onStamp });\n'));
+  assert.ok(tick.includes('stampLegOutcome(state, { force_charge_on_at_ms: nowMs, force_charge_mode: onMode });'));
+  const stamped = nfc.forceChargeOnStamp(night(), WIN_END - H, [1, 2, 3], { cost: false, line: true });
+  assert.equal(stamped.forceChargeMode, 'line');
+  assert.equal(nfc.forceChargeOnStamp(night({ forceChargeCeilingPct: 90 }), WIN_END - H, [1], { cost: true, line: true }).forceChargeMode, 'cost');
+  // …which keys the line sentence of the ON-failure push and the morning account.
+  assert.ok(tick.includes("lineLinePct: state.forceChargeMode === 'line' ? (state.forceChargeLinePct ?? state.forceChargeLineAskPct) : null,"));
+  // W2 — the evening push's supervised context: the line force-charge on a line night, never a cost stop.
+  const evening = INDEX.slice(INDEX.indexOf('async function runNightChargeEveningJobInner('), INDEX.indexOf('function shadowArmProbe('));
+  assert.equal(evening.split('          ...armedForceChargeAnnouncement(armedCandidate, forceChargeGatesOn()),\n').length - 1, 1);
+  const armedLine = night({ forceChargeRides: true });
+  assert.deepEqual(nfc.armedForceChargeAnnouncement(armedLine, { cost: false, line: true }),
+    { forceChargeTargetPct: null, forceChargeLine: { askPct: 56, linePct: 55.55, panelCeilingPct: 80 } });
+  assert.deepEqual(nfc.armedForceChargeAnnouncement({ ...armedLine, forceChargeCeilingPct: 90 }, { cost: true, line: true }),
+    { forceChargeTargetPct: 90, forceChargeLine: null }, 'cost-dominant: today\'s cost clause');
+  assert.deepEqual(nfc.armedForceChargeAnnouncement(armedLine, { cost: false, line: false }), { forceChargeTargetPct: null, forceChargeLine: null });
+  assert.deepEqual(nfc.armedForceChargeAnnouncement({ ...armedLine, forceChargeRides: false }, { cost: false, line: true }),
+    { forceChargeTargetPct: null, forceChargeLine: null }, 'the stamp, never the option');
+  // W3 — the morning account of a line night states where its pool read at the close (a fresh reading).
+  const restore = INDEX.slice(INDEX.indexOf('function sendRestoreSummary('), INDEX.indexOf('\n}\n', INDEX.indexOf('function sendRestoreSummary(')));
+  assert.ok(restore.includes("      closePoolPct: state.forceChargeMode === 'line' ? freshPoolSocPct(nowMs) : null,\n"));
 });

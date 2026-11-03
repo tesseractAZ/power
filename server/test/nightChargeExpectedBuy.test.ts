@@ -11,6 +11,7 @@ import {
 import {
   armedWriteLevelPct, forceChargeEnabled, forceChargeStartAtMs, forceChargeStopPct, FORCE_CHARGE_MIN_RUN_MS,
   armedForceChargeStopPct, forceChargeNightOutcome, type ForceChargeNightOutcome, partialForceChargeOnFailureSlots,
+  armedForceChargeAnnouncement,
 } from '../src/nightForceCharge.js';
 import {
   armFromPlan, emptyActuationState, nightChargeSpokenNotice, RESERVE_WRITE_MAX_PCT, MAX_SPOKEN_ADVISORY_CHARS,
@@ -1653,9 +1654,15 @@ test('★★★ the morning push reads whether force-charge rode the night from 
   }
   // index.ts arms with the gate and names the force-charge on the evening push from the stamp.
   const idx = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
-  // v1.200.0 — the COST force-charge's target, unless tonight rides in line mode (then forceChargeLine).
-  assert.match(idx, /\n\s+forceChargeTargetPct: armedCandidate\.forceChargeRides === true && fcMode\?\.kind !== 'line' \? armedCandidate\.forceChargeCeilingPct : null,\n/);
+  // v1.200.0 — the COST force-charge's target, unless tonight rides in line mode (then forceChargeLine): from the
+  // stamp, never the option (review: nightForceCharge.armedForceChargeAnnouncement, the one expression).
+  assert.ok(idx.includes('          ...armedForceChargeAnnouncement(armedCandidate, forceChargeGatesOn()),\n'));
   assert.doesNotMatch(idx, /forceChargeOn\(\) && armedCandidate\.forceChargeCeilingPct/);
+  const ann = (rides: boolean | null, gates: { cost: boolean; line: boolean }) =>
+    armedForceChargeAnnouncement({ forceChargeRides: rides, forceChargeCeilingPct: 90, forceChargeLineAskPct: null, forceChargeLinePct: null }, gates);
+  assert.deepEqual(ann(true, { cost: true, line: true }), { forceChargeTargetPct: 90, forceChargeLine: null });
+  assert.deepEqual(ann(false, { cost: true, line: true }), { forceChargeTargetPct: null, forceChargeLine: null }, 'the stamp said it does not ride: never the option');
+  assert.deepEqual(ann(null, { cost: true, line: true }), { forceChargeTargetPct: null, forceChargeLine: null });
 });
 
 test('★★ a force-charge ON that failed on only some slots is reported as such, in the warning and the morning push', () => {

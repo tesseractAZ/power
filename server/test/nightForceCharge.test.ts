@@ -686,9 +686,12 @@ test('★★★ the force-charge step actually RUNS, in the order actuationStepO
 test('★★★ WRITE-AHEAD: the ON intent is persisted before any ON write is issued', () => {
   const fn = INDEX.indexOf('async function runForceChargeTick(');
   assert.ok(fn > 0);
-  const intent = INDEX.indexOf('forceChargeOnAtMs: nowMs, forceChargeSlots: action.slots', fn);
+  // v1.200.0 (review) — the intent is forceChargeOnStamp's (forceChargeOnAtMs: nowMs, the slots, the mode and the
+  // panel ceiling read back; lineForceCharge.test.ts T6), on the leg's LIVE gates, persisted whole.
+  const stamp = INDEX.indexOf('const onStamp = forceChargeOnStamp(state, nowMs, action.slots, forceChargeGatesOn(legRoleOf(state)));', fn);
+  const intent = INDEX.indexOf('persistNightActuation({ ...nightActuationMem, ...onStamp });', fn);
   const write = INDEX.indexOf("on: true, source: { ua: 'night-force-charge' }", fn);
-  assert.ok(intent > fn && write > fn, 'both located');
+  assert.ok(stamp > fn && intent > stamp && write > fn, 'all located');
   assert.ok(intent < write,
     'a lost confirmation must never orphan a force-charge — the OFF covers every slot attempted');
 });

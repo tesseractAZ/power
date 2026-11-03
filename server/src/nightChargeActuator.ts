@@ -613,6 +613,15 @@ export interface NightActuationState {
   /** v1.200.0 — the mode the force-charge was switched ON in (forceChargeModeOf at the ON): 'cost' or
    *  'line'. null = never ON, and every record from before v1.200.0. The ledger's force_charge_mode. */
   forceChargeMode: 'cost' | 'line' | null;
+  /** v1.200.0 (review) — LINE re-ONs spent tonight (nightForceCharge FORCE_CHARGE_LINE_REON_MAX). The panel
+   *  switches a slot's Charge Now OFF by itself when its Core reaches the force-charge ceiling, and it
+   *  stays OFF; on a line night whose pool then falls back under the start target (a late EV after an
+   *  early start), the slots are switched back ON (decideForceCharge 'lineReOn'). Counted write-ahead,
+   *  like the ON re-issue. 0 on every record from before the field. */
+  forceChargeLineReOns: number;
+  /** v1.200.0 (review) — the last line re-ON's writes (finished); the next waits
+   *  FORCE_CHARGE_ON_VERIFY_AFTER_MS from here. null = none tonight. */
+  forceChargeLineReOnAtMs: number | null;
   /** STAMPED AT ARM TIME: the start of the first on-peak period at or after the window open
    *  (chargeWindows.nextOnPeakStartMs). Raises stop, and the restore and force-charge OFF fall
    *  due, ON_PEAK_RAISE_GUARD_MS before it. null = no on-peak period ahead, or a record armed
@@ -685,6 +694,7 @@ export function emptyActuationState(): NightActuationState {
     forceChargeCeilingRestoreLastAttemptMs: null,
     forceChargeRides: null,
     forceChargeLineAskPct: null, forceChargeLinePct: null, forceChargeCeilingSyncedPct: null, forceChargeMode: null,
+    forceChargeLineReOns: 0, forceChargeLineReOnAtMs: null,
     nextOnPeakStartMs: null,
     foreignReservePct: null, foreignSeenAtMs: null, foreignSettledAtMs: null,
     revertDeadlinePagedAtMs: null, revertDeadlineOnPeakPagedAtMs: null,
@@ -780,6 +790,10 @@ export function coerceActuationState(raw: unknown): NightActuationState {
       && (o.forceChargeCeilingSyncedPct as number) >= FORCE_CHARGE_CEILING_MIN_PCT && (o.forceChargeCeilingSyncedPct as number) <= FORCE_CHARGE_CEILING_MAX_PCT
       ? o.forceChargeCeilingSyncedPct as number : null,
     forceChargeMode: o.forceChargeMode === 'cost' || o.forceChargeMode === 'line' ? o.forceChargeMode : null,
+    // v1.200.0 (review) — as forceChargeOnRetries: a count, so never negative or fractional (the budget is
+    // FORCE_CHARGE_LINE_REON_MAX whatever a corrupt file says).
+    forceChargeLineReOns: Math.max(0, Math.floor(num(o.forceChargeLineReOns) ?? 0)),
+    forceChargeLineReOnAtMs: num(o.forceChargeLineReOnAtMs),
     nextOnPeakStartMs: num(o.nextOnPeakStartMs),
     foreignReservePct: num(o.foreignReservePct),
     foreignSeenAtMs: num(o.foreignSeenAtMs),

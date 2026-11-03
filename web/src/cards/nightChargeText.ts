@@ -213,6 +213,8 @@ export interface CushionNotePlan {
   cushionShortfall?: boolean;
   /** The server's NightChargePlan.cushionShortfallCause: the 50% reserve envelope contributes. */
   cushionShortfallCause?: 'envelope' | 'envelope+caps';
+  /** The server's NightChargePlan.cushionEnvelopeReason: why no line force-charge carries it (review). */
+  cushionEnvelopeReason?: 'advisory' | 'backupLeg' | 'tooHigh';
   cushionLineSocPct?: number | null;
   /** The outage line the night force-charge carries to the window close. */
   forceChargeLine?: { askPct: number; linePct: number } | null;
@@ -239,9 +241,20 @@ export function outageLineRow(plan: CushionNotePlan, maxPct: number | null = nul
   const max = maxPct ?? 50;
   if (plan.cushionShortfallCause != null) {
     const l = plan.cushionLineSocPct;
-    return `outage line ${l != null && Number.isFinite(l) ? `${r1(l)}% ` : ''}is above the ${max}% the panel accepts as a reserve — not held tonight; residual risk remains`;
+    // v1.200.0 (review) — worded by why: a line too close to full may still see a cost force-charge (the title's
+    // "charging to ~100%"), so it is "not carried to the window close", never "not held tonight".
+    const why = plan.cushionEnvelopeReason === 'tooHigh'
+      ? 'too close to a full pool for the force-charge to carry it to the window close'
+      : plan.cushionEnvelopeReason === 'backupLeg' ? 'not held tonight (the backup leg writes the reserve only)'
+        : plan.cushionEnvelopeReason === 'advisory' ? 'not held tonight (advisory mode)' : 'not held tonight';
+    return `outage line ${l != null && Number.isFinite(l) ? `${r1(l)}% ` : ''}is above the ${max}% the panel accepts as a reserve — ${why}; residual risk remains`;
   }
   if (plan.expectedForceChargeMode === 'line' && plan.forceChargeLine != null) {
+    // v1.200.0 (review) — armed but not expected to start (the pool stays at or above the panel ceiling):
+    // never "stays on to the window close" for a force-charge that does not switch on.
+    if (plan.expectedForceChargeStartMs === null) {
+      return `outage line ${r1(plan.forceChargeLine.linePct)}% is above the ${max}% reserve — the panel's force-charge is armed for it, not expected to start (the pool stays at or above its ceiling)`;
+    }
     const lvl = plan.expectedWriteLevelPct;
     const tail = lvl != null && Number.isFinite(lvl) && plan.expectedForceChargeStartMs != null ? `, ~${r1(lvl)}% expected at the close` : '';
     return `outage line ${r1(plan.forceChargeLine.linePct)}% is above the ${max}% reserve — the panel's force-charge stays on to the window close${tail}`;
