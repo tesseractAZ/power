@@ -77,8 +77,9 @@ const MUTANTS = [
   {
     id: 'S-ii. ★★★ the line is asked at one decimal, not the whole percent above it',
     file: NCA, tests: [T_SET],
-    find: '    ? Math.min(100, Math.ceil((targetFloorKwh / fullKwh) * 100 - 1e-9)) : 0;',
-    to: '    ? Math.min(100, round1((targetFloorKwh / fullKwh) * 100)) : 0; /* MUTANT */',
+    // v1.200.0 (review) — anchor moved: the reserve path's ask reads askOf (the one expression).
+    find: '  const lineAskPct = !setpointOnWalk && !baselineHolds ? askOf(targetFloorKwh, fullKwh) : 0;',
+    to: '  const lineAskPct = !setpointOnWalk && !baselineHolds ? Math.min(100, round1((targetFloorKwh / fullKwh) * 100)) : 0; /* MUTANT */',
     why: 'clampReserveTarget rounds: a 30.45% line is written as 30, under the line the plan was sized on.',
   },
   {

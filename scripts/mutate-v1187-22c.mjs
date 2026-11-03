@@ -1196,10 +1196,11 @@ const MUTANTS = [
   },
   {
     id: 'C-cxlix. ★ the evening push names the force-charge from the option, not the stamp',
-    file: IDX,
+    file: FC,
     // v1.200.0 — anchor moved (the outage line above the reserve envelope; mutate-line-force-charge.mjs).
-    find: "          forceChargeTargetPct: armedCandidate.forceChargeRides === true && fcMode?.kind !== 'line' ? armedCandidate.forceChargeCeilingPct : null,",
-    to: "          forceChargeTargetPct: forceChargeOn() && fcMode?.kind !== 'line' ? armedCandidate.forceChargeCeilingPct : null, /* MUTANT */",
+    // v1.200.0 (review) — anchor moved: index.ts spreads nightForceCharge.armedForceChargeAnnouncement, which reads the stamp.
+    find: '  const rides = armed.forceChargeRides === true;',
+    to: '  const rides = gates.cost; /* MUTANT */',
     why: 'A 50% ceiling is pushed as "It also arms the panel\'s force-charge toward ~50%".',
   },
   // ── a force-charge ON that failed on only some slots ──
