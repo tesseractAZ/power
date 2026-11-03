@@ -90,6 +90,9 @@ test('★★★ W4 lineCeilingLoweringDue: a write only when the panel reads ABO
   for (const rb of [null, 70, 79, 101, Number.NaN]) assert.equal(nfc.lineCeilingLoweringDue(s, off(rb)), null, String(rb));
   // One write: once stamped at the mode's ceiling it never repeats, whatever the panel reads.
   assert.equal(nfc.lineCeilingLoweringDue({ ...s, forceChargeCeilingSyncedPct: 85 }, off(90)), null);
+  // Only a ceiling the add-on itself synced ABOVE the mode's is lowered: a night synced under the mode's 88 (ask 78)
+  // whose panel reads 100 (raised in the app) is left alone — writing 88 would raise it past our own 80.
+  assert.equal(nfc.lineCeilingLoweringDue(onNight({ forceChargeLineAskPct: 78, forceChargeLinePct: 77.1, forceChargeCeilingSyncedPct: 80 }), off(100)), null);
 });
 
 /* ══ W2 — a line re-ON is readback-checked like the first ON ════════════════════════════════════════════ */

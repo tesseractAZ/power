@@ -48,8 +48,9 @@ const MUTANTS = [
   {
     id: 'iv. ★★★ the at-the-ceiling exemption is gone',
     file: FC,
-    find: 'Number.isFinite(soc) && soc >= ceiling;',
-    to: 'Number.isFinite(soc) && soc >= ceiling && false; /* MUTANT */',
+    // v1.200.0 (review 2) — anchor widened: the line re-ON's readback check has the same exemption (lineReOnCheckDue).
+    find: 'Number.isFinite(soc) && soc >= ceiling;\n  };\n  const notOn = ours.filter(',
+    to: 'Number.isFinite(soc) && soc >= ceiling && false; /* MUTANT */\n  };\n  const notOn = ours.filter(',
     why: 'A slot the panel switched off itself (its Core at the ceiling) is re-issued and reported as a failure.',
   },
   {

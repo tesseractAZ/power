@@ -11,7 +11,7 @@ import {
 import {
   armedWriteLevelPct, forceChargeEnabled, forceChargeStartAtMs, forceChargeStopPct, FORCE_CHARGE_MIN_RUN_MS,
   armedForceChargeStopPct, forceChargeNightOutcome, type ForceChargeNightOutcome, partialForceChargeOnFailureSlots,
-  armedForceChargeAnnouncement,
+  armedForceChargeAnnouncement, forceChargeOnFailureNight,
 } from '../src/nightForceCharge.js';
 import {
   armFromPlan, emptyActuationState, nightChargeSpokenNotice, RESERVE_WRITE_MAX_PCT, MAX_SPOKEN_ADVISORY_CHARS,
@@ -1731,6 +1731,11 @@ test('★★ the force-charge ON-failure push names where the force-charge stops
   // from the record's line ask, whatever the mode (forceChargeOnFailureNight; lineForceChargeAtRisk.test.ts W5).
   assert.match(idx, /buildNightForceChargeOnFailure\(\{\n\s+day: state\.day, slots: action\.slots, ourSlots: state\.forceChargeSlots, retries: state\.forceChargeOnRetries,\n\s+noRetry: action\.noRetry === true,\n(\s+\/\/[^\n]*\n)*\s+\.\.\.forceChargeOnFailureNight\(state\),\n\s+cores: slotCores,\n\s+\}\)\)/);
   assert.doesNotMatch(idx, /\(toward \$\{state\.forceChargeCeilingPct/);
+  // (review 2) …and the record's fields as index.ts spreads them (forceChargeOnFailureNight): a cost night's armed
+  // ceiling, so the warning still says where the forfeited force-charge would have stopped.
+  const fields = forceChargeOnFailureNight({ forceChargeCeilingPct: 80.4, forceChargeLineAskPct: null, forceChargeLinePct: null });
+  assert.deepEqual(fields, { ceilingPct: 80.4, lineLinePct: null });
+  assert.match(buildNightForceChargeOnFailure({ day: '2026-10-12', slots: [3], ourSlots: [3], retries: 0, noRetry: false, ...fields }).body, /reserve \(toward ~80%\) will not happen;/);
   // The stop is the one the morning push and the evening push name.
   assert.match(buildNightChargeMorningSummary({ day: '2026-10-12', targetPct: 50, restorePct: 16, expectedKwh: null,
     forceCharge: forceChargeNightOutcome({ ...armFromPlan(emptyActuationState(), '2026-10-12', plan(), NOW, 16, true)!, forceChargeOnAtMs: NOW }, true) }).body,

@@ -776,8 +776,9 @@ const MUTANTS = [
     file: NOTIFY,
     // v1.187.22 (recheck) — re-pointed: the shape of a force-charge that ran.
     // v1.200.0 — anchor moved (the outage line above the reserve envelope; mutate-line-force-charge.mjs).
-    find: '        : `${reserve}, and force-charge ran${toward}${note}; ${restored}`)',
-    to: '        : `${reserve}${note}; ${restored}`) /* MUTANT */',
+    // v1.200.0 (review 2) — again: a cost-dominant line night states its close (`close` is '' on a cost night).
+    find: '        : `${reserve}, and force-charge ran${toward}${close}${note}; ${restored}`)',
+    to: '        : `${reserve}${close}${note}; ${restored}`) /* MUTANT */',
     why: '"reserve raised to 50% (~34.9 kWh expected)": the figure covers the force-charge to 80%, which the push never names.',
   },
   {
@@ -1341,11 +1342,12 @@ const MUTANTS = [
     why: 'A failure on slot 2 alone is pushed as the whole buy above the reserve not happening.',
   },
   {
-    id: 'C-clxix. ★ index.ts builds the ON-failure push without the armed ceiling',
-    file: IDX,
+    id: 'C-clxix. ★ the ON-failure push is built without the armed ceiling',
+    file: FC,
     // v1.200.0 — anchor moved (the outage line above the reserve envelope; mutate-line-force-charge.mjs).
-    find: "        ceilingPct: state.forceChargeMode === 'line' ? null : state.forceChargeCeilingPct,",
-    to: '        ceilingPct: null, /* MUTANT */',
+    // v1.200.0 (review 2) — and again: index.ts spreads forceChargeOnFailureNight(state), keyed on the record's line ask.
+    find: '  return line != null ? { ceilingPct: null, lineLinePct: line } : { ceilingPct: s.forceChargeCeilingPct, lineLinePct: null };',
+    to: '  return line != null ? { ceilingPct: null, lineLinePct: line } : { ceilingPct: null, lineLinePct: null }; /* MUTANT */',
     why: 'The warning no longer says where the forfeited force-charge would have stopped.',
   },
   // ── (final review) a spoken detail states its figures whole ──

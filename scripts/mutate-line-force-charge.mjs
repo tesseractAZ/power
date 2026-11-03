@@ -22,6 +22,12 @@
  * stale cost ceiling is lowered in line mode. F-xi..xxi. THE WIRING of the line-night surfaces (the ON's mode
  * stamp, the evening push's line, the morning close). W-i..v.
  *
+ * (review 2) THE LINE AT RISK after the start (the ON-reading latch, a refused or spent re-ON, the re-ON's gates, a late
+ * load): pushed once a night, write-ahead, while a person can act; the trail, the panel's own stop, the ON-reading shape
+ * logged. W1-i..xxv. A line re-ON readback-checked like the ON. W2-i..viii. The morning account of a line-ask night
+ * (under the line, unread close, the panel's stop, the re-ONs). W3-i..ix. The ceiling lowering lowers only what the
+ * panel holds. W4-i..iii. A cost-dominant line night's ON failure and declined start; the declined start once a night
+ * across restarts; the reserve-apply failure on a line night. W5-i..ix.
  * (M) THE MORNING REFRESH never lowers or drops the line. M-i, M-ii.
  * (T) THE TEXTS: cause-keyed notes, one level everywhere, the line sentence only in line mode, the spoken
  * clause, the ON-failure sentence, the declined-start push. T-i..vii. (review) the ON failure's line words
@@ -54,6 +60,7 @@ const CARD = resolve(REPO, 'web/src/cards/nightChargeText.ts');
 const T_LINE = 'test/lineForceCharge.test.ts';
 const T_CLOSE = 'test/lineForceChargeClose.test.ts';
 const T_GOLDEN = 'test/legacyIdentity.test.ts';
+const T_RISK = 'test/lineForceChargeAtRisk.test.ts';
 
 const MUTANTS = [
   /* ── P: the plan ── */
@@ -337,11 +344,12 @@ const MUTANTS = [
     why: 'The cost gate off mid-run leaves the cost 90 as the only stop: ten points past the line mode\'s own ceiling.',
   },
   {
-    id: 'F-xxi. ★★ the line ceiling re-sync while ON may RAISE',
-    file: NFC, tests: [T_LINE],
-    find: '  if (synced == null || synced <= mode.panelCeilingPct || o.ceilingReadbackPct == null) return null;',
-    to: '  if (synced == null || synced === mode.panelCeilingPct || o.ceilingReadbackPct == null) return null; /* MUTANT */',
-    why: 'A ceiling write while ON that charges further than the night was armed for.',
+    id: 'F-xxi. ★★ the line ceiling re-sync while ON lowers a ceiling the add-on synced UNDER the mode\'s',
+    file: NFC, tests: [T_LINE, T_RISK],
+    // v1.200.0 (review 2) — anchor moved: the readback is checked on its own line (W4).
+    find: '  if (synced == null || synced <= mode.panelCeilingPct) return null;',
+    to: '  if (synced == null || synced === mode.panelCeilingPct) return null; /* MUTANT */',
+    why: 'A ceiling write while ON past the add-on\'s own synced value: 88 over our 80 on a panel raised to 100 in the app.',
   },
   {
     id: 'W-i. ★★ the ON stamps the mode on the cost gate only',
@@ -374,9 +382,398 @@ const MUTANTS = [
   {
     id: 'W-v. ★★ the morning account of a line night loses the close reading',
     file: IDX, tests: [T_LINE],
-    find: "      closePoolPct: state.forceChargeMode === 'line' ? freshPoolSocPct(nowMs) : null,",
+    // v1.200.0 (review 2) — anchor moved: every night whose record carries a line ask (W3).
+    find: '      closePoolPct: lineNight != null ? freshPoolSocPct(nowMs) : null,',
     to: '      closePoolPct: null, /* MUTANT */',
     why: 'The morning push says the line night ran, never where the pool closed against the line.',
+  },
+
+  /* ── (review 2) W4: the line ceiling lowering lowers only what the panel holds ── */
+  {
+    id: 'W4-i. ★★★ the lowering writes whatever the panel reads (a RAISE over a ceiling lowered in the app)',
+    file: NFC, tests: [T_RISK],
+    find: '  if (!(rb > mode.panelCeilingPct)) return null;',
+    to: '  /* MUTANT */',
+    why: 'The panel holds 80 and the line mode writes 85 under red vitals: a new grid-charge reach the night never armed.',
+  },
+  {
+    id: 'W4-ii. ★★ the lowering reads a ceiling outside the panel\'s 80..100',
+    file: NFC, tests: [T_RISK],
+    find: '  if (rb == null || !Number.isFinite(rb) || rb < FORCE_CHARGE_CEILING_MIN_PCT || rb > FORCE_CHARGE_CEILING_MAX_PCT) return null;',
+    to: '  if (rb == null || !Number.isFinite(rb)) return null; /* MUTANT */',
+    why: 'A stray 101 (no ceiling) triggers a ceiling write.',
+  },
+  {
+    id: 'W4-iii. ★ the lowering held by red vitals (the safe direction refused)',
+    file: NFC, tests: [T_RISK],
+    find: '  if (!(rb > mode.panelCeilingPct)) return null;',
+    to: '  if (!(rb > mode.panelCeilingPct) || o.vitalsRed) return null; /* MUTANT */',
+    why: 'A struggling host leaves the stale cost ceiling as the only stop: ten points past the line mode\'s own.',
+  },
+
+  /* ── (review 2) W2: the line re-ON is readback-checked like the first ON ── */
+  {
+    id: 'W2-i. ★★★ no re-ON readback check',
+    file: NFC, tests: [T_RISK],
+    find: '    const reOnCheck = lineReOnCheckDue(s, nowMs, o);\n    if (reOnCheck) return reOnCheck;',
+    to: '    /* MUTANT */',
+    why: 'A re-ON the cloud ACKs and the panel ignores is never known: no push names it, the morning says nothing.',
+  },
+  {
+    id: 'W2-ii. ★★ the re-ON judged inside its readback grace',
+    file: NFC, tests: [T_RISK],
+    find: '  if (nowMs - at < FORCE_CHARGE_ON_VERIFY_AFTER_MS || o.slotsOn == null) return null;',
+    to: '  if (o.slotsOn == null) return null; /* MUTANT */',
+    why: 'A re-ON that is merely slow to read back (up to 14 min on 2026-10-05/06) is recorded as not applied.',
+  },
+  {
+    id: 'W2-iii. ★★ a checked re-ON is checked again every tick (the next re-ON never comes)',
+    file: NFC, tests: [T_RISK],
+    find: '  if (s.forceChargeLineReOnCheckedAtMs != null && s.forceChargeLineReOnCheckedAtMs >= at) return null;',
+    to: '  /* MUTANT */',
+    why: 'The check pre-empts the budget\'s second re-ON on every tick: the retry is never written.',
+  },
+  {
+    id: 'W2-iv. ★★ the re-ON check counts a Core at the ceiling as not applied',
+    file: NFC, tests: [T_RISK],
+    find: '  const notOn = slots.filter((n) => !o.slotsOn!.includes(n) && !atCeiling(n));',
+    to: '  const notOn = slots.filter((n) => !o.slotsOn!.includes(n)); /* MUTANT */',
+    why: 'A slot the panel switched off again at its ceiling is reported as a re-ON that did not take effect.',
+  },
+  {
+    id: 'W2-v. ★★ the re-ON check trusts an all-exempt verdict with nothing ON',
+    file: NFC, tests: [T_RISK],
+    find: "  return { kind: 'lineReOnChecked', slots: [...slots], notApplied: notOn.length === 0 && !anyOn ? [...slots] : notOn };",
+    to: "  return { kind: 'lineReOnChecked', slots: [...slots], notApplied: notOn }; /* MUTANT */",
+    why: 'A bad Core reading at the ceiling with every slot OFF records a re-ON that never applied as applied.',
+  },
+  {
+    id: 'W2-vi. ★★ index.ts: the re-ON stamps no slots (no check ever runs)',
+    file: IDX, tests: [T_RISK],
+    find: '      forceChargeLineReOnSlots: [...action.slots],\n    });',
+    to: '    }); /* MUTANT */',
+    why: 'The same, at the wiring.',
+  },
+  {
+    id: 'W2-vii. ★★ index.ts: a re-ON that did not take effect is not counted',
+    file: IDX, tests: [T_RISK],
+    find: '      ...(failedReOn ? { forceChargeLineReOnsNotApplied: nightActuationMem.forceChargeLineReOnsNotApplied + 1 } : {}),',
+    to: '      /* MUTANT */',
+    why: 'The morning account says nothing of the re-ON that never took.',
+  },
+  {
+    id: 'W2-viii. ★★ index.ts: a re-ON handed back (all rate-limited) keeps its slots and is judged',
+    file: IDX, tests: [T_LINE, T_RISK],
+    find: '      ...(allLimited ? { forceChargeLineReOns: Math.max(0, nightActuationMem.forceChargeLineReOns - 1), forceChargeLineReOnSlots: null } : {}),',
+    to: '      ...(allLimited ? { forceChargeLineReOns: Math.max(0, nightActuationMem.forceChargeLineReOns - 1) } : {}), /* MUTANT */',
+    why: 'A re-ON that never reached the panel is recorded as one that did not take effect.',
+  },
+
+  /* ── (review 2) W1: the line at risk after the start ── */
+  {
+    id: 'W1-i. ★★★ index.ts never asks whether the line is at risk',
+    file: IDX, tests: [T_RISK],
+    find: '    const risk = lineAtRiskPushDue(nightActuationMem, nowMs, fcOpts);',
+    to: '    const risk = (false as boolean) ? lineAtRiskPushDue(nightActuationMem, nowMs, fcOpts) : null; /* MUTANT */',
+    why: 'The ON-reading latch, a spent re-ON budget or a late EV takes the pool under the line in silence until the morning.',
+  },
+  {
+    id: 'W1-ii. ★★★ index.ts: the at-risk push not stamped before it goes',
+    file: IDX, tests: [T_RISK],
+    find: '      persistNightActuation({ ...nightActuationMem, forceChargeLineAtRiskPushedAtMs: nowMs });',
+    to: '      /* MUTANT */',
+    why: 'The push repeats every tick (and after every restart) while the line stays at risk.',
+  },
+  {
+    id: 'W1-iii. ★★★ the at-risk push more than once a night',
+    file: NFC, tests: [T_RISK],
+    find: '  if (s.forceChargeLineAtRiskPushedAtMs != null) return null;',
+    to: '  /* MUTANT */',
+    why: 'The same, at the helper.',
+  },
+  {
+    id: 'W1-iv. ★★★ never on a COST-DOMINANT line night',
+    file: NFC, tests: [T_RISK],
+    find: "  const thresholdPct = mode.kind === 'line' ? mode.startTargetPct : s.forceChargeLineAskPct! + FORCE_CHARGE_LINE_HEADROOM_PCT;",
+    to: "  if (mode.kind !== 'line') return null; const thresholdPct = mode.startTargetPct; /* MUTANT */",
+    why: 'A Thursday line night (cost 90, line 69.4) whose cost force-charge stalls closes under its line with no word.',
+  },
+  {
+    id: 'W1-v. ★★★ a cost-dominant night at risk under its COST target (an economic level)',
+    file: NFC, tests: [T_RISK],
+    find: "  const thresholdPct = mode.kind === 'line' ? mode.startTargetPct : s.forceChargeLineAskPct! + FORCE_CHARGE_LINE_HEADROOM_PCT;",
+    to: "  const thresholdPct = mode.kind === 'line' ? mode.startTargetPct : mode.targetPct; /* MUTANT */",
+    why: 'A cost night 15 points above its line, merely short of a 90% buy, is pushed as an outage line at risk.',
+  },
+  {
+    id: 'W1-vi. ★★★ pushed while the add-on can still switch the slots back on itself',
+    file: NFC, tests: [T_RISK],
+    find: '  if (lineReOnDue(s, nowMs, o, ours) != null) return null;',
+    to: '  /* MUTANT */',
+    why: 'The owner is told to act on the one case the add-on handles on the next tick.',
+  },
+  {
+    id: 'W1-vii. ★★★ a re-ON (or the ON) in its readback grace is not left alone',
+    file: NFC, tests: [T_RISK],
+    find: '  const last = s.forceChargeLineReOnAtMs ?? s.forceChargeOnLastAttemptMs ?? s.forceChargeOnAtMs;\n  if (nowMs - last < FORCE_CHARGE_ON_VERIFY_AFTER_MS) return null;\n  const ref =',
+    to: '  const ref = /* MUTANT */',
+    why: 'A re-ON written a minute ago, not yet read back, is pushed as a line the add-on cannot hold.',
+  },
+  {
+    id: 'W1-viii. ★★★ a RISING pool is pushed as at risk',
+    file: NFC, tests: [T_RISK],
+    find: '  if (ref == null || o.poolSocPct > ref.pct) return null;',
+    to: '  if (ref == null) return null; /* MUTANT */',
+    why: 'Every line night mid-charge under its start target pushes a false alarm.',
+  },
+  {
+    id: 'W1-ix. ★★★ pushed inside the last 20 min (nothing can still move the close)',
+    file: NFC, tests: [T_RISK],
+    find: '  if (nowMs > closeAtMs - FORCE_CHARGE_LINE_AT_RISK_LEAD_MS) return null;',
+    to: '  if (nowMs > closeAtMs) return null; /* MUTANT */',
+    why: 'A push at 04:55 asks for an action that buys under a point.',
+  },
+  {
+    id: 'W1-x. ★★★ at the start target counts as under it',
+    file: NFC, tests: [T_RISK],
+    find: '  if (!(o.poolSocPct < thresholdPct)) return null;',
+    to: '  if (!(o.poolSocPct <= thresholdPct)) return null; /* MUTANT */',
+    why: 'A pool sitting at ⌈L⌉ + 5 is pushed as at risk.',
+  },
+  {
+    id: 'W1-xi. ★★★ the line gate not read (advisory, or the backup leg, pushes)',
+    file: NFC, tests: [T_RISK],
+    find: '  const gates = gatesOf(o);\n  if (!gates.line) return null;',
+    to: '  const gates = gatesOf(o); /* MUTANT */',
+    why: 'NIGHT_CHARGE_MODE advisory (no line force-charge) still pushes a line at risk.',
+  },
+  {
+    id: 'W1-xii. ★★ an OFF slot whose Core sits at the ceiling is named to switch on',
+    file: NFC, tests: [T_RISK],
+    find: '  const offSlots = ours.filter((n) => !o.slotsOn!.includes(n) && o.connectedSlots.includes(n) && coreBelowStop(n));',
+    to: '  const offSlots = ours.filter((n) => !o.slotsOn!.includes(n) && o.connectedSlots.includes(n)); /* MUTANT */',
+    why: 'The owner is told to switch on a slot the panel would switch straight off again.',
+  },
+  {
+    id: 'W1-xiii. ★★ a spent budget read as a held re-ON',
+    file: NFC, tests: [T_RISK],
+    find: "        ? (notApplied != null && notApplied.length > 0 ? 'reOnNotApplied' : 'reOnSpent')",
+    to: "        ? ('reOnHeld' as LineAtRiskCause) /* MUTANT */",
+    why: 'The push says the add-on waits on its gates when it will never switch the slots on again tonight.',
+  },
+  {
+    id: 'W1-xiv. ★★★ the pool trail never moves',
+    file: NFC, tests: [T_RISK],
+    find: '  return [last, { pct, atMs: nowMs }];',
+    to: '  return samples as LinePoolSample[]; /* MUTANT */',
+    why: 'The reference is the ON-time reading all night: a pool falling from 80 reads as not rising only once under it.',
+  },
+  {
+    id: 'W1-xv. ★★★ the reference is the newest sample whatever its age',
+    file: NFC, tests: [T_RISK],
+    find: '    if (nowMs - samples[i].atMs >= FORCE_CHARGE_LINE_TREND_MS) return { pct: samples[i].pct, atMs: samples[i].atMs };',
+    to: '    return { pct: samples[i].pct, atMs: samples[i].atMs }; /* MUTANT */',
+    why: 'A reading a minute old compares a whole-percent pool with itself: a charging pool reads as not rising.',
+  },
+  {
+    id: 'W1-xvi. ★★ the trail persisted every tick',
+    file: NFC, tests: [T_RISK],
+    find: '  if (nowMs - last.atMs < FORCE_CHARGE_LINE_TREND_MS) return samples as LinePoolSample[];',
+    to: '  if (nowMs - last.atMs < FORCE_CHARGE_LINE_TREND_MS) return [...cur]; /* MUTANT */',
+    why: 'A file write a minute for nothing: index.ts persists only a changed trail.',
+  },
+  {
+    id: 'W1-xvii. ★★★ the panel\'s own stop never stamped',
+    file: NFC, tests: [T_RISK],
+    find: '    if (allOff && coreAtStop && newEpisode) out.forceChargeLinePanelOffAtMs = nowMs;',
+    to: '    /* MUTANT */',
+    why: 'The morning says the line night ran to the window close when the panel stopped it at 03:10.',
+  },
+  {
+    id: 'W1-xviii. ★★ the panel\'s stop re-stamped inside a re-ON\'s readback grace',
+    file: NFC, tests: [T_RISK],
+    find: '    const newEpisode = prev == null || (reOn != null && reOn > prev && nowMs - reOn >= FORCE_CHARGE_ON_VERIFY_AFTER_MS);',
+    to: '    const newEpisode = prev == null || (reOn != null && reOn > prev); /* MUTANT */',
+    why: 'A re-ON just written (its slots still read OFF) is recorded as the panel stopping the charge again.',
+  },
+  {
+    id: 'W1-xix. ★★ an all-OFF with no Core at the ceiling read as the panel\'s stop',
+    file: NFC, tests: [T_RISK],
+    find: "      return typeof soc === 'number' && Number.isFinite(soc) && soc >= stop - 1;",
+    to: "      return typeof soc === 'number' && Number.isFinite(soc); /* MUTANT */",
+    why: 'An OFF from the app at 70% is reported as the panel\'s own stop at its ceiling.',
+  },
+  {
+    id: 'W1-xx. ★★★ index.ts: the observations not on the record before the decision',
+    file: IDX, tests: [T_RISK],
+    find: '  if (obs != null) { persistNightActuation({ ...nightActuationMem, ...obs }); state = nightActuationMem; }',
+    to: '  /* MUTANT */',
+    why: 'No trail, no panel stop: the at-risk push never fires and the morning names no stop.',
+  },
+  {
+    id: 'W1-xxi. ★★ index.ts: the ON-reading shape logged every tick',
+    file: IDX, tests: [T_RISK],
+    find: '    if (shape != null && lineOnShapeLoggedDay !== state.day) {',
+    to: '    if (shape != null) { /* MUTANT */',
+    why: 'A warning line a minute; the first occurrence is lost in the flood.',
+  },
+  {
+    id: 'W1-xxii. ★★ the ON-reading shape logged on a flat pool',
+    file: NFC, tests: [T_RISK],
+    find: '  if (ref == null || !(o.poolSocPct < ref.pct)) return null;',
+    to: '  if (ref == null || !(o.poolSocPct <= ref.pct)) return null; /* MUTANT */',
+    why: 'A pool held flat under Charge Now is logged as the unmeasured latch.',
+  },
+  {
+    id: 'W1-xxiii. ★★★ the at-risk push asks for nothing (no slot to switch on)',
+    file: NTF, tests: [T_RISK],
+    find: "    ? `To hold the line, switch Charge Now on for slot(s) ${r.offSlots.join(', ')} in the EcoFlow app (the add-on switches it off at the close).`",
+    to: "    ? 'No action needed tonight.' /* MUTANT */",
+    why: 'The push reaches a phone and asks for nothing while the line can still be held.',
+  },
+  {
+    id: 'W1-xxiv. ★★ the ON-reading slots not named',
+    file: NTF, tests: [T_RISK],
+    find: '  const on = r.onSlots.length > 0',
+    to: '  const on = false /* MUTANT */',
+    why: 'The ON-reading latch pushes a warning with no action in it.',
+  },
+  {
+    id: 'W1-xxv. ★★ a flat pool said to be falling',
+    file: NTF, tests: [T_RISK],
+    find: '  const falling = r.poolPct < r.refPct;',
+    to: '  const falling = r.poolPct <= r.refPct; /* MUTANT */',
+    why: 'The push states a fall no reading shows.',
+  },
+
+  /* ── (review 2) W5: a cost-dominant line night; the declined start across restarts; the apply failure ── */
+  {
+    id: 'W5-i. ★★★ index.ts: the ON-failure push keyed on the stamped mode (a cost-dominant line night reads "No action needed")',
+    file: IDX, tests: [T_LINE, T_RISK],
+    find: '        ...forceChargeOnFailureNight(state),',
+    to: "        ...(state.forceChargeMode === 'line' ? forceChargeOnFailureNight(state) : { ceilingPct: state.forceChargeCeilingPct, lineLinePct: null }), /* MUTANT */",
+    why: 'Finding 1: a Thursday line night whose ON fails is told no action is needed, though Charge Now by hand would hold the line.',
+  },
+  {
+    id: 'W5-ii. ★★★ the record\'s line is never read (no line-ask night)',
+    file: NFC, tests: [T_RISK],
+    find: '  if (ask == null || !Number.isFinite(ask) || !(ask > RESERVE_WRITE_MAX_PCT)) return null;\n  const line = s.forceChargeLinePct;',
+    to: '  if (ask === ask) return null; /* MUTANT */\n  const line = s.forceChargeLinePct;',
+    why: 'Every line-night text falls back to the cost night\'s words.',
+  },
+  {
+    id: 'W5-iii. ★★★ the declined-start push on line-mode nights only (finding 1)',
+    file: NFC, tests: [T_RISK],
+    find: '  const applies = live && gates.line && forceChargeLineNightPct(s) != null && forceChargeModeOf(s, gates) != null;',
+    to: "  const applies = live && gates.line && forceChargeLineNightPct(s) != null && forceChargeModeOf(s, gates)?.kind === 'line'; /* MUTANT */",
+    why: 'Red vitals hold a cost-dominant line night\'s start all night with no push.',
+  },
+  {
+    id: 'W5-iv. ★★★ the declined-start memory not seeded from the record (finding 9)',
+    file: NFC, tests: [T_RISK],
+    find: '    : { ...EMPTY_LINE_DECLINED_PUSH, pushed: [...(s.forceChargeLineDeclinedPushed ?? [])] };',
+    to: '    : EMPTY_LINE_DECLINED_PUSH; /* MUTANT */',
+    why: 'A crash-looping add-on under red vitals pushes the same warning once per restart.',
+  },
+  {
+    id: 'W5-v. ★★★ index.ts: the pushed class not on the record before the push goes',
+    file: IDX, tests: [T_RISK],
+    find: '      persistNightActuation({ ...nightActuationMem, forceChargeLineDeclinedPushed: [...dp.mem.st.pushed] });',
+    to: '      /* MUTANT */',
+    why: 'The same, at the wiring.',
+  },
+  {
+    id: 'W5-vi. ★★ the record drops the pushed classes on load',
+    file: ACT, tests: [T_RISK],
+    find: "      ? [...new Set(o.forceChargeLineDeclinedPushed.filter((c): c is string => typeof c === 'string' && c.length > 0 && c.length <= 64))]",
+    to: '      ? [] as string[] /* MUTANT */',
+    why: 'The same, at the restart.',
+  },
+  {
+    id: 'W5-vii. ★★ the declined-start push before the reserve write verified',
+    file: NFC, tests: [T_RISK],
+    find: '  const live = s.appliedAtMs != null && s.applyVerifiedAtMs != null && s.revertedAtMs == null && !s.cancelled',
+    to: '  const live = s.appliedAtMs != null && s.revertedAtMs == null && !s.cancelled /* MUTANT */',
+    why: 'The force-charge rides only a verified reserve write; that wait is no blocker to push.',
+  },
+  {
+    id: 'W5-viii. ★★★ the reserve-apply failure on a line night says "No action needed" (finding 6)',
+    file: NTF, tests: [T_RISK],
+    find: '  const tail = line == null',
+    to: '  const tail = true /* MUTANT */',
+    why: 'A 55.55% line night whose reserve write never took is told no action is needed, its pool on a 30% floor.',
+  },
+  {
+    id: 'W5-ix. ★★★ index.ts: the reserve-apply failure is built without the line',
+    file: IDX, tests: [T_RISK],
+    find: '        linePct: forceChargeLineNightPct(state),\n      }));',
+    to: '      })); /* MUTANT */',
+    why: 'The same, at the wiring.',
+  },
+
+  /* ── (review 2) W3: the morning account of a line-ask night ── */
+  {
+    id: 'W3-i. ★★★ a close under the line not said so',
+    file: NTF, tests: [T_RISK],
+    find: 'closeRead < linePct - 0.05 ?',
+    to: 'false /* MUTANT */ ?',
+    why: 'Finding 5: "ran to the window close for the 55.6% outage line; the pool read 51% at the close" — read as held.',
+  },
+  {
+    id: 'W3-ii. ★★★ an unread close is silence',
+    file: NTF, tests: [T_RISK],
+    find: "      : closeRead == null ? '; the pool was not read at the close (no fresh panel reading)'",
+    to: "      : closeRead == null ? '' /* MUTANT */",
+    why: 'A stale readback at the restore and the account reads as carried.',
+  },
+  {
+    id: 'W3-iii. ★★★ a cost-dominant line night\'s close never stated (the record\'s line ignored)',
+    file: NTF, tests: [T_RISK],
+    find: '    const linePct = o.linePct != null && Number.isFinite(o.linePct) ? o.linePct : line?.linePct ?? null;',
+    to: '    const linePct = line?.linePct ?? null; /* MUTANT */',
+    why: 'A Thursday line night closing at 62% under its 69.4% line reads "force-charge ran toward ~90%".',
+  },
+  {
+    id: 'W3-iv. ★★★ index.ts: the close read only in line mode',
+    file: IDX, tests: [T_RISK],
+    find: '  const lineNight = forceChargeLineNightPct(state);',
+    to: "  const lineNight = state.forceChargeMode === 'line' ? forceChargeLineNightPct(state) : null; /* MUTANT */",
+    why: 'The same, at the wiring.',
+  },
+  {
+    id: 'W3-v. ★★ the panel\'s own stop never named',
+    file: NTF, tests: [T_RISK],
+    find: '    const panelEnded = panelAt != null && (lastReOn == null || panelAt > lastReOn) && !(early && offAt != null && offAt <= panelAt);',
+    to: '    const panelEnded = false; /* MUTANT */',
+    why: 'A charge the panel ended at 03:10 is said to have run to the window close.',
+  },
+  {
+    id: 'W3-vi. ★★ the panel\'s stop said to end a charge a later re-ON resumed',
+    file: NTF, tests: [T_RISK],
+    find: '(lastReOn == null || panelAt > lastReOn)',
+    to: '(true /* MUTANT */)',
+    why: 'A night switched back on at 02:30 that charged to the close is said to have stopped at 02:00.',
+  },
+  {
+    id: 'W3-vii. ★★ the re-ONs never named',
+    file: NTF, tests: [T_RISK],
+    find: '    const reOnText = reOns > 0',
+    to: '    const reOnText = false /* MUTANT */',
+    why: 'The account hides that the panel stopped the charge and the add-on switched it back on.',
+  },
+  {
+    id: 'W3-viii. ★★ a re-ON that did not take effect never named',
+    file: NTF, tests: [T_RISK],
+    find: '${reOnsNotApplied > 0 ?',
+    to: '${false /* MUTANT */ ?',
+    why: 'The same, for the re-ON the panel never took.',
+  },
+  {
+    id: 'W3-ix. ★★ the outcome drops the panel\'s stop',
+    file: NFC, tests: [T_RISK],
+    find: '      panelOffAtMs: s.forceChargeLinePanelOffAtMs ?? null, reOns: s.forceChargeLineReOns ?? 0,',
+    to: '      panelOffAtMs: null, reOns: s.forceChargeLineReOns ?? 0, /* MUTANT */',
+    why: 'The same, at the outcome.',
   },
 
   /* ── M: the morning refresh ── */
@@ -494,8 +891,9 @@ const MUTANTS = [
   {
     id: 'T-xi. ★★ the push quotes the timed start, not the latest start that reaches the line',
     file: IDX, tests: [T_LINE],
-    find: 'lineLatestStartMs(endMs, lineMode.askPct, ',
-    to: 'lineLatestStartMs(endMs, lineMode.startTargetPct, /* MUTANT */ ',
+    // v1.200.0 (review 2) — anchor moved: the record's ⌈L⌉ (a cost-dominant night has no line mode to read it from).
+    find: 'lineLatestStartMs(endMs, state.forceChargeLineAskPct!, ',
+    to: 'lineLatestStartMs(endMs, state.forceChargeLineAskPct! + 5, /* MUTANT */ ',
     why: '"If it has not started by ~03:25 the pool closes under the line" — a start at 04:20 still holds it.',
   },
   {
@@ -515,8 +913,9 @@ const MUTANTS = [
   {
     id: 'T-xiv. ★★ the line outcome drops the OFF',
     file: NFC, tests: [T_LINE],
-    find: '    const ran: ForceChargeOutcomeLine = { ...line, offReason: s.forceChargeOffReason ?? null, offAtMs: s.forceChargeOffAtMs ?? null };',
-    to: '    const ran: ForceChargeOutcomeLine = { ...line }; /* MUTANT */',
+    // v1.200.0 (review 2) — anchor moved: the outcome also carries the panel's stop and the re-ONs.
+    find: '      ...line, offReason: s.forceChargeOffReason ?? null, offAtMs: s.forceChargeOffAtMs ?? null,',
+    to: '      ...line, /* MUTANT */',
     why: 'The same, at the outcome.',
   },
   {
