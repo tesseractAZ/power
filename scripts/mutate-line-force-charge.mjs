@@ -495,7 +495,7 @@ const MUTANTS = [
     id: 'W1-iv. ★★★ never on a COST-DOMINANT line night',
     file: NFC, tests: [T_RISK],
     find: "  const thresholdPct = mode.kind === 'line' ? mode.startTargetPct : s.forceChargeLineAskPct! + FORCE_CHARGE_LINE_HEADROOM_PCT;",
-    to: "  if (mode.kind !== 'line') return null; const thresholdPct = mode.startTargetPct; /* MUTANT */",
+    to: "  const thresholdPct = mode.kind === 'line' ? mode.startTargetPct : Number.NaN; /* MUTANT */",
     why: 'A Thursday line night (cost 90, line 69.4) whose cost force-charge stalls closes under its line with no word.',
   },
   {
@@ -715,8 +715,8 @@ const MUTANTS = [
   {
     id: 'W3-i. ★★★ a close under the line not said so',
     file: NTF, tests: [T_RISK],
-    find: 'closeRead < linePct - 0.05 ?',
-    to: 'false /* MUTANT */ ?',
+    find: ", under the ${round1(linePct)}% outage line` : ''}`;",
+    to: "` : ''}`; /* MUTANT */",
     why: 'Finding 5: "ran to the window close for the 55.6% outage line; the pool read 51% at the close" — read as held.',
   },
   {

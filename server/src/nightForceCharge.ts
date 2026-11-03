@@ -1222,14 +1222,14 @@ export function lineCeilingLoweringDue(
  * rate-limited stamps no slots (it never reached the panel).
  */
 export function lineReOnCheckDue(
-  s: NightActuationState, nowMs: number, o: Pick<ForceChargeOpts, 'slotsOn' | 'slotSocPct' | 'ceilingReadbackPct'>,
+  s: NightActuationState, nowMs: number, o: ForceChargeOpts,
 ): Extract<ForceChargeAction, { kind: 'lineReOnChecked' }> | null {
   const slots = s.forceChargeLineReOnSlots;
   const at = s.forceChargeLineReOnAtMs;
   if (at == null || slots == null || slots.length === 0) return null;
   if (s.forceChargeLineReOnCheckedAtMs != null && s.forceChargeLineReOnCheckedAtMs >= at) return null;
   if (nowMs - at < FORCE_CHARGE_ON_VERIFY_AFTER_MS || o.slotsOn == null) return null;
-  const ceiling = panelStopCeilingPct(s, o as ForceChargeOpts);
+  const ceiling = panelStopCeilingPct(s, o);
   const atCeiling = (n: number): boolean => {
     const soc = o.slotSocPct?.[n];
     return ceiling != null && typeof soc === 'number' && Number.isFinite(soc) && soc >= ceiling;
