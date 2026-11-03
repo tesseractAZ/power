@@ -13,7 +13,7 @@ A pure reduction over the ledger (no I/O, `nowMs` injected) into one of three st
 
 | Gate | Rule |
 |---|---|
-| Engine-fault strikes | A strike requires the plan to have **claimed hold** (`cushion_shortfall` falsy — a NULL/legacy row still counts as claimed, fail-closed) AND either the plan's own simulated trajectory breached floor+cushion (forecast-tier rows, §3.3) or an actuated night's **realized** outcome breached (`cushion_breached`, any tier — a delivered buy that still breached is fault evidence regardless of forecast basis). **v1.196.0 — the realized outcome is graded on the claim the plan made** (`realizedCushionBreach`, `nightChargeGate.ts`). On an overnight row whose recorded line (`cushion_line_soc_pct`) is not the legacy band, which covers the islanded-outage and disabled bases, the plan claims only that the pack at the window close holds that line. The verdict there is the pool measured at the close (`window_close_soc_pct`: the median `backup_pct` over the window's last 15 minutes) under the line, less 0.05 points (half the reading's 0.1 step). A row without the reading (captured before v1.196.0, or with no reading in those minutes) is clean when its lowest pool after the close holds the line, because that span starts at the close. Otherwise the verdict is unknown, and the gate keeps the stored flag (fail-closed). The gate derives the verdict again from the columns, and counts the stored flags it overrules in `realizedStrikesSetAside`. A night whose line is above the panel's 50% reserve maximum, with no force-charge to carry the pool past it, now reads as breached: the plan claims a cushion the write cannot reach, because `cushionShortfall` does not count the write envelope. This happens on 4 of the year fixture's 199 islanded evening charges with no disclosed shortfall; the old rule passed all four. Since v1.199.0 the line counts the cushion on the packs' measured capacity, up to 2 points higher: at a scale of 0.944 it is 6 of the fixture's 209 islanded evening charges, against 4 on the nameplate line (`measuredCushionLine.test.ts`). The legacy band, a mid-day two-leg row and a row without its line keep the lowest pool over the scored span against `reserve_floor_pct + cushion_pct`. Before v1.196.0 every row was graded that way: after the close, with the reserve back at the floor. The 50% write masked the mismatch until v1.196.0 wrote the line itself. On the 2026-10-12 fixture a resilience night then writes 32% for a 31.13% line, with a P50 morning low of about 23.6% against 16 + 15 = 31. With a 2.0 kW island the write is 28%, already under 31% at the close. Every actuated resilience night would have been a strike, and the gate would have stayed `BLOCKED`. A plan that honestly disclosed `cushionShortfall` is physics, not fault — exempt. Strikes count within a rolling `STRIKE_WINDOW_DAYS = 45` window and clear after `STRIKE_CLEAR_STREAK = 14` consecutive strike-free actuated nights — escapable by demonstrated performance, never by waiting alone. |
+| Engine-fault strikes | A strike requires the plan to have **claimed hold** (`cushion_shortfall` falsy — a NULL/legacy row still counts as claimed, fail-closed) AND either the plan's own simulated trajectory breached floor+cushion (forecast-tier rows, §3.3) or an actuated night's **realized** outcome breached (`cushion_breached`, any tier — a delivered buy that still breached is fault evidence regardless of forecast basis). **v1.196.0 — the realized outcome is graded on the claim the plan made** (`realizedCushionBreach`, `nightChargeGate.ts`). On an overnight row whose recorded line (`cushion_line_soc_pct`) is not the legacy band, which covers the islanded-outage and disabled bases, the plan claims only that the pack at the window close holds that line. The verdict there is the pool measured at the close (`window_close_soc_pct`: the median `backup_pct` over the window's last 15 minutes) under the line, less 0.05 points (half the reading's 0.1 step). A row without the reading (captured before v1.196.0, or with no reading in those minutes) is clean when its lowest pool after the close holds the line, because that span starts at the close. Otherwise the verdict is unknown, and the gate keeps the stored flag (fail-closed). The gate derives the verdict again from the columns, and counts the stored flags it overrules in `realizedStrikesSetAside`. A night whose line is above the panel's 50% reserve maximum read as breached until v1.200.0: the plan claimed a cushion the 50% write could not reach, because `cushionShortfall` did not count the write envelope (4 of the year fixture's 199 islanded evening charges with no disclosed shortfall on the nameplate line, 6 of 209 at a measured scale of 0.944; `measuredCushionLine.test.ts`). Since v1.200.0 every such charge plan is either carried by the night force-charge to the window close (`cushion_line_force_charge_pct` set; a close under the line remains a strike, counted in `lineForceChargeStrikes`) or disclosed (`cushion_shortfall` = 1 with `cushion_envelope_shortfall` = 1, exempt): "The outage line above the reserve envelope", below. The legacy band, a mid-day two-leg row and a row without its line keep the lowest pool over the scored span against `reserve_floor_pct + cushion_pct`. Before v1.196.0 every row was graded that way: after the close, with the reserve back at the floor. The 50% write masked the mismatch until v1.196.0 wrote the line itself. On the 2026-10-12 fixture a resilience night then writes 32% for a 31.13% line, with a P50 morning low of about 23.6% against 16 + 15 = 31. With a 2.0 kW island the write is 28%, already under 31% at the close. Every actuated resilience night would have been a strike, and the gate would have stayed `BLOCKED`. A plan that honestly disclosed `cushionShortfall` is physics, not fault — exempt. Strikes count within a rolling `STRIKE_WINDOW_DAYS = 45` window and clear after `STRIKE_CLEAR_STREAK = 14` consecutive strike-free actuated nights — escapable by demonstrated performance, never by waiting alone. |
 | `buy_err_kwh` basis | **v1.105.0 (algo v3)** — the PLANNER-SIZING basis: `buy_err = planBuy − (planBuy + netMiss/legEff) = −netMiss/legEff`, where `netMiss = (forecastPv − actualPv) + (actualLoad − forecastLoad)`. It answers exactly one question — *did the planner size the buy correctly?* — and contains no delivered term, no trough and no reserve setpoint. The prior definition was `planBuy − (delivered + troughDeficit)`, the difference of two questions: it counted the actuator's by-design over-delivery (29-41 kWh against 21-22 kWh plans) as under-buy, and anchored on a 16 h post-window trough that is really the reverted `backupReserveSoc` (a fixed −14.9 kWh at a 10 % trough). Across four live nights that was −62.13 kWh of residual, 52 % over-delivery / 48 % trough, producing a 56 % under-buy rate no forecast change could move. Actuated and advisory nights share the basis — one column, one meaning. Delivery quality is a separate question. **v1.194.0:** the formula is unchanged, but the planner now stores a surplus hour's whole net, `pv − load/dischargeEff`, at `legEff`, so a miss inside a surplus hour, solar or load, reads `1/legEff` (about 7.8 %) larger against the planner's own re-sizing than it did before, in both directions. A PV miss there moves the planner's buy by 1 kWh per kWh missed while the column converts it at `1/legEff`: `buy_err_kwh` reads it 7.8 % larger (it read it exactly). A load miss there moves the buy by `1/dischargeEff` per kWh: the column reads it about 1.4 % larger (it read it about 6 % smaller). A cloudier day or a heavier daytime house than forecast scores a deeper under-buy than before, so the under-buy rate errs toward blocking; a sunnier or lighter one a larger over-buy. Only misses in deficit hours read as before: a PV miss exactly, a load miss about 6 % small. |
 | Under-buy rate | With ≥ `MIN_NIGHTS_TO_JUDGE_UNDERBUY = 5` actuated nights: fraction of `buy_err_kwh < −UNDERBUY_DEADBAND_KWH` (0.5, **v1.105.0** — an untoleranced `< 0` scored a −0.01 kWh rounding residual as a life-safety miss) must be ≤ `MAX_UNDERBUY_RATE = 0.10` (under-buy is the asymmetric safety miss). Below 5 nights this is still LEARNING, not BLOCKED. **v1.104.0** — the pool EXCLUDES nights whose plan disclosed a cushion shortfall (`cushion_shortfall`), matching the exemption the strike rule already applies ("disclosed — physics, not fault"): a plan that declared up front it could not meet the cushion, because charge and pool caps prevent it, is not evidence that the engine under-bought. `underBuyExcluded` reports how many were dropped. Removing bad evidence leaves NO evidence, so the rate becomes null and the state falls to LEARNING — fail-closed, never READY. (The hybrid-residual limitation recorded here before algo v3 — delivered energy added back into realized need, a trough anchored on the reverted setpoint — was removed by v1.105.0; see the basis row above.) |
 
@@ -313,7 +313,10 @@ Three properties an operator needs before setting these:
    backup leg ahead of a mid-day buy never force-charges. Every leg armed today is the overnight
    cost leg.
 
-   Setting `ARB_COST_MAX_SOC_PCT` to 50 disables force-charge.
+   Setting `ARB_COST_MAX_SOC_PCT` to 50 disables the **cost** force-charge. Since v1.200.0 it does
+   not stop every Charge Now: a night whose outage line is above the 50% reserve still
+   force-charges to it in supervised or auto mode (below). Only `NIGHT_CHARGE_MODE: advisory` or
+   the per-night cancel stops that.
 2. **Cost mode is rate-blind.** `costModeTargetKwh` reads no tariff. "Cost" here means *fill
    further*, on the premise that overnight energy is the cheapest the day will offer — not
    that the planner optimises against the rate table. The tariff model informs the *window*,
@@ -326,6 +329,94 @@ Three properties an operator needs before setting these:
    was measured against. Before v1.174.0 the hold returned ahead of the objective in both
    modes, so a high-pack night, including the long-gap 90% ceiling, never bought toward the
    cost ceiling.
+
+**The outage line above the reserve envelope (v1.200.0).**
+
+The panel accepts a backup reserve of at most 50% (`RESERVE_WRITE_MAX_PCT`). A line above it cannot be
+written. Before v1.200.0 such a charge night wrote 50 and still claimed the cushion
+(`cushionShortfall` false). Where no cost force-charge stop reached the line, the pool closed near 50, under
+the line. That is a realized strike and an unheld cushion: 13 charge plans of the legacyIdentity year on
+the nameplate line and 24 on the measured one at a scale of 0.944. On 2026-10-29 21:30 (line 65.95%,
+setpoint = arrival = 66%) the rationale said nothing about the 50% write.
+
+- **Which plans qualify** (`nightChargeAdvisor.ts`): an islanded-outage charge plan, not economic-only
+  (`requiredExtraKwh > 0`), whose line asked to the whole percent above it, ⌈L⌉ (`askOf`, the one
+  expression the reserve path's ask also reads), is above 50. A legacy-pct or disabled cushion, a hold,
+  and a night whose pack already holds the line without a buy never qualify. On the year fixture 22 plans
+  qualify on nameplate and 37 at 0.944; 9 and 13 of them were already sizing shortfalls.
+- **Carried or disclosed.** Where the line force-charge is eligible (`lineForceChargeEligible`:
+  supervised or auto mode, never the backup leg) and ⌈L⌉ + 10 ≤ 100, the plan carries
+  `forceChargeLine { askPct: ⌈L⌉, linePct: L }`. Otherwise it **discloses**: `cushionShortfall` is
+  set, with `cushionShortfallCause` `'envelope'`, or `'envelope+caps'` where the sizing fell short too.
+  Advisory mode, the backup leg (which writes the reserve only) and a line within 10 points of full
+  disclose. The flag is OR-ed in **after** the cost block, so the cost ceiling and its de-bias bound
+  read the sized flag alone. `cushionTroughSocPct` stays the sized trough and is never capped. No
+  sizing figure moves: the written reserve, `buyKwh`, `requiredExtraKwh`, `targetSocPct`,
+  `setpointSocPct` and `costCeilingSocPct` equal v1.199.1's for the same inputs. With no eligibility
+  input (every caller before v1.200.0) the plan is v1.199.1's byte for byte.
+- **The two modes** (`forceChargeModeOf`, `nightForceCharge.ts`). The armed record keeps the line's ask
+  in its own field (`forceChargeLineAskPct`) beside the cost ceiling (`forceChargeCeilingPct`, whose
+  meaning is unchanged). Each tick composes the mode from the **live** gates: the cost force-charge
+  (`forceChargeEnabled`) and the line (`lineForceChargeEnabled`: any write mode). It is **cost** mode,
+  today's force-charge exactly, when no line rides or when the cost stop already reaches ⌈L⌉ + 10. It
+  is **line** mode otherwise, with target max(cost ceiling where it rides, ⌈L⌉). An option changed
+  and a restart therefore take effect at once, in either direction. With the cost gate off, a line
+  night drives to ⌈L⌉, never to the cost ceiling.
+- **The start.** It is timed to reach max(target, ⌈L⌉ + 5) at the window close less 20 minutes
+  (`forceChargeLineStartAtMs`: `forceChargeStartAtMs` counted back from close − `FORCE_CHARGE_MIN_RUN_MS`).
+  A lift of one point therefore still starts outside the "not worth starting" dead zone. A pool above
+  the line but under the panel ceiling still gets its final segment ON.
+- **To the close.** There is no software stop in line mode. The force-charge runs to the window close
+  (or the on-peak guard, a grid loss, both gates off, or the run backstop). While Charge Now is ON under
+  the panel ceiling the house and an EV ride the grid, so a load that starts after the start cannot draw
+  the pool under the line. Design A's drain-aware hold (a stop at ⌈L⌉ plus the drain to the close)
+  closed under the line on 197 of 200 emulated nights with a 7 kW EV plugging in 30 minutes before the
+  close.
+- **The panel ceiling** is `desiredForceChargeCeilingPct(max(target, ⌈L⌉ + 10))`: 80 for any ask up to
+  70, and ask + 10 above it. The value written is kept (`forceChargeCeilingSyncedPct`). The ON verify's
+  at-the-ceiling exemption and the settings-drift own-write list read it.
+- **The morning refresh** (`morningRefresh.ts`) lowers or drops the cost ceiling only. The leg's line
+  ask rides through unchanged, never lowered and never nulled.
+- **The surfaces** state one level, the expected close of the line walk (`expectedBuyFromPlan` in line
+  mode, `expectedForceChargeMode: 'line'`): the rationale, the push title and its clause, the spoken
+  notice and the card. The rationale says: "The reserve is set to 50%, the most the panel accepts as a
+  backup reserve; tonight's 55.55% outage line is above it, so the panel's force-charge switches on at
+  ~03:25 and stays on until the window closes, taking the pool to ~78.4%. After the window the reserve
+  returns to 30% and the house can draw the pool down as usual." The spoken notice adds "The panel
+  keeps only 50 percent in reserve." The line sentence appears only in line mode, never on a
+  cost-dominant night. A disclosed plan says the line is above it "and no force-charge runs in advisory
+  mode" (the backup leg: "the outage backup leg writes the reserve only"; a line within 10 points of
+  full: "too close to a full pool for the force-charge to carry"), "so the cushion is not fully held —
+  residual risk remains". The "charge/pool caps" note appears only where the sizing itself fell short.
+- **At run time** a line night that cannot start for a reason other than the clock or the pool (the
+  ceiling refused, Charge Now already on, the grid unknown or absent, red vitals, no slot readback, an
+  incoherent SoC) pushes once, as soon as that is known after the reserve verifies, with the start it is
+  timed to. An ON that never took says the pool will close near the 50% reserve, under the line. The
+  morning summary says the force-charge "ran to the window close for the 55.6% outage line; the pool read
+  63% at the close".
+- **Strikes.** A carried night that closes at or above its line is clean. A disclosed row is exempt
+  (`cushion_shortfall` = 1). A carried night that closes under its line is a run-time refusal, an ON
+  that never took, or a pack slower than the start was timed for. It remains a strike, fail-closed;
+  `lineForceChargeStrikes` counts such rows in the window. The ledger records `cushion_line_force_charge_pct`
+  (the ask carried), `cushion_envelope_shortfall` (1/0) and, at the ON, `force_charge_mode` ('cost' or
+  'line'). `CURRENT_ALGO_VERSION` stays 3: no scored column's formula or sign moved.
+- **The exposure.** On a line night in supervised or auto mode, Charge Now is ON from the timed start
+  to the window close, whatever `ARB_OBJECTIVE` says. A resilience-objective plant therefore gets Charge
+  Now for the first time. Emulated over the year's line shapes, the ON lasts 75 minutes on average, and
+  169 minutes for lines of 70-90%. How a slot with Charge Now ON behaves when the grid fails is not
+  established (the force-charge module header). The off switches are `NIGHT_CHARGE_MODE: advisory`, the
+  per-night cancel, or a cushion whose line is at or under 50%. Before a resilience plant runs line
+  nights, the attended test is recommended: one slot ON, main breaker open, the backed-up loads stay up
+  and the pack discharges.
+- **The close guarantee** (`lineForceChargeClose.test.ts`, the real `decideForceCharge` in a
+  minute-by-minute plant). The year's line shapes (50.45-65.95%), houses of 0.6-3.6 kW and rate factors
+  of 0.9-1.25 close at or above the line on every night. The same holds with rounded or floored
+  readings, 0.27 kW of Core standby, an ON 5 minutes late, a reading 3 minutes stale, a 7 kW EV
+  starting 15, 25, 30, 60 or 90 minutes before the close, a pack taking 60% or 70% of the rate, and a
+  pool of 60% or 77% at the open. The cost is the overshoot: the close sits about 13 points above ⌈L⌉
+  on average, overnight energy stored rather than lost. For lines of 70-90% the window cannot always
+  deliver the lift to a slow pack. With rounded readings that is 8 of 35 nights at 70% of the rate, 30
+  of 35 at 60%, and 1 of 140 with an EV from 90 minutes out. With floored readings it is 11, 33 and 10.
 
 **Manual cancel:** `POST /api/night-charge/cancel` (write-auth; surfaced as a button on the `NightChargeCard`). Before the apply moment it disarms; after a successful apply it triggers an immediate revert on the next actuator tick. The card offers it in every shape it takes, because a write armed from the announced plan stands whatever a later recompute says: beside a charge plan, beside a hold, beside a plan whose basis was incomplete or that has gone stale (`actuationBannerState`: "Cancel tonight" while armed, "Cancel & revert" once applied). Beside a hold or a missing plan the card then says the armed write stands, where it would otherwise say nothing will be charged (`writeStands`). When the status itself cannot be read (an error, or no answer within 15 s), the card offers the same cancel without knowing what is armed; a 409 answer reads "Nothing to cancel" with the server's reason (`cancelOutcome`), as it does on a night whose reserve settled as someone else's. A cancel the server confirmed shows at once, for that write only (`actuationKey`, keyed by plan date, leg and window), until the status poll carries it. The route takes an optional body `{ leg: 'cost' | 'backup' }` (`cancelLeg`, below): with no leg named it cancels the cost leg wherever it is, active or pending, and otherwise the active leg — with one leg, tonight's write, as it always has; any other `leg` is a 400. The card's banner names its own leg; the status-blind Cancel names none. A night whose reserve settled as someone else's shows no Cancel: "The reserve was set to 30% outside the add-on — tonight's write no longer holds it." (`actuationBannerState`), where the server would answer 409.
 
@@ -443,7 +534,7 @@ Add-on options (`config.yaml` → env):
 | `ARB_OUTAGE_CUSHION_HOURS` | `4` | float 0–72 | Outage length the cushion carries the measured islanded load through (v1.125.0); `0` disables the cushion (basis `disabled`, v1.133.0) |
 | `ARB_ISLANDED_LOAD_SAFETY` | `1.25` | float 1–5 | Multiplier on the 7-day mean islanded (panel) load in the cushion; raising it buys more |
 | `ARB_OBJECTIVE` | `resilience` | list(resilience\|cost) | Sizing objective (§8b) |
-| `ARB_COST_MAX_SOC_PCT` | `90` | int 50–100 | Cost-mode fill ceiling; above 50 it is reached by force-charge (v1.165.0); `50` disables force-charge |
+| `ARB_COST_MAX_SOC_PCT` | `90` | int 50–100 | Cost-mode fill ceiling; above 50 it is reached by force-charge (v1.165.0); `50` disables the **cost** force-charge — a night whose outage line is above the 50% reserve still force-charges to it in supervised or auto mode (v1.200.0) |
 | `ARB_GRID_INPUT_CAP_KW` | `17` | float 0–100 | The panel's total grid-input envelope shared by house load and charging; sets the live force-charge rate and the planner's contention cap (≤ 0 disables contention modelling). The default is the reference plant's measured figure; a home enters its grid-input breaker capacity |
 | `NIGHT_CHARGE_CHEAP_PERIOD` | unset | str (optional) | The tariff period the planner charges in, by id; unset takes the plan's cheap period (`overnight` with the preset) |
 | `FORCE_CHARGE_KW_PER_CORE` | unset (5.5) | float (optional) | The rate one Core takes into its pack under force charge (pack side); with the slots known, the slots × this value bound the force-charge rate that times the run, and the planner's AUTO cap is connected Cores × this ÷ √RTE |

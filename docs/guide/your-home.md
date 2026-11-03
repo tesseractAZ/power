@@ -157,7 +157,17 @@ second panel gets its own charge-level ladder and runway, and nothing else.
   the house drawing little, or take about 0.93 × its AC input power: the AC input is the grid
   side, before the charge losses.
 - `ARB_OUTAGE_CUSHION_HOURS`: how long the panel's circuits must run on the batteries in an
-  outage that starts as the charge window closes, before you can act.
+  outage that starts as the charge window closes, before you can act. When the reserve plus that
+  cushion comes to more than 50 % of the pool, the panel cannot hold it as a reserve. In
+  `supervised` or `auto` mode the night's force-charge (the EcoFlow app's Charge Now) then carries
+  the pool to the line and stays on until the window closes, on a resilience setup as well as a
+  cost one. On the year of test nights that is about 75 minutes of Charge Now, and nearly three
+  hours for a line of 70-90 %. How a battery slot with Charge Now on behaves when the grid fails
+  has not been tested on any plant. Before a home with a line above 50 % runs in a write mode,
+  test it once while someone is present: switch Charge Now on for one slot in the EcoFlow app, open
+  the main breaker, and check that the backed-up circuits stay powered and the pool discharges.
+  `NIGHT_CHARGE_MODE` `advisory`, the per-night cancel, or a cushion whose line is at or under
+  50 % keeps Charge Now off on those nights.
 
 ## Runway
 
