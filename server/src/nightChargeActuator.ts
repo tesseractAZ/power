@@ -622,6 +622,34 @@ export interface NightActuationState {
   /** v1.200.0 (review) — the last line re-ON's writes (finished); the next waits
    *  FORCE_CHARGE_ON_VERIFY_AFTER_MS from here. null = none tonight. */
   forceChargeLineReOnAtMs: number | null;
+  /** v1.200.0 (review 2) — the slots the last line re-ON switched, stamped WRITE-AHEAD; its readback check
+   *  (nightForceCharge.lineReOnCheckDue) reads them FORCE_CHARGE_ON_VERIFY_AFTER_MS later. null = none, or a
+   *  re-ON whose every write came back rate-limited (it never reached the panel: nothing to check). */
+  forceChargeLineReOnSlots: number[] | null;
+  /** v1.200.0 (review 2) — when the last line re-ON was readback-checked; a check at or after
+   *  forceChargeLineReOnAtMs means that re-ON is judged. null = none checked tonight. */
+  forceChargeLineReOnCheckedAtMs: number | null;
+  /** v1.200.0 (review 2) — line re-ONs a readback check found NOT applied (a slot of the re-ON still reading
+   *  OFF, its Core under the panel's ceiling): the morning account names them. 0 on older records. */
+  forceChargeLineReOnsNotApplied: number;
+  /** v1.200.0 (review 2) — the LAST check's slots still reading OFF ([] when it applied); null = none checked.
+   *  The line-at-risk push names them. */
+  forceChargeLineReOnNotAppliedSlots: number[] | null;
+  /** v1.200.0 (review 2) — when a live readback after the verified ON first showed every slot of ours OFF with a
+   *  Core at the panel's stop ceiling (its own stop: 2026-09-23, 2026-10-02), the latest such episode (a second
+   *  latch after a re-ON re-stamps it). The morning account says the panel's stop ended the charge. null = never. */
+  forceChargeLinePanelOffAtMs: number | null;
+  /** v1.200.0 (review 2) — the pool trail of a line night while ON: at most two fresh, coherent readings, the
+   *  newer replaced once it is FORCE_CHARGE_LINE_TREND_MS old (nightForceCharge.linePoolSamplesStep), so a
+   *  reading at least that much older is always at hand: "is the pool rising?" for the line-at-risk push. */
+  forceChargeLinePoolSamples: Array<{ pct: number; atMs: number }> | null;
+  /** v1.200.0 (review 2) — when the line-at-risk push went (nightForceCharge.lineAtRiskPushDue), stamped
+   *  WRITE-AHEAD: once a night, and a restart never repeats it. */
+  forceChargeLineAtRiskPushedAtMs: number | null;
+  /** v1.200.0 (review 2) — the blocker classes whose declined-start push went tonight (lineDeclinedPushStep),
+   *  stamped WRITE-AHEAD: the push is once a night per class across restarts (it was module memory, and a
+   *  crash-looping add-on under red vitals pushed once per restart). [] on older records. */
+  forceChargeLineDeclinedPushed: string[];
   /** STAMPED AT ARM TIME: the start of the first on-peak period at or after the window open
    *  (chargeWindows.nextOnPeakStartMs). Raises stop, and the restore and force-charge OFF fall
    *  due, ON_PEAK_RAISE_GUARD_MS before it. null = no on-peak period ahead, or a record armed
@@ -695,6 +723,10 @@ export function emptyActuationState(): NightActuationState {
     forceChargeRides: null,
     forceChargeLineAskPct: null, forceChargeLinePct: null, forceChargeCeilingSyncedPct: null, forceChargeMode: null,
     forceChargeLineReOns: 0, forceChargeLineReOnAtMs: null,
+    forceChargeLineReOnSlots: null, forceChargeLineReOnCheckedAtMs: null,
+    forceChargeLineReOnsNotApplied: 0, forceChargeLineReOnNotAppliedSlots: null,
+    forceChargeLinePanelOffAtMs: null, forceChargeLinePoolSamples: null,
+    forceChargeLineAtRiskPushedAtMs: null, forceChargeLineDeclinedPushed: [],
     nextOnPeakStartMs: null,
     foreignReservePct: null, foreignSeenAtMs: null, foreignSettledAtMs: null,
     revertDeadlinePagedAtMs: null, revertDeadlineOnPeakPagedAtMs: null,
@@ -794,6 +826,18 @@ export function coerceActuationState(raw: unknown): NightActuationState {
     // FORCE_CHARGE_LINE_REON_MAX whatever a corrupt file says).
     forceChargeLineReOns: Math.max(0, Math.floor(num(o.forceChargeLineReOns) ?? 0)),
     forceChargeLineReOnAtMs: num(o.forceChargeLineReOnAtMs),
+    // v1.200.0 (review 2) — slots as forceChargeSlots (1-3 integers, else dropped); counts never negative or
+    // fractional; the pool trail finite pairs only, the last two in time order; the pushed classes strings, once.
+    forceChargeLineReOnSlots: slotList(o.forceChargeLineReOnSlots),
+    forceChargeLineReOnCheckedAtMs: num(o.forceChargeLineReOnCheckedAtMs),
+    forceChargeLineReOnsNotApplied: Math.max(0, Math.floor(num(o.forceChargeLineReOnsNotApplied) ?? 0)),
+    forceChargeLineReOnNotAppliedSlots: slotList(o.forceChargeLineReOnNotAppliedSlots),
+    forceChargeLinePanelOffAtMs: num(o.forceChargeLinePanelOffAtMs),
+    forceChargeLinePoolSamples: coercePoolSamples(o.forceChargeLinePoolSamples),
+    forceChargeLineAtRiskPushedAtMs: num(o.forceChargeLineAtRiskPushedAtMs),
+    forceChargeLineDeclinedPushed: Array.isArray(o.forceChargeLineDeclinedPushed)
+      ? [...new Set(o.forceChargeLineDeclinedPushed.filter((c): c is string => typeof c === 'string' && c.length > 0 && c.length <= 64))]
+      : [],
     nextOnPeakStartMs: num(o.nextOnPeakStartMs),
     foreignReservePct: num(o.foreignReservePct),
     foreignSeenAtMs: num(o.foreignSeenAtMs),
@@ -819,6 +863,28 @@ export function coerceActuationState(raw: unknown): NightActuationState {
 export function coerceLineAskPct(v: unknown): number | null {
   if (typeof v !== 'number' || !Number.isFinite(v)) return null;
   return Math.min(100, Math.max(RESERVE_WRITE_MAX_PCT + 1, Math.ceil(v - 1e-9)));
+}
+
+/** v1.200.0 (review 2) — a slot list as the record keeps it: the 1..SHP2_SOURCE_SLOTS integers of an array, else
+ *  null (never a guess). PURE. */
+function slotList(v: unknown): number[] | null {
+  return Array.isArray(v)
+    ? v.filter((n): n is number => Number.isInteger(n) && (n as number) >= 1 && (n as number) <= SHP2_SOURCE_SLOTS)
+    : null;
+}
+
+/** v1.200.0 (review 2) — the line night's pool trail as the record keeps it: the finite {pct, atMs} pairs, in
+ *  time order, the last two; none ⇒ null. PURE. */
+function coercePoolSamples(v: unknown): Array<{ pct: number; atMs: number }> | null {
+  if (!Array.isArray(v)) return null;
+  const ok = v
+    .filter((x): x is { pct: number; atMs: number } => x != null && typeof x === 'object'
+      && typeof (x as { pct?: unknown }).pct === 'number' && Number.isFinite((x as { pct: number }).pct)
+      && typeof (x as { atMs?: unknown }).atMs === 'number' && Number.isFinite((x as { atMs: number }).atMs))
+    .map((x) => ({ pct: x.pct, atMs: x.atMs }))
+    .sort((a, b) => a.atMs - b.atMs)
+    .slice(-2);
+  return ok.length > 0 ? ok : null;
 }
 
 /** The plan fields the actuator needs at announce time. */

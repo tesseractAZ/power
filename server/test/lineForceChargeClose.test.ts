@@ -129,10 +129,14 @@ function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Varian
       onEffectiveMs = t + kn.onDelayMin * MIN;
     } else if (a.kind === 'lineReOn') {
       if (variant !== 'noReOn') {
-        s = { ...s, forceChargeLineReOns: s.forceChargeLineReOns + 1, forceChargeLineReOnAtMs: t };
+        s = { ...s, forceChargeLineReOns: s.forceChargeLineReOns + 1, forceChargeLineReOnAtMs: t, forceChargeLineReOnSlots: [...a.slots] };
         onEffectiveMs = t + kn.onDelayMin * MIN;
         reOns += 1;
       }
+    } else if (a.kind === 'lineReOnChecked') {
+      // (review 2) index.ts records the re-ON's readback check; the budget's next re-ON is the retry.
+      s = { ...s, forceChargeLineReOnCheckedAtMs: t, forceChargeLineReOnNotAppliedSlots: [...a.notApplied],
+        forceChargeLineReOnsNotApplied: s.forceChargeLineReOnsNotApplied + (a.notApplied.length > 0 ? 1 : 0) };
     } else if (a.kind === 'off') {
       s = { ...s, forceChargeOffAtMs: t, forceChargeOffReason: a.reason };
       chargeNowOn = false; onEffectiveMs = null;

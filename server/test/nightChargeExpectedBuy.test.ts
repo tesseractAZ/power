@@ -1727,8 +1727,9 @@ test('★★ the force-charge ON-failure push names where the force-charge stops
   // index.ts builds it from the record: the slots, ours, the armed ceiling — and, v1.196.0, each
   // slot's Core (forceChargeFailedCore.test.ts).
   const idx = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
-  // v1.200.0 — a cost night's ceiling as before; a line night names its line (lineForceCharge.test.ts T9).
-  assert.match(idx, /buildNightForceChargeOnFailure\(\{\n\s+day: state\.day, slots: action\.slots, ourSlots: state\.forceChargeSlots, retries: state\.forceChargeOnRetries,\n\s+noRetry: action\.noRetry === true,\n(\s+\/\/[^\n]*\n)*\s+ceilingPct: state\.forceChargeMode === 'line' \? null : state\.forceChargeCeilingPct,\n\s+lineLinePct: state\.forceChargeMode === 'line' \? \(state\.forceChargeLinePct \?\? state\.forceChargeLineAskPct\) : null,\n\s+cores: slotCores,\n\s+\}\)\)/);
+  // v1.200.0 — a cost night's ceiling as before; a line night names its line (lineForceCharge.test.ts T9) — (review 2)
+  // from the record's line ask, whatever the mode (forceChargeOnFailureNight; lineForceChargeAtRisk.test.ts W5).
+  assert.match(idx, /buildNightForceChargeOnFailure\(\{\n\s+day: state\.day, slots: action\.slots, ourSlots: state\.forceChargeSlots, retries: state\.forceChargeOnRetries,\n\s+noRetry: action\.noRetry === true,\n(\s+\/\/[^\n]*\n)*\s+\.\.\.forceChargeOnFailureNight\(state\),\n\s+cores: slotCores,\n\s+\}\)\)/);
   assert.doesNotMatch(idx, /\(toward \$\{state\.forceChargeCeilingPct/);
   // The stop is the one the morning push and the evening push name.
   assert.match(buildNightChargeMorningSummary({ day: '2026-10-12', targetPct: 50, restorePct: 16, expectedKwh: null,

@@ -651,7 +651,8 @@ test('★★★ T6 (review) the LINE re-ON: a verified ON the panel switched off
   const spend = exec.indexOf('forceChargeLineReOns: nightActuationMem.forceChargeLineReOns + 1,');
   const write = exec.indexOf("on: true, source: { ua: 'night-force-charge-line-reon' }");
   assert.ok(spend > 0 && write > spend, 'spent before the writes');
-  assert.ok(exec.includes('...(allLimited ? { forceChargeLineReOns: Math.max(0, nightActuationMem.forceChargeLineReOns - 1) } : {}),'));
+  // (review 2) …and a re-ON handed back stamps no slots: there is nothing for its readback check to judge.
+  assert.ok(exec.includes('...(allLimited ? { forceChargeLineReOns: Math.max(0, nightActuationMem.forceChargeLineReOns - 1), forceChargeLineReOnSlots: null } : {}),'));
 });
 
 test('★★★ T6 (review) the expected walk is the tick\'s: at the panel ceiling the slots latch OFF and the house draws the pool, until the re-ON — the stated close is no longer the ceiling', () => {
@@ -955,15 +956,16 @@ test('★★ T9 the declined start (L3; review): every all-night blocker is one;
   st = nfc.EMPTY_LINE_DECLINED_PUSH; pushes.length = 0;
   for (let i = 0; i < 60; i++) tick(T0 + i * M, i % 5 === 4 ? null : STALE);
   assert.deepEqual(pushes, []);
-  // index.ts steps it on every declined tick of a line night after the reserve verifies, keyed by the night.
-  assert.ok(INDEX.includes("    const step = lineDeclinedPushStep(lineDeclinedPush.st, lineMode?.kind === 'line' ? action.why : null, nowMs);\n"));
-  assert.ok(INDEX.includes("    if (lineDeclinedPush.day !== state.day) lineDeclinedPush = { day: state.day, st: EMPTY_LINE_DECLINED_PUSH };\n"));
+  // index.ts steps it on every declined tick (lineDeclinedPushTick: a live night whose record carries a line ask,
+  // keyed by the night and seeded from the record after a restart — lineForceChargeAtRisk.test.ts W5).
+  assert.ok(INDEX.includes("    const dp = lineDeclinedPushTick(lineDeclinedPush, state, action.why, nowMs, "));
+  assert.ok(INDEX.includes("    lineDeclinedPush = dp.mem;\n"));
   assert.ok(!INDEX.includes("'push:line-declined'"), 'no single per-night key');
   // The latest start (review 15): to ⌈L⌉ at the rate now, never after the dead zone; 2027-01-04 at 50.8%,
   // 14 kW: 4.79 kWh ⇒ 20.5 min + 15 ⇒ 35.5 min before the close — a start well after the 03:25 timed one.
   assert.equal(nfc.lineLatestStartMs(WIN_END, 56, 50.8, 92.16, 14, null, 3), WIN_END - ((0.052 * 92.16) / 14) * H - nfc.FORCE_CHARGE_JIT_BUFFER_MS);
   assert.equal(nfc.lineLatestStartMs(WIN_END, 56, 56, 92.16, 14, null, 3), WIN_END - FORCE_CHARGE_MIN_RUN_MS, 'at the ask: the last start the tick makes');
-  assert.ok(INDEX.includes('lineLatestStartMs(endMs, lineMode.askPct, '), 'the push quotes the latest start for ⌈L⌉');
+  assert.ok(INDEX.includes('lineLatestStartMs(endMs, state.forceChargeLineAskPct!, '), 'the push quotes the latest start for ⌈L⌉');
 });
 
 test('★★ T9 the morning summary (review): "ran to the window close" only when the OFF was the window\'s; any other OFF says when and why', () => {
@@ -1092,8 +1094,9 @@ test('★★ T12 (review) the line-night surfaces are wired: the ON\'s mode stam
   const stamped = nfc.forceChargeOnStamp(night(), WIN_END - H, [1, 2, 3], { cost: false, line: true });
   assert.equal(stamped.forceChargeMode, 'line');
   assert.equal(nfc.forceChargeOnStamp(night({ forceChargeCeilingPct: 90 }), WIN_END - H, [1], { cost: true, line: true }).forceChargeMode, 'cost');
-  // …which keys the line sentence of the ON-failure push and the morning account.
-  assert.ok(tick.includes("lineLinePct: state.forceChargeMode === 'line' ? (state.forceChargeLinePct ?? state.forceChargeLineAskPct) : null,"));
+  // (review 2) The ON-failure push's line sentence keys on the RECORD's line ask, never the stamped mode — a
+  // cost-dominant night is stamped 'cost' and carries its line too (behaviour: lineForceChargeAtRisk.test.ts W5 #1).
+  assert.ok(tick.includes('        ...forceChargeOnFailureNight(state),\n'));
   // W2 — the evening push's supervised context: the line force-charge on a line night, never a cost stop.
   const evening = INDEX.slice(INDEX.indexOf('async function runNightChargeEveningJobInner('), INDEX.indexOf('function shadowArmProbe('));
   assert.equal(evening.split('          ...armedForceChargeAnnouncement(armedCandidate, forceChargeGatesOn()),\n').length - 1, 1);
@@ -1105,7 +1108,8 @@ test('★★ T12 (review) the line-night surfaces are wired: the ON\'s mode stam
   assert.deepEqual(nfc.armedForceChargeAnnouncement(armedLine, { cost: false, line: false }), { forceChargeTargetPct: null, forceChargeLine: null });
   assert.deepEqual(nfc.armedForceChargeAnnouncement({ ...armedLine, forceChargeRides: false }, { cost: false, line: true }),
     { forceChargeTargetPct: null, forceChargeLine: null }, 'the stamp, never the option');
-  // W3 — the morning account of a line night states where its pool read at the close (a fresh reading).
+  // W3 — the morning account of a line night states where its pool read at the close (a fresh reading); (review 2)
+  // on every night whose record carries a line ask (lineForceChargeAtRisk.test.ts W3).
   const restore = INDEX.slice(INDEX.indexOf('function sendRestoreSummary('), INDEX.indexOf('\n}\n', INDEX.indexOf('function sendRestoreSummary(')));
-  assert.ok(restore.includes("      closePoolPct: state.forceChargeMode === 'line' ? freshPoolSocPct(nowMs) : null,\n"));
+  assert.ok(restore.includes("      closePoolPct: lineNight != null ? freshPoolSocPct(nowMs) : null,\n"));
 });
