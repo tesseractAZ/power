@@ -542,7 +542,8 @@ test('the 21:30 announcement names the force-charge and its TARGET, and drops th
 
 test('★★★ an 80+ target is switched OFF when the pool reaches it — the coast is retired', () => {
   // Measured 2026-09-18: at the 90% ceiling grid import fell to 0 and the house drew the
-  // pack 90 → 86% by 05:00 with Charge Now still on. v1.170.0 retired the coast.
+  // pack 90 → 86% by 05:00 (Charge Now's slot state that night is the add-on's record — no OFF
+  // was sent — not a readback). v1.170.0 retired the coast.
   const n = forcedNight({ forceChargeCeilingPct: 90 });
   assert.equal(decideForceCharge(n, MID, opts({ poolSocPct: 89 })).kind, 'none');
   assert.deepEqual(decideForceCharge(n, MID, opts({ poolSocPct: 90 })), { kind: 'off', slots: [1, 2, 3], reason: 'target' });

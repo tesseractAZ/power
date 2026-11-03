@@ -56,8 +56,12 @@
  * ★★★ v1.170.0 — THE COAST IS RETIRED (2026-09-18): the software stop applies at
  * every target again (forceChargeStopPct), so force-charge is on only as long as it charges.
  * ★★★ MEASURED 2026-09-18 — THE COAST DID NOT HOLD. The pack reached the 90% ceiling at
- * 03:30; grid import then fell to 0 W and the house ran from the pack, 90% → 86% by 05:00,
- * with Charge Now still ON. At its ceiling the panel stops importing; it does NOT keep the
+ * 03:30; grid import then fell to 0 W and the house ran from the pack, 90% → 86% by 05:00.
+ * (Charge Now's slot state that night is the add-on's own RECORD — no OFF was sent before
+ * 05:00 — not a per-slot readback: until v1.187.10 the drift watch filed a panel-side OFF
+ * inside the force-charge as the add-on's own write. Import at 0 W with the house on the pack
+ * is what the panel's own OFF at its ceiling produces, read with the panel-side classifier on
+ * 2026-09-23 and 2026-10-02.) At its ceiling the panel stops importing; it does NOT keep the
  * house on grid. So the coast gives back what a stop at the target would, and only adds
  * Charge Now time — v1.170.0 restored the stop at every target (above), and the
  * live charge rate (v1.169.0) shrinks the early arrival.
@@ -98,7 +102,8 @@
  *    run); the panel ceiling is desiredForceChargeCeilingPct(max(target, ⌈L⌉ + 2H)). While Charge Now is ON
  *    under that ceiling the house and an EV ride the grid, so a load that starts after the start cannot
  *    draw the pool under the line. AT the ceiling the panel switches each slot OFF by itself and leaves
- *    it OFF (2026-09-18 / 09-23 / 10-02), so a pool that reaches it early (a predicted EV pulling the start
+ *    it OFF (read with the panel-side classifier on 2026-09-23 and 2026-10-02; 2026-09-18 is consistent with
+ *    it, but its slot state is the add-on's record, not a readback), so a pool that reaches it early (a predicted EV pulling the start
  *    forward) is drawn back down by a late load: the tick switches the slots back ON under the start
  *    target (lineReOnDue, ≤ FORCE_CHARGE_LINE_REON_MAX a night). Design A's drain-aware hold (a stop at
  *    ⌈L⌉ plus the drain to the close) closed under the line on 197 of 200 nights with a 7 kW EV plugging
@@ -427,7 +432,11 @@ export const FORCE_CHARGE_LINE_HEADROOM_PCT = 5;
 
 /** v1.200.0 (review) — the LINE re-ONs a night may spend (lineReOnDue). The panel switches a slot's Charge
  *  Now OFF by itself as its Core reaches the force-charge ceiling, and does not switch it back on
- *  (2026-09-18: 90 → 86% with Charge Now still set; 2026-09-23: ch1 at 04:19, ch3 at 04:30). An early
+ *  (read with the panel-side classifier: 2026-09-23, ch1 at 04:19 and ch3 at 04:30; 2026-10-02, slots 2 and 1
+ *  at 04:24-04:25. 2026-09-18's 90 → 86% after the ceiling is consistent with it, but that night's slot state
+ *  is the add-on's record, not a readback). A slot that keeps reading ON at its ceiling and stops importing
+ *  (the ON-reading latch) has never been measured here: no write rests on it — the line-at-risk push
+ *  (lineAtRiskPushDue) and a once-a-night log line (lineOnReadingShape) cover it. An early
  *  start (a predicted EV) can reach the ceiling hours before the close; a load that arrives after that
  *  draws the pool back down. Two re-ONs cover a second latch on a long night (lineForceChargeClose.test.ts). */
 export const FORCE_CHARGE_LINE_REON_MAX = 2;

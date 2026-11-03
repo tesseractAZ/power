@@ -18,10 +18,11 @@ import { emptyActuationState, type NightActuationState } from '../src/nightCharg
  *    start on the panel's nameplate backupFullCapWh (92.16), as index.ts passes it;
  *  - ON and under the panel ceiling: the pack gains (17 − house − EV) × 0.927 × k per hour (the grid
  *    cap less the load, through the charge leg; k the share of that rate the pack actually takes);
- *  - AT THE CEILING THE PANEL SWITCHES THE SLOTS' CHARGE NOW OFF AND LEAVES THEM OFF (review: the
- *    2026-09-18 and 2026-09-23 measurements — 90 → 86% with Charge Now still set; ch1 off at 04:19, ch3 at
- *    04:30). The plant once resumed importing below the ceiling, which no Core does. Then, or OFF, the
- *    house draws the pack (load ÷ 0.94 + the Cores' standby), held at the 50% reserve; the slots read OFF
+ *  - AT THE CEILING THE PANEL SWITCHES THE SLOTS' CHARGE NOW OFF AND LEAVES THEM OFF (read with the
+ *    panel-side classifier on 2026-09-23 — ch1 off at 04:19, ch3 at 04:30 — and 2026-10-02, slots 2 and 1 at
+ *    04:24-04:25; 2026-09-18's 90 → 86% after the ceiling is consistent with it, but that night's slot state is
+ *    the add-on's record, not a readback). The plant once resumed importing below the ceiling, which no Core
+ *    does. Then, or OFF, the house draws the pack (load ÷ 0.94 + the Cores' standby), held at the 50% reserve; the slots read OFF
  *    until an ON of ours (the tick's 'on', 'onRetry' or 'lineReOn') takes effect;
  *  - the tick's evDisplacedKwh is the plan's predicted (P90) window EV, constant through the night, through
  *    evDisplacedPackKwh, exactly as index.ts passes it — so a predicted EV pulls the start early;
@@ -31,14 +32,18 @@ import { emptyActuationState, type NightActuationState } from '../src/nightCharg
  *    night is UNDER when it closes below L − 0.05 (REALIZED_CLOSE_TOLERANCE_PCT).
  *
  * Year-shaped lines (the legacyIdentity year's qualifying lines, 50.45-65.95), houses 0.6-3.6 kW, rate
- * factors 0.9-1.25: 0 nights under in every STRESS cell and every PREDICTED-EV cell (the latch, then the
- * tick's line re-ON, lineReOnDue). What the line force-charge cannot carry is pinned exactly, not claimed:
+ * factors 0.9-1.25: 0 nights under in every STRESS cell and every PREDICTED-EV cell (the MEASURED, OFF-reading
+ * latch, then the tick's line re-ON, lineReOnDue). What the line force-charge cannot carry is pinned exactly, not claimed:
  *  - asks of 70-90 with a slow pack (the window cannot deliver a 20-40 point lift);
  *  - a late UNPREDICTED load that takes the grid cap after the start (an 11.52 kW EV — EV_MAX_LOAD_W, the
  *    site's 48 A × 240 V default — or a 7 kW one two hours out), alone or with another stress: the start
  *    was timed on a rate the pack then does not get;
  *  - a COST-DOMINANT night (the cost stop already at ⌈L⌉ + 10 or above: today's cost force-charge exactly,
  *    with its software stop) whose late EV draws the pool back under the line after that stop.
+ * (review 2) THE ON-READING LATCH — a slot that keeps reading ON at its ceiling and stops importing — is UNMEASURED on
+ * this plant (variant 'onLatch'): nothing of ours switches it back on, so predicted-EV nights close under the line there
+ * (pinned exactly, PIN_ON_LATCH); the line-at-risk push (lineAtRiskPushDue) reaches every one of them at least 20 min
+ * before the close. The plant stamps the night's observations and asks for the push on each tick, as index.ts does.
  * Three discriminators show the grid can see the mutants it is meant to kill: a software stop at ⌈L⌉ (design
  * A's hold, F-i), a start timed to ⌈L⌉ without the + 5 (F-iii), and no re-ON after the latch.
  */
@@ -54,7 +59,10 @@ const W1 = W0 + 6 * H;
 /** EV_MAX_LOAD_W at its default (config.ts; analytics.ts "48 A × 240 V"), kW. */
 const EV_MAX_KW = 11.52;
 
-type Variant = 'real' | 'hold' | 'askStart' | 'noReOn';
+/** 'onLatch' (review 2) — the ON-READING latch, UNMEASURED on this plant: at the ceiling a slot stops importing but
+ *  keeps reading Charge Now ON, and imports again only once an ON of ours takes effect (none comes: the re-ON keys
+ *  on slots reading OFF). */
+type Variant = 'real' | 'hold' | 'askStart' | 'noReOn' | 'onLatch';
 interface Knobs {
   p0: number; evFromMin: number | null; evKw: number; standbyKw: number; onDelayMin: number; staleMin: number; floor: boolean;
   /** The plan's predicted window EV (kWh) the tick passes as evDisplacedKwh; 'exact' = the EV that comes. */
@@ -69,7 +77,7 @@ type LineState = NightActuationState & {
   forceChargeMode: 'cost' | 'line' | null;
 };
 
-function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Variant): { close: number; onMin: number; reOns: number } {
+function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Variant): { close: number; onMin: number; reOns: number; pushedAtMs: number | null } {
   const ask = Math.ceil(L - 1e-9);
   const cost = typeof kn.costPct === 'function' ? Math.min(100, kn.costPct(ask)) : kn.costPct;
   let s: LineState = {
@@ -85,6 +93,8 @@ function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Varian
   let pendingCeiling: number | null = null;
   let onEffectiveMs: number | null = null;
   let chargeNowOn = false;
+  let importing = true;
+  let pushedAtMs: number | null = null;
   let onMin = 0;
   let reOns = 0;
   const readings: number[] = [];
@@ -105,14 +115,22 @@ function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Varian
     const evDisplacedKwh = pred != null && pred > 0
       ? evDisplacedPackKwh({ evKwh: pred, peakEvKw: kn.evKw, rateKw: chargeRateKw, unboundedRateKw: Math.max(1, (17 - load) * LEG), legEff: LEG })
       : null;
-    if (onEffectiveMs != null && t >= onEffectiveMs) { chargeNowOn = true; onEffectiveMs = null; }
+    if (onEffectiveMs != null && t >= onEffectiveMs) { chargeNowOn = true; importing = true; onEffectiveMs = null; }
     const o = {
       enabled: gates.cost, lineEnabled: gates.line, gridPresent: true, gridStaLost: false,
       slotsOn: chargeNowOn ? [1, 2, 3] : [], connectedSlots: [1, 2, 3], vitalsRed: false, socCoherent: true,
       slotSocPct: { 1: seen, 2: seen, 3: seen },
       ceilingReadbackPct: panelCeiling, poolSocPct: seen, fullKwh: NAME, chargeRateKw, evDisplacedKwh,
     } as ForceChargeOpts;
+    // (review 2) index.ts: the night's observations (the pool trail, the panel's own stop) on the record before
+    // the decision; and on a tick that decides nothing, the line-at-risk push (once a night).
+    const obs = nfc.lineNightObservations(s, t, o);
+    if (obs != null) s = { ...s, ...obs };
     const a = decideForceCharge(s, t, o);
+    if (a.kind === 'none' && pushedAtMs == null && nfc.lineAtRiskPushDue(s, t, o) != null) {
+      pushedAtMs = t;
+      s = { ...s, forceChargeLineAtRiskPushedAtMs: t };
+    }
     if (a.kind === 'syncCeiling') {
       s = { ...s, forceChargeCeilingAttemptedAtMs: t, forceChargeCeilingPriorPct: s.forceChargeCeilingPriorPct ?? a.prior, forceChargeCeilingSyncedPct: a.pct };
       pendingCeiling = a.pct;
@@ -143,18 +161,19 @@ function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Varian
     }
     // F-i's emulation: a software stop at ⌈L⌉ (design A's hold without its drain allowance).
     if (variant === 'hold' && chargeNowOn && seen >= ask) { chargeNowOn = false; onEffectiveMs = null; s = { ...s, forceChargeOffAtMs: t, forceChargeOffReason: 'target' }; }
-    if (chargeNowOn && pack < (panelCeiling / 100) * CAP) {
+    if (chargeNowOn && importing && pack < (panelCeiling / 100) * CAP) {
       pack = Math.min((panelCeiling / 100) * CAP, pack + Math.max(1, (17 - load) * LEG) * k * (MIN / H));
       onMin += 1;
     } else {
-      // At the ceiling the panel switches the slots OFF by itself, and they stay OFF.
-      if (chargeNowOn) { onMin += 1; chargeNowOn = false; }
+      // At the ceiling the panel switches the slots OFF by itself, and they stay OFF (measured). 'onLatch': they
+      // stop importing and keep reading ON (unmeasured).
+      if (chargeNowOn) { onMin += 1; if (variant === 'onLatch') importing = false; else chargeNowOn = false; }
       if (pack > 0.5 * CAP) pack = Math.max(0.5 * CAP, pack - (load / DIS + kn.standbyKw) * (MIN / H));
     }
   }
   tail.sort((x, y) => x - y);
   const m = Math.floor(tail.length / 2);
-  return { close: tail.length % 2 ? tail[m] : (tail[m - 1] + tail[m]) / 2, onMin, reOns };
+  return { close: tail.length % 2 ? tail[m] : (tail[m - 1] + tail[m]) / 2, onMin, reOns, pushedAtMs };
 }
 
 const YEAR_LINES = [50.45, 50.61, 51.15, 51.43, 52.62, 54.33, 55.55, 57.52, 59.1, 65.95];
@@ -162,15 +181,18 @@ const HIGH_LINES = [69.5, 72.2, 74.6, 77.1, 80.3, 84.9, 89.6];
 const HOUSES = [0.6, 1.2, 2.0, 2.8, 3.6];
 const KS = [0.9, 1.0, 1.1, 1.25];
 
-function cell(lines: number[], kn: Partial<Knobs>, ks: number[] = KS, variant: Variant = 'real'): { under: number; n: number; worst: number; meanOn: number; reOns: number } {
+/** (review 2) `pushed` — nights the line-at-risk push went; `underPushed` — of the nights under, those it reached;
+ *  `latePushed` — pushes inside FORCE_CHARGE_LINE_AT_RISK_LEAD_MS of the close (the helper never makes one). */
+function cell(lines: number[], kn: Partial<Knobs>, ks: number[] = KS, variant: Variant = 'real'): { under: number; n: number; worst: number; meanOn: number; reOns: number; pushed: number; underPushed: number; latePushed: number } {
   const k2 = { ...BASE, ...kn };
-  let under = 0, n = 0, worst = Infinity, on = 0, reOns = 0;
+  let under = 0, n = 0, worst = Infinity, on = 0, reOns = 0, pushed = 0, underPushed = 0, latePushed = 0;
   for (const L of lines) for (const h of HOUSES) for (const k of ks) {
     const r = night(L, h, k, k2, variant);
     n += 1; on += r.onMin; reOns += r.reOns; worst = Math.min(worst, r.close - L);
-    if (r.close < L - 0.05) under += 1;
+    if (r.pushedAtMs != null) { pushed += 1; if (r.pushedAtMs > W1 - nfc.FORCE_CHARGE_LINE_AT_RISK_LEAD_MS) latePushed += 1; }
+    if (r.close < L - 0.05) { under += 1; if (r.pushedAtMs != null) underPushed += 1; }
   }
-  return { under, n, worst, meanOn: on / n, reOns };
+  return { under, n, worst, meanOn: on / n, reOns, pushed, underPushed, latePushed };
 }
 
 const STRESSES: Array<[string, Partial<Knobs>]> = [
@@ -213,6 +235,8 @@ test('★★★ T7 the year-shaped lines close at or above the line in EVERY str
       const r = cell(YEAR_LINES, { ...kn, floor });
       out.push(`${name}${floor ? ' (floor)' : ''}: ${r.under}/${r.n}`);
       assert.equal(r.under, 0, `${name}${floor ? ' (floor)' : ''}: ${r.under}/${r.n} under, worst close − L ${r.worst.toFixed(2)}`);
+      // (review 2) and the line-at-risk push never goes on them: a carried night with no latch is never a warning.
+      assert.equal(r.pushed, 0, `${name}${floor ? ' (floor)' : ''}: ${r.pushed} pushed`);
     }
     for (const k of [0.7, 0.6]) {
       const r = cell(YEAR_LINES, { floor }, [k]);
@@ -234,6 +258,32 @@ test('★★★ T7 (review) a PREDICTED EV pulls the start early and the panel l
   // The re-ON is what carries them: it fires on these nights (and never on the plain year cells).
   assert.ok(cell(YEAR_LINES, { predEvKwh: 30, evKw: 11, evFromMin: 90 }).reOns >= 40);
   assert.equal(cell(YEAR_LINES, {}).reOns, 0);
+});
+
+test('★★★ T7 (review 2) the ON-READING latch — UNMEASURED here: no re-ON keys on a slot reading ON, so predicted-EV nights close under; pinned exactly, and the line-at-risk push reaches every one of them ≥ 20 min before the close', () => {
+  const got: Record<string, Array<[number, number]>> = {};
+  let real = { round: 0, floor: 0 };
+  for (const [name, kn] of PREDICTED) {
+    got[name] = [];
+    for (const [lines, floor] of [[YEAR_LINES, false], [YEAR_LINES, true], [HIGH_LINES, false], [HIGH_LINES, true]] as const) {
+      const r = cell(lines as number[], { ...kn, floor }, KS, 'onLatch');
+      got[name].push([r.under, r.pushed]);
+      assert.equal(r.underPushed, r.under, `${name} (${lines === YEAR_LINES ? 'year' : 'high'}${floor ? ', floor' : ''}): the push reached ${r.underPushed} of ${r.under} under`);
+      assert.equal(r.latePushed, 0, 'never inside the lead');
+      const m = cell(lines as number[], { ...kn, floor });
+      assert.equal(m.under, 0, 'the measured (OFF-reading) latch: carried by the re-ON');
+      real = { ...real, [floor ? 'floor' : 'round']: real[floor ? 'floor' : 'round'] + m.pushed };
+    }
+  }
+  assert.deepEqual(got, PIN_ON_LATCH);
+  assert.deepEqual(real, PIN_REAL_PREDICTED_PUSHES);
+  // The shape is what the once-a-night log names: a slot of ours reading ON, its Core under the ceiling, the pool falling.
+  const s = { ...emptyActuationState(), day: '2027-01-04', windowStartMs: W0, windowEndMs: W1, forceChargeLineAskPct: 56, forceChargeLinePct: 55.55,
+    forceChargeOnAtMs: W0, forceChargeSlots: [1, 2, 3], forceChargeOnVerifiedAtMs: W0 + MIN, forceChargeCeilingSyncedPct: 80,
+    forceChargeLinePoolSamples: [{ pct: 66, atMs: W1 - 70 * MIN }] } as LineState;
+  const o = { enabled: false, lineEnabled: true, gridPresent: true, gridStaLost: false, slotsOn: [1, 2, 3], connectedSlots: [1, 2, 3],
+    vitalsRed: false, socCoherent: true, slotSocPct: { 1: 62, 2: 62, 3: 62 }, ceilingReadbackPct: 80, poolSocPct: 62, fullKwh: NAME } as ForceChargeOpts;
+  assert.deepEqual(nfc.lineOnReadingShape(s, W1 - H, o)?.slots, [1, 2, 3]);
 });
 
 test('★★★ T7 the line force-charge actually runs: ON to the close on a 50% pool, no OFF before it', () => {
@@ -268,6 +318,13 @@ test('★★★ T7 (review) known failures: a late UNPREDICTED load that takes t
     got[name] = [r(YEAR_LINES, false), r(YEAR_LINES, true), r(HIGH_LINES, false), r(HIGH_LINES, true)];
   }
   assert.deepEqual(got, PIN_KNOWN);
+  // (review 2) The line-at-risk push on those nights: the under nights it reached, pinned (it needs the pool not rising).
+  const pushed: Record<string, [number, number, number, number]> = {};
+  for (const [name, kn, ks] of KNOWN_CELLS) {
+    const r = (lines: number[], floor: boolean) => { const c = cell(lines, { ...kn, floor }, ks); assert.equal(c.latePushed, 0); return c.underPushed; };
+    pushed[name] = [r(YEAR_LINES, false), r(YEAR_LINES, true), r(HIGH_LINES, false), r(HIGH_LINES, true)];
+  }
+  assert.deepEqual(pushed, PIN_KNOWN_PUSHED);
 });
 
 test('★★ T7 (review) cost-dominant nights (the cost stop at ⌈L⌉ + 10 or above runs today\'s cost force-charge, with its software stop): pinned, never claimed carried', () => {
@@ -344,4 +401,39 @@ const PIN_COST: Record<string, [number, number, number, number]> = {
   'cost ⌈L⌉ + 10, 7 kW EV from 90 min': [0, 0, 0, 7],
   'cost ⌈L⌉ + 10, 11.52 kW EV from 60 min': [0, 0, 15, 27],
   'cost ⌈L⌉ + 15, 11.52 kW EV from 60 min': [0, 0, 15, 15],
+};
+
+/** (review 2) THE ON-READING LATCH — UNMEASURED on this plant (no per-slot readback ever showed a slot reading ON at
+ *  its ceiling and not importing; 2026-09-18's "Charge Now still ON" is the add-on's record, not a readback). Per
+ *  PREDICTED cell: [under, nights the line-at-risk push went] for [year rounded, year floored, high rounded, high
+ *  floored], of 200 / 200 / 140 / 140. The re-ON keys on slots reading OFF, so nothing of ours switches these back on;
+ *  the push reaches every night that closes under (pinned below), at least FORCE_CHARGE_LINE_AT_RISK_LEAD_MS before
+ *  the close, and also goes on nights the remaining charge still carries. Matches the round-2 reviewer's emulation. */
+const PIN_ON_LATCH: Record<string, Array<[number, number]>> = {
+  '20 kWh predicted, 7 kW EV from 60 min': [[1, 7], [2, 8], [84, 140], [93, 140]],
+  '20 kWh predicted, 7 kW EV from 90 min': [[8, 13], [9, 15], [137, 140], [139, 140]],
+  '30 kWh predicted, 11 kW EV from 90 min': [[44, 57], [47, 59], [140, 140], [140, 140]],
+  '30 kWh predicted, 11 kW EV from 120 min': [[31, 33], [32, 33], [140, 140], [140, 140]],
+  'predicted exactly, 7 kW EV from 90 min': [[0, 0], [0, 0], [52, 72], [55, 74]],
+  'predicted exactly, 11.52 kW EV from 90 min': [[8, 8], [8, 9], [105, 105], [105, 105]],
+  'predicted exactly, 11.52 kW EV from 120 min': [[8, 8], [8, 12], [105, 109], [105, 113]],
+  '36 kWh predicted, 11.52 kW EV from 90 min': [[65, 84], [72, 91], [140, 140], [140, 140]],
+  '36 kWh predicted, 11.52 kW EV from 180 min': [[10, 42], [10, 55], [124, 140], [127, 140]],
+  'pool 77 + 20 kWh predicted, 7 kW EV from 90 min': [[5, 13], [7, 17], [140, 140], [140, 140]],
+  'all: standby, ON 5 min late, 3 min stale + 20 kWh predicted, 7 kW EV from 90 min': [[7, 11], [8, 13], [131, 140], [133, 140]],
+};
+/** (review 2) The line-at-risk push on the MEASURED (OFF-reading) latch, summed over every PREDICTED cell (3,740 nights),
+ *  rounded and floored: none of those nights closes under the line (the re-ON carries them), so each push here is a
+ *  warning on a night that still held — the cost of pushing while there is time to act. */
+const PIN_REAL_PREDICTED_PUSHES = { round: 202, floor: 227 };
+/** (review 2) …and on the KNOWN late-unpredicted-load cells: the under nights the push reached, in PIN_KNOWN's order. It needs
+ *  the pool NOT RISING with at least 20 min left: a load that slows the charge without stopping it (7 kW from 120 min;
+ *  an ON 5 min late with a 7 kW EV) still rises, short of the line, and is not pushed — a residual, pinned. */
+const PIN_KNOWN_PUSHED: Record<string, [number, number, number, number]> = {
+  'unpredicted 7 kW EV from 120 min': [0, 0, 0, 0],
+  'unpredicted 11.52 kW EV from 60 min': [0, 1, 8, 18],
+  'unpredicted 11.52 kW EV from 90 min': [69, 72, 83, 90],
+  'unpredicted 11.52 kW EV from 120 min': [52, 58, 124, 123],
+  'ON 5 min late × unpredicted 7 kW EV from 90 min': [0, 0, 0, 0],
+  'pack at 0.85 of the rate × unpredicted 7 kW EV from 90 min': [0, 1, 2, 1],
 };
