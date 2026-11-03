@@ -291,8 +291,10 @@ const MUTANTS = [
   {
     id: 'C17-vii. ★ the synced ceiling is the raw target, not the value written',
     file: FC, tests: [T_FC],
-    find: '    ceilingPcts.push(desiredForceChargeCeilingPct(s.forceChargeCeilingPct));',
-    to: '    ceilingPcts.push(s.forceChargeCeilingPct); /* MUTANT */',
+    // v1.200.0 — anchor moved: the synced ceiling is read through syncedCeilingPct (the stamped value, or —
+    // on a record from before the stamp — the value the sync always wrote).
+    find: '  return s.forceChargeCeilingPct != null && Number.isFinite(s.forceChargeCeilingPct) ? desiredForceChargeCeilingPct(s.forceChargeCeilingPct) : null;\n}',
+    to: '  return s.forceChargeCeilingPct != null && Number.isFinite(s.forceChargeCeilingPct) ? s.forceChargeCeilingPct : null; /* MUTANT */\n}',
     why: 'The 86.6% target synced as 87 is never matched: our own ceiling write is logged panel-side.',
   },
   {

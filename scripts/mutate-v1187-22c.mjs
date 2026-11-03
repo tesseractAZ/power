@@ -415,8 +415,9 @@ const MUTANTS = [
   {
     id: 'C-xlvii. ★★ the walk ignores the predicted EV the live start counts',
     file: NCA,
-    find: '      if (t >= forceChargeStartAtMs(o.windowEndMs, o.ceilingPct, poolPct, o.fullKwh, rateKw, evDisplacedKwh)) {',
-    to: '      if (t >= forceChargeStartAtMs(o.windowEndMs, o.ceilingPct, poolPct, o.fullKwh, rateKw, null)) { /* MUTANT */',
+    // v1.200.0 — anchor moved (the outage line above the reserve envelope; mutate-line-force-charge.mjs).
+    find: '      if (t >= forceChargeStartAtMs(o.windowEndMs, o.ceilingPct, poolPct, o.tickPoolKwh, rateKw, evDisplacedKwh)) {',
+    to: '      if (t >= forceChargeStartAtMs(o.windowEndMs, o.ceilingPct, poolPct, o.tickPoolKwh, rateKw, null)) { /* MUTANT */',
     why: 'index.ts times the live start with the plan\'s EV displacement; without it the walk starts later and states more drain than the write allows.',
   },
   {
@@ -773,15 +774,17 @@ const MUTANTS = [
     id: 'C-xcii. ★★ the morning push pairs the force-charge figure with the reserve alone',
     file: NOTIFY,
     // v1.187.22 (recheck) — re-pointed: the shape of a force-charge that ran.
-    find: '      ? `${reserve}, and force-charge ran${toward}${note}; ${restored}`',
-    to: '      ? `${reserve}${note}; ${restored}` /* MUTANT */',
+    // v1.200.0 — anchor moved (the outage line above the reserve envelope; mutate-line-force-charge.mjs).
+    find: '        : `${reserve}, and force-charge ran${toward}${note}; ${restored}`)',
+    to: '        : `${reserve}${note}; ${restored}`) /* MUTANT */',
     why: '"reserve raised to 50% (~34.9 kWh expected)": the figure covers the force-charge to 80%, which the push never names.',
   },
   {
     id: 'C-xciii. ★★ the revert never passes what the force-charge did',
     file: IDX,
     // v1.187.22 (recheck) — re-pointed: the outcome from the actuation record.
-    find: '      forceCharge: forceChargeNightOutcome(state, forceChargeOn()),',
+    // v1.200.0 — anchor moved (the outage line above the reserve envelope; mutate-line-force-charge.mjs).
+    find: '      forceCharge: forceChargeNightOutcome(state, forceChargeGatesOn()),',
     to: '      forceCharge: null, /* MUTANT */',
     why: 'The morning push names the 50% reserve beside a figure that covers the force-charge leg, and never says whether it ran.',
   },
@@ -1139,22 +1142,25 @@ const MUTANTS = [
   {
     id: 'C-cxlii. ★★★ the morning push reads the option at the restore, not the stamp',
     file: FC,
-    find: '  const armedStop = armedForceChargeStopPct(s, s.forceChargeRides ?? enabled);',
-    to: '  const armedStop = armedForceChargeStopPct(s, enabled); /* MUTANT */',
+    // v1.200.0 — anchor moved (the outage line above the reserve envelope; mutate-line-force-charge.mjs).
+    find: '  const armedStop = armedForceChargeStopPct(s, s.forceChargeRides ?? gates.cost);',
+    to: '  const armedStop = armedForceChargeStopPct(s, gates.cost); /* MUTANT */',
     why: 'A restart with force-charge switched off turns an armed-to-ride night into "reserve raised to 50% (~34.9 kWh expected)".',
   },
   {
     id: 'C-cxliii. ★★★ the arm never stamps whether force-charge rides the night',
     file: ACT,
-    find: '      : forceChargeEnabled && ceiling != null && ceiling > RESERVE_WRITE_MAX_PCT,',
-    to: '      : null, /* MUTANT */',
+    // v1.200.0 — anchor moved (the outage line above the reserve envelope; mutate-line-force-charge.mjs).
+    find: '    forceChargeRides: forceChargeEnabled === undefined ? (lineRides ? true : null) : costRides || lineRides,',
+    to: '    forceChargeRides: null, /* MUTANT */',
     why: 'Every record reads as armed before the stamp: the option at the restore decides again.',
   },
   {
     id: 'C-cxliv. ★★ the stamp ignores the armed ceiling',
     file: ACT,
-    find: '      : forceChargeEnabled && ceiling != null && ceiling > RESERVE_WRITE_MAX_PCT,',
-    to: '      : forceChargeEnabled, /* MUTANT */',
+    // v1.200.0 — anchor moved (the outage line above the reserve envelope; mutate-line-force-charge.mjs).
+    find: '  const costRides = forceChargeEnabled === true && ceiling != null && ceiling > RESERVE_WRITE_MAX_PCT;',
+    to: '  const costRides = forceChargeEnabled === true; /* MUTANT */',
     why: 'A 50% ceiling (the reserve reaches it alone) is stamped as riding: the morning says "force-charge … never started".',
   },
   {
@@ -1182,15 +1188,17 @@ const MUTANTS = [
     id: 'C-cxlviii. ★★ index.ts arms without the force-charge gate',
     file: IDX,
     // v1.189.0 — re-pointed: the arm goes through armCycle (chargeCycle.ts), the gate on its leg.
-    find: "        role: 'cost', kind: 'overnight', plan, forceChargeEnabled: forceChargeOn(), nextOnPeakStartMs: armOnPeakStartMs,",
-    to: "        role: 'cost', kind: 'overnight', plan, forceChargeEnabled: undefined, nextOnPeakStartMs: armOnPeakStartMs, /* MUTANT */",
+    // v1.200.0 — anchor moved (the outage line above the reserve envelope; mutate-line-force-charge.mjs).
+    find: "        role: 'cost', kind: 'overnight', plan, forceChargeEnabled: forceChargeOn(), lineForceChargeEnabled: lineForceChargeOn(), nextOnPeakStartMs: armOnPeakStartMs,",
+    to: "        role: 'cost', kind: 'overnight', plan, forceChargeEnabled: undefined, lineForceChargeEnabled: lineForceChargeOn(), nextOnPeakStartMs: armOnPeakStartMs, /* MUTANT */",
     why: 'Every armed record carries no stamp, so the morning reads the option at the restore.',
   },
   {
     id: 'C-cxlix. ★ the evening push names the force-charge from the option, not the stamp',
     file: IDX,
-    find: '          forceChargeTargetPct: armedCandidate.forceChargeRides === true ? armedCandidate.forceChargeCeilingPct : null,',
-    to: '          forceChargeTargetPct: forceChargeOn() ? armedCandidate.forceChargeCeilingPct : null, /* MUTANT */',
+    // v1.200.0 — anchor moved (the outage line above the reserve envelope; mutate-line-force-charge.mjs).
+    find: "          forceChargeTargetPct: armedCandidate.forceChargeRides === true && fcMode?.kind !== 'line' ? armedCandidate.forceChargeCeilingPct : null,",
+    to: "          forceChargeTargetPct: forceChargeOn() && fcMode?.kind !== 'line' ? armedCandidate.forceChargeCeilingPct : null, /* MUTANT */",
     why: 'A 50% ceiling is pushed as "It also arms the panel\'s force-charge toward ~50%".',
   },
   // ── a force-charge ON that failed on only some slots ──
@@ -1333,8 +1341,9 @@ const MUTANTS = [
   {
     id: 'C-clxix. ★ index.ts builds the ON-failure push without the armed ceiling',
     file: IDX,
-    find: '        noRetry: action.noRetry === true, ceilingPct: state.forceChargeCeilingPct,',
-    to: '        noRetry: action.noRetry === true, ceilingPct: null, /* MUTANT */',
+    // v1.200.0 — anchor moved (the outage line above the reserve envelope; mutate-line-force-charge.mjs).
+    find: "        ceilingPct: state.forceChargeMode === 'line' ? null : state.forceChargeCeilingPct,",
+    to: '        ceilingPct: null, /* MUTANT */',
     why: 'The warning no longer says where the forfeited force-charge would have stopped.',
   },
   // ── (final review) a spoken detail states its figures whole ──

@@ -369,8 +369,9 @@ const MUTANTS = [
   {
     id: 'A-iv. ★★★ the backup leg keeps the plan\'s cost ceiling',
     file: CYC,
-    find: '    const plan: ArmablePlan = backup ? { ...c.plan, costCeilingSocPct: null } : c.plan;',
-    to: '    const plan: ArmablePlan = c.plan; /* MUTANT */',
+    // v1.200.0 — anchor moved: the strip also drops the plan's outage line (mutate-line-force-charge A-iii).
+    find: '    const plan: ArmablePlan = backup ? { ...c.plan, costCeilingSocPct: null, forceChargeLine: null } : c.plan;',
+    to: '    const plan: ArmablePlan = backup ? { ...c.plan, forceChargeLine: null } : c.plan; /* MUTANT */',
     why: 'A reserve-only leg arms a force-charge ceiling.',
   },
   {

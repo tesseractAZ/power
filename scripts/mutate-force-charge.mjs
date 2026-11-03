@@ -56,7 +56,8 @@ const MUTANTS = [
   {
     id: 'iv. ★★ ON takes ownership of an operator\'s Charge Now',
     file: FC,
-    find: '  if (o.slotsOn.length > 0) return { kind: \'none\', why: `Charge Now is already ON for slot(s) ${o.slotsOn.join(\', \')} — that is the operator\'s, never taken over` }; // someone else\'s Charge Now — never take ownership',
+    // v1.200.0 — anchor moved: the why-text's lead is FORCE_CHARGE_BLOCKER_WHY.alreadyOn (the declined-start push).
+    find: '  if (o.slotsOn.length > 0) return { kind: \'none\', why: `${W.alreadyOn}${o.slotsOn.join(\', \')} — that is the operator\'s, never taken over` }; // someone else\'s Charge Now — never take ownership',
     to: '  /* MUTANT */',
     why: 'The add-on adopts a force-charge an operator switched on deliberately, then switches it OFF at 05:00 with no notice to the operator.',
   },
@@ -224,8 +225,10 @@ const MUTANTS = [
   {
     id: 'xxvii. ★★ a target at or below the reserve still force-charges',
     file: FC,
-    find: '  if (target <= RESERVE_WRITE_MAX_PCT) {',
-    to: '  if (false) { /* MUTANT */',
+    // v1.200.0 — anchor moved: decideForceCharge's target now reads forceChargeModeOf, which rides no cost
+    // ceiling at or below the reserve maximum (the ON step's own check became that of a null mode).
+    find: '  const costOk = gates.cost && c != null && Number.isFinite(c) && c > RESERVE_WRITE_MAX_PCT;',
+    to: '  const costOk = gates.cost && c != null && Number.isFinite(c); /* MUTANT */',
     why: 'A night the reserve alone covers still switches force-charge on — two writes and an on-peak hazard for nothing.',
   },
   {
