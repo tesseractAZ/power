@@ -1,3 +1,17 @@
+## 1.199.1
+
+### The web UI's static file server runs on glob 14
+
+**Dependencies**
+
+- `glob` 13.0.6 → 14.0.3 and `minimatch` 10.2.5 → 11.0.4, forced through an npm override in `server/package.json` (`"overrides": {"glob": "^14.0.3"}`). Both come in only through `@fastify/static`, whose newest release (10.1.8) still asks for glob 13. This closes two GitHub advisories: GHSA-3g3m-2fjr-6pw4 (glob: a cancelled walk can keep reading the filesystem) and GHSA-g3hv-75wg-m249 (minimatch: a denial of service through pattern amplification).
+- Neither was reachable in the add-on. `@fastify/static` globs the built web UI folder once at start (`wildcard: false`) with the fixed pattern `**/**` and no abort signal. glob 14 keeps that call's function and options; its changes are internal (minimatch 11 matchers, ignore patterns that start with `/`, the removed `debug` option), and none of them reaches this call. glob 14 needs Node 18, 20 or 22 and later; the image runs Node 22.
+- Remove the override once `@fastify/static` itself depends on glob 14.
+
+**Unchanged**
+
+- No behaviour, option, API or Home Assistant entity changes. The web UI's files, routes and the 404 handling for missing assets are served as before (`spaAsset404.test.ts`).
+
 ## 1.199.0
 
 ### The outage cushion's reserve line holds the whole cushion on the batteries' measured capacity
