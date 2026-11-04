@@ -1561,6 +1561,41 @@ test('★★ T19 the mid-day push and its shadow record: a leg with a line ask i
   assert.equal((ann.cost as unknown as Record<string, unknown>).lineNotHeld, 'closeUnder');
 });
 
+test('★★ T22 (H1) the spoken notice of a window-bound line night: its level is the window\'s reach, so never "which ends before it gets there" — except where that reach is under the 50% reserve the level is floored at', () => {
+  const spokenOf = (p: LinePlan, label: string) => eveningAnnouncement({
+    cycle: 'overnight', plan: p, shape: 'charge', supervised: armedSupervised(p, liveCost(label)), armRefused: null, mode: 'supervised',
+  } as never).spoken!;
+  // 2026-10-29 21:30 on nameplate at 14 h (carried) and 15 h (disclosed), and 2026-10-26 21:30 at 20 h (a line above a
+  // full pool): bound walks capped at the window's reach (~92.8%, ~97.4%), which the pool reaches as the window closes.
+  for (const [label, h, level] of [['2026-10-29 21:30', 14, 93], ['2026-10-29 21:30', 15, 93], ['2026-10-26 21:30', 20, 97]] as const) {
+    const p = yearPlanAt(label, h, 'np');
+    assert.equal(p.expectedDeliverableBound, true, `${label} ${h} h`);
+    assert.ok(p.expectedWriteLevelPct! > RESERVE_WRITE_MAX_PCT);
+    const s = spokenOf(p, label);
+    assert.ok(s.en.includes(`Charging the backup pool to about ${level} percent, `), `${label} ${h} h: ${s.en}`);
+    assert.doesNotMatch(s.en, /ends before it gets there/, `${label} ${h} h`);
+    assert.ok(s.es.includes(`hasta cerca del ${level} por ciento`), s.es);
+    assert.doesNotMatch(s.es, /termina antes de alcanzar/, `${label} ${h} h`);
+    assert.ok(s.en.length + s.es.length <= MAX_SPOKEN_ADVISORY_CHARS);
+    assert.equal((nca as unknown as { chargeEndsShortOfLevel: (p: unknown) => boolean }).chargeEndsShortOfLevel(p), false);
+  }
+  // 2026-11-27 21:30 at 17 h: the window cannot finish even the reserve leg (it reaches ~49.9%), the level is floored at the
+  // 50% reserve — the window does end before the pool gets there.
+  const dd = yearPlanAt('2026-11-27 21:30', 17, 'np');
+  assert.deepEqual([dd.expectedDeliverableBound, dd.expectedWriteLevelPct], [true, 50]);
+  const sd = spokenOf(dd, '2026-11-27 21:30');
+  assert.ok(sd.en.includes('toward 50 percent') && sd.en.includes(', which ends before it gets there.'), sd.en);
+  assert.equal((nca as unknown as { chargeEndsShortOfLevel: (p: unknown) => boolean }).chargeEndsShortOfLevel(dd), true);
+  // A night with no line walk keeps chargeIsWindowBound exactly (a cost night's level is its target, not its close).
+  const ends = (nca as unknown as { chargeEndsShortOfLevel: (p: unknown) => boolean }).chargeEndsShortOfLevel;
+  assert.equal(ends({ expectedDeliverableBound: true, expectedWriteLevelPct: 80 }), true);
+  assert.equal(ends({ expectedDeliverableBound: false, expectedWriteLevelPct: 80 }), false);
+  assert.equal(ends({ expectedDeliverableBound: false, expectedForceChargeMode: 'line', expectedWriteLevelPct: 50 }), false);
+  assert.equal(ends({ expectedDeliverableBound: true, expectedForceChargeMode: 'line', expectedWriteLevelPct: null }), true);
+  // Both overnight speakers read it (overnightTextGolden.test.ts holds the two argument lists equal).
+  assert.match(INDEX, /\n\s+expectedKwh: statedBuyKwh\(plan\),\n\s+toward: chargeEndsShortOfLevel\(plan\),\n/);
+});
+
 test('★ T19 the source: the line-mode ON log names the panel\'s own stop and the re-ON, never "as the backstop" (L3); index.ts passes what the walk cannot hold to the 21:30 line', () => {
   const tick = INDEX.slice(INDEX.indexOf('const onLine = onLineMode?.kind === \'line\''), INDEX.indexOf('if (rejected > 0) app.log.warn(onLine);'));
   const lineArm = tick.slice(0, tick.indexOf("\n      : `night-charge: FORCE-CHARGE ON for ${state.day}"));

@@ -1193,7 +1193,8 @@ test('★★ wiring (index.ts is not reachable from a unit test): the refused ar
   // v1.200.0 — and the outage-line force-charge's gate (lineForceCharge.test.ts T12).
   assert.match(idx, /const arm = armCycle\(nightCycleView\(\), today, \[\{\n\s+role: 'cost', kind: 'overnight', plan, forceChargeEnabled: forceChargeOn\(\), lineForceChargeEnabled: lineForceChargeOn\(\), nextOnPeakStartMs: armOnPeakStartMs,\n[^\n]*\n\s+\}\], nowMs, plan\.reserveFloorPct\);\n\s+armedCycle = arm\.cycle;\n\s+armedCandidate = arm\.cycle\?\.active \?\? null;\n\s+if \(!armedCandidate\) armRefused = arm\.refused\[0\]\?\.reason \?\? null;/);
   assert.match(idx, /const msg = buildNightChargeMessage\(plan, shape, supervisedCtx, armRefused, NIGHT_CHARGE_MODE\);/);
-  assert.match(idx, /\n\s+expectedKwh: statedBuyKwh\(plan\),\n\s+toward: chargeIsWindowBound\(plan\),\n/);
+  // v1.200.0 (A5, H1) — chargeEndsShortOfLevel: chargeIsWindowBound, except a line walk's level reached at its close.
+  assert.match(idx, /\n\s+expectedKwh: statedBuyKwh\(plan\),\n\s+toward: chargeEndsShortOfLevel\(plan\),\n/);
   // v1.189.0 (review) — the summary goes after the ACK: the grid-loss abort is kept on the record with it.
   // v1.200.0 — both gates (a line night's outcome), and a line night's pool at the close.
   assert.match(idx, /\n\s+expectedKwh: armedExpectedBuyKwh\(state\.day\),\n\s+forceCharge: forceChargeNightOutcome\(state, forceChargeGatesOn\(\)\),\n\s+ended: endedBy, restore,\n/);

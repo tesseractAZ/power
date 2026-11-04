@@ -35,7 +35,9 @@ import { MEASURED_SCALE } from './fixtures/measuredCushionLineFigures.js';
  *    needs that reach;
  *  - the texts: a line-mode night under its line says so, a line above a full pool says so, an armed night never
  *    says "no force-charge";
- *  - (T19) lineNotHeldOf, the predicate every surface words by, and the card's mirror agree with the walk on every plan.
+ *  - (T19) lineNotHeldOf, the predicate every surface words by, and the card's mirror agree with the walk on every plan;
+ *  - (T22) the spoken notice says a window-bound line night ends short of its level ("which ends before it gets there")
+ *    only where the 50% floor lifts that level above the window's reach.
  * The expected close and the expected buy are NOT monotone in the line (a latching walk: a higher line starts earlier
  * and latches sooner): their falls are pinned as counts, not asserted (PIN_A5). With ARB_COST_MAX_SOC_PCT above 95
  * the start target can fall as the line crosses 90 (the cost ceiling to 95%): pinned, the ceiling still never falls.
@@ -96,17 +98,22 @@ interface Sweep {
   meanBuyQual: Record<number, number | null>;
   /** T19 — plans lineNotHeldOf and the card's lineNotHeldOfCard were checked on, and those either disagreed with the walk. */
   parity: { checked: number; mismatch: number };
+  /** T22 — window-bound line-mode plans, those the spoken notice says end short of their level (chargeEndsShortOfLevel),
+   *  and those where it would say so of a close above the reserve, or not of one floored at it. */
+  spoken: { boundLine: number; endsShort: number; mismatch: number };
   ex: string[];
 }
 type NotHeldFn = (p: unknown) => string | null;
 const serverKind = (nca as unknown as { lineNotHeldOf?: NotHeldFn }).lineNotHeldOf;
 const cardKind = (cardText as unknown as { lineNotHeldOfCard?: NotHeldFn }).lineNotHeldOfCard;
+const endsShort = (nca as unknown as { chargeEndsShortOfLevel?: (p: unknown) => boolean }).chargeEndsShortOfLevel;
 
 function sweep(basis: Basis, depsOf: (d: Deps) => Deps): Sweep {
   const s: Sweep = {
     m1: 0, m2: 0, m3: 0, m4: 0, undisclosedUnder: 0, carrierRest: 0, reachOver: 0, stopUnreached: 0, underFloor: 0, textMissing: 0, noForceCharge: 0,
     armed: 0, carried: 0, nearFull: 0, closeUnder: 0, kinds: { closeUnder: 0, aboveFull: 0, nearFull: 0 },
-    eFalls: 0, eFallsNonBoundGt5: 0, eFallMaxNonBound: 0, buyFalls: 0, closeUnderVanish: 0, meanBuyQual: {}, parity: { checked: 0, mismatch: 0 }, ex: [],
+    eFalls: 0, eFallsNonBoundGt5: 0, eFallMaxNonBound: 0, buyFalls: 0, closeUnderVanish: 0, meanBuyQual: {}, parity: { checked: 0, mismatch: 0 },
+    spoken: { boundLine: 0, endsShort: 0, mismatch: 0 }, ex: [],
   };
   const buySum: Record<number, number> = {};
   const qualN: Record<number, number> = {};
@@ -163,6 +170,14 @@ function sweep(basis: Basis, depsOf: (d: Deps) => Deps): Sweep {
           }
         }
         if (E != null && E < 50 - EPS) { s.underFloor += 1; note(`${where}: ~${E}% under the reserve`); }
+        // T22 — the spoken notice's "which ends before it gets there": a bound line walk's level is its reach (H1), so only
+        // a level floored at the 50% reserve ends short.
+        if (r.bound && endsShort != null) {
+          s.spoken.boundLine += 1;
+          const short = endsShort(p);
+          if (short) s.spoken.endsShort += 1;
+          if (short !== (E == null || E <= 50)) { s.spoken.mismatch += 1; note(`${where}: ~${E}%, ends short ${short}`); }
+        }
       }
       // Per step (h − 1 → h), where the line did not fall.
       if (prev != null && !(prev.line != null && L != null && L < prev.line - EPS)) {
@@ -221,6 +236,13 @@ const PIN_A5: Record<Basis, ReturnType<typeof PINNED>> = {
     meanBuyQual: { 4: null, 5: 31.64, 6: 29.19, 7: 30.54, 8: 29.55, 9: 31.86, 10: 32.22, 11: 32.41, 12: 32.38, 13: 33.21, 14: 33.76, 15: 34.86, 16: 35.96, 17: 36.2, 18: 37.14, 19: 37.69, 20: 38.04 },
   },
 };
+/** (T22) Measured on the landed change: window-bound line-mode plans of the year at 4-20 h (the live cost gate), and those
+ *  whose stated close is the 50% floor above the window's reach (every one disclosed: T15) — the only ones the spoken
+ *  notice says end short. The rest state the capped close, which the window reaches as it closes. */
+const PIN_SPOKEN: Record<Basis, { boundLine: number; endsShort: number; mismatch: number }> = {
+  np: { boundLine: 919, endsShort: 206, mismatch: 0 },
+  m: { boundLine: 1037, endsShort: 224, mismatch: 0 },
+};
 /** (L1) ARB_COST_MAX_SOC_PCT 100 on the year's cost cases at 90 or more: the start-target falls as a line crosses 90%. */
 const PIN_A5_COST100: Record<Basis, { m1: number }> = { np: { m1: 14 }, m: { m1: 19 } };
 
@@ -246,6 +268,10 @@ for (const basis of ['np', 'm'] as const) {
   test(`★★ T19 (${basis === 'np' ? 'nameplate' : '×0.944'}) lineNotHeldOf and the card's lineNotHeldOfCard agree with the walk on every plan of the year at 4-20 h`, () => {
     const s = sweepLive(basis);
     assert.deepEqual(s.parity, { checked: CASES.length * (HMAX - HMIN + 1), mismatch: 0 }, s.ex.join('\n'));
+  });
+  test(`★★ T22 (${basis === 'np' ? 'nameplate' : '×0.944'}) the spoken notice says a window-bound line night ends short of its level only where that level is the 50% floor above the window's reach`, () => {
+    const s = sweepLive(basis);
+    assert.deepEqual(s.spoken, PIN_SPOKEN[basis], s.ex.join('\n'));
   });
 }
 
