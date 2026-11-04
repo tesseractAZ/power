@@ -537,6 +537,14 @@ test('★★★ W1 (review 5) a re-ON checked not applied whose slots then read 
   assert.equal(nfc.lineAtRiskPushDue(after(seen + 15 * M), seen + 26 * M, onReading())?.cause, 'onNotRising', 'a pool falling after the wait is pushed');
   // A seen ON older than the last ON of ours (the ON at 01:00, read past the failed re-ON) waits nothing extra.
   assert.deepEqual(nfc.lineTrendReference({ ...after(R + 20 * M), forceChargeLineOnSeenAtMs: R - 3 * H } as S, R + 31 * M), { pct: 62, atMs: R + 20 * M });
+  // …and never shortens the wait of a later ON of ours: the slots seen ON at +16 stopped again at the panel's ceiling, a
+  // re-ON at +30 took effect, and a reading 10 min after that re-ON is inside ITS grace (not past the +16 one's).
+  const Q = R + 30 * M;
+  const laterReOn = { ...after(Q + 10 * M), forceChargeLineReOns: 2, forceChargeLineReOnAtMs: Q, forceChargeLineReOnSlots: [1, 2, 3],
+    forceChargeLineReOnCheckedAtMs: Q + 15 * M, forceChargeLineReOnNotAppliedSlots: [], forceChargeLineReOnAppliedAtMs: Q } as S;
+  assert.equal(laterReOn.forceChargeLineOnSeenAtMs, seen);
+  assert.equal(nfc.lineTrendReference(laterReOn, Q + 21 * M), null, 'inside the later re-ON\'s grace');
+  assert.deepEqual(nfc.lineTrendReference({ ...laterReOn, forceChargeLinePoolSamples: [{ pct: 62, atMs: Q + 15 * M }] } as S, Q + 26 * M), { pct: 62, atMs: Q + 15 * M });
 });
 
 test('★★★ W1 (review 5) Charge Now switched on in the app after the push is waited out: the ON-reading shape is not logged on the person\'s fix', () => {
