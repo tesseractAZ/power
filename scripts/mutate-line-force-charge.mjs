@@ -41,7 +41,8 @@
  * panel's stop resumed the charge; the outcome names only the last re-ON's check. W3-xxii..xxvii.
  * (review 6) The hand-back hold counts the ticks (FORCE_CHARGE_TICK_MS, the cadence index.ts runs the tick on): it holds only
  * while the first tick 15 min or more after the stamp falls before the cutoff; a slot seen ON again opens a new panel-stop
- * episode. W1-lvi..lxii. The ceiling lowering lowers only what the
+ * episode. W1-lvi..lxii. (review 7) …counted to the EARLIEST tick the retry can come (ticks that run late reach it sooner,
+ * FORCE_CHARGE_TICK_LATE_TOL_MS), at least one tick. W1-lxiii..lxv. The ceiling lowering lowers only what the
  * panel holds. W4-i..iii. A cost-dominant line night's ON failure and declined start; the declined start once a night
  * across restarts; the reserve-apply failure on a line night. W5-i..ix.
  * (M) THE MORNING REFRESH never lowers or drops the line. M-i, M-ii.
@@ -927,16 +928,16 @@ const MUTANTS = [
   {
     id: 'W1-lvi. ★★★ the hand-back hold takes the retry at the stamp + 15 min',
     file: NFC, tests: [T_RISK, T_CLOSE],
-    find: '    const retryAtMs = nowMs + Math.ceil((reOnAt! + FORCE_CHARGE_ON_VERIFY_AFTER_MS - nowMs) / FORCE_CHARGE_TICK_MS) * FORCE_CHARGE_TICK_MS;',
+    find: '    const retryAtMs = nowMs + ticks * FORCE_CHARGE_TICK_MS;',
     to: '    const retryAtMs = reOnAt! + FORCE_CHARGE_ON_VERIFY_AFTER_MS; /* MUTANT */',
     why: 'Round-6 finding 1 (eed0363a\'s rule): the hand-back is stamped after its writes, so its retry is the 16th tick; a hand-back 35-36 min before the close gets neither the retry (the cutoff) nor the push (the lead) — 30 lost in the close plant with the stamp 2 s late, 25 nights under never reached.',
   },
   {
     id: 'W1-lvii. ★★ the retry\'s tick counted a tick early',
     file: NFC, tests: [T_RISK],
-    find: '    const retryAtMs = nowMs + Math.ceil((reOnAt! + FORCE_CHARGE_ON_VERIFY_AFTER_MS - nowMs) / FORCE_CHARGE_TICK_MS) * FORCE_CHARGE_TICK_MS;',
-    to: '    const retryAtMs = nowMs + Math.floor((reOnAt! + FORCE_CHARGE_ON_VERIFY_AFTER_MS - nowMs) / FORCE_CHARGE_TICK_MS) * FORCE_CHARGE_TICK_MS; /* MUTANT */',
-    why: 'A stamp any later than its tick is counted to the 15th tick, which is too early for the retry: the same loss as W1-lvi.',
+    find: '    const ticks = Math.max(1, Math.ceil((reOnAt! + FORCE_CHARGE_ON_VERIFY_AFTER_MS - FORCE_CHARGE_TICK_LATE_TOL_MS - nowMs) / FORCE_CHARGE_TICK_MS));',
+    to: '    const ticks = Math.max(1, Math.floor((reOnAt! + FORCE_CHARGE_ON_VERIFY_AFTER_MS - FORCE_CHARGE_TICK_LATE_TOL_MS - nowMs) / FORCE_CHARGE_TICK_MS)); /* MUTANT */',
+    why: 'The hold waits a tick past the earliest the retry can come: a hand-back whose retry is the first tick past the cutoff is pushed 14 min late, on the last tick before it (review 7: at least one tick keeps it from the loss of W1-lvi).',
   },
   {
     id: 'W1-lviii. ★★ a retry due on the cutoff instant itself is held for',
@@ -948,7 +949,7 @@ const MUTANTS = [
   {
     id: 'W1-lix. ★★ the hold gives up a tick early (one tick of margin past the real one)',
     file: NFC, tests: [T_RISK, T_CLOSE],
-    find: '    const retryAtMs = nowMs + Math.ceil((reOnAt! + FORCE_CHARGE_ON_VERIFY_AFTER_MS - nowMs) / FORCE_CHARGE_TICK_MS) * FORCE_CHARGE_TICK_MS;',
+    find: '    const retryAtMs = nowMs + ticks * FORCE_CHARGE_TICK_MS;',
     to: '    const retryAtMs = reOnAt! + FORCE_CHARGE_ON_VERIFY_AFTER_MS + FORCE_CHARGE_TICK_MS; /* MUTANT */',
     why: 'A hand-back stamped on its tick 36 min out is pushed as "it does not try again tonight", and its retry comes 14 min later.',
   },
@@ -972,6 +973,28 @@ const MUTANTS = [
     find: '      || (seenOn != null && seenOn > prev);',
     to: '      || (seenOn != null); /* MUTANT */',
     why: 'Every all-OFF reading at the ceiling after the stop moves the stop later: the morning names the last reading, not the stop.',
+  },
+  /* (review 7) the hand-back hold counts to the EARLIEST tick the retry can come (ticks that run late), at least one. */
+  {
+    id: 'W1-lxiii. ★★★ no tolerance: the hold counts to the stamp + 15 min at the cadence (36beb4b8\'s count)',
+    file: NFC, tests: [T_RISK],
+    find: '    const ticks = Math.max(1, Math.ceil((reOnAt! + FORCE_CHARGE_ON_VERIFY_AFTER_MS - FORCE_CHARGE_TICK_LATE_TOL_MS - nowMs) / FORCE_CHARGE_TICK_MS));',
+    to: '    const ticks = Math.max(1, Math.ceil((reOnAt! + FORCE_CHARGE_ON_VERIFY_AFTER_MS - nowMs) / FORCE_CHARGE_TICK_MS)); /* MUTANT */',
+    why: 'Round-7 finding: a stamp 2-15 ms after its tick, the ticks ~1 ms late each — the hold counts to the 16th tick, pushes "it does not try again tonight", and the retry comes on the 15th, 14 min later (60 of the sweep\'s hand-backs, 35m05s-36m00s out).',
+  },
+  {
+    id: 'W1-lxiv. ★★ the count may be no tick at all',
+    file: NFC, tests: [T_RISK],
+    find: '    const ticks = Math.max(1, Math.ceil((reOnAt! + FORCE_CHARGE_ON_VERIFY_AFTER_MS - FORCE_CHARGE_TICK_LATE_TOL_MS - nowMs) / FORCE_CHARGE_TICK_MS));',
+    to: '    const ticks = Math.ceil((reOnAt! + FORCE_CHARGE_ON_VERIFY_AFTER_MS - FORCE_CHARGE_TICK_LATE_TOL_MS - nowMs) / FORCE_CHARGE_TICK_MS); /* MUTANT */',
+    why: 'Within the tolerance of the stamp + 15 min the count is 0: the hold waits on this tick\'s own instant, always before the cutoff, though the next tick is past it — neither the retry nor the push.',
+  },
+  {
+    id: 'W1-lxv. ★★ the tolerance added, not taken off',
+    file: NFC, tests: [T_RISK],
+    find: '    const ticks = Math.max(1, Math.ceil((reOnAt! + FORCE_CHARGE_ON_VERIFY_AFTER_MS - FORCE_CHARGE_TICK_LATE_TOL_MS - nowMs) / FORCE_CHARGE_TICK_MS));',
+    to: '    const ticks = Math.max(1, Math.ceil((reOnAt! + FORCE_CHARGE_ON_VERIFY_AFTER_MS + FORCE_CHARGE_TICK_LATE_TOL_MS - nowMs) / FORCE_CHARGE_TICK_MS)); /* MUTANT */',
+    why: 'Counted to a tick after the retry can come: a hand-back stamped on its tick 36 min out is pushed as "it does not try again tonight", and the retry comes on the 15th tick.',
   },
 
   /* ── (review 2) W5: a cost-dominant line night; the declined start across restarts; the apply failure ── */
