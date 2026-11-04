@@ -293,10 +293,13 @@ test('★★★ SCOPE — source pins: the planner, JIT force-charge and MPC nev
   // helper that returns it (cushionPoolScale\w+: cushionPoolScaleLedgerColumns), the ledger's columns
   // (cushion_pool_scale, _basis) and the tracker's file (defaultPoolEnergyBasisPath, pool-energy-basis*).
   // v1.201.0 — and the runway's overhead in every spelling: its rule (runwayPoolOverheadW — the old
-  // \bpoolOverheadW\b never matched it), its options, its marginal efficiency, the second door and the standby's
-  // ledger helper and columns.
-  const forbidden = /\b(projectedSocPct|minProjectedSoc|minProjectedSocTs|p10SocPct|p50SocPct|p90SocPct|pAboveReservePct|pFullCharge|socPct|poolFullWh|poolCapacityScale|poolCapacityBasis|poolOverheadW|runwayDrainW|runwayEnergyBasis|capacityScale|computeRunway|panelPoolBasisTracker|PoolEnergyBasisTracker|cushionPoolBasisTracker|measuredCushionScale|cushionPoolScale\w+|cushion_pool_scale\w*|defaultPoolEnergyBasisPath|pool-energy-basis|runwayPoolOverheadW|RUNWAY_POOL_OVERHEAD_FLOOR_W|RUNWAY_CORE_OVERHEAD_W|RUNWAY_DRAIN_MARGINAL_EFFICIENCY|cushionStandbyOverheadW|cushionStandbyLedgerColumns|cushion_standby\w*)\b|report\('runway'\)|report<[^>]*>\('runway'\)/;
+  // \bpoolOverheadW\b never matched it), its options (analytics.ts's constants AND the limits.ts getters they are
+  // built from, which index.ts can reach through the `limits` it imports), its marginal efficiency (both spellings),
+  // the second door and the standby's ledger helper and columns.
+  const forbidden = /\b(projectedSocPct|minProjectedSoc|minProjectedSocTs|p10SocPct|p50SocPct|p90SocPct|pAboveReservePct|pFullCharge|socPct|poolFullWh|poolCapacityScale|poolCapacityBasis|poolOverheadW|runwayDrainW|runwayEnergyBasis|capacityScale|computeRunway|panelPoolBasisTracker|PoolEnergyBasisTracker|cushionPoolBasisTracker|measuredCushionScale|cushionPoolScale\w+|cushion_pool_scale\w*|defaultPoolEnergyBasisPath|pool-energy-basis|runwayPoolOverheadW|RUNWAY_POOL_OVERHEAD_FLOOR_W|RUNWAY_CORE_OVERHEAD_W|RUNWAY_DRAIN_MARGINAL_EFFICIENCY|runwayPoolOverheadFloorW|runwayCoreOverheadW|runwayDrainMarginalEfficiency|cushionStandbyOverheadW|cushionStandbyLedgerColumns|cushion_standby\w*)\b|report\('runway'\)|report<[^>]*>\('runway'\)/;
   assert.ok(forbidden.test('runwayPoolOverheadW(3, true)') && forbidden.test('cushion_standby_w'), 'the hole is closed');
+  assert.ok(['limits.runwayPoolOverheadFloorW', 'limits.runwayCoreOverheadW', "limits['runwayDrainMarginalEfficiency']",
+    "option<number>('RUNWAY_CORE_OVERHEAD_W')"].every((t) => forbidden.test(t)), "the options' own getters and names too");
   /** Every spelling of the scale itself: the plan's field, the ledger helper and the ledger's columns. */
   const SCALE = /\bcushionPoolScale\w*|\bcushion_pool_scale\w*/;
   /** v1.201.0 — every spelling of the standby: the inputs' and the plan's fields, the helpers, the ledger's columns. */
@@ -438,7 +441,7 @@ test('★★★ SCOPE — source pins: the planner, JIT force-charge and MPC nev
   // v1.201.0 — nor the runway's overhead rule, its options or its marginal efficiency, comments included: the
   // advisor names the runway's options in words only, and takes the figure as one number (cushionStandbyW).
   const advisor = src('nightChargeAdvisor.ts');
-  const RUNWAY_IN_ADVISOR = /poolEnergyBasis|runwayDrainW|runwayEnergyBasis|RUNWAY_CORE_OVERHEAD_W|runwayPoolOverheadW|RUNWAY_POOL_OVERHEAD_FLOOR_W|RUNWAY_DRAIN_MARGINAL_EFFICIENCY|\boverheadW\b/;
+  const RUNWAY_IN_ADVISOR = /poolEnergyBasis|runwayDrainW|runwayEnergyBasis|RUNWAY_CORE_OVERHEAD_W|runwayPoolOverheadW|RUNWAY_POOL_OVERHEAD_FLOOR_W|RUNWAY_DRAIN_MARGINAL_EFFICIENCY|runwayPoolOverheadFloorW|runwayCoreOverheadW|runwayDrainMarginalEfficiency|\boverheadW\b/;
   assert.ok(!RUNWAY_IN_ADVISOR.test(advisor), `nightChargeAdvisor.ts must not read the runway basis (${advisor.match(RUNWAY_IN_ADVISOR)?.[0]})`);
   // Its imports are the ones it had: no module reaches the planner that is not named here. Every module
   // specifier in the file counts — a static import, a re-export, a dynamic import(), wherever it sits.
@@ -609,10 +612,17 @@ test('★★★ SCOPE — source pins: the planner, JIT force-charge and MPC nev
   }
   // v1.201.0 — the runway's overhead rule is called where the runway computes it and by the second door only.
   assert.deepEqual(files.filter((f) => src(f).includes('runwayPoolOverheadW(')).sort(), ['analytics.ts', 'index.ts']);
+  // v1.201.0 (review) — and the overhead options are read where they are defined and by the runway only, in either
+  // spelling: the limits.ts getters by analytics.ts (its constants), the option names by config.ts (the rows),
+  // limits.ts (the getters) and analytics.ts. No other module reaches the options around the two doors.
+  assert.deepEqual(files.filter((f) => /\b(runwayPoolOverheadFloorW|runwayCoreOverheadW|runwayDrainMarginalEfficiency)\b/.test(src(f))).sort(),
+    ['analytics.ts', 'limits.ts'], "the overhead options' getters");
+  assert.deepEqual(files.filter((f) => /\b(RUNWAY_POOL_OVERHEAD_FLOOR_W|RUNWAY_CORE_OVERHEAD_W|RUNWAY_DRAIN_MARGINAL_EFFICIENCY)\b/.test(src(f))).sort(),
+    ['analytics.ts', 'config.ts', 'limits.ts'], "the overhead options' names");
 
   for (const f of ['nightForceCharge.ts', 'nightChargeActuator.ts', 'dispatch/mpc.ts']) {
     const s = src(f);
-    assert.ok(!/poolEnergyBasis|runwayDrainW|runwayEnergyBasis|RUNWAY_CORE_OVERHEAD_W/.test(s), `${f} must not read the runway basis`);
+    assert.ok(!/poolEnergyBasis|runwayDrainW|runwayEnergyBasis|RUNWAY_CORE_OVERHEAD_W|RUNWAY_DRAIN_MARGINAL_EFFICIENCY|runwayPoolOverheadFloorW|runwayCoreOverheadW|runwayDrainMarginalEfficiency/.test(s), `${f} must not read the runway basis`);
     assert.ok(!SCALE.test(s) && !/cushionLineKwh|defaultPoolEnergyBasisPath|pool-energy-basis/.test(s), `${f} must not read the cushion scale`);
     assert.ok(!STANDBY.test(s) && !/runwayPoolOverheadW|cushionStandbyOverheadW|plausibleStandbyW|RUNWAY_POOL_OVERHEAD_FLOOR_W/.test(s), `${f} must not read the cushion standby`);
   }
