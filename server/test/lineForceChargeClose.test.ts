@@ -57,8 +57,9 @@ import { buildNightChargeMorningSummary } from '../src/notify.js';
  * (lineNightObservations stamps it, lineTrendReference waits): the ON-reading shape is never logged on any of them. And a
  * re-ON handed back rate-limited ('reOnLimited') is never pushed as the gates inside its retry's spacing (PIN_REVIEW5).
  * (review 6) …nor lost: with the ticks off the minute (`phaseMs`) and every re-ON stamped after its writes (`lagMs`, as
- * index.ts stamps Date.now()), each hand-back gets its retry or the push, never neither and never both (PIN_REVIEW6). And a
- * person's ON followed by the panel's stop at its ceiling ('reOnPerson') is stamped as a stop, and the morning names it.
+ * index.ts stamps Date.now()), each hand-back with a tick left before the push's lead gets its retry or the push, never
+ * neither and never both (PIN_REVIEW6). And a person's ON followed by the panel's stop at its ceiling ('reOnPerson') is
+ * stamped as a stop, and the morning names it.
  * Three discriminators show the grid can see the mutants it is meant to kill: a software stop at ⌈L⌉ (design
  * A's hold, F-i), a start timed to ⌈L⌉ without the + 5 (F-iii), and no re-ON after the latch.
  */
@@ -475,7 +476,7 @@ test('★★★ T7 (review 5) an ON seen on the readback that no ON write of our
   assert.deepEqual(got, PIN_REVIEW5);
 });
 
-test('★★★ T7 (review 6) with the ticks off the minute and each re-ON stamped after its writes, a handed-back re-ON gets its retry or the push — never neither, never both; a person\'s ON the panel then stops is stamped and named; pinned exactly', () => {
+test('★★★ T7 (review 6) with the ticks off the minute and each re-ON stamped after its writes, a handed-back re-ON with a tick left before the lead gets its retry or the push — never neither, never both; a person\'s ON the panel then stops is stamped and named; pinned exactly', () => {
   const runs: Array<[string, Variant, Partial<Knobs>]> = [
     ['reOnLimited, stamped 2 s after its tick', 'reOnLimited', { lagMs: 2_000 }],
     ['reOnLimited, ticks 30 s off the minute, stamped 2 s after', 'reOnLimited', { phaseMs: 30_000, lagMs: 2_000 }],

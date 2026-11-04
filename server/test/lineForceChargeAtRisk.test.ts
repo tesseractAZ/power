@@ -597,7 +597,7 @@ test('★★★ W1 (review 5) a re-ON handed back (every write rate-limited): no
   assert.doesNotMatch(body, /grid known present|No action needed/);
 });
 
-test('★★★ W1 (review 6) the hand-back hold counts the ticks: the retry is the first tick 15 min or more after a stamp written after the writes — no hand-back loses both its retry and the push', () => {
+test('★★★ W1 (review 6) the hand-back hold counts the ticks: the retry is the first tick 15 min or more after a stamp written after the writes — no hand-back with a tick left before the cutoff loses both its retry and the push', () => {
   // The round-6 reviewer's probe: index.ts stamps a hand-back (forceChargeLineReOnAtMs: Date.now()) after its writes, a little
   // after its tick's nowMs, and the tick runs every FORCE_CHARGE_TICK_MS (index.ts's setInterval). Fifteen ticks on, the tick
   // reads 15 min less that lag: the retry is the 16th. Held while the stamp + 15 min fell before the cutoff, a hand-back 35-36
