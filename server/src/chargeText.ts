@@ -25,6 +25,7 @@
  */
 import type { NotifyMessage } from './notify.js';
 import type { ForceChargeNightOutcome } from './nightForceCharge.js';
+import type { LineNotHeld } from './nightChargeAdvisor.js';
 import { MAX_SPOKEN_ADVISORY_CHARS, NO_CHARGE_EXPECTED_KWH, RESERVE_WRITE_MAX_PCT, revertRetryText, type RevertResendOnReport, type RestoreSummaryKind } from './nightChargeActuator.js';
 
 // v1.191.0 (lane A, T18) — the site zone (siteTime.ts), read at call time; it was a literal here.
@@ -207,6 +208,10 @@ export interface MiddayCostText {
   cushionShortfall: boolean;
   /** v1.200.0 — the plan's cushionShortfallCause (the 50% reserve envelope); absent ⇒ the caps alone. */
   cushionShortfallCause?: 'envelope' | 'envelope+caps';
+  /** v1.200.0 (A5) — the outage line's ask the leg's force-charge is armed for (the plan's forceChargeLine.askPct), and
+   *  what its own walk cannot hold (nightChargeAdvisor.lineNotHeldOf). Absent ⇒ nothing armed / held. */
+  lineAskPct?: number;
+  lineNotHeld?: LineNotHeld;
 }
 
 /** The overnight outage-backup leg as the evening announces it (reserve only). */
@@ -219,6 +224,9 @@ export interface MiddayBackupText {
   cushionShortfall: boolean;
   /** v1.200.0 — the plan's cushionShortfallCause (the 50% reserve envelope); absent ⇒ the caps alone. */
   cushionShortfallCause?: 'envelope' | 'envelope+caps';
+  /** v1.200.0 (A5) — as MiddayCostText's (a backup leg is never armed: absent). */
+  lineAskPct?: number;
+  lineNotHeld?: LineNotHeld;
 }
 
 /** What the evening's mid-day notice is told. */
@@ -290,13 +298,27 @@ export function buildMiddayPlanMessage(i: MiddayAnnounceInput): NotifyMessage {
     : `${dayTextCap(day)} ${span}, APS super off-peak`;
   const supervised = i.mode !== 'advisory' && i.refused == null;
   // v1.200.0 — keyed on the cause: the caps note where a leg's SIZING fell short, the envelope note where a
-  // leg's line is above the 50% the panel accepts as a reserve and no force-charge carries it.
+  // leg's line is above the 50% the panel accepts as a reserve and no force-charge carries it. (A5) A cost leg with a
+  // line ask is ARMED: its note says what its own walk cannot hold (lineNotHeld), never "no force-charge carries it" —
+  // and, the kind lost (a record from before it), that it runs and the line is not claimed (keyed on the ask, not the
+  // reason, L4). A leg with no ask reads as before, byte for byte.
   const capsShort = (l: { cushionShortfall: boolean; cushionShortfallCause?: string } | null | undefined): boolean =>
     l != null && l.cushionShortfall && l.cushionShortfallCause !== 'envelope';
+  const notCarried = (which: string): string =>
+    ` NOTE: the outage line is above the ${RESERVE_WRITE_MAX_PCT}% the panel accepts as a reserve and no force-charge carries it on ${which} — residual risk remains.`;
+  const armedNote = (l: { cushionShortfallCause?: string; lineNotHeld?: LineNotHeld }): string =>
+    l.lineNotHeld === 'closeUnder' ? " NOTE: on the median load this leg's pool is expected to close under its outage line — residual risk remains."
+      : l.lineNotHeld === 'aboveFull' ? " NOTE: this leg's outage line is above a full pool, so no charge can hold it — residual risk remains."
+        : l.lineNotHeld === 'nearFull' ? " NOTE: this leg's outage line is within 10 points of a full pool, so the force-charge cannot hold it with its usual margin — residual risk remains."
+          : l.cushionShortfallCause != null
+            ? ` NOTE: this leg's outage line is above the ${RESERVE_WRITE_MAX_PCT}% the panel accepts as a reserve; its force-charge runs, but the plan does not claim the line — residual risk remains.`
+            : '';
   const shortNote = (capsShort(c) || capsShort(i.backup)
     ? ' NOTE: charge/pool limits prevent fully meeting the cushion — residual risk remains.' : '')
-    + (c.cushionShortfallCause != null || i.backup?.cushionShortfallCause != null
-      ? ` NOTE: the outage line is above the ${RESERVE_WRITE_MAX_PCT}% the panel accepts as a reserve and no force-charge carries it on ${c.cushionShortfallCause != null ? 'this leg' : 'the backup leg'} — residual risk remains.` : '');
+    + (c.lineAskPct != null
+      ? armedNote(c) + (i.backup?.cushionShortfallCause != null ? notCarried('the backup leg') : '')
+      : c.cushionShortfallCause != null || i.backup?.cushionShortfallCause != null
+        ? notCarried(c.cushionShortfallCause != null ? 'this leg' : 'the backup leg') : '');
   const backupLine = i.backup != null ? ` ${backupPushLine(i.backup, i.backupApplyAtMs, now, supervised)}` : '';
   if (!c.basisComplete) {
     // v1.196.0 — what refused the plan, as the overnight push says it (notify.buildNightChargeMessage).

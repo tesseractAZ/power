@@ -213,10 +213,11 @@ export interface CushionNotePlan {
   cushionShortfall?: boolean;
   /** The server's NightChargePlan.cushionShortfallCause: the 50% reserve envelope contributes. */
   cushionShortfallCause?: 'envelope' | 'envelope+caps';
-  /** The server's NightChargePlan.cushionEnvelopeReason: why no line force-charge carries it (review). */
-  cushionEnvelopeReason?: 'advisory' | 'backupLeg' | 'tooHigh';
+  /** The server's NightChargePlan.cushionEnvelopeReason: why the plan does not claim the line (review; A5: armed
+   *  'nearFull' / 'closeUnder', or nothing armed 'advisory' / 'backupLeg'). */
+  cushionEnvelopeReason?: 'advisory' | 'backupLeg' | 'nearFull' | 'closeUnder';
   cushionLineSocPct?: number | null;
-  /** The outage line the night force-charge carries to the window close. */
+  /** The outage line the night force-charge is armed for (A5: carried, or disclosed beside it). */
   forceChargeLine?: { askPct: number; linePct: number } | null;
   /** 'line' when the expected walk ran the line force-charge (never on a cost-dominant night). */
   expectedForceChargeMode?: 'line';
@@ -238,25 +239,53 @@ export function capsShortfallShown(plan: CushionNotePlan): boolean {
   return plan.cushionShortfall === true && plan.cushionShortfallCause !== 'envelope';
 }
 
+/** v1.200.0 (A5) — the server's nightChargeAdvisor.lineNotHeldOf, mirrored: what an ARMED line-mode night's own walk
+ *  cannot hold — 'aboveFull' (a line above a full pool), 'closeUnder' (its expected close under the line less the
+ *  scorer's 0.05, whatever the reason or cause), 'nearFull' (held, within 10 points of full) — or null. The server's
+ *  lineForceChargeYear.test.ts holds the two equal on every plan of the year. */
+export function lineNotHeldOfCard(plan: CushionNotePlan): 'closeUnder' | 'aboveFull' | 'nearFull' | null {
+  if (plan.forceChargeLine == null || plan.expectedForceChargeMode !== 'line') return null;
+  const l = plan.cushionLineSocPct;
+  if (l == null || !Number.isFinite(l)) return null;
+  if (l > 100) return 'aboveFull';
+  const e = plan.expectedWriteLevelPct;
+  if (e != null && e < l - 0.05) return 'closeUnder';
+  return plan.cushionEnvelopeReason === 'nearFull' ? 'nearFull' : null;
+}
+
 /**
- * v1.200.0 — the outage line above the panel's 50% reserve, in one row: disclosed ("not held tonight"),
- * or carried by the force-charge to the window close (line mode only, with the expected close — the
- * level the charge figure names). null otherwise, a cost-dominant night included. `maxPct` is the
- * panel's reserve maximum (status.reserveWriteMaxPct); 50 when unknown.
+ * v1.200.0 — the outage line above the panel's 50% reserve, in one row: disclosed with nothing armed ("not held
+ * tonight": advisory mode, the backup leg), or the force-charge's own row (line mode only, with the expected close —
+ * the level the charge figure names) — (A5) followed, on an armed night, by what its walk cannot hold
+ * (lineNotHeldOfCard). null otherwise, a cost-dominant night included. `maxPct` is the panel's reserve maximum
+ * (status.reserveWriteMaxPct); 50 when unknown.
  */
 export function outageLineRow(plan: CushionNotePlan, maxPct: number | null = null): string | null {
   const r1 = (n: number): number => Math.round(n * 10) / 10;
   const max = maxPct ?? 50;
-  if (plan.cushionShortfallCause != null) {
+  const armed = plan.forceChargeLine != null;
+  if (plan.cushionShortfallCause != null && !armed) {
     const l = plan.cushionLineSocPct;
-    // v1.200.0 (review) — worded by why: a line too close to full may still see a cost force-charge (the title's
-    // "charging to ~100%"), so it is "not carried to the window close", never "not held tonight".
-    const why = plan.cushionEnvelopeReason === 'tooHigh'
-      ? 'too close to a full pool for the force-charge to carry it to the window close'
-      : plan.cushionEnvelopeReason === 'backupLeg' ? 'not held tonight (the backup leg writes the reserve only)'
-        : plan.cushionEnvelopeReason === 'advisory' ? 'not held tonight (advisory mode)' : 'not held tonight';
+    const why = plan.cushionEnvelopeReason === 'backupLeg' ? 'not held tonight (the backup leg writes the reserve only)'
+      : plan.cushionEnvelopeReason === 'advisory' ? 'not held tonight (advisory mode)' : 'not held tonight';
     return `outage line ${l != null && Number.isFinite(l) ? `${r1(l)}% ` : ''}is above the ${max}% the panel accepts as a reserve — ${why}; residual risk remains`;
   }
+  // A5 — an ARMED night: the force-charge's row (what it does), then what its walk cannot hold. Never "not held tonight".
+  const kind = lineNotHeldOfCard(plan);
+  const notHeld = kind === 'closeUnder' ? ' — under the line; residual risk remains'
+    : kind === 'aboveFull' ? ' — the line is above a full pool; residual risk remains'
+      : kind === 'nearFull' ? ' — within 10 points of a full pool, not held with its usual margin; residual risk remains' : '';
+  const row = outageLineArmedRow(plan, max, r1);
+  if (row == null && armed && plan.cushionShortfallCause != null) {
+    // Never silent on a disclosed night, whatever the walk's mode (a plan this build does not make).
+    const l = plan.cushionLineSocPct;
+    return `outage line ${l != null && Number.isFinite(l) ? `${r1(l)}% ` : ''}is above the ${max}% the panel accepts as a reserve — its force-charge runs, but the line is not claimed; residual risk remains`;
+  }
+  return row == null ? null : `${row}${notHeld}`;
+}
+
+/** v1.200.0 — the armed line force-charge's own row (outageLineRow): line mode only. */
+function outageLineArmedRow(plan: CushionNotePlan, max: number, r1: (n: number) => number): string | null {
   if (plan.expectedForceChargeMode === 'line' && plan.forceChargeLine != null) {
     // v1.200.0 (review) — armed but not expected to start (the pool stays at or above the panel ceiling):
     // never "stays on to the window close" for a force-charge that does not switch on.

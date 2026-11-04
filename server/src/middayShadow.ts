@@ -34,7 +34,8 @@ import {
 } from './chargeWindows.js';
 import { saturationThresholdPct, meanChargeCeilingPct, surplusSpanEndMs } from './chargeTaper.js';
 import {
-  chargeIsWindowBound, chargeLevelPct, statedBuyKwh, type NightChargePlan, type WindowSpec, type MiddayReserveBasis,
+  chargeIsWindowBound, chargeLevelPct, statedBuyKwh, lineNotHeldOf, type NightChargePlan, type WindowSpec, type MiddayReserveBasis,
+  type LineNotHeld,
 } from './nightChargeAdvisor.js';
 import { APPLY_LEAD_MS, clampReserveTarget, MAX_SPOKEN_ADVISORY_CHARS, RESERVE_WRITE_MAX_PCT, revertDueMs, type NightChargeMode } from './nightChargeActuator.js';
 import { eveningAnnouncement } from './chargeAnnounce.js';
@@ -308,6 +309,9 @@ export interface ShadowLegSummary {
   /** v1.200.0 — the outage line's ask the leg would carry to its close (the plan's forceChargeLine.askPct):
    *  a mid-day cost leg in shadow. Absent otherwise. */
   lineAskPct?: number;
+  /** v1.200.0 (A5) — beside `lineAskPct`: what the leg's own walk cannot hold (nightChargeAdvisor.lineNotHeldOf), the
+   *  kind the evening's words are chosen by. Absent where it holds, and on a record from before it. */
+  lineNotHeld?: LineNotHeld;
   /** v1.196.0 — the gate that refused the leg's plan (plan.basisBlockedBy): on a refused plan that
    *  names one only. Absent on a complete leg, an unsized one and a record from before v1.196.0. */
   basisBlockedBy?: string;
@@ -420,6 +424,7 @@ export function summariseLeg(
     ...(p != null ? { toward: chargeIsWindowBound(p) === true, cushionShortfall: p.cushionShortfall === true } : {}),
     ...(p?.cushionShortfallCause != null ? { cushionShortfallCause: p.cushionShortfallCause } : {}),
     ...(p?.forceChargeLine != null ? { lineAskPct: p.forceChargeLine.askPct } : {}),
+    ...(p != null && lineNotHeldOf(p) != null ? { lineNotHeld: lineNotHeldOf(p)! } : {}),
     ...(p != null && !p.basisComplete && typeof p.basisBlockedBy === 'string' && p.basisBlockedBy !== ''
       ? { basisBlockedBy: p.basisBlockedBy } : {}),
     heldImport: sized?.heldImport ?? null,
@@ -925,11 +930,15 @@ export function middayShadowAnnounceInput(rec: MiddayShadowRecord, model: Tariff
       basisBlockedBy: c.basisComplete ? null : (c.basisBlockedBy ?? null),
       cushionShortfall: c.cushionShortfall === true,
       ...(c.cushionShortfallCause != null ? { cushionShortfallCause: c.cushionShortfallCause } : {}),
+      ...(c.lineAskPct != null ? { lineAskPct: c.lineAskPct } : {}),
+      ...(c.lineNotHeld != null ? { lineNotHeld: c.lineNotHeld } : {}),
     },
     backup: backupNamed && b != null ? {
       windowStartMs: b.windowStartMs, windowEndMs: b.windowEndMs, reservePct: b.reservePct,
       expectedKwh: b.expectedBuyKwh, buyKwh: b.buyKwh, cushionShortfall: b.cushionShortfall === true,
       ...(b.cushionShortfallCause != null ? { cushionShortfallCause: b.cushionShortfallCause } : {}),
+      ...(b.lineAskPct != null ? { lineAskPct: b.lineAskPct } : {}),
+      ...(b.lineNotHeld != null ? { lineNotHeld: b.lineNotHeld } : {}),
     } : null,
     onPeak,
     refreshAtMs: c.windowStartMs - REFRESH_LEAD_MS,
@@ -1019,6 +1028,7 @@ const coerceLeg = (raw: unknown): ShadowLegSummary | null => {
     ...(typeof o.cushionShortfall === 'boolean' ? { cushionShortfall: o.cushionShortfall } : {}),
     ...(o.cushionShortfallCause === 'envelope' || o.cushionShortfallCause === 'envelope+caps' ? { cushionShortfallCause: o.cushionShortfallCause } : {}),
     ...(fin(o.lineAskPct) != null ? { lineAskPct: fin(o.lineAskPct)! } : {}),
+    ...(o.lineNotHeld === 'closeUnder' || o.lineNotHeld === 'aboveFull' || o.lineNotHeld === 'nearFull' ? { lineNotHeld: o.lineNotHeld } : {}),
     ...(typeof o.basisBlockedBy === 'string' && o.basisBlockedBy !== '' ? { basisBlockedBy: o.basisBlockedBy } : {}),
     ...('heldImport' in o ? { heldImport: coerceHeldImport(o.heldImport) } : {}),
   };

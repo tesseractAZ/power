@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { request } from 'undici';
 import { callHaService } from './haService.js';
 import { packSnTail, type Severity } from './alerts.js';
-import type { NightChargePlan } from './nightChargeAdvisor.js';
+import { lineNotHeldOf, type NightChargePlan } from './nightChargeAdvisor.js';
 // v1.187.22 — a night-charge push states what the write will do: the level it drives the pool to
 // and the energy it is expected to draw. The worst case the plan is sized on is never pushed.
 import {
@@ -467,7 +467,8 @@ export function buildNightChargeMessage(
         ? ' NOTE: no EVSE prediction covers this window, so EV contention is NOT modelled — if the car charges overnight the packs will receive less than planned.'
         : '';
   // v1.200.0 — keyed on the cause: the caps note only where the SIZING fell short; the envelope note
-  // where the line is above the 50% the panel accepts as a reserve and no force-charge carries it.
+  // where the line is above the 50% the panel accepts as a reserve and the plan does not claim it — (A5) on an armed
+  // night, what its own walk cannot hold (lineNotHeldOf), a carried night whose sizing fell short included.
   const shortfallNote = (sizingShortfall(plan)
     ? ' NOTE: charge/pool limits prevent fully meeting the cushion — residual risk remains.'
     : '') + envelopeShortfallNote(plan);
@@ -1133,18 +1134,33 @@ function sizingShortfall(plan: Pick<NightChargePlan, 'cushionShortfall' | 'cushi
   return plan.cushionShortfall === true && plan.cushionShortfallCause !== 'envelope';
 }
 
-/** v1.200.0 — the envelope note: the line is above the 50% the panel accepts as a reserve and no LINE
- *  force-charge carries it tonight (plan.cushionShortfallCause), worded by why (review:
- *  plan.cushionEnvelopeReason) — never "no force-charge rides" on a night whose cost force-charge does
- *  (a line above 90 in a write mode). '' otherwise. PURE. */
-function envelopeShortfallNote(plan: Pick<NightChargePlan, 'cushionShortfallCause' | 'cushionLineSocPct' | 'cushionEnvelopeReason'>): string {
-  if (plan.cushionShortfallCause == null) return '';
+/** v1.200.0 — the envelope note: the line is above the 50% the panel accepts as a reserve and the plan does not
+ *  claim it tonight. Nothing armed (plan.cushionShortfallCause; review: worded by plan.cushionEnvelopeReason): the
+ *  backup leg, advisory mode. (A5) ARMED (plan.forceChargeLine): the force-charge runs — the line clause says how — and
+ *  the note says what its own walk cannot hold (lineNotHeldOf, the predicate every surface words by: under the line,
+ *  whatever the reason or cause; above a full pool; held without its usual margin), on a carried night whose sizing
+ *  fell short too (cause null, beside the caps note). Never "no force-charge" on an armed night. '' otherwise. PURE. */
+function envelopeShortfallNote(plan: Pick<NightChargePlan, 'cushionShortfallCause' | 'cushionLineSocPct' | 'cushionEnvelopeReason'
+  | 'expectedWriteLevelPct' | 'forceChargeLine' | 'expectedForceChargeMode'>): string {
   const line = plan.cushionLineSocPct != null && Number.isFinite(plan.cushionLineSocPct) ? `tonight's ${round1(plan.cushionLineSocPct)}% outage line` : "tonight's outage line";
-  const why = plan.cushionEnvelopeReason === 'tooHigh'
-    ? 'and it is too close to a full pool for the force-charge to carry it to the window close'
-    : plan.cushionEnvelopeReason === 'backupLeg' ? 'and the outage backup leg writes the reserve only'
-      : plan.cushionEnvelopeReason === 'advisory' ? 'and no force-charge runs in advisory mode'
-        : 'and no force-charge carries it to the window close';
+  if (plan.forceChargeLine != null) {
+    const kind = lineNotHeldOf(plan);
+    if (kind === 'closeUnder') {
+      const e = plan.expectedWriteLevelPct;
+      return ` NOTE: on the median load the pool is expected to close at ${e != null && Number.isFinite(e) ? `~${round1(e)}%` : 'a level'}, under ${line} — residual risk remains.`;
+    }
+    if (kind === 'aboveFull') return ` NOTE: ${line} is above a full pool, so no charge can hold it — residual risk remains.`;
+    if (kind === 'nearFull') return ` NOTE: ${line} is within 10 points of a full pool, so the force-charge cannot hold it with its usual margin — residual risk remains.`;
+    // Armed and disclosed, but no line-mode walk to say why (a plan this build does not make): armed, not claimed.
+    if (plan.cushionShortfallCause != null) {
+      return ` NOTE: ${line} is above the ${RESERVE_WRITE_MAX_PCT}% the panel accepts as a reserve; its force-charge runs, but the plan does not claim the line — residual risk remains.`;
+    }
+    return '';
+  }
+  if (plan.cushionShortfallCause == null) return '';
+  const why = plan.cushionEnvelopeReason === 'backupLeg' ? 'and the outage backup leg writes the reserve only'
+    : plan.cushionEnvelopeReason === 'advisory' ? 'and no force-charge runs in advisory mode'
+      : 'and no force-charge carries it to the window close';
   return ` NOTE: ${line} is above the ${RESERVE_WRITE_MAX_PCT}% the panel accepts as a reserve, ${why} — residual risk remains.`;
 }
 

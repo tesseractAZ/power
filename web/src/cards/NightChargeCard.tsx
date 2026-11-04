@@ -2,7 +2,7 @@ import { memo, useEffect, useState } from 'react';
 import {
   actuationBannerState, actuationBannerVisible, actuationKey, cancelOutcome, cancelRequestInit, chargeFigureParts, floorCushionLinePct, fmtLinePct,
   holdSummary, noChargeExpected, noPlanText, refusedArmLead, reserveWriteLabel, sizingLine, withConfirmedCancel, writeStands,
-  capsShortfallShown, outageLineRow,
+  capsShortfallShown, outageLineRow, lineNotHeldOfCard,
   writtenReservePct, middayShadowView, type MiddayShadowStatus, type MiddayShadowPreviewStatus,
 } from './nightChargeText';
 import { apiUrl } from '../api';
@@ -58,6 +58,8 @@ interface NightChargePlan {
   /** v1.200.0 — the 50% reserve envelope's part in the shortfall, the line the force-charge carries, and
    *  whether the expected walk ran it (nightChargeText.outageLineRow). Absent on older plans. */
   cushionShortfallCause?: 'envelope' | 'envelope+caps';
+  /** v1.200.0 (A5) — why the plan does not claim the line (nightChargeText.CushionNotePlan). */
+  cushionEnvelopeReason?: 'advisory' | 'backupLeg' | 'nearFull' | 'closeUnder';
   forceChargeLine?: { askPct: number; linePct: number } | null;
   expectedForceChargeMode?: 'line';
   /** v1.200.0 (review 2) — the expected walk reaches the panel ceiling: the panel switches Charge Now off there and
@@ -340,9 +342,10 @@ export const NightChargeCard = memo(function NightChargeCard() {
         </div>
       )}
 
-      {/* v1.200.0 — the outage line above the panel's 50% reserve: disclosed, or carried to the close. */}
+      {/* v1.200.0 — the outage line above the panel's 50% reserve: disclosed, or the force-charge's own row; (A5) a warning
+          wherever the plan does not claim it or its walk cannot hold it (a carried night whose sizing fell short too). */}
       {outageLineRow(plan, status.reserveWriteMaxPct ?? null) != null && (
-        <div className={`text-xs ${plan.cushionShortfallCause != null ? 'text-warn' : 'text-muted'} mb-3 -mt-1`}>
+        <div className={`text-xs ${plan.cushionShortfallCause != null || lineNotHeldOfCard(plan) != null ? 'text-warn' : 'text-muted'} mb-3 -mt-1`}>
           {outageLineRow(plan, status.reserveWriteMaxPct ?? null)}
         </div>
       )}
