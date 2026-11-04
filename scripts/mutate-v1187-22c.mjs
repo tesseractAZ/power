@@ -659,7 +659,7 @@ const MUTANTS = [
   {
     id: 'C-lxxvi. ★★ the speakers are never told the window bound',
     file: IDX,
-    find: '        toward: chargeIsWindowBound(plan),',
+    find: '        toward: chargeEndsShortOfLevel(plan),',
     to: '        toward: false, /* MUTANT */',
     why: 'The spoken line says "to about 80 percent" on a Friday the push says "toward".',
   },

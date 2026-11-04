@@ -62,7 +62,8 @@
  * deliverable and the P50 PV) and the panel's stop only where reachable; the mid-day push keyed on the leg's ask (L4), the
  * shadow record and its restore; the ON log names the panel's stop (L3); the gate strikes an armed, disclosed row whose
  * force-charge never switched on and that closed under min(line, 100). A5-i..xxviii (P-viii, P-xi, P-xii, F-iii, T-xv,
- * T-xvi, T-xvii and G-i re-anchored on the A5 lines).
+ * T-xvi, T-xvii and G-i re-anchored on the A5 lines). The spoken notice of a window-bound line night: its level is the
+ * window's reach, so "which ends before it gets there" only where the 50% floor lifts it above that reach. A5-xxx.
  *
  *   node scripts/mutate-line-force-charge.mjs [--only <id prefix>]
  *
@@ -86,6 +87,7 @@ const CARD = resolve(REPO, 'web/src/cards/nightChargeText.ts');
 const CARDX = resolve(REPO, 'web/src/cards/NightChargeCard.tsx');
 const CTX = resolve(REPO, 'server/src/chargeText.ts');
 const MSH = resolve(REPO, 'server/src/middayShadow.ts');
+const ANN = resolve(REPO, 'server/src/chargeAnnounce.ts');
 
 const T_LINE = 'test/lineForceCharge.test.ts';
 const T_CLOSE = 'test/lineForceChargeClose.test.ts';
@@ -1768,6 +1770,29 @@ const MUTANTS = [
     find: "  if (e != null && e < l - 0.05) return 'closeUnder';",
     to: "  if (plan.cushionEnvelopeReason === 'closeUnder') return 'closeUnder'; /* MUTANT */",
     why: 'The card says "within 10 points" where the server says "under the line".',
+  },
+
+  /* ── A5 (docs stage): the spoken notice of a window-bound line night (T22) ── */
+  {
+    id: 'A5-xxx(a). ★★ a bound line walk spoken as ending short of its capped close',
+    file: NCA, tests: [T_LINE, T_YEAR],
+    find: "  if (plan.expectedForceChargeMode !== 'line') return true;\n  const e = plan.expectedWriteLevelPct;",
+    to: "  if (plan.expectedForceChargeMode !== 'line' || true) return true; /* MUTANT */\n  const e = plan.expectedWriteLevelPct;",
+    why: 'The spoken notice says "toward 93 percent, which ends before it gets there" of the ~92.8% the window reaches as it closes.',
+  },
+  {
+    id: 'A5-xxx(b). ★★ the 50% floor above the reach spoken as reached',
+    file: NCA, tests: [T_LINE, T_YEAR],
+    find: '  return e == null || !Number.isFinite(e) || e <= RESERVE_WRITE_MAX_PCT;',
+    to: '  return e == null || !Number.isFinite(e); /* MUTANT */',
+    why: 'A window that cannot finish the reserve leg is spoken as charging "to about 50 percent".',
+  },
+  {
+    id: 'A5-xxx(c). ★★ the announce route keeps the bound flag alone',
+    file: ANN, tests: [T_LINE],
+    find: '      toward: chargeEndsShortOfLevel(plan),\n      deadlineText: supervised.cancelDeadlineText,',
+    to: '      toward: chargeEndsShortOfLevel(plan) || plan.expectedDeliverableBound === true, /* MUTANT */\n      deadlineText: supervised.cancelDeadlineText,',
+    why: 'The evening\'s spoken notice (the route) says the window ends short of the close it reaches.',
   },
 
   /* ── R: the ledger ── */

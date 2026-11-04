@@ -223,7 +223,9 @@ import {
   // v1.187.22 — the expected buy: its ledger columns, and what a spoken line states (the level
   // the write drives to and the expected draw — never the worst case, which only logs name).
   expectedBuyLedgerColumns, ledgerExpectedBuyKwh, chargeLevelPct, statedBuyKwh, buyFiguresLogText,
-  chargeIsWindowBound,
+  // v1.200.0 (A5, H1) — "toward" on the speakers: a line walk's bound level is the window's reach (chargeIsWindowBound
+  // elsewhere).
+  chargeEndsShortOfLevel,
   // R2 — the leg a plan sizes (every live plan is the overnight cost leg).
   OVERNIGHT_WINDOW_SPEC,
   // v1.200.0 (A5) — what an armed line night's own walk cannot hold, for the 21:30 line.
@@ -5157,7 +5159,7 @@ async function runNightChargeEveningJobInner(): Promise<void> {
         // v1.187.22 — what a night expected to charge nothing holds: the armed reserve.
         reservePct: supervisedCtx.targetPct,
         expectedKwh: statedBuyKwh(plan),
-        toward: chargeIsWindowBound(plan),
+        toward: chargeEndsShortOfLevel(plan),
         deadlineText: supervisedCtx.cancelDeadlineText,
         deadlineTextEs: supervisedCtx.cancelDeadlineTextEs,
         cushionShortfall: plan.cushionShortfall === true,

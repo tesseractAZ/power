@@ -18,7 +18,7 @@
  */
 import { buildNightChargeMessage, type NotifyMessage } from './notify.js';
 import { nightChargeSpokenNotice, RESERVE_WRITE_MAX_PCT, type NightChargeMode, type RevertResendOnReport } from './nightChargeActuator.js';
-import { chargeIsWindowBound, chargeLevelPct, statedBuyKwh, type NightChargePlan } from './nightChargeAdvisor.js';
+import { chargeEndsShortOfLevel, chargeLevelPct, statedBuyKwh, type NightChargePlan } from './nightChargeAdvisor.js';
 import {
   buildMiddayPlanMessage, middaySpokenNotice,
   type MiddayAnnounceInput, type MiddayRevertDeadlineText, type MiddaySummaryText,
@@ -74,7 +74,7 @@ export function eveningAnnouncement(i: EveningAnnounceInput): { push: NotifyMess
       levelPct: chargeLevelPct(plan) ?? supervised.targetPct,
       reservePct: supervised.targetPct,
       expectedKwh: statedBuyKwh(plan),
-      toward: chargeIsWindowBound(plan),
+      toward: chargeEndsShortOfLevel(plan),
       deadlineText: supervised.cancelDeadlineText,
       deadlineTextEs: supervised.cancelDeadlineTextEs,
       cushionShortfall: plan.cushionShortfall === true,

@@ -529,7 +529,9 @@ export interface NightChargePlan {
   /** v1.187.22 — the window cannot pass the whole expected draw on the median load
    *  (expectedBuyFromPlan's deliverableBound): the write charges TOWARD expectedWriteLevelPct and
    *  the window closes first (Friday's one-hour 23:00 window from ~48%: ~14 kWh, ~62%, not 80%).
-   *  Every surface that states the level then says "toward". Absent/false otherwise. */
+   *  Every surface that states the level then says "toward". Absent/false otherwise. (A5, H1) On a LINE walk the
+   *  level is instead the expected close capped at the window's reach: the spoken notice does not say the window
+   *  ends before it gets there (chargeEndsShortOfLevel), unless the 50% floor lifts the level above that reach. */
   expectedDeliverableBound?: boolean;
   /** v1.187.22 — when force-charge rides the night: the expected just-in-time start
    *  (expectedBuyFromPlan's forceChargeStartMs), or null when no start is expected (the pool stays
@@ -1472,6 +1474,20 @@ export function chargeLevelPct(
  *  headline does, never "to" a level the plan itself says the night will not reach. PURE. */
 export function chargeIsWindowBound(plan: Pick<NightChargePlan, 'expectedDeliverableBound'>): boolean {
   return plan.expectedDeliverableBound === true;
+}
+
+/** v1.200.0 (A5, H1) — PURE. The window closes before the pool reaches the level the spoken notice states (its "which
+ *  ends before it gets there"): chargeIsWindowBound, except on a LINE walk, whose level is its expected close capped at
+ *  the window's reach (expectedLineBuy) — reached as the window closes, so not short of it — unless that reach is under
+ *  the 50% reserve the level is floored at (2026-11-27 21:30 at 17 h: ~49.9% reachable, 50% stated). A cost night's
+ *  bound level is its target, which the window does not reach. */
+export function chargeEndsShortOfLevel(
+  plan: Pick<NightChargePlan, 'expectedDeliverableBound' | 'expectedForceChargeMode' | 'expectedWriteLevelPct'>,
+): boolean {
+  if (!chargeIsWindowBound(plan)) return false;
+  if (plan.expectedForceChargeMode !== 'line') return true;
+  const e = plan.expectedWriteLevelPct;
+  return e == null || !Number.isFinite(e) || e <= RESERVE_WRITE_MAX_PCT;
 }
 
 /** v1.187.22 — the ONLY buy figure a spoken or pushed line states: the expected draw of the armed
