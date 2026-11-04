@@ -24,10 +24,13 @@ import { buildNightChargeApplyFailure, buildNightChargeMorningSummary, buildNigh
  *       FORCE_CHARGE_LINE_AT_RISK_LEAD_MS, when a fresh coherent pool reads under the night's start target
  *       (⌈L⌉ + H on a cost-dominant night), is not rising against a reading ≥ FORCE_CHARGE_LINE_TREND_MS older,
  *       and the add-on cannot act itself (no re-ON due, none in its readback grace). And the one-time log of
- *       the ON-reading shape (lineOnReadingShape).
+ *       the ON-reading shape (lineOnReadingShape). (review 3) The trend only on readings taken once the last ON of ours
+ *       had its readback grace (lineTrendReference), a flat pool at risk only at or under ⌈L⌉, no push at the re-ON's
+ *       own cutoff instant, and a cost-dominant night's push worded by its margin over the line and its reason.
  *  W2 — a line re-ON is readback-checked FORCE_CHARGE_ON_VERIFY_AFTER_MS after it, like the first ON.
  *  W3 — the morning account of a line-ask night: under the line said so; an unread close said so; the panel's
- *       own stop and the re-ONs named. A cost night with no line ask reads word for word as v1.199.1.
+ *       own stop and the re-ONs named. A cost night with no line ask reads word for word as v1.199.1. (review 3) A
+ *       re-ON resumes the charge only when it took effect; "after the panel's own stop" only when that stop is on record.
  *  W4 — lineCeilingLoweringDue lowers only what the panel holds (never a raise, also under red vitals).
  *  W5 — (#1) a cost-dominant line night's ON failure and declined start speak for the line; (#9) the declined-
  *       start push is once a night per class ACROSS RESTARTS; (#6) the reserve-apply failure on a line night.
@@ -269,6 +272,9 @@ test('★★★ W1 lineAtRiskPushDue — each condition holds it back', () => {
   none(risky(), onReading({ poolSocPct: null }), T, 'no pool reading');
   none(risky(), onReading({ slotsOn: null }), T, 'no slot readback: no slot to name');
   none(risky({ forceChargeLinePoolSamples: [{ pct: 57, atMs: T - 15 * M }] }), onReading(), T, 'rising (58 > 57)');
+  // (review 3) …also at or under ⌈L⌉, where a flat pool is pushed: a pool rising there is the charge working.
+  none(risky({ forceChargeLinePoolSamples: [{ pct: 54, atMs: T - 15 * M }] }), onReading({ poolSocPct: 55, slotSocPct: at(55) }), T, 'rising under the line (54 → 55)');
+  assert.notEqual(due(risky({ forceChargeLinePoolSamples: [{ pct: 55, atMs: T - 15 * M }] }), T, onReading({ poolSocPct: 55, slotSocPct: at(55) })), null, 'flat under the line: pushed');
   none(risky({ forceChargeLinePoolSamples: [{ pct: 62, atMs: T - 5 * M }] }), onReading(), T, 'no reading 10 min older');
   none(risky({ forceChargeLinePoolSamples: null }), onReading(), T, 'no trail');
   none(risky({ forceChargeLineReOns: 1, forceChargeLineReOnAtMs: T - 15 * M + 1, forceChargeLineReOnSlots: [1, 2, 3], forceChargeLineReOnCheckedAtMs: T - M }), onReading(), T, 'a re-ON in its readback grace is left alone');
@@ -276,8 +282,17 @@ test('★★★ W1 lineAtRiskPushDue — each condition holds it back', () => {
   // The lead: never inside FORCE_CHARGE_LINE_AT_RISK_LEAD_MS of the add-on's close OFF.
   const tc = WIN_END - nfc.FORCE_CHARGE_LINE_AT_RISK_LEAD_MS;
   const near = (t: number) => risky({ forceChargeLinePoolSamples: [{ pct: 62, atMs: t - 15 * M }] });
-  assert.notEqual(due(near(tc), tc, onReading()), null, 'at the lead: still pushed');
+  // (review 3) …and not AT it: the lead is the re-ON's own cutoff (FORCE_CHARGE_ON_RETRY_CUTOFF_MS), and at that instant
+  // a re-ON is refused by the cutoff — a push there would blame the re-ON's gates (the grid, the vitals, a readback) for
+  // it. The plant's minute ticks landed there on 18 of 202 nights; production's tick, at any phase, almost never does.
+  assert.equal(nfc.FORCE_CHARGE_LINE_AT_RISK_LEAD_MS, nfc.FORCE_CHARGE_ON_RETRY_CUTOFF_MS);
+  assert.notEqual(due(near(tc - 1), tc - 1, onReading()), null, 'a millisecond before the lead: pushed');
+  none(near(tc), onReading(), tc, 'at the lead (the re-ON\'s cutoff)');
   none(near(tc + 1), onReading(), tc + 1, 'inside the lead');
+  const offAtCut = near(tc);
+  assert.equal(nfc.lineReOnDue(offAtCut, tc, offReading(), [1, 2, 3]), null, 'the re-ON\'s cutoff refuses it');
+  none(offAtCut, offReading(), tc, 'at the cutoff: no push blaming the re-ON\'s gates');
+  assert.equal(decideForceCharge(offAtCut, tc - 1, offReading()).kind, 'lineReOn', 'a millisecond before: the add-on\'s own re-ON');
   // The close is the write window's end: an hour before on-peak, when that comes first.
   const onPeak = WIN_END + 30 * M; // on-peak at 05:30 ⇒ the write window ends 04:30, the lead 04:10
   assert.equal(due(risky({ nextOnPeakStartMs: onPeak }), T, onReading())?.closeAtMs, WIN_END - 30 * M);
@@ -287,6 +302,41 @@ test('★★★ W1 lineAtRiskPushDue — each condition holds it back', () => {
   const mixed = due(spent, T, offReading({ slotsOn: [3], connectedSlots: [1, 3], slotSocPct: at(58) }));
   assert.deepEqual([mixed?.offSlots, mixed?.onSlots], [[1], [3]]);
   none(spent, offReading({ slotSocPct: at(80) }), T, 'every OFF slot\'s Core at the ceiling, none ON: nothing a person can switch');
+});
+
+test('★★★ W1 (review 3) the trend is judged on readings after the last ON of ours took effect, and a FLAT pool is at risk only at or under ⌈L⌉', () => {
+  const due = nfc.lineAtRiskPushDue;
+  // The round-3 reviewer's probe 2: a re-ON at T−16 took effect (its check found it applied) and the pool rose 58 → 60;
+  // the reference, 62 at T−17, predates the re-ON (the fall that called for it). The pool is RISING: no push.
+  const reOnTook = (reOnAt: number, samples: Array<{ pct: number; atMs: number }>) => risky({
+    forceChargeLineReOns: 1, forceChargeLineReOnAtMs: reOnAt, forceChargeLineReOnSlots: [1, 2, 3],
+    forceChargeLineReOnCheckedAtMs: reOnAt + 15 * M, forceChargeLineReOnNotAppliedSlots: [], forceChargeLinePoolSamples: samples,
+  });
+  const charging = (pool: number) => onReading({ poolSocPct: pool, slotSocPct: at(pool) });
+  assert.equal(due(reOnTook(T - 16 * M, [{ pct: 62, atMs: T - 17 * M }, { pct: 58, atMs: T - 7 * M }]), T, charging(60)), null, 'a reference from before the re-ON');
+  // A reference taken after the re-ON's write but inside its readback grace (an ON that takes effect late, a stale
+  // reading) is no better: the re-ON at T−20, the reference at T−10.
+  assert.equal(due(reOnTook(T - 20 * M, [{ pct: 62, atMs: T - 10 * M }]), T, charging(60)), null, 'a reference inside the re-ON\'s readback grace');
+  // From the grace on, the trend counts: the re-ON at T−25, the reference at T−10 (= its write + 15 min), the pool falling.
+  assert.equal(due(reOnTook(T - 25 * M, [{ pct: 62, atMs: T - 10 * M }]), T, charging(60))?.cause, 'onNotRising');
+  // The first ON alike (its last attempt): a reference inside its grace says nothing.
+  assert.equal(due(risky({ forceChargeOnLastAttemptMs: T - 20 * M, forceChargeLinePoolSamples: [{ pct: 62, atMs: T - 10 * M }] }), T, charging(58)), null);
+  // The round-3 reviewer's probe 1: Charge Now ON and importing ~3.4 kW beside an EV sharing the grid cap — whole-percent
+  // readings sit flat at 59 (6 points over ⌈L⌉ = 56, under the 61% start target). Flat is not falling: no push.
+  const flat = (pct: number) => risky({ forceChargeLinePoolSamples: [{ pct, atMs: T - 12 * M }, { pct, atMs: T - 2 * M }] });
+  assert.equal(due(flat(59), T, charging(59)), null, 'flat at 59, above ⌈L⌉');
+  assert.equal(due(flat(57), T, charging(57)), null, 'flat at 57, above ⌈L⌉');
+  // A flat pool AT ⌈L⌉ or under it is at risk (one more point lost is the line): pushed.
+  assert.equal(due(flat(56), T, charging(56))?.cause, 'onNotRising', 'flat at ⌈L⌉');
+  assert.equal(due(flat(55), T, charging(55))?.cause, 'onNotRising', 'flat under the line');
+  // A FALLING pool keeps the start-target threshold: 60 against 62, above ⌈L⌉.
+  assert.equal(due(risky(), T, charging(60))?.cause, 'onNotRising', 'falling, under the start target');
+  // On a cost-dominant night (ask 70): flat at 72 is not pushed; flat at 70 is.
+  const costDom = (pct: number) => risky({ forceChargeCeilingPct: 90, forceChargeLineAskPct: 70, forceChargeLinePct: 69.4, forceChargeMode: 'cost',
+    forceChargeCeilingSyncedPct: 90, forceChargeLinePoolSamples: [{ pct, atMs: T - 12 * M }] });
+  const cdo = (pct: number) => fo({ enabled: true, poolSocPct: pct, slotsOn: [1, 2, 3], slotSocPct: at(pct), ceilingReadbackPct: 90 });
+  assert.equal(due(costDom(72), T, cdo(72)), null);
+  assert.equal(due(costDom(70), T, cdo(70))?.cause, 'costMode');
 });
 
 test('★★★ W1 the push words: the pool, the start target, the line, the close; what to switch — never "No action needed"', () => {
@@ -309,8 +359,22 @@ test('★★★ W1 the push words: the pool, the start target, the line, the clo
   const held = build({ day: '2026-09-16', risk: r({ cause: 'reOnHeld', offSlots: [1, 2, 3], onSlots: [] }), closeText: '4:40am' });
   assert.ok(held.body.includes('The add-on cannot switch Charge Now back on now (it needs the grid known present, healthy host vitals and a live panel reading). '), held.body);
   const cost = build({ day: '2026-09-16', risk: r({ cause: 'costMode', thresholdPct: 75, linePct: 69.4, poolPct: 73, refPct: 76 }), closeText: '4:40am' });
-  assert.ok(cost.body.startsWith("Night-charge: the pool reads 73%, under the 75% start target and falling toward tonight's 69.4% outage line;"), cost.body);
-  for (const m of [onLatch, spent, notApplied, held, cost]) assert.doesNotMatch(m.body, /No action needed|no action/i);
+  // (review 3) A cost-dominant night has no start target (its start is timed to its cost target, here 90): the threshold
+  // is named by its margin over the line, and the push says why the add-on cannot act — its cost force-charge has its
+  // own stop and no re-ON.
+  assert.equal(cost.body, "Night-charge: the pool reads 73%, under 75%, 5.6 points above tonight's 69.4% outage line, and falling toward it; "
+    + 'the window closes at ~4:40am. '
+    + "Tonight's force-charge is the cost plan's, with its own stop: the add-on does not switch Charge Now back on for the line. "
+    + 'Charge Now reads on for slot(s) 1, 2, 3 but the pool is not rising; switching it off and on again in the EcoFlow app may restart the charge.');
+  const costOff = build({ day: '2026-09-16', risk: r({ cause: 'costMode', offSlots: [2], onSlots: [], thresholdPct: 75, linePct: 69.4, poolPct: 70, refPct: 70 }), closeText: '4:40am' });
+  assert.equal(costOff.body, "Night-charge: the pool reads 70%, under 75%, 5.6 points above tonight's 69.4% outage line, and not rising; "
+    + 'the window closes at ~4:40am. '
+    + "Tonight's force-charge is the cost plan's, with its own stop: the add-on does not switch Charge Now back on for the line. "
+    + 'To hold the line, switch Charge Now on for slot(s) 2 in the EcoFlow app (the add-on switches it off at the close).');
+  for (const m of [cost, costOff]) assert.doesNotMatch(m.body, /start target/);
+  // A line-mode night keeps "the start target" (the value its re-ON switches back on under).
+  for (const m of [onLatch, spent]) assert.match(m.body, /the 61% start target/);
+  for (const m of [onLatch, spent, notApplied, held, cost, costOff]) assert.doesNotMatch(m.body, /No action needed|no action/i);
 });
 
 test('★★★ W1 the ON-reading shape is logged once a night when seen, whatever the push conditions — its first real occurrence is measured', () => {
@@ -325,6 +389,19 @@ test('★★★ W1 the ON-reading shape is logged once a night when seen, whatev
   assert.equal(shape(risky(), T, onReading({ slotSocPct: null })), null, 'an unknown Core level says nothing');
   assert.equal(shape(risky(), T, offReading()), null, 'the slots read OFF: the measured latch, not this shape');
   assert.equal(shape(risky({ forceChargeLineAskPct: null, forceChargeLinePct: null, forceChargeCeilingPct: 70, forceChargeMode: 'cost' }), T, onReading({ enabled: true })), null, 'a cost night with no line ask');
+  // (review 3) NEVER right after an ON of ours: on the measured path the pool falls (the panel's OFF), the re-ON switches
+  // the slots back on, and the next tick reads them ON, their Cores under the stop, the pool still below a reading from
+  // before the re-ON. That is the re-ON working, not the unmeasured latch. The round-3 reviewer's probe 3: the re-ON at
+  // T−1, the reference 62 at T−12.
+  const reOn = (reOnAt: number, refAt: number) => risky({ forceChargeLineReOns: 1, forceChargeLineReOnAtMs: reOnAt, forceChargeLineReOnSlots: [1, 2, 3],
+    forceChargeLinePoolSamples: [{ pct: 62, atMs: refAt }] });
+  assert.equal(shape(reOn(T - M, T - 12 * M), T, onReading()), null, 'the minute after a re-ON');
+  // …nor against a reference taken inside the re-ON's readback grace (an ON 5 min late, a reading 3 min stale).
+  assert.equal(shape(reOn(T - 20 * M, T - 10 * M), T, onReading()), null, 'a reference inside the re-ON\'s grace');
+  // A reference taken once the grace has run does count.
+  assert.notEqual(shape(reOn(T - 25 * M, T - 10 * M), T, onReading()), null, 'a reference at the re-ON + 15 min');
+  // The first ON alike.
+  assert.equal(shape(risky({ forceChargeOnLastAttemptMs: T - 20 * M, forceChargeLinePoolSamples: [{ pct: 62, atMs: T - 10 * M }] }), T, onReading()), null);
   // index.ts: once a night, in memory (a log line), a warning.
   assert.ok(TICK.includes('lineOnReadingShape(nightActuationMem, nowMs, fcOpts)'));
   assert.ok(TICK.includes('if (shape != null && lineOnShapeLoggedDay !== state.day) {'));
@@ -471,6 +548,7 @@ test('★★★ W3 a line night: the panel\'s own stop and the re-ONs (issued, a
   // A re-ON after the panel's stop that then ran to the close.
   const reOnRan = nfc.forceChargeNightOutcome(onNight({
     forceChargeLinePanelOffAtMs: WIN_END - 3 * H, forceChargeLineReOns: 1, forceChargeLineReOnAtMs: WIN_END - 150 * M,
+    forceChargeLineReOnSlots: [1, 2, 3], forceChargeLineReOnCheckedAtMs: WIN_END - 135 * M, forceChargeLineReOnNotAppliedSlots: [],
     forceChargeOffAtMs: WIN_END, forceChargeOffReason: 'windowEnd',
   }), lineGates);
   assert.ok(sum(reOnRan, { closePoolPct: 63 }).includes("force-charge ran to the window close for the 55.6% outage line; Charge Now was switched back on 1 time(s) after the panel's own stop; the pool read 63% at the close"), sum(reOnRan, { closePoolPct: 63 }));
@@ -481,6 +559,48 @@ test('★★★ W3 a line night: the panel\'s own stop and the re-ONs (issued, a
   assert.deepEqual(
     (({ panelOffAtMs, reOns, reOnsNotApplied, lastReOnAtMs }) => ({ panelOffAtMs, reOns, reOnsNotApplied, lastReOnAtMs }))((ended as unknown as { line: Record<string, unknown> }).line),
     { panelOffAtMs: WIN_END - 110 * M, reOns: 2, reOnsNotApplied: 1, lastReOnAtMs: WIN_END - 150 * M });
+});
+
+test('★★★ W3 (review 3) a re-ON resumes the charge only when it took effect; "after the panel\'s own stop" only when that stop is on record', () => {
+  // The round-3 reviewer's probe 1: the panel stopped the charge at 01:00; both re-ONs after it (the last at 02:30) were
+  // checked not applied — Charge Now was off from 01:00 to the close. Never "ran to the window close".
+  const failedAfterStop = (reOns: number, over: Record<string, unknown> = {}) => onNight({
+    forceChargeLinePanelOffAtMs: WIN_START + 2 * H, forceChargeLineReOns: reOns, forceChargeLineReOnAtMs: WIN_END - 150 * M,
+    forceChargeLineReOnSlots: [1, 3], forceChargeLineReOnCheckedAtMs: WIN_END - 135 * M, forceChargeLineReOnNotAppliedSlots: [1, 3],
+    forceChargeLineReOnsNotApplied: reOns, forceChargeOffAtMs: WIN_END, forceChargeOffReason: 'windowEnd', ...over,
+  });
+  const two = sum(nfc.forceChargeNightOutcome(failedAfterStop(2), lineGates), { closePoolPct: 52 });
+  assert.ok(two.includes("force-charge ran for the 55.6% outage line until the panel's own stop switched Charge Now off at 1am; "
+    + "Charge Now was switched back on 2 time(s) after the panel's own stop (2 of them did not take effect); the pool read 52% at the close, under the 55.6% outage line"), two);
+  assert.doesNotMatch(two, /to the window close/);
+  const one = sum(nfc.forceChargeNightOutcome(failedAfterStop(1), lineGates), { closePoolPct: 52 });
+  assert.ok(one.includes("until the panel's own stop switched Charge Now off at 1am; Charge Now was switched back on 1 time(s) after the panel's own stop (1 of them did not take effect)"), one);
+  // A re-ON that took on one slot of the two resumed the charge: it ran to the close.
+  const partial = sum(nfc.forceChargeNightOutcome(failedAfterStop(1, { forceChargeLineReOnNotAppliedSlots: [3] }), lineGates), { closePoolPct: 60 });
+  assert.ok(partial.includes('force-charge ran to the window close for the 55.6% outage line; Charge Now was switched back on 1 time(s)'), partial);
+  // A re-ON whose every write came back rate-limited never reached the panel (no slots on the record, the count handed
+  // back): the panel's stop ended the charge.
+  const limited = sum(nfc.forceChargeNightOutcome(failedAfterStop(0, { forceChargeLineReOnSlots: null, forceChargeLineReOnCheckedAtMs: null,
+    forceChargeLineReOnNotAppliedSlots: null, forceChargeLineReOnsNotApplied: 0 }), lineGates), { closePoolPct: 52 });
+  assert.ok(limited.includes("force-charge ran for the 55.6% outage line until the panel's own stop switched Charge Now off at 1am; the pool read 52%"), limited);
+  // A re-ON not yet checked (no live readback in time) is taken as having resumed it, as before the check existed.
+  const unchecked = sum(nfc.forceChargeNightOutcome(failedAfterStop(1, { forceChargeLineReOnCheckedAtMs: null, forceChargeLineReOnNotAppliedSlots: null,
+    forceChargeLineReOnsNotApplied: 0 }), lineGates), { closePoolPct: 60 });
+  assert.ok(unchecked.includes('force-charge ran to the window close for the 55.6% outage line;'), unchecked);
+  // The outcome carries the last re-ON's verdict.
+  const v = (s: S) => (nfc.forceChargeNightOutcome(s, lineGates) as unknown as { line: { lastReOnApplied: boolean | null } }).line.lastReOnApplied;
+  assert.equal(v(failedAfterStop(2)), false);
+  assert.equal(v(failedAfterStop(1, { forceChargeLineReOnNotAppliedSlots: [3] })), true);
+  assert.equal(v(failedAfterStop(1, { forceChargeLineReOnNotAppliedSlots: [] })), true);
+  assert.equal(v(failedAfterStop(1, { forceChargeLineReOnCheckedAtMs: WIN_END - 160 * M })), null, 'a check older than the last re-ON judges the one before');
+  assert.equal(v(failedAfterStop(0, { forceChargeLineReOnSlots: null })), false);
+  assert.equal(v(onNight({ forceChargeOffAtMs: WIN_END, forceChargeOffReason: 'windowEnd' })), null, 'no re-ON tonight');
+  // The round-3 reviewer's probe 2: no panel stop on record (a slot an operator switched off in the app), one re-ON that
+  // took effect. The re-ON is named, never "after the panel's own stop".
+  const noStop = sum(nfc.forceChargeNightOutcome(failedAfterStop(1, { forceChargeLinePanelOffAtMs: null, forceChargeLineReOnNotAppliedSlots: [],
+    forceChargeLineReOnsNotApplied: 0 }), lineGates), { closePoolPct: 60 });
+  assert.ok(noStop.includes('force-charge ran to the window close for the 55.6% outage line; Charge Now was switched back on 1 time(s); the pool read 60% at the close'), noStop);
+  assert.doesNotMatch(noStop, /panel's own stop/);
 });
 
 test('★★★ W3 a COST-DOMINANT line night\'s morning account says where it closed against its line', () => {

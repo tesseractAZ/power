@@ -785,11 +785,13 @@ export function buildNightChargeMorningSummary(o: {
     const early = line != null && line.offReason != null && line.offReason !== 'windowEnd';
     // v1.200.0 (review 2) — the panel's own stop ended the charge when it is the latest thing that switched Charge
     // Now off: after the last re-ON, and before any early OFF of ours. The re-ONs after it are named, and those a
-    // readback check found not applied.
+    // readback check found not applied. (review 3) A last re-ON that did not take effect (or never reached the panel)
+    // resumed nothing: the panel's stop still ended the charge.
     const panelAt = line?.panelOffAtMs != null && Number.isFinite(line.panelOffAtMs) ? line.panelOffAtMs : null;
     const lastReOn = line?.lastReOnAtMs != null && Number.isFinite(line.lastReOnAtMs) ? line.lastReOnAtMs : null;
     const offAt = line?.offAtMs != null && Number.isFinite(line.offAtMs) ? line.offAtMs : null;
-    const panelEnded = panelAt != null && (lastReOn == null || panelAt > lastReOn) && !(early && offAt != null && offAt <= panelAt);
+    const reOnResumed = line?.lastReOnApplied !== false;
+    const panelEnded = panelAt != null && (lastReOn == null || panelAt > lastReOn || !reOnResumed) && !(early && offAt != null && offAt <= panelAt);
     const ranLine = panelEnded
       ? `ran${toward} until the panel's own stop switched Charge Now off at ${phxShortClock(panelAt!)}`
       : early
@@ -798,8 +800,10 @@ export function buildNightChargeMorningSummary(o: {
         : `ran to the window close${toward}`;
     const reOns = line?.reOns ?? 0;
     const reOnsNotApplied = line?.reOnsNotApplied ?? 0;
+    // (review 3) "after the panel's own stop" only when that stop is on record: a re-ON also follows a slot switched off
+    // in the app, or a stop the readback never caught with every slot off.
     const reOnText = reOns > 0
-      ? `; Charge Now was switched back on ${reOns} time(s) after the panel's own stop${reOnsNotApplied > 0 ? ` (${reOnsNotApplied} of them did not take effect)` : ''}`
+      ? `; Charge Now was switched back on ${reOns} time(s)${panelAt != null ? " after the panel's own stop" : ''}${reOnsNotApplied > 0 ? ` (${reOnsNotApplied} of them did not take effect)` : ''}`
       : '';
     night = fc.kind === 'ran'
       ? (line != null
@@ -1040,8 +1044,9 @@ export function buildLineForceChargeDeclinedStart(o: {
 /**
  * v1.200.0 (review 2) — the push when a LINE night's line is at risk after its verified ON and the add-on cannot act
  * itself (nightForceCharge.lineAtRiskPushDue): once a night, while a person can still act. Where the pool is
- * against the start target and the line, when the window closes, why the add-on cannot switch Charge Now back
- * on, and what to switch: slots reading OFF — switch Charge Now on (the add-on's close OFF covers them, they are
+ * against the start target (review 3: on a cost-dominant night, against ⌈L⌉ + 5 named by its margin over the line — that
+ * night has no start target) and the line, when the window closes, why the add-on cannot switch Charge Now back
+ * on (every cause, the cost-dominant night's included), and what to switch: slots reading OFF — switch Charge Now on (the add-on's close OFF covers them, they are
  * ours); slots reading ON while the pool is not rising — off and on again may restart the charge (the ON-reading
  * shape, unmeasured on this plant; or a load taking the grid cap). Never "No action needed". PURE.
  */
@@ -1054,12 +1059,20 @@ export function buildLineForceChargeAtRisk(o: {
   const r = o.risk;
   const line = round1(r.linePct);
   const falling = r.poolPct < r.refPct;
+  // (review 3) A COST-DOMINANT night has no start target (its start is timed to its cost target): its threshold (⌈L⌉ + 5)
+  // is named by its margin over the line.
+  const costMode = r.cause === 'costMode';
+  const margin = `under ${round1(r.thresholdPct)}%, ${round1(r.thresholdPct - r.linePct)} points above tonight's ${line}% outage line,`;
   const where = r.poolPct < r.linePct - 0.05
     ? `under tonight's ${line}% outage line and ${falling ? 'falling' : 'not rising'}`
-    : falling
-      ? `under the ${round1(r.thresholdPct)}% start target and falling toward tonight's ${line}% outage line`
-      : `under the ${round1(r.thresholdPct)}% start target and not rising; tonight's outage line is ${line}%`;
-  const why = r.cause === 'reOnSpent'
+    : costMode
+      ? `${margin} and ${falling ? 'falling toward it' : 'not rising'}`
+      : falling
+        ? `under the ${round1(r.thresholdPct)}% start target and falling toward tonight's ${line}% outage line`
+        : `under the ${round1(r.thresholdPct)}% start target and not rising; tonight's outage line is ${line}%`;
+  const why = costMode
+    ? "Tonight's force-charge is the cost plan's, with its own stop: the add-on does not switch Charge Now back on for the line. "
+    : r.cause === 'reOnSpent'
     ? `The add-on has switched Charge Now back on ${FORCE_CHARGE_LINE_REON_MAX} times tonight after the panel's own stop, the most it does in a night. `
     : r.cause === 'reOnNotApplied'
       ? `The add-on switched Charge Now back on for slot(s) ${(r.reOnNotAppliedSlots != null && r.reOnNotAppliedSlots.length > 0 ? r.reOnNotAppliedSlots : r.offSlots).join(', ')} `

@@ -6234,7 +6234,7 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     const risk = lineAtRiskPushDue(nightActuationMem, nowMs, fcOpts);
     if (risk != null) {
       persistNightActuation({ ...nightActuationMem, forceChargeLineAtRiskPushedAtMs: nowMs });
-      app.log.warn(`night-charge: the ${state.day} outage line (${risk.linePct}%) is AT RISK — the pool reads ${risk.poolPct}% (${risk.refPct}% at ${fmtSiteClock(risk.refAtMs)}), under the ${risk.thresholdPct}% start target and not rising; the add-on cannot act (${risk.cause}); slot(s) reading OFF: ${risk.offSlots.join(',') || 'none'}, reading ON: ${risk.onSlots.join(',') || 'none'}. Pushed once tonight.`);
+      app.log.warn(`night-charge: the ${state.day} outage line (${risk.linePct}%) is AT RISK — the pool reads ${risk.poolPct}% (${risk.refPct}% at ${fmtSiteClock(risk.refAtMs)}), under its ${risk.thresholdPct}% at-risk threshold and ${risk.poolPct < risk.refPct ? 'falling' : 'flat'}; the add-on cannot act (${risk.cause}); slot(s) reading OFF: ${risk.offSlots.join(',') || 'none'}, reading ON: ${risk.onSlots.join(',') || 'none'}. Pushed once tonight.`);
       void sendNotification(loadNotifyConfig(), buildLineForceChargeAtRisk({
         day: state.day, risk,
         closeText: fmtSiteClock(risk.closeAtMs),
