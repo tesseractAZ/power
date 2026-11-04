@@ -1759,20 +1759,22 @@ test('★★★ T23 the mid-day re-entry hold never holds a leg the line force-c
 
 /** Measured on the landed change (the planner over the grid below): a qualifying leg is ARMED at every hour (none held),
  *  most carried with the caps note (the window binds: the sizing falls short); none held over its line. The same grid on
- *  b1fd7613 held 830 / 847 armed-qualifying legs, 61 / 61 of them one hour after the line was armed. */
-const PIN_T23: Record<'np' | 'm', { plans: number; armed: number; carried: number; nearFull: number; lineMode: number; reentryNotes: number; kinds: Record<string, number> }> = {
-  np: { plans: 3400, armed: 2808, carried: 1836, nearFull: 972, lineMode: 2412, reentryNotes: 830, kinds: { closeUnder: 1598, aboveFull: 468 } },
-  m: { plans: 3400, armed: 2916, carried: 1764, nearFull: 1152, lineMode: 2460, reentryNotes: 847, kinds: { closeUnder: 1495, aboveFull: 648 } },
+ *  b1fd7613 held 830 / 847 armed-qualifying legs, 61 / 61 of them one hour after the line was armed. As on the year, the
+ *  stated close and the expected buy are not monotone in the line (a cost target the window cannot reach gives way to the
+ *  line walk's capped close): `eFalls` / `buyFalls` count the steps they fall, pinned, not asserted. */
+const PIN_T23: Record<'np' | 'm', { plans: number; armed: number; carried: number; nearFull: number; lineMode: number; reentryNotes: number; kinds: Record<string, number>; eFalls: number; buyFalls: number }> = {
+  np: { plans: 3400, armed: 2808, carried: 1836, nearFull: 972, lineMode: 2412, reentryNotes: 830, kinds: { closeUnder: 1598, aboveFull: 468 }, eFalls: 131, buyFalls: 71 },
+  m: { plans: 3400, armed: 2916, carried: 1764, nearFull: 1152, lineMode: 2460, reentryNotes: 847, kinds: { closeUnder: 1495, aboveFull: 648 }, eFalls: 131, buyFalls: 71 },
 };
 
 for (const basis of ['np', 'm'] as const) {
   test(`★★★ T23 (${basis === 'np' ? 'nameplate' : '×0.944'}) a mid-day leg grid at 4-20 h (floors 26-40, 4.5-10 kW, two pools, P50 sun ×0, 0.1, 0.3, 1): as the cushion rises the armed target and ceiling never fall, an armed line never disarms, no leg is held over a line above 50, no carried leg closes under its line undisclosed`, () => {
     const s = { m1: 0, m2: 0, m3: 0, m4: 0, undisclosedUnder: 0, heldOverLine: 0 };
-    const pin = { plans: 0, armed: 0, carried: 0, nearFull: 0, lineMode: 0, reentryNotes: 0, kinds: {} as Record<string, number> };
+    const pin = { plans: 0, armed: 0, carried: 0, nearFull: 0, lineMode: 0, reentryNotes: 0, kinds: {} as Record<string, number>, eFalls: 0, buyFalls: 0 };
     const ex: string[] = [];
     const gates = { cost: true, line: true };
     for (const floor of [26, 30, 31, 35, 40]) for (const capKw of [4.5, 5, 6, 7, 10]) for (const pvScale of [0, 0.1, 0.3, 1]) for (const socPct of [30, 45]) {
-      let prev: { line: number | null; armed: boolean; E: number | null; target: number | null; ceil: number | null } | null = null;
+      let prev: { line: number | null; armed: boolean; E: number | null; buy: number | null; target: number | null; ceil: number | null } | null = null;
       for (let h = 4; h <= 20; h++) {
         const p = middayLegPlan({ floor, capKw, socPct, pvScale, h, basis });
         const where = `floor ${floor}, ${capKw} kW, sun ×${pvScale}, pool ${socPct}%, ${h} h`;
@@ -1780,7 +1782,7 @@ for (const basis of ['np', 'm'] as const) {
         const lineL = p.cushionLineSocPct ?? null;
         const E = p.expectedWriteLevelPct ?? null;
         const mode = nfc.forceChargeModeOf({ forceChargeCeilingPct: act.armedForceChargeCeilingPct(p), forceChargeLineAskPct: p.forceChargeLine?.askPct ?? null } as never, gates);
-        const r = { line: lineL, armed: p.forceChargeLine != null, E,
+        const r = { line: lineL, armed: p.forceChargeLine != null, E, buy: p.expectedBuyKwh ?? null,
           target: p.chargeTonight ? nfc.armedWriteLevelPct(p as never, gates) : null, ceil: p.chargeTonight && mode != null ? mode.panelCeilingPct : null };
         pin.plans += 1;
         if (r.armed) { pin.armed += 1; if (p.cushionShortfallCause == null) pin.carried += 1; }
@@ -1797,6 +1799,8 @@ for (const basis of ['np', 'm'] as const) {
           if (fell(prev.ceil, r.ceil)) { s.m2 += 1; note(`ceiling ${prev.ceil} → ${r.ceil}`); }
           if (prev.armed && !r.armed) { s.m3 += 1; note('disarmed'); }
           if (prev.E != null && E != null && lineL != null && p.cushionShortfall !== true && E < Math.min(prev.E, lineL) - 0.05) { s.m4 += 1; note(`~${prev.E} → ~${E}% under ${lineL}%`); }
+          if (fell(prev.E, E)) pin.eFalls += 1;
+          if (fell(prev.buy, r.buy)) pin.buyFalls += 1;
         }
         prev = r;
       }
