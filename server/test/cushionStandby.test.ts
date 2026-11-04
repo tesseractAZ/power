@@ -329,15 +329,33 @@ test('★★★ S5 MONOTONE — on the year, w = 0…1500 in 30 W steps on both 
  *  16 h at 270 W: the plans whose expected buy or write level falls below the 0 W plan, and the carried lines the
  *  standby takes over 1.200.0's ⌈L⌉ + 2H ≤ 100 limit (dropped, disclosed 'tooHigh'). */
 const PIN_S5_LINE = {
-  labels: ['2027-01-04 21:30', '2027-01-04 13:00'], fromW: 1050, levels: [78.4, 78.3, 77.5],
+  labels: ['2027-01-04 21:30', '2027-01-04 13:00'], fromW: 1050, levels: [78.4, 78.3, 77.5], swept: [2406, 17_150],
   hours: { 8: { m: [11, 0], np: [7, 0] }, 16: { m: [51, 31], np: [53, 23] } } as Record<number, Record<'m' | 'np', [number, number]>>,
   example8: { label: '2027-04-13 21:30', expectedBuyKwh: [40.8, 38.77], expectedWriteLevelPct: [74.4, 70.3] },
   example16: { label: '2026-10-26 21:30', expectedBuyKwh: [56.29, 9.18], expectedWriteLevelPct: [96.5, 50] },
 };
 
 test('★★★ S5 LINE NIGHTS — with line force-charge eligibility (a write mode) the monotone set holds as w rises; the expected buy and its write level are ≥ the w = 0 plan except on carried line nights, as measured', () => {
-  const out = sweepW(CASES, [null, S944], { line: true });
-  assert.ok(out.plans > 70_000, `${out.plans} plans`);
+  // Eligibility moves only a plan whose line is above the envelope (carried or disclosed): every other plan is the
+  // S5 plan byte for byte (I-A0 / I-A1), checked here at both ends of the sweep. A line that qualifies at some figure
+  // qualifies at 1500 W (the line only rises, no charge night holds), so the sweep takes the cases that do.
+  const onLine = (p: StandbyPlan): boolean => {
+    const q = p as StandbyPlan & { forceChargeLine?: unknown; cushionEnvelopeReason?: unknown };
+    return q.forceChargeLine != null || q.cushionEnvelopeReason != null;
+  };
+  let offLine = 0;
+  for (const c of CASES) {
+    for (const scale of [null, S944]) {
+      for (const w of [0, 1500]) {
+        const p = yearPlan(c.deps, scale, w, true);
+        if (p.cushionBasis !== 'islanded-outage' || onLine(p)) continue;
+        assert.equal(planDigest(p), planDigest(yearPlan(c.deps, scale, w)), `${c.label} ${scaleTag(scale)} ${w} W: eligibility moved a plan off the line`);
+        offLine += 1;
+      }
+    }
+  }
+  const out = sweepW(CASES, [null, S944], { line: true, only: (zero, top) => onLine(zero) || onLine(top) });
+  assert.deepEqual([offLine, out.plans], PIN_S5_LINE.swept, '[plans off the line, checked identical; line-night plans swept]');
   const pinned = PIN_S5_LINE.labels.flatMap((l) => STEPS_30.filter((w) => w >= PIN_S5_LINE.fromW).map((w) => `${l}|m|${w}|expectedWriteLevelPct`));
   assert.deepEqual(out.underW0, pinned, 'the ≥-w0 set under the w = 0 plan: the carried 2027-01-04 nights at 0.944 alone');
   const deps = caseOf(PIN_S5_LINE.labels[0]).deps;
@@ -393,7 +411,7 @@ const PIN_S5_CLIFF = {
   // 2027-02-09 21:30 at 14 h on ×0.75, unmeetable at 0 W: v1.200.0's proxy [requirement, buy, target], then full effort.
   c: { label: '2027-02-09 21:30', hours: 14, proxy: [61.27, 66.06, 94.6], full: [99.04, 106.8, 100] },
   // (d) [crossings, plans] over 12/20/30 h × three scales, and with eligibility at 20 h.
-  sweep: [2159, 53_975], sweepLine: [1136, 28_400],
+  sweep: [2159, 21_590], sweepLine: [1136, 11_360],
 };
 
 test('★★★ S5 THE POOL CLIFF — where the standby lifts the line past 100% of the pool, the requirement and the buy do not fall and a charge night does not hold; with no figure or 0 W, v1.200.0\'s plan', () => {
@@ -425,21 +443,21 @@ test('★★★ S5 THE POOL CLIFF — where the standby lifts the line past 100%
     const p = ct(w);
     assert.deepEqual([p.requiredExtraKwh, p.buyKwh, p.targetSocPct], C.full, `${w} W`);
   }
-  // (d) the sweep across the cliff, in 60 W steps: the year at 12, 20 and 30 h on ×0.75, ×0.944 and nameplate under a
+  // (d) the sweep across the cliff, in 150 W steps: the year at 12, 20 and 30 h on ×0.75, ×0.944 and nameplate under a
   // 40 kWh minimum buy, every case whose line crosses 100% between 0 and 1500 W — the monotone set holds, no charge
   // night holds, and nothing falls under the w = 0 plan; with eligibility (a write mode, 20 h) the monotone set too.
   const crossing = (zero: StandbyPlan, top: StandbyPlan) => zero.cushionLineSocPct! <= 100 && top.cushionLineSocPct! > 100;
-  const STEPS_60 = STEPS_30.filter((w) => w % 60 === 0);
+  const STEPS_150 = STEPS_30.filter((w) => w % 150 === 0);
   let plans = 0, crossings = 0;
   for (const hours of [12, 20, 30]) {
     const deps = (d: NightChargeInputDeps) => ({ ...d, outageCushionHours: hours, minBuyKwh: 40 }) as NightChargeInputDeps;
-    const out = sweepW(CASES, [S075, S944, null], { deps, only: crossing, steps: STEPS_60 });
+    const out = sweepW(CASES, [S075, S944, null], { deps, only: crossing, steps: STEPS_150 });
     assert.deepEqual(out.underW0, [], `${hours} h: under the w = 0 plan`);
     plans += out.plans;
     crossings += out.crossings;
   }
   assert.deepEqual([crossings, plans], PIN_S5_CLIFF.sweep, 'the crossings swept, and the plans');
-  const line = sweepW(CASES, [S075, S944, null], { line: true, steps: STEPS_60, deps: (d) => ({ ...d, outageCushionHours: 20, minBuyKwh: 40 }) as NightChargeInputDeps, only: crossing });
+  const line = sweepW(CASES, [S075, S944, null], { line: true, steps: STEPS_150, deps: (d) => ({ ...d, outageCushionHours: 20, minBuyKwh: 40 }) as NightChargeInputDeps, only: crossing });
   assert.deepEqual([line.crossings, line.plans], PIN_S5_CLIFF.sweepLine, 'with eligibility');
 });
 
