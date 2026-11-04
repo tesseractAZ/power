@@ -29,7 +29,11 @@
  * (review 3) The trend judged only on readings taken after the last ON of ours had its readback grace (lineTrendReference),
  * a flat pool at risk only at or under ⌈L⌉, no push at the re-ON's own cutoff instant, the ON-reading shape never on the
  * re-ON working, the cost-dominant push by its margin and its reason. W1-xxvi..xxxv. A re-ON resumes the charge in the
- * morning account only when it took effect; the panel's stop named only when on record. W3-x..xv. The ceiling lowering lowers only what the
+ * morning account only when it took effect; the panel's stop named only when on record. W3-x..xv.
+ * (review 4) A re-ON checked not applied (or never written) is no ON of ours for the trend; the check keeps the latest re-ON
+ * that took effect (lineReOnCheckedStamp), across the next re-ON and a restart; the spent budget names the panel's stop only
+ * on record. W1-xxxvi..xli, W2-ix..xiv. The morning account counts every re-ON after the stop, and with no stop and no re-ON
+ * that took never says "ran to the window close". W3-xvi..xxi. The ceiling lowering lowers only what the
  * panel holds. W4-i..iii. A cost-dominant line night's ON failure and declined start; the declined start once a night
  * across restarts; the reserve-apply failure on a line night. W5-i..ix.
  * (M) THE MORNING REFRESH never lowers or drops the line. M-i, M-ii.
@@ -461,10 +465,10 @@ const MUTANTS = [
     why: 'The same, at the wiring.',
   },
   {
-    id: 'W2-vii. ★★ index.ts: a re-ON that did not take effect is not counted',
-    file: IDX, tests: [T_RISK],
-    find: '      ...(failedReOn ? { forceChargeLineReOnsNotApplied: nightActuationMem.forceChargeLineReOnsNotApplied + 1 } : {}),',
-    to: '      /* MUTANT */',
+    id: 'W2-vii. ★★ a re-ON that did not take effect is not counted (the check\'s stamp, review 4: lineReOnCheckedStamp)',
+    file: NFC, tests: [T_RISK],
+    find: '    ...(a.notApplied.length > 0 ? { forceChargeLineReOnsNotApplied: s.forceChargeLineReOnsNotApplied + 1 } : {}),',
+    to: '    /* MUTANT */',
     why: 'The morning account says nothing of the re-ON that never took.',
   },
   {
@@ -473,6 +477,49 @@ const MUTANTS = [
     find: '      ...(allLimited ? { forceChargeLineReOns: Math.max(0, nightActuationMem.forceChargeLineReOns - 1), forceChargeLineReOnSlots: null } : {}),',
     to: '      ...(allLimited ? { forceChargeLineReOns: Math.max(0, nightActuationMem.forceChargeLineReOns - 1) } : {}), /* MUTANT */',
     why: 'A re-ON that never reached the panel is recorded as one that did not take effect.',
+  },
+  /* (review 4) the check keeps the latest re-ON that took effect. */
+  {
+    id: 'W2-ix. ★★★ the check never keeps the re-ON that took effect',
+    file: NFC, tests: [T_RISK],
+    find: '    ...(took && s.forceChargeLineReOnAtMs != null ? { forceChargeLineReOnAppliedAtMs: s.forceChargeLineReOnAtMs } : {}),',
+    to: '    /* MUTANT */',
+    why: 'Round-4 finding 2: a re-ON after the 01:00 stop resumed the charge, a later one failed, and the morning says the 1am stop ended it.',
+  },
+  {
+    id: 'W2-x. ★★ a re-ON that took on one slot of three not kept as taking effect',
+    file: NFC, tests: [T_RISK],
+    find: '  const took = a.slots.some((n) => !a.notApplied.includes(n));',
+    to: '  const took = a.notApplied.length === 0; /* MUTANT */',
+    why: 'The stamp disagrees with lastLineReOnApplied: a charge resumed on two slots is forgotten once a later re-ON fails.',
+  },
+  {
+    id: 'W2-xi. ★★ every checked re-ON kept as taking effect',
+    file: NFC, tests: [T_RISK],
+    find: '  const took = a.slots.some((n) => !a.notApplied.includes(n));',
+    to: '  const took = true; /* MUTANT */',
+    why: 'A re-ON whose slots all still read OFF becomes the last ON of ours: the trend waits on it again, and the morning says it resumed the charge.',
+  },
+  {
+    id: 'W2-xii. ★★ index.ts: the check persisted without its pure stamp (the applied re-ON lost)',
+    file: IDX, tests: [T_RISK],
+    find: '    persistNightActuation({ ...nightActuationMem, ...lineReOnCheckedStamp(nightActuationMem, nowMs, action) });',
+    to: '    persistNightActuation({ ...nightActuationMem, forceChargeLineReOnCheckedAtMs: nowMs, forceChargeLineReOnNotAppliedSlots: [...action.notApplied] }); /* MUTANT */',
+    why: 'The same, at the wiring.',
+  },
+  {
+    id: 'W2-xiii. ★★ index.ts: the next re-ON clears the re-ON that took effect',
+    file: IDX, tests: [T_RISK],
+    find: '      forceChargeLineReOnSlots: [...action.slots],\n    });',
+    to: '      forceChargeLineReOnSlots: [...action.slots],\n      forceChargeLineReOnAppliedAtMs: null, /* MUTANT */\n    });',
+    why: 'A failed second re-ON erases the first that took: the trend and the morning account read the night as never resumed.',
+  },
+  {
+    id: 'W2-xiv. ★★ a restart drops the re-ON that took effect',
+    file: ACT, tests: [T_RISK],
+    find: '    forceChargeLineReOnAppliedAtMs: num(o.forceChargeLineReOnAppliedAtMs),',
+    to: '    forceChargeLineReOnAppliedAtMs: null, /* MUTANT */',
+    why: 'An add-on restart after the second re-ON fails reads the night as never resumed.',
   },
 
   /* ── (review 2) W1: the line at risk after the start ── */
@@ -670,7 +717,7 @@ const MUTANTS = [
   {
     id: 'W1-xxviii. ★★ the re-ON not counted as an ON of ours',
     file: NFC, tests: [T_RISK],
-    find: '  const lastOn = s.forceChargeLineReOnAtMs ?? s.forceChargeOnLastAttemptMs ?? s.forceChargeOnAtMs;',
+    find: '  const lastOn = reOn ?? s.forceChargeOnLastAttemptMs ?? s.forceChargeOnAtMs;',
     to: '  const lastOn = s.forceChargeOnLastAttemptMs ?? s.forceChargeOnAtMs; /* MUTANT */',
     why: 'Every re-ON that works is followed by a push (and a shape log) against the fall that called for it.',
   },
@@ -722,6 +769,50 @@ const MUTANTS = [
     find: '    ? "Tonight\'s force-charge is the cost plan\'s, with its own stop: the add-on does not switch Charge Now back on for the line. "',
     to: "    ? '' /* MUTANT */",
     why: 'The owner is not told the add-on will not switch Charge Now back on tonight.',
+  },
+  /* (review 4) a re-ON checked not applied, or never written, is no ON of ours for the trend; the spent budget names the
+     panel's stop only on record. */
+  {
+    id: 'W1-xxxvi. ★★★ a re-ON checked NOT APPLIED still bars the trend (the review-4 regression)',
+    file: NFC, tests: [T_RISK, T_CLOSE],
+    find: '  const reOn = lastLineReOnApplied(s) !== false ? s.forceChargeLineReOnAtMs : s.forceChargeLineReOnAppliedAtMs;',
+    to: '  const reOn = s.forceChargeLineReOnAtMs; /* MUTANT */',
+    why: 'Round-4 finding 1: both re-ONs (54 and 38 min out) never take; the earliest reference comes past the 20-min lead and the night closes 6 points under its line with no push (the close plant\'s reOnInert: 90 of the 390 year nights under reached, not 169; 1,740 of 2,615 at 70-90%, not 2,308).',
+  },
+  {
+    id: 'W1-xxxvii. ★★ past a failed re-ON, an earlier re-ON that took effect is forgotten',
+    file: NFC, tests: [T_RISK],
+    find: '  const reOn = lastLineReOnApplied(s) !== false ? s.forceChargeLineReOnAtMs : s.forceChargeLineReOnAppliedAtMs;',
+    to: '  const reOn = lastLineReOnApplied(s) !== false ? s.forceChargeLineReOnAtMs : null; /* MUTANT */',
+    why: 'A reference taken inside the grace of the re-ON that did take effect (the pool not yet importing) reads a charging pool as falling.',
+  },
+  {
+    id: 'W1-xxxviii. ★★ a re-ON NOT YET CHECKED read as not applied',
+    file: NFC, tests: [T_RISK],
+    find: '  const reOn = lastLineReOnApplied(s) !== false ? s.forceChargeLineReOnAtMs : s.forceChargeLineReOnAppliedAtMs;',
+    to: '  const reOn = lastLineReOnApplied(s) === true ? s.forceChargeLineReOnAtMs : s.forceChargeLineReOnAppliedAtMs; /* MUTANT */',
+    why: 'A re-ON still in its readback grace (it may yet take effect) is judged against the fall that called for it: the push fires on the re-ON working.',
+  },
+  {
+    id: 'W1-xxxix. ★★ the spent budget says "after the panel\'s own stop" with no stop on record',
+    file: NTF, tests: [T_RISK],
+    find: "tonight${r.panelOffAtMs != null ? \" after the panel's own stop\" : ''}, the most",
+    to: "tonight${\" after the panel's own stop\" /* MUTANT */}, the most",
+    why: 'Round-4 finding 3: Charge Now switched off in the app twice, re-ONed twice, and the push names a panel stop that never happened.',
+  },
+  {
+    id: 'W1-xl. ★ the spent budget never names the panel\'s stop',
+    file: NTF, tests: [T_RISK],
+    find: "tonight${r.panelOffAtMs != null ? \" after the panel's own stop\" : ''}, the most",
+    to: "tonight${'' /* MUTANT */}, the most",
+    why: 'The push hides that the panel stopped the charge at its ceiling.',
+  },
+  {
+    id: 'W1-xli. ★ the at-risk record drops the panel\'s stop',
+    file: NFC, tests: [T_RISK],
+    find: '    panelOffAtMs: s.forceChargeLinePanelOffAtMs ?? null,\n  };',
+    to: '    panelOffAtMs: null, /* MUTANT */\n  };',
+    why: 'The same, at the push\'s record: every spent budget reads as app OFFs.',
   },
 
   /* ── (review 2) W5: a cost-dominant line night; the declined start across restarts; the apply failure ── */
@@ -821,15 +912,15 @@ const MUTANTS = [
   {
     id: 'W3-v. ★★ the panel\'s own stop never named',
     file: NTF, tests: [T_RISK],
-    find: '    const panelEnded = panelAt != null && (lastReOn == null || panelAt > lastReOn || !reOnResumed) && !(early && offAt != null && offAt <= panelAt);',
+    find: '    const panelEnded = panelAt != null && !resumedSince(panelAt) && !(early && offAt != null && offAt <= panelAt);',
     to: '    const panelEnded = false; /* MUTANT */',
     why: 'A charge the panel ended at 03:10 is said to have run to the window close.',
   },
   {
     id: 'W3-vi. ★★ the panel\'s stop said to end a charge a later re-ON resumed',
     file: NTF, tests: [T_RISK],
-    find: '(lastReOn == null || panelAt > lastReOn || !reOnResumed)',
-    to: '(true /* MUTANT */)',
+    find: '!resumedSince(panelAt)',
+    to: 'true /* MUTANT */',
     why: 'A night switched back on at 02:30 that charged to the close is said to have stopped at 02:00.',
   },
   {
@@ -895,6 +986,49 @@ const MUTANTS = [
     find: "${panelAt != null ? \" after the panel's own stop\" : ''}",
     to: "${\" after the panel's own stop\" /* MUTANT */}",
     why: 'Round-3 finding 2: a re-ON after a slot switched off in the app is reported after a panel stop that never happened.',
+  },
+  /* (review 4) every re-ON after the stop counts; no stop and no re-ON that took: never "ran to the window close". */
+  {
+    id: 'W3-xvi. ★★★ only the LAST re-ON can resume the charge',
+    file: NTF, tests: [T_RISK],
+    find: ' || (appliedAt != null && appliedAt >= t);',
+    to: '; /* MUTANT */',
+    why: 'Round-4 finding 2(a): the panel stopped at 01:00, a 02:00 re-ON resumed the charge, a 04:00 one failed — "until the panel\'s own stop switched Charge Now off at 1am".',
+  },
+  {
+    id: 'W3-xvii. ★★★ every re-ON failed with no stop on record: "ran to the window close"',
+    file: NTF, tests: [T_RISK],
+    find: '    const readOff = panelAt == null && !early && lastReOn != null && !reOnResumed && appliedAt == null;',
+    to: '    const readOff = false; /* MUTANT */',
+    why: 'Round-4 finding 2(b): Charge Now read off from before the first re-ON, and the morning says it ran to the close.',
+  },
+  {
+    id: 'W3-xviii. ★★ the read-off said after a re-ON that took effect',
+    file: NTF, tests: [T_RISK],
+    find: '    const readOff = panelAt == null && !early && lastReOn != null && !reOnResumed && appliedAt == null;',
+    to: '    const readOff = panelAt == null && !early && lastReOn != null && !reOnResumed; /* MUTANT */',
+    why: 'A charge resumed by the first re-ON is said to have read off because the second failed.',
+  },
+  {
+    id: 'W3-xix. ★★ the read-off said beside the panel\'s stop or an early OFF',
+    file: NTF, tests: [T_RISK],
+    find: '    const readOff = panelAt == null && !early && lastReOn != null && !reOnResumed && appliedAt == null;',
+    to: '    const readOff = lastReOn != null && !reOnResumed && appliedAt == null; /* MUTANT */',
+    why: 'Two endings in one sentence: "until the panel\'s own stop … at 1am; Charge Now read off … before the window close".',
+  },
+  {
+    id: 'W3-xx. ★ the read-off names no slot',
+    file: NTF, tests: [T_RISK],
+    find: "${offSlots.length > 0 ? ` on slot(s) ${offSlots.join(', ')}` : ''}",
+    to: "${'' /* MUTANT */}",
+    why: 'The account does not say which slots the add-on could not switch back on.',
+  },
+  {
+    id: 'W3-xxi. ★ the outcome drops the re-ON that took effect',
+    file: NFC, tests: [T_RISK],
+    find: '      reOnAppliedAtMs: s.forceChargeLineReOnAppliedAtMs ?? null,',
+    to: '      reOnAppliedAtMs: null, /* MUTANT */',
+    why: 'The same as W3-xvi, at the outcome.',
   },
 
   /* ── M: the morning refresh ── */
