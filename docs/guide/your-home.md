@@ -159,14 +159,15 @@ second panel gets its own charge-level ladder and runway, and nothing else.
 - `ARB_OUTAGE_CUSHION_HOURS`: how long the panel's circuits must run on the batteries in an outage
   that starts as the charge window closes, before you can act. When the reserve plus that cushion
   comes to more than 50 % of the pool, the panel cannot hold it as a reserve. In `supervised` or
-  `auto` mode the night's force-charge (the EcoFlow app's Charge Now) then carries the pool to the
+  `auto` mode the night's force-charge (the EcoFlow app's Charge Now) then carries the pool toward the
   line and the add-on leaves it on until the window closes, on a resilience setup as well as a cost
   one. In an emulation over the year's test nights (not a measurement) a battery slot reads Charge
   Now on for about 74 minutes on average, about two and a half hours for a line of 70-90 %, and
   longer on a night with a predicted EV, when the force-charge starts earlier. The panel switches a
   slot off by itself at its force-charge ceiling; if the pool then falls back under its start target
-  (at least 5 points above the line) before the close, the add-on switches it on again, at most
-  twice a night. If the pool keeps falling toward the line, or sits flat at it, and the add-on cannot
+  (at least 5 points above the line, or 95 % on a line within 10 points of full) before the close,
+  the add-on switches it on again, at most twice a night. A line within 10 points of full, or a night
+  the plan expects to close under its line, is still force-charged and the plan says so. If the pool keeps falling toward the line, or sits flat at it, and the add-on cannot
   act itself, a push names the slots to switch Charge Now on for in the EcoFlow app, at least 20
   minutes before the close. A load that only slows the charge is not pushed, and on a night whose
   cost force-charge already stops above the line, nothing is pushed after that stop. How a

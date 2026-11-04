@@ -144,7 +144,7 @@ options:
   # force-charged to it in supervised or auto mode, whatever ARB_OBJECTIVE says,
   # and left ON until the window closes (the panel switches it off at its own
   # ceiling; the add-on switches it back on, at most twice, if the pool falls
-  # back under its start target, at least the line + 5); ARB_COST_MAX_SOC_PCT 50
+  # back under its start target, the line + 5 or 95 near full); ARB_COST_MAX_SOC_PCT 50
   # does not stop it.
   NIGHT_CHARGE_ADVISOR_ENABLED: true
   NIGHT_CHARGE_MODE: advisory
