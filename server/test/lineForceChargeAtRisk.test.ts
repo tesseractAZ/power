@@ -35,8 +35,9 @@ import { buildNightChargeApplyFailure, buildNightChargeMorningSummary, buildNigh
  *       while a handed-back re-ON's retry can still come, and 'reOnRefused' when it cannot; a not-applied slot that reads
  *       ON since is not named as not taking effect. (review 6) The retry comes on a tick: the hold counts them at
  *       FORCE_CHARGE_TICK_MS (index.ts's cadence), so a hand-back stamped after its writes gets its retry or the push.
- *       (review 7) …to the earliest tick it can come (FORCE_CHARGE_TICK_LATE_TOL_MS): ticks that run late reach it a tick
- *       sooner, and a 'reOnRefused' push is never followed by the retry.
+ *       (review 7 counted to the earliest tick the retry can come, with a 1-s tolerance.) (review 8) The hold keeps a FULL
+ *       TICK of margin before the cutoff and the push is judged on the hand-back's own tick: never neither while a tick reads
+ *       before the cutoff after each hold; a 'reOnRefused' push may be followed by the retry, and its words say it may.
  *  W2 — a line re-ON is readback-checked FORCE_CHARGE_ON_VERIFY_AFTER_MS after it, like the first ON. (review 4) The check
  *       keeps the latest re-ON that took effect (lineReOnCheckedStamp), across the next re-ON and a restart.
  *  W3 — the morning account of a line-ask night: under the line said so; an unread close said so; the panel's
@@ -586,17 +587,21 @@ test('★★★ W1 (review 5) a re-ON handed back (every write rate-limited): no
   const last = WIN_END - 35 * M;
   assert.equal(nfc.lineReOnDue(handedBack(last), last + 15 * M, off59, [1, 2, 3]), null, 'the cutoff refuses the retry');
   assert.equal(due(handedBack(last), last + M, off59)?.cause, 'reOnRefused');
-  assert.equal(due(handedBack(last - 1), last - 1 + M, off59), null, 'a millisecond earlier the retry fits');
+  // (review 8) A millisecond earlier the retry fits, but its tick is due within a tick of the cutoff: pushed at once (the retry
+  // may follow, and the push says it may). A full tick earlier, held.
+  assert.equal(due(handedBack(last - 1), last - 1 + M, off59)?.cause, 'reOnRefused', 'the retry due within a tick of the cutoff');
+  assert.equal(due(handedBack(last - M - 1), last - 1, off59), null, 'due a full tick before the cutoff: held');
+  assert.equal(due(handedBack(last - M), last, off59)?.cause, 'reOnRefused');
   assert.equal(due(handedBack(WIN_END - 30 * M), WIN_END - 29 * M, off59)?.cause, 'reOnRefused');
   // After the spacing the push is the gates' to explain (here the grid not known present), as for any re-ON held.
   assert.equal(due(handedBack(H0), H0 + 16 * M, offReading({ poolSocPct: 59, slotSocPct: at(59), gridPresent: null }))?.cause, 'reOnHeld');
-  // The words: the add-on's own write cooldown refused it, and it does not try again tonight.
+  // The words: the add-on's own write cooldown refused it, and (review 8) it may try once more before the re-ON's cutoff.
   const build = (notify as unknown as { buildLineForceChargeAtRisk: (o: unknown) => { body: string } }).buildLineForceChargeAtRisk;
   const risk = due(handedBack(last), last + M, off59);
-  const body = build({ day: '2026-09-16', risk, closeText: '5am' }).body;
-  assert.ok(body.includes("The add-on's last try to switch Charge Now back on was refused by its own write cooldown; it does not try again tonight. "
+  const body = build({ day: '2026-09-16', risk, closeText: '5am', reOnCutoffText: '4:40am' }).body;
+  assert.ok(body.includes("The add-on's last try to switch Charge Now back on was refused by its own write cooldown; it may try once more before ~4:40am if the cooldown allows. "
     + 'To hold the line, switch Charge Now on for slot(s) 1, 2, 3 in the EcoFlow app (the add-on switches it off at the close).'), body);
-  assert.doesNotMatch(body, /grid known present|No action needed/);
+  assert.doesNotMatch(body, /grid known present|No action needed|does not try again/);
 });
 
 /** (review 6) A re-ON handed back (every write rate-limited) on the tick at `tHb`, stamped `lagMs` after it (index.ts stamps
@@ -605,13 +610,15 @@ const handedBackAt = (tHb: number, lagMs: number): S => onNight({ forceChargeLin
   forceChargeLineReOnAtMs: tHb + lagMs, forceChargeLineReOnSlots: null, forceChargeLineOffSlots: [1, 2, 3],
   forceChargeLinePoolSamples: [{ pct: 61, atMs: tHb - 12 * M }, { pct: 60, atMs: tHb - 2 * M }] });
 const OFF59 = offReading({ poolSocPct: 59, slotsOn: [], slotSocPct: at(59) });
-/** Every tick after the hand-back's, past the cutoff: the retry, and the push. Tick k fires k × (FORCE_CHARGE_TICK_MS +
- *  `driftMs`) after the hand-back's (setInterval re-arms from each callback's start, so the ticks drift later) and (review 7)
- *  reads its nowMs `lateMs(k)` after it fires. The push is once a night and the ticks run on after it, so a retry after a
- *  'reOnRefused' push ("it does not try again") is seen. */
+/** The hand-back's own tick (review 8: index.ts judges the push there, +0) and every tick after it, past the cutoff: the
+ *  retry, and the push. Tick k fires k × (FORCE_CHARGE_TICK_MS + `driftMs`) after the hand-back's (setInterval re-arms from
+ *  each callback's start, so the ticks drift later) and (review 7) reads its nowMs `lateMs(k)` after it fires. The push is
+ *  once a night and the ticks run on after it, so a retry after a 'reOnRefused' push is seen. */
 const afterHandBack = (tHb: number, lagMs: number, driftMs = 0, lateMs: (k: number) => number = () => 0): string[] => {
   let s = handedBackAt(tHb, lagMs);
   const ev: string[] = [];
+  const p0 = nfc.lineAtRiskPushDue(s, tHb, OFF59);
+  if (p0 != null) { ev.push(`+0 push ${p0.cause}`); s = { ...s, forceChargeLineAtRiskPushedAtMs: tHb } as S; }
   for (let k = 1; tHb + k * (M + driftMs) + lateMs(k) < WIN_END - 15 * M; k++) {
     const r = tick(s, tHb + k * (M + driftMs) + lateMs(k), OFF59);
     s = r.s;
@@ -641,22 +648,23 @@ test('★★★ W1 (review 6) the hand-back hold counts the ticks: the retry is 
   const SEC = 1000;
   const after = afterHandBack;
   // The probe's hand-backs, 35m50s and 35m30s before the close, the writes stamped 2 s after their tick: the 16th tick falls
-  // past the cutoff, so there is no retry — the push goes the next minute, as 'reOnRefused'.
-  assert.deepEqual(after(WIN_END - 35 * M - 50 * SEC, 2 * SEC), ['+1 push reOnRefused']);
-  assert.deepEqual(after(WIN_END - 35 * M - 30 * SEC, 2 * SEC), ['+1 push reOnRefused']);
+  // past the cutoff, so there is no retry — (review 8) the push goes on the hand-back's own tick, as 'reOnRefused'.
+  assert.deepEqual(after(WIN_END - 35 * M - 50 * SEC, 2 * SEC), ['+0 push reOnRefused']);
+  assert.deepEqual(after(WIN_END - 35 * M - 30 * SEC, 2 * SEC), ['+0 push reOnRefused']);
   // On the minute (the close plant's ticks) with the writes 2 s late: the 16th tick IS the cutoff instant, which refuses it.
-  assert.deepEqual(after(WIN_END - 36 * M, 2 * SEC), ['+1 push reOnRefused']);
-  // Ten seconds earlier the 16th tick is still before the cutoff: the retry comes on it, and nothing is pushed meanwhile.
-  assert.deepEqual(after(WIN_END - 36 * M - 10 * SEC, 2 * SEC), ['+16 lineReOn']);
-  assert.deepEqual(after(WIN_END - 37 * M + 10 * SEC, 2 * SEC), ['+16 lineReOn']);
-  // Stamped on its tick's own millisecond, the 15th tick is the retry: a hand-back 36 min out still gets it, 21 min out.
-  assert.deepEqual(after(WIN_END - 36 * M, 0), ['+15 lineReOn']);
+  assert.deepEqual(after(WIN_END - 36 * M, 2 * SEC), ['+0 push reOnRefused']);
+  // Ten seconds earlier the 16th tick is still before the cutoff, but (review 8) within a tick of it: the push goes at once,
+  // and the retry still comes on the 16th — the push said it may. A full tick earlier, held, and the retry alone.
+  assert.deepEqual(after(WIN_END - 36 * M - 10 * SEC, 2 * SEC), ['+0 push reOnRefused', '+16 lineReOn']);
+  assert.deepEqual(after(WIN_END - 37 * M + 10 * SEC, 2 * SEC), ['+0 push reOnRefused', '+16 lineReOn']);
+  assert.deepEqual(after(WIN_END - 37 * M - 1, 2 * SEC), ['+16 lineReOn']);
+  // Stamped on its tick's own millisecond, the 15th tick is the retry, a tick before the cutoff: pushed, then the retry.
+  assert.deepEqual(after(WIN_END - 36 * M, 0), ['+0 push reOnRefused', '+15 lineReOn']);
   // Swept: hand-back ticks 34-38 min before the close every 5 s, the stamp 0 ms, 1 ms, 2 s or 20 s after its tick, the ticks on
-  // the cadence or drifting 1 ms each. Every hand-back gets exactly one of the two: its retry, or the push — never neither
-  // (the reviewer's sweep of eed0363a: none from 35m05s to 36m00s out whenever the lag exceeded the drift), and never a
-  // 'reOnRefused' push followed by the retry it says does not come. (review 7) And the stamp 2-15 ms after its tick, between
-  // one tick's drift and fifteen: 36beb4b8 pushed on the first tick, counting to the 16th, and the drift brought the retry on
-  // the 15th — a push, then the retry, for every hand-back from 35m05s to 36m00s out.
+  // the cadence or drifting 1 ms each. Every hand-back gets its retry or the push — never neither (the reviewer's sweep of
+  // eed0363a: none from 35m05s to 36m00s out whenever the lag exceeded the drift). (review 7 also kept a 'reOnRefused' push
+  // from being followed by the retry; review 8 gives that up for the full tick of margin: 288 of the 882, each a hand-back
+  // whose retry's tick falls within a tick of the cutoff, pushed in words that say the add-on may try once more.)
   const runs: Array<[string, string[]]> = [];
   for (let back = 38 * M; back >= 34 * M; back -= 5 * SEC) {
     for (const lag of [0, 1, 2, 3, 5, 10, 15, 2 * SEC, 20 * SEC]) {
@@ -665,31 +673,30 @@ test('★★★ W1 (review 6) the hand-back hold counts the ticks: the retry is 
   }
   const { neither, both } = handBackOutcomes(runs);
   assert.deepEqual(neither, [], 'a hand-back with neither its retry nor the push');
-  assert.deepEqual(both, [], "a 'reOnRefused' push, then the retry");
+  assert.equal(both.length, 288, "a 'reOnRefused' push, then the retry");
+  assert.ok(both.every((b) => b.includes(': +0 push reOnRefused, +')), both.find((b) => !b.includes(': +0 push reOnRefused, +')));
   // The cadence the hold counts is the one index.ts runs the tick on: the actuation tick, and the safety tick.
   assert.equal(nfc.FORCE_CHARGE_TICK_MS, 60_000);
   assert.ok(INDEX.includes('setInterval(() => { void runNightActuationTick(); }, FORCE_CHARGE_TICK_MS);'), 'the actuation tick runs on the cadence the hold counts');
   assert.match(INDEX, /runForceChargeTick\(\{ forceDisabled: true \}\)[\s\S]{0,300}\n\}, FORCE_CHARGE_TICK_MS\);\nforceChargeSafetyTick\.unref\(\);/, 'and the safety tick');
 });
 
-test('★★★ W1 (review 7) the hand-back hold counts to the EARLIEST tick the retry can come: ticks that run late reach the stamp + 15 min sooner in the count, so a \'reOnRefused\' push is never followed by the retry', () => {
+test('★★★ W1 (review 7, review 8) the ticks run late and read late: a \'reOnRefused\' push followed by the retry is allowed, in words that say it may come — never neither', () => {
   // The round-7 reviewer's probe: the push is once a night, so one judged on an early tick is not taken back by a later one.
-  // setInterval only runs late (1-2 ms a tick measured on Node), and later ticks that run late reach the stamp + 15 min in
-  // fewer ticks. Stamped 5 ms after its tick 35m30s before the close, with the ticks 1 ms late each: 36beb4b8 counted to the
-  // 16th tick (past the cutoff) and pushed 'reOnRefused' — "it does not try again tonight" — on the first, and the 15th tick
-  // came 15 min after the stamp, before the cutoff: the retry, 14 min after the push.
+  // Stamped 5 ms after its tick 35m30s before the close, with the ticks 1 ms late each, 36beb4b8 pushed "it does not try again
+  // tonight" and the 15th tick brought the retry 14 min later. Review 7 counted to the earliest tick (a 1-s tolerance), and
+  // its own final review found both windows again (a tick read late on either side). (review 8) Pushed at once, on the
+  // hand-back's own tick, in words true either way; the retry comes on the 15th tick, before the cutoff.
   const SEC = 1000;
   const cutoff = WIN_END - nfc.FORCE_CHARGE_ON_RETRY_CUTOFF_MS;
-  assert.deepEqual(afterHandBack(WIN_END - 35 * M - 30 * SEC, 5, 1), ['+15 lineReOn']);
-  // On the cadence the retry would be the 16th tick, past the cutoff: none. The push waits for the 15th tick — the last the
-  // retry could have come on — and goes there, 20m30s before the close: still before the lead.
-  assert.deepEqual(afterHandBack(WIN_END - 35 * M - 30 * SEC, 5, 0), ['+15 push reOnRefused']);
-  // A stamp later than the tolerance (FORCE_CHARGE_TICK_LATE_TOL_MS) after its tick: no drift brings the 15th tick to it, so
-  // the push goes on the first tick (as review 6).
-  assert.deepEqual(afterHandBack(WIN_END - 35 * M - 30 * SEC, 2 * SEC, 1), ['+1 push reOnRefused']);
+  assert.deepEqual(afterHandBack(WIN_END - 35 * M - 30 * SEC, 5, 1), ['+0 push reOnRefused', '+15 lineReOn']);
+  // On the cadence the retry would be the 16th tick, past the cutoff: none. Pushed on the hand-back's tick (review 7 waited for
+  // the 15th, 14 min, to push).
+  assert.deepEqual(afterHandBack(WIN_END - 35 * M - 30 * SEC, 5, 0), ['+0 push reOnRefused']);
+  assert.deepEqual(afterHandBack(WIN_END - 35 * M - 30 * SEC, 2 * SEC, 1), ['+0 push reOnRefused']);
   // Swept with each tick's nowMs read up to 500 ms after it fires (the steps before the force-charge's, seeded), on the cadence
   // or drifting 1 ms a tick, hand-backs 34-38 min out every 5 s, stamped 0 ms, 1 ms, 5 ms or 2 s after their tick: never
-  // neither, never both.
+  // neither; 144 of the 392 pushed and then retried, all pushed on the hand-back's tick as 'reOnRefused'.
   const lateFor = (seed: number): ((k: number) => number) => {
     let x = seed >>> 0;
     const late = Array.from({ length: 64 }, () => { x = (Math.imul(x, 1103515245) + 12345) >>> 0; return Math.floor((x / 2 ** 32) * 501); });
@@ -705,17 +712,187 @@ test('★★★ W1 (review 7) the hand-back hold counts to the EARLIEST tick the
   }
   const { neither, both } = handBackOutcomes(runs);
   assert.deepEqual(neither, [], 'a hand-back with neither its retry nor the push');
-  assert.deepEqual(both, [], "a 'reOnRefused' push, then the retry");
-  // The one hand-back left with neither, pinned: the tick the hold waits for — due before the cutoff on the cadence — runs late
-  // onto it. A window of that tick's own lateness: here 1 ms (the 15th tick 1 ms late on the 14th's cadence lands on the cutoff
-  // instant). A millisecond either side, the retry or the push.
+  assert.equal(both.length, 144, "a 'reOnRefused' push, then the retry");
+  assert.ok(both.every((b) => b.includes(': +0 push reOnRefused, +')), both.find((b) => !b.includes(': +0 push reOnRefused, +')));
+  // Review 7's last neither, pinned there (the 15th tick 1 ms late on the 14th's cadence landed on the cutoff instant): pushed on
+  // the hand-back's tick, a millisecond either side too.
   const tHbLast = cutoff - 15 * (M + 1);
-  assert.deepEqual(afterHandBack(tHbLast, 5, 1), [], 'the 15th tick lands on the cutoff instant');
-  assert.deepEqual(afterHandBack(tHbLast - 1, 5, 1), ['+15 lineReOn']);
-  assert.deepEqual(afterHandBack(tHbLast + 1, 5, 1), ['+14 push reOnRefused']);
-  // The tolerance: the sweep's lateness and sixteen ticks' drift inside it, a tick far above it.
-  assert.equal(nfc.FORCE_CHARGE_TICK_LATE_TOL_MS, 1_000);
-  assert.ok(500 + 16 * 1 <= nfc.FORCE_CHARGE_TICK_LATE_TOL_MS && nfc.FORCE_CHARGE_TICK_LATE_TOL_MS * 60 <= nfc.FORCE_CHARGE_TICK_MS);
+  assert.deepEqual(afterHandBack(tHbLast, 5, 1), ['+0 push reOnRefused'], 'the 15th tick lands on the cutoff instant');
+  assert.deepEqual(afterHandBack(tHbLast - 1, 5, 1), ['+0 push reOnRefused', '+15 lineReOn']);
+  assert.deepEqual(afterHandBack(tHbLast + 1, 5, 1), ['+0 push reOnRefused']);
+});
+
+/* (review 8) THE HAND-BACK HOLD BY DESIGN. Rounds 5-7 tuned a predictive hold and each tuning opened the opposite window: a
+ * push that said "it does not try again tonight" and then the retry, or a hold for a tick that ran late onto the cutoff and
+ * neither came. The hold now keeps a FULL TICK of margin (every doubt settled on the side of the push), the push is judged on
+ * the hand-back's own tick too (index.ts), and the 'reOnRefused' words are true whether or not the retry comes. */
+
+/** (review 8) A night whose line re-ON is due on its next tick: the panel's stop 30 min before `t0`, the pool 61 → 60 → 59,
+ *  the slots reading OFF, no re-ON on the record yet. */
+const reOnDueAt = (t0: number): S => onNight({ forceChargeLinePanelOffAtMs: t0 - 30 * M, forceChargeLineReOns: 0,
+  forceChargeLineOffSlots: [1, 2, 3], forceChargeLinePoolSamples: [{ pct: 61, atMs: t0 - 12 * M }, { pct: 60, atMs: t0 - 2 * M }] });
+const CUTOFF = WIN_END - nfc.FORCE_CHARGE_ON_RETRY_CUTOFF_MS;
+interface Cadence { push: { k: number; atMs: number; cause: string } | null; retry: { k: number; atMs: number } | null; reads: Array<{ k: number; atMs: number }> }
+/** (review 8) index.ts's cadence, tick by tick. Tick 0 fires at `f0` and tick k FORCE_CHARGE_TICK_MS + `drift(k)` after tick
+ *  k − 1 (setInterval re-arms from each callback's start); each force step reads its nowMs `late(k)` after its tick fires (the
+ *  trailing-leg, cycle and reserve steps run first), so a later tick may read LESS late than the one that judged; a tick with
+ *  `skip(k)` finds the in-flight lock still held (the tick before ran past 60 s) and does nothing. On tick 0 the re-ON is
+ *  decided (decideForceCharge), every write refused by the add-on's own cooldown: the count returned, no slots, the stamp
+ *  `lagMs` after the read (Date.now() after the writes) — and the push judged on that same tick, as index.ts does. */
+const cadence = (f0: number, lagMs: number, drift: (k: number) => number = () => 0, late: (k: number) => number = () => 0,
+  skip: (k: number) => boolean = () => false): Cadence => {
+  const reads: Cadence['reads'] = [];
+  let push: Cadence['push'] = null;
+  let retry: Cadence['retry'] = null;
+  const t0 = f0 + late(0);
+  let s = reOnDueAt(f0);
+  const obs0 = nfc.lineNightObservations(s, t0, OFF59);
+  if (obs0 != null) s = { ...s, ...obs0 } as S;
+  assert.equal(decideForceCharge(s, t0, OFF59).kind, 'lineReOn', "the re-ON is due on the hand-back's tick");
+  reads.push({ k: 0, atMs: t0 });
+  s = { ...s, forceChargeLineReOnAtMs: t0 + lagMs, forceChargeLineReOnSlots: null } as S;
+  const p0 = nfc.lineAtRiskPushDue(s, t0, OFF59);
+  if (p0 != null) { push = { k: 0, atMs: t0, cause: p0.cause }; s = { ...s, forceChargeLineAtRiskPushedAtMs: t0 } as S; }
+  let fire = f0;
+  for (let k = 1; fire < WIN_END - 15 * M; k++) {
+    fire += M + drift(k);
+    if (skip(k)) continue;
+    const t = fire + late(k);
+    reads.push({ k, atMs: t });
+    const r = tick(s, t, OFF59);
+    s = r.s;
+    if (r.push != null) push = { k, atMs: t, cause: r.push.cause };
+    if (r.kind === 'lineReOn') { retry = { k, atMs: t }; break; }
+    assert.equal(r.kind, 'none', `+${k} ${r.kind}`);
+  }
+  return { push, retry, reads };
+};
+const outcomeOf = (c: Cadence): 'neither' | 'push' | 'retry' | 'both' =>
+  c.push != null ? (c.retry != null ? 'both' : 'push') : c.retry != null ? 'retry' : 'neither';
+/** A seeded per-tick value in 0..max (ms), for drift and read lateness. */
+const seeded = (seed: number, max: number): ((k: number) => number) => {
+  let x = (seed >>> 0) || 1;
+  const v = Array.from({ length: 48 }, () => { x = (Math.imul(x, 1103515245) + 12345) >>> 0; return Math.floor((x / 2 ** 32) * (max + 1)); });
+  return (k) => v[k] ?? 0;
+};
+/** (review 8) The sweep's counts, measured on the landed change: per outcome, and the pushes of the push-then-retry runs by
+ *  cause. With no tick lost, neither on none (31e87ca4: 6 in the first band — the awaited tick running late onto the cutoff —
+ *  and 10,769 hand-backs on the last tick before it, with no tick left for the push); push-then-retry 11,135 (31e87ca4: 3),
+ *  all in the first band, a hand-back whose retry's tick falls within a tick of the cutoff: one tick-wide band of hand-back
+ *  times, pushed for at once. With a tick lost, neither on 5, each the lost tick the one awaited (31e87ca4: 2,486). */
+const PIN_HANDBACK_CADENCE = {
+  noSkip: { runs: 43156, neither: 0, push: 25997, retry: 6024, both: 11135, bothCauses: { reOnRefused: 11135 } as Record<string, number> },
+  oneSkip: { runs: 86400, neither: 5, push: 24236, retry: 7009, both: 55150, bothCauses: { reOnRefused: 55150 } as Record<string, number> },
+};
+
+test('★★★ W1 (review 8) the hand-back hold keeps a FULL TICK of margin: swept at sub-second spacing near the cutoff, drift 0-5 ms a tick, reads 0-500 ms late (later ticks sometimes less late than the judging one), stamps 0 ms to 5 s late — never neither; with a tick lost to the in-flight lock, neither only where that tick is the one awaited', () => {
+  // The round-7 final reviewer's probes on 962e4668 (its afterHandBack: tick k at tHb + k × (M + drift) + late(k)):
+  // finding 1 — a stamp under 1 s after its tick waited for the 15th tick, which ran late onto the cutoff: neither.
+  assert.notEqual(outcomeOf(cadence(CUTOFF - 15 * (M + 3) + 2, 5, () => 3)), 'neither', '3 ms a tick');
+  assert.notEqual(outcomeOf(cadence(CUTOFF - 15 * M - 200, 5, () => 0, (k) => (k === 15 ? 210 : 0))), 'neither', 'the 15th tick read 210 ms late');
+  // finding 2 — the push tick read late, a later tick less late: 'reOnRefused' ("it does not try again tonight"), then the
+  // retry. That may still happen (the retry tick is due within a tick of the cutoff): the push words it as possible.
+  for (const c of [cadence(CUTOFF - 15 * M - 200, 0, () => 0, (k) => (k === 1 ? 500 : 0)), cadence(CUTOFF - 15 * M - 20, 0, () => 0, (k) => (k === 1 ? 30 : 0))]) {
+    assert.ok(outcomeOf(c) !== 'neither' && c.push?.cause === 'reOnRefused', JSON.stringify(c.push));
+  }
+  // The sweep with no tick lost: hand-back ticks every 100 ms from 17m30s to 15m30s before the re-ON's cutoff (where the awaited
+  // tick crosses a tick before the cutoff) and over the last 2 min before it (the last tick: no tick left for the retry),
+  // stamps 0 ms, 1 ms, 5 ms, 20 ms, 2 s and 5 s after their tick's read, and three tick models: on the cadence; drift 0-5 ms
+  // and reads 0-500 ms late, seeded; the hand-back's tick read 500 ms late, every later one on time, drifting 5 ms.
+  const models: Array<[string, (seed: number) => [(k: number) => number, (k: number) => number]]> = [
+    ['cadence', () => [() => 0, () => 0]],
+    ['seeded', (seed) => [seeded(seed, 5), seeded(seed * 7 + 3, 500)]],
+    ['judge late', () => [() => 5, (k) => (k === 0 ? 500 : 0)]],
+  ];
+  const tally = () => ({ runs: 0, neither: 0, push: 0, retry: 0, both: 0, bothCauses: {} as Record<string, number> });
+  const noSkip = tally();
+  const neither: string[] = [];
+  for (const [from, to] of [[CUTOFF - 17 * M - 30_000, CUTOFF - 15 * M - 30_000], [CUTOFF - 2 * M, CUTOFF]]) {
+    for (let f0 = from; f0 < to; f0 += 100) {
+      for (const lag of [0, 1, 5, 20, 2_000, 5_000]) {
+        for (const [name, model] of models) {
+          const [drift, late] = model(f0 + lag);
+          if (f0 + late(0) >= CUTOFF) continue; // no re-ON at or past the cutoff: no hand-back
+          const c = cadence(f0, lag, drift, late);
+          const o = outcomeOf(c);
+          noSkip.runs += 1;
+          noSkip[o] += 1;
+          if (o === 'neither') neither.push(`${(CUTOFF - f0) / 1000}s before the cutoff, lag ${lag} ms, ${name}`);
+          if (o === 'both') noSkip.bothCauses[c.push!.cause] = (noSkip.bothCauses[c.push!.cause] ?? 0) + 1;
+        }
+      }
+    }
+  }
+  assert.deepEqual(neither.slice(0, 10), [], `${neither.length} hand-backs with neither the retry nor the push`);
+  // Push-then-retry is the price of the margin: the retry's tick due within a tick of the cutoff is pushed for at once, and the
+  // retry may still come. Only as 'reOnRefused', whose words say it may (the next test).
+  assert.deepEqual(Object.keys(noSkip.bothCauses), noSkip.both > 0 ? ['reOnRefused'] : []);
+  // One tick lost to the in-flight lock (the tick before it held the lock past 60 s), at each of ticks 1-18, hand-backs every
+  // 100 ms from 17m10s to 15m10s before the cutoff, the stamp 5 ms or 2 s late; drift and reads seeded, or (adversarial) the
+  // tick after the lost one read 500 ms late, every other on time, drifting 5 ms. Every hold leaves two ticks of its own
+  // cadence before the cutoff, so neither needs the tick after the last hold to be lost (or a full tick late) and the one after
+  // it to land past the cutoff. Counted and pinned; each such run's last hold is checked.
+  const oneSkip = tally();
+  const badNeither: string[] = [];
+  for (let f0 = CUTOFF - 17 * M - 10_000; f0 < CUTOFF - 15 * M - 10_000; f0 += 100) {
+    for (const lag of [5, 2_000]) {
+      for (let lost = 1; lost <= 18; lost++) for (const adversarial of [false, true]) {
+        const drift = adversarial ? () => 5 : seeded(f0 + lag + lost, 5);
+        const late = adversarial ? (k: number) => (k === lost + 1 ? 500 : 0) : seeded(f0 * 3 + lag + lost, 500);
+        const c = cadence(f0, lag, drift, late, (k) => k === lost);
+        const o = outcomeOf(c);
+        oneSkip.runs += 1;
+        oneSkip[o] += 1;
+        if (o === 'both') oneSkip.bothCauses[c.push!.cause] = (oneSkip.bothCauses[c.push!.cause] ?? 0) + 1;
+        if (o === 'neither') {
+          const lastHold = c.reads.filter((r) => r.atMs < CUTOFF).at(-1)!;
+          if (!(lastHold.k + 1 === lost && lastHold.atMs + 2 * nfc.FORCE_CHARGE_TICK_MS < CUTOFF)) {
+            badNeither.push(`${(CUTOFF - f0) / 1000}s, lag ${lag}, tick ${lost} lost: last hold +${lastHold.k} at cutoff − ${CUTOFF - lastHold.atMs} ms`);
+          }
+        }
+      }
+    }
+  }
+  assert.deepEqual(badNeither.slice(0, 10), [], `${badNeither.length} neither not explained by the lost awaited tick`);
+  assert.deepEqual(Object.keys(oneSkip.bothCauses), oneSkip.both > 0 ? ['reOnRefused'] : []);
+  assert.deepEqual({ noSkip, oneSkip }, PIN_HANDBACK_CADENCE);
+});
+
+test('★★★ W1 (review 8) the margin is a full tick, and the hand-back\'s own tick is judged: a hand-back on the last tick before the cutoff is pushed on that tick; no tolerance constant is left', () => {
+  // The hold, at its edge: the retry's tick on this tick's cadence (the 16th after a stamp written after its tick's read) one
+  // full tick before the cutoff holds; a millisecond later, pushed at once.
+  const edge = CUTOFF - 17 * M; // the 16th tick lands at CUTOFF − M: R + one tick = CUTOFF
+  assert.deepEqual([outcomeOf(cadence(edge - 1, 5)), cadence(edge - 1, 5).retry?.k], ['retry', 16]);
+  assert.deepEqual([outcomeOf(cadence(edge, 5)), cadence(edge, 5).push?.k, cadence(edge, 5).retry?.k], ['both', 0, 16]);
+  // On the last tick before the cutoff (the next tick is past it, and the push's lead with it): pushed on the hand-back's tick.
+  for (const back of [1, 30_000, 59_999]) {
+    const c = cadence(CUTOFF - back, 5);
+    assert.deepEqual([outcomeOf(c), c.push?.k, c.push?.cause], ['push', 0, 'reOnRefused'], `${back} ms before the cutoff`);
+  }
+  // index.ts judges it there: the re-ON's branch, when every write came back rate-limited, after the stamp.
+  const reOn = TICK.slice(TICK.indexOf("if (action.kind === 'lineReOn') {"), TICK.indexOf("if (action.kind === 'onFailed') {"));
+  const stamp = reOn.indexOf('forceChargeLineReOnAtMs: Date.now(),');
+  const judged = reOn.indexOf('if (allLimited) pushLineAtRiskIfDue();');
+  assert.ok(stamp > 0 && judged > stamp, 'the hand-back judged for the push after its stamp, on its own tick');
+  assert.ok(TICK.includes("if (action.kind === 'none') {") && TICK.slice(TICK.indexOf("if (action.kind === 'none') {")).includes('    pushLineAtRiskIfDue();\n'));
+  // The margin makes the earliest-tick tolerance dead: it is gone.
+  assert.equal('FORCE_CHARGE_TICK_LATE_TOL_MS' in nfc, false);
+});
+
+test('★★★ W1 (review 8) the \'reOnRefused\' push is true whether or not the retry comes: the cooldown refused the switch-on, it may try once more before the re-ON\'s cutoff, and what to do now — never "it does not try again tonight"', () => {
+  const build = (notify as unknown as { buildLineForceChargeAtRisk: (o: unknown) => { body: string } }).buildLineForceChargeAtRisk;
+  const c = cadence(CUTOFF - 16 * M, 5);
+  assert.equal(c.push?.cause, 'reOnRefused');
+  const risk = nfc.lineAtRiskPushDue({ ...reOnDueAt(CUTOFF - 16 * M), forceChargeLineReOnAtMs: CUTOFF - 16 * M + 5, forceChargeLineReOnSlots: null } as S, CUTOFF - 16 * M, OFF59);
+  const body = build({ day: '2026-09-16', risk, closeText: '5:00 AM', reOnCutoffText: '4:40 AM' }).body;
+  assert.ok(body.includes("The add-on's last try to switch Charge Now back on was refused by its own write cooldown; it may try once more before ~4:40 AM if the cooldown allows. "
+    + 'To hold the line, switch Charge Now on for slot(s) 1, 2, 3 in the EcoFlow app (the add-on switches it off at the close).'), body);
+  assert.doesNotMatch(body, /does not try again|grid known present|No action needed/);
+  // index.ts gives the push the re-ON's cutoff (the close less FORCE_CHARGE_ON_RETRY_CUTOFF_MS) and words its log line alike.
+  assert.ok(TICK.includes('const reOnCutoffText = fmtSiteClock(risk.closeAtMs - FORCE_CHARGE_ON_RETRY_CUTOFF_MS);'));
+  assert.ok(TICK.includes('        reOnCutoffText,\n      })).catch('));
+  assert.ok(TICK.includes("risk.cause === 'reOnRefused'"));
+  assert.doesNotMatch(TICK, /does not try again/);
 });
 
 test('★★ W1 (review 5) a slot its check found not applied that reads ON since is not named as not taking effect', () => {

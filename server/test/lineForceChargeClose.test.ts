@@ -58,8 +58,10 @@ import { buildNightChargeMorningSummary } from '../src/notify.js';
  * re-ON handed back rate-limited ('reOnLimited') is never pushed as the gates inside its retry's spacing (PIN_REVIEW5).
  * (review 6) …nor lost: with the ticks off the minute (`phaseMs`) and every re-ON stamped after its writes (`lagMs`, as
  * index.ts stamps Date.now()), each hand-back with a tick left before the push's lead gets its retry or the push, never
- * neither and never both (PIN_REVIEW6). And a person's ON followed by the panel's stop at its ceiling ('reOnPerson') is
- * stamped as a stop, and the morning names it.
+ * neither (PIN_REVIEW6). And a person's ON followed by the panel's stop at its ceiling ('reOnPerson') is stamped as a stop,
+ * and the morning names it. (review 8) The push is judged on the hand-back's own tick too (index.ts), so one on the last tick
+ * before the cutoff is pushed there; the hold keeps a full tick of margin, so a push may be followed by the retry (counted);
+ * and no night without a hand-back changes (PIN_REVIEW8_IDENTITY).
  * Three discriminators show the grid can see the mutants it is meant to kill: a software stop at ⌈L⌉ (design
  * A's hold, F-i), a start timed to ⌈L⌉ without the + 5 (F-iii), and no re-ON after the latch.
  * (A5, T18) A LINE WITHIN 10 POINTS OF FULL is armed and runs as a 90% line (start 95, ceiling 100): its nights under the
@@ -214,9 +216,14 @@ function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Varian
     } else if (a.kind === 'lineReOn') {
       if (variant === 'reOnLimited' && !handedBack) {
         // (review 5) index.ts: every write rate-limited — the count handed back, no slots, the stamp moved to the write.
-        // (review 6) …stamped `lagMs` after the tick (Date.now() after the writes).
+        // (review 6) …stamped `lagMs` after the tick (Date.now() after the writes). (review 8) …and the push judged on this,
+        // the hand-back's own tick, after the stamp (index.ts pushLineAtRiskIfDue).
         handedBack = true; handBackAtMs = t;
         s = { ...s, forceChargeLineReOnAtMs: t + kn.lagMs, forceChargeLineReOnSlots: null };
+        if (pushedAtMs == null) {
+          const risk = nfc.lineAtRiskPushDue(s, t, o);
+          if (risk != null) { pushedAtMs = t; pushCause = risk.cause; s = { ...s, forceChargeLineAtRiskPushedAtMs: t }; }
+        }
       } else if (variant !== 'noReOn') {
         if (handBackAtMs != null && retryAtMs == null) retryAtMs = t;
         s = { ...s, forceChargeLineReOns: s.forceChargeLineReOns + 1, forceChargeLineReOnAtMs: t + kn.lagMs, forceChargeLineReOnSlots: [...a.slots] };
@@ -284,8 +291,9 @@ const KS = [0.9, 1.0, 1.1, 1.25];
  *  log fired; `heldPushes` — pushes whose cause is 'reOnHeld'. (review 5) `refusedPushes` — pushes whose cause is
  *  'reOnRefused' (a handed-back re-ON whose retry the cutoff refuses). (review 6) `handBacks` — nights with a hand-back;
  *  `lost` — of them, those with neither its retry nor a push though a tick came between the hand-back and the lead;
- *  `lastTick` — those handed back on the last tick before the re-ON's cutoff (the next tick is at or past it and the push's
- *  lead: no retry, no push); `refusedRetried` — a 'reOnRefused' push followed by the retry it says does not come;
+ *  `lastTick` — those handed back on the last tick before the re-ON's cutoff with no retry and no push (the next tick is at or
+ *  past the cutoff and the push's lead; review 8 pushes on the hand-back's own tick); `refusedRetried` — a 'reOnRefused'
+ *  push followed by the retry (review 8: allowed, its words say the add-on may try once more);
  *  `personOn` — nights a person's ON took effect; `personStop` — of them, those the panel stopped at its ceiling after it;
  *  `stopStamped` — of those, the panel's stop on the record after the person's ON; `stopNamed` — the morning account naming
  *  the panel's stop as what ended the charge. */
@@ -488,7 +496,7 @@ test('★★★ T7 (review 5) an ON seen on the readback that no ON write of our
   assert.deepEqual(got, PIN_REVIEW5);
 });
 
-test('★★★ T7 (review 6) with the ticks off the minute and each re-ON stamped after its writes, a handed-back re-ON with a tick left before the lead gets its retry or the push — never neither, never both; a person\'s ON the panel then stops is stamped and named; pinned exactly', () => {
+test('★★★ T7 (review 6, review 8) with the ticks off the minute and each re-ON stamped after its writes, every handed-back re-ON gets its retry or the push — never neither, a push then the retry counted; a person\'s ON the panel then stops is stamped and named; pinned exactly', () => {
   const runs: Array<[string, Variant, Partial<Knobs>]> = [
     ['reOnLimited, stamped 2 s after its tick', 'reOnLimited', { lagMs: 2_000 }],
     ['reOnLimited, ticks 30 s off the minute, stamped 2 s after', 'reOnLimited', { phaseMs: 30_000, lagMs: 2_000 }],
@@ -512,15 +520,50 @@ test('★★★ T7 (review 6) with the ticks off the minute and each re-ON stamp
   }
   for (const [label, t] of Object.entries(got)) {
     // No hand-back loses both its retry and the push (eed0363a held the push while the stamp + 15 min fell before the cutoff,
-    // and the retry came a tick later, past it), and no 'reOnRefused' push ("it does not try again tonight") is followed by one.
-    assert.equal(t.lost, 0, `${label}: ${t.lost} hand-backs with neither the retry nor the push`);
-    assert.equal(t.refusedRetried, 0, `${label}: ${t.refusedRetried} 'reOnRefused' pushes followed by the retry`);
+    // and the retry came a tick later, past it); (review 8) nor one on the last tick before the cutoff (pushed on its own
+    // tick). A 'reOnRefused' push may be followed by the retry (its words say the add-on may try once more): counted, pinned.
+    assert.equal(t.lost + t.lastTick, 0, `${label}: ${t.lost + t.lastTick} hand-backs with neither the retry nor the push`);
     assert.equal(t.shapes + t.heldCause, 0, `${label}: shape logs or 'reOnHeld' pushes`);
     // A person's ON that the panel stops at its ceiling is a stop on the record, and the morning names it.
     assert.equal(t.stopStamped, t.personStop, `${label}: ${t.stopStamped} of ${t.personStop} stops after the person's ON stamped`);
     assert.equal(t.stopNamed, t.personStop, `${label}: ${t.stopNamed} of ${t.personStop} named by the morning account`);
   }
   assert.deepEqual(got, PIN_REVIEW6);
+});
+
+/** (review 8) Every night WITHOUT a hand-back, fingerprinted (FNV-1a over each night's close, ON minutes, re-ONs, failed
+ *  re-ONs, push instant and cause, shape-log instant and ON-kind writes), per variant over every PREDICTED cell (year and
+ *  70-90% lines, rounded and floored): measured on 31e87ca4 before the review-8 hold, and unchanged by it — the full-tick
+ *  margin and the push on the hand-back's own tick touch only a night with a hand-back. */
+const PIN_REVIEW8_IDENTITY: Record<string, { nights: number; fnv: string }> = {
+  real: { nights: 7480, fnv: '84fe8d1f' }, onLatch: { nights: 7480, fnv: 'b154cb0c' }, reOnInert: { nights: 7480, fnv: 'b5faf202' },
+  reOnLate: { nights: 7480, fnv: '29a9ab56' }, reOnGlitch: { nights: 7480, fnv: 'edd54d84' }, reOnPerson: { nights: 7480, fnv: 'a70a011e' },
+  'reOnLimited, stamped 2 s after its tick (nights with no hand-back)': { nights: 4202, fnv: 'c829e4a1' },
+};
+test('★★★ T7 (review 8) identity: no night without a hand-back changes — every PREDICTED night of every variant, and the reOnLimited nights with none, fingerprinted as on 31e87ca4', () => {
+  const fnv = (h: number, str: string): number => { for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; } return h; };
+  const runs: Array<[string, Variant, Partial<Knobs>]> = [
+    ['real', 'real', {}], ['onLatch', 'onLatch', {}], ['reOnInert', 'reOnInert', {}], ['reOnLate', 'reOnLate', {}],
+    ['reOnGlitch', 'reOnGlitch', {}], ['reOnPerson', 'reOnPerson', {}],
+    ['reOnLimited, stamped 2 s after its tick (nights with no hand-back)', 'reOnLimited', { lagMs: 2_000 }],
+  ];
+  const got: Record<string, { nights: number; fnv: string }> = {};
+  for (const [label, variant, knobs] of runs) {
+    let h = 2166136261;
+    let nights = 0;
+    for (const [, kn] of PREDICTED) {
+      for (const [lines, floor] of [[YEAR_LINES, false], [YEAR_LINES, true], [HIGH_LINES, false], [HIGH_LINES, true]] as const) {
+        for (const L of lines as number[]) for (const hk of HOUSES) for (const k of KS) {
+          const r = night(L, hk, k, { ...BASE, ...kn, ...knobs, floor }, variant);
+          if (r.handBackAtMs != null) continue;
+          nights += 1;
+          h = fnv(h, `${L}|${hk}|${k}|${floor}|${r.close}|${r.onMin}|${r.reOns}|${r.reOnsFailed}|${r.pushedAtMs}|${r.pushCause}|${r.shapeAtMs}|${r.onWrites};`);
+        }
+      }
+    }
+    got[label] = { nights, fnv: h.toString(16).padStart(8, '0') };
+  }
+  assert.deepEqual(got, PIN_REVIEW8_IDENTITY);
 });
 
 test('★★★ T7 the line force-charge actually runs: ON to the close on a 50% pool, no OFF before it', () => {
@@ -816,12 +859,15 @@ const PIN_REON_INERT_HELD_PUSHES = 6;
  *  - reOnLimited: every night under reached. 356 pushes are 'reOnRefused' — a hand-back 22-35 min before the close, whose
  *    retry would fall inside the re-ON's 20-min cutoff (236 of those nights still held on their margin) — and none
  *    'reOnHeld' inside a retry's spacing (3,256 before); the other 92 on held nights are reOnLate's kind (flat at ⌈L⌉
- *    beside an 11 kW or larger EV). Its re-ONs are stamped on their tick's own minute: PIN_REVIEW6 stamps them later. */
+ *    beside an 11 kW or larger EV). Its re-ONs are stamped on their tick's own minute: PIN_REVIEW6 stamps them later.
+ *    (review 8) 404 'reOnRefused', every one on the hand-back's own tick: +18 handed back 21 min out (the last tick before the
+ *    cutoff, no push before), +30 handed back 36 min out (the retry's tick, 21 min out, within a tick of the cutoff: pushed,
+ *    then retried), each on a night that held (held 328 → 376). */
 const PIN_REVIEW5 = {
   reOnLate: { under: 0, reached: 0, held: 88, shapes: 0, heldCause: 0, refused: 0 },
   reOnGlitch: { under: 0, reached: 0, held: 7, shapes: 0, heldCause: 0, refused: 0 },
   reOnPerson: { under: 2078, reached: 1550, held: 933, shapes: 0, heldCause: 0, refused: 0 },
-  reOnLimited: { under: 121, reached: 121, held: 328, shapes: 0, heldCause: 0, refused: 356 },
+  reOnLimited: { under: 121, reached: 121, held: 376, shapes: 0, heldCause: 0, refused: 404 },
 };
 /** (review 6) Summed over every PREDICTED cell (7,480 nights each, rounded and floored, year and 70-90% lines), as PIN_REVIEW5
  *  plus: `handBacks`, `lost` (neither the retry nor a push, a tick left before the lead), `lastTick` (handed back on the last
@@ -834,17 +880,21 @@ const PIN_REVIEW5 = {
  *    and every night under reached. The other 187 pushes on held nights are reOnLate's kind (flat at ⌈L⌉ beside an 11 kW or
  *    larger EV, 26-36 min after the retry; 92 with the stamp on its tick).
  *  - …with the ticks 30 s off the minute too: the same — eed0363a lost 31, 22 of the 155 under never reached.
+ *  - (review 8) with the full tick of margin and the push on the hand-back's own tick: 429 'reOnRefused' (431 off the minute),
+ *    every one on that tick — +18 (17) handed back on the last tick before the cutoff, which had neither (`lastTick`, now 0),
+ *    and +25 (20) whose retry's tick falls within a tick of the cutoff, pushed and then retried (`refusedRetried`), all on
+ *    nights that held (held 428 → 471, 426 → 463).
  *  - reOnPerson: of the 2,476 nights a person's ON took effect, 3 reach the panel's ceiling before the close; each stop is on
  *    the record and named by the morning account. (Its re-ONs never take effect, so the recorded stop stays before them and
  *    the re-ON's own rule stamped these 3 at eed0363a too; the round-6 reviewer's night — the stop re-stamped after a re-ON
  *    that took effect, then a person's ON — is lineForceChargeAtRisk.test.ts's.) */
 const PIN_REVIEW6: Record<string, Record<string, number>> = {
   'reOnLimited, stamped 2 s after its tick': {
-    under: 146, reached: 146, held: 428, shapes: 0, heldCause: 0, refused: 386, handBacks: 3278, lost: 0, lastTick: 18, refusedRetried: 0,
+    under: 146, reached: 146, held: 471, shapes: 0, heldCause: 0, refused: 429, handBacks: 3278, lost: 0, lastTick: 0, refusedRetried: 25,
     personOn: 0, personStop: 0, stopStamped: 0, stopNamed: 0,
   },
   'reOnLimited, ticks 30 s off the minute, stamped 2 s after': {
-    under: 155, reached: 155, held: 426, shapes: 0, heldCause: 0, refused: 394, handBacks: 3292, lost: 0, lastTick: 17, refusedRetried: 0,
+    under: 155, reached: 155, held: 463, shapes: 0, heldCause: 0, refused: 431, handBacks: 3292, lost: 0, lastTick: 0, refusedRetried: 20,
     personOn: 0, personStop: 0, stopStamped: 0, stopNamed: 0,
   },
   reOnPerson: {
