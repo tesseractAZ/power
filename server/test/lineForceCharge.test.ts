@@ -1768,8 +1768,8 @@ const PIN_T23: Record<'np' | 'm', { plans: number; armed: number; carried: numbe
 };
 
 for (const basis of ['np', 'm'] as const) {
-  test(`★★★ T23 (${basis === 'np' ? 'nameplate' : '×0.944'}) a mid-day leg grid at 4-20 h (floors 26-40, 4.5-10 kW, two pools, P50 sun ×0, 0.1, 0.3, 1): as the cushion rises the armed target and ceiling never fall, an armed line never disarms, no leg is held over a line above 50, no carried leg closes under its line undisclosed`, () => {
-    const s = { m1: 0, m2: 0, m3: 0, m4: 0, undisclosedUnder: 0, heldOverLine: 0 };
+  test(`★★★ T23 (${basis === 'np' ? 'nameplate' : '×0.944'}) a mid-day leg grid at 4-20 h (floors 26-40, 4.5-10 kW, two pools, P50 sun ×0, 0.1, 0.3, 1): as the cushion rises the armed target and ceiling never fall, an armed line never disarms, no leg is held over a line above 50, a qualifying leg is armed or disclosed, no carried leg closes under its line undisclosed`, () => {
+    const s = { m1: 0, m2: 0, m3: 0, m4: 0, undisclosedUnder: 0, heldOverLine: 0, carrierRest: 0 };
     const pin = { plans: 0, armed: 0, carried: 0, nearFull: 0, lineMode: 0, reentryNotes: 0, kinds: {} as Record<string, number>, eFalls: 0, buyFalls: 0 };
     const ex: string[] = [];
     const gates = { cost: true, line: true };
@@ -1793,6 +1793,8 @@ for (const basis of ['np', 'm'] as const) {
         if (k != null) pin.kinds[k] = (pin.kinds[k] ?? 0) + 1;
         if (p.middayReentryHold != null && lineL != null && Math.min(100, Math.ceil(lineL - 1e-9)) > 50) { s.heldOverLine += 1; note(`held over a ${lineL}% line`); }
         if (r.armed && p.cushionShortfall !== true && lineL != null && E != null && E < lineL - 0.05 - 1e-9) { s.undisclosedUnder += 1; note(`carried ~${E}% under ${lineL}%`); }
+        if (lineL != null && p.chargeTonight && p.cushionBasis === 'islanded-outage' && Math.min(100, Math.ceil(lineL - 1e-9)) > 50
+          && (p.requiredExtraKwh ?? 0) > 0 && !r.armed && p.cushionShortfallCause == null) { s.carrierRest += 1; note('qualifying, neither armed nor disclosed'); }
         if (prev != null && !(prev.line != null && lineL != null && lineL < prev.line - 1e-9)) {
           const fell = (a: number | null, b: number | null) => a != null && (b == null || b < a - 1e-9);
           if (fell(prev.target, r.target)) { s.m1 += 1; note(`target ${prev.target} → ${r.target}`); }
@@ -1805,7 +1807,7 @@ for (const basis of ['np', 'm'] as const) {
         prev = r;
       }
     }
-    assert.deepEqual(s, { m1: 0, m2: 0, m3: 0, m4: 0, undisclosedUnder: 0, heldOverLine: 0 }, ex.join('\n'));
+    assert.deepEqual(s, { m1: 0, m2: 0, m3: 0, m4: 0, undisclosedUnder: 0, heldOverLine: 0, carrierRest: 0 }, ex.join('\n'));
     assert.deepEqual(pin, PIN_T23[basis]);
   });
 }
