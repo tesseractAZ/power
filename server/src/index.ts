@@ -68,6 +68,8 @@ import {
   forceChargeLineNightPct, forceChargeOnFailureNight, type ForceChargeOpts,
   // v1.200.0 (review 4) — what a line re-ON's readback check stamps, the re-ON that took effect included.
   lineReOnCheckedStamp,
+  // v1.200.0 (review 6) — the force-charge tick's cadence, which the line-at-risk push's hand-back hold counts.
+  FORCE_CHARGE_TICK_MS,
 } from './nightForceCharge.js';
 import {
   extractSettingsSurface, evaluateDrift, freshDriftState, loadConfirmedSurface,
@@ -7473,7 +7475,7 @@ if (nightChargeEnabled) {
   nightEveningTick.unref();
   // v1.50.0 — supervised-write actuator (v1.187.0: apply at window open, revert at
   // window close — APPLY_LEAD_MS / REVERT_LAG_MS are 0; both fail-closed, both audited).
-  const nightActuationTick = setInterval(() => { void runNightActuationTick(); }, 60 * 1000);
+  const nightActuationTick = setInterval(() => { void runNightActuationTick(); }, FORCE_CHARGE_TICK_MS);
   nightActuationTick.unref();
   // R4 — the winter mid-day cycle in shadow: computed and recorded, never written (middayShadow.ts).
   const nightMiddayShadowTick = setInterval(() => { void runMiddayShadowTick(); }, 60 * 1000);
@@ -7505,7 +7507,7 @@ const forceChargeSafetyTick = setInterval(() => {
   runForceChargeTick({ forceDisabled: true })
     .catch((e: any) => app.log.warn(`night-charge: force-charge safety tick failed (${e?.message ?? e})`))
     .finally(() => { nightActuationInFlight = false; });
-}, 60 * 1000);
+}, FORCE_CHARGE_TICK_MS);
 forceChargeSafetyTick.unref();
 
 // v1.91.0 — these four engines are independent of night charge and must run

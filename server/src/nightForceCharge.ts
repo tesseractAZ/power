@@ -1396,6 +1396,10 @@ export const FORCE_CHARGE_LINE_TREND_MS = 10 * 60_000;
  *  later than that, after the push reaches a phone and the app is opened, buys under ~4 points at the measured
  *  ~14 kW — the push would arrive when nothing can still move the close. */
 export const FORCE_CHARGE_LINE_AT_RISK_LEAD_MS = FORCE_CHARGE_MIN_RUN_MS;
+/** v1.200.0 (review 6) — the force-charge tick's cadence: index.ts runs the night actuation tick (and the force-charge
+ *  safety tick) on a setInterval of this. A decision that waits for a later tick counts the ticks by it
+ *  (lineAtRiskPushDue's hand-back hold): a later tick lands a whole number of these after this one, not at any instant. */
+export const FORCE_CHARGE_TICK_MS = 60_000;
 
 /** v1.200.0 (review 2) — one pool reading of a line night's trail (forceChargeLinePoolSamples). */
 export interface LinePoolSample { pct: number; atMs: number }
@@ -1467,7 +1471,9 @@ function oursOf(s: Pick<NightActuationState, 'forceChargeSlots'>): number[] {
  *  - the PANEL'S OWN STOP (forceChargeLinePanelOffAtMs): after the verified ON, a live readback showing every slot
  *    of ours OFF with a Core at the panel's stop ceiling (one point under it counts: a reading taken just after
  *    the last slot latched). It is the shape measured on 2026-09-23 and 2026-10-02. Stamped once per episode: a
- *    second latch re-stamps it only once a re-ON's readback grace has run (a re-ON just written still reads OFF);
+ *    second latch re-stamps it only once a re-ON's readback grace has run (a re-ON just written still reads OFF), or
+ *    (review 6) after a slot of ours seen ON again since the stop (forceChargeLineOnSeenAtMs, a reading: no grace) — a
+ *    person's ON after the push that the panel then stops at its ceiling is a stop of its own;
  *  - (review 5) THE SLOTS READ OFF (forceChargeLineOffSlots), and an ON SEEN AGAIN (forceChargeLineOnSeenAtMs): a slot
  *    the last live readback showed OFF reading ON now, outside the FORCE_CHARGE_ON_VERIFY_AFTER_MS readback grace of an
  *    ON write of ours that reached the panel (the last re-ON with slots on the record, else the ON's last attempt).
@@ -1495,7 +1501,9 @@ export function lineNightObservations(
     });
     const prev = s.forceChargeLinePanelOffAtMs;
     const reOn = s.forceChargeLineReOnAtMs;
-    const newEpisode = prev == null || (reOn != null && reOn > prev && nowMs - reOn >= FORCE_CHARGE_ON_VERIFY_AFTER_MS);
+    const seenOn = s.forceChargeLineOnSeenAtMs;
+    const newEpisode = prev == null || (reOn != null && reOn > prev && nowMs - reOn >= FORCE_CHARGE_ON_VERIFY_AFTER_MS)
+      || (seenOn != null && seenOn > prev);
     if (allOff && coreAtStop && newEpisode) out.forceChargeLinePanelOffAtMs = nowMs;
     const offNow = ours.filter((n) => !o.slotsOn!.includes(n));
     const prevOff = s.forceChargeLineOffSlots ?? [];
@@ -1515,8 +1523,8 @@ export function lineNightObservations(
  *  - 'reOnHeld' — a re-ON is possible but its gates hold it (the grid not known present, red vitals, no
  *    coherent reading, no live panel ceiling the pool is under);
  *  - 'reOnRefused' — (review 5) the last re-ON came back rate-limited on every write (the add-on's own per-slot write
- *    cooldown; handed back: no slots on the record) and its retry, FORCE_CHARGE_ON_VERIFY_AFTER_MS later, falls at or
- *    after the re-ON's cutoff: the add-on does not try again tonight;
+ *    cooldown; handed back: no slots on the record) and its retry — (review 6) the first tick FORCE_CHARGE_ON_VERIFY_AFTER_MS
+ *    or more after it — falls at or after the re-ON's cutoff: the add-on does not try again tonight;
  *  - 'costMode' — a COST-DOMINANT night: its cost force-charge has its own stop and no re-ON. */
 export type LineAtRiskCause = 'onNotRising' | 'reOnSpent' | 'reOnNotApplied' | 'reOnHeld' | 'reOnRefused' | 'costMode';
 
@@ -1561,7 +1569,7 @@ export interface LineAtRisk {
  *    more) is an economic level, and falling short of it is no line risk; ⌈L⌉ + H is the same margin over the
  *    line the line mode times its start and its re-ON to;
  *  - the add-on cannot act on it now: no re-ON due, nor (review 5) a handed-back re-ON's retry still to come before the
- *    re-ON's cutoff;
+ *    re-ON's cutoff — (review 6) on a tick, counted at FORCE_CHARGE_TICK_MS from this one;
  *  - the pool NOT RISING against a reading at least FORCE_CHARGE_LINE_TREND_MS older taken at least
  *    FORCE_CHARGE_ON_VERIFY_AFTER_MS after the last ON of ours (lineTrendReference, review 3) — so none while a re-ON (or
  *    the ON) may yet take effect; FALLING under the threshold, or FLAT at or under ⌈L⌉ (review 3: a flat pool above
@@ -1594,10 +1602,18 @@ export function lineAtRiskPushDue(s: NightActuationState, nowMs: number, o: Forc
   // spacing has run. While that retry can still come before the re-ON's cutoff, it is the add-on's to make: no push (one
   // here blamed the gates — "it needs the grid known present, …" — 14 min before the add-on switched Charge Now back on).
   // A retry the cutoff refuses is none: the push goes, as 'reOnRefused'.
+  // (review 6) The retry comes on a TICK: the first one FORCE_CHARGE_ON_VERIFY_AFTER_MS or more after the stamp, a whole
+  // number of FORCE_CHARGE_TICK_MS from this one — not at the stamp + 15 min. index.ts stamps a hand-back after its writes,
+  // a little after its tick's nowMs, so that tick is the 16th after the hand-back's: held while the stamp + 15 min fell
+  // before the cutoff, a hand-back 35-36 min before the close got neither its retry (the cutoff) nor the push (the lead).
+  // Judged again on every tick, so setInterval's drift is counted from the latest one; what is left is one tick's lateness.
   const reOnAt = s.forceChargeLineReOnAtMs;
   const handedBack = reOnAt != null && (s.forceChargeLineReOnSlots == null || s.forceChargeLineReOnSlots.length === 0)
     && s.forceChargeLineReOns < FORCE_CHARGE_LINE_REON_MAX && nowMs - reOnAt < FORCE_CHARGE_ON_VERIFY_AFTER_MS;
-  if (handedBack && reOnAt! + FORCE_CHARGE_ON_VERIFY_AFTER_MS < closeAtMs - FORCE_CHARGE_ON_RETRY_CUTOFF_MS) return null;
+  if (handedBack) {
+    const retryAtMs = nowMs + Math.ceil((reOnAt! + FORCE_CHARGE_ON_VERIFY_AFTER_MS - nowMs) / FORCE_CHARGE_TICK_MS) * FORCE_CHARGE_TICK_MS;
+    if (retryAtMs < closeAtMs - FORCE_CHARGE_ON_RETRY_CUTOFF_MS) return null;
+  }
   // (review 3) The trend only on readings after the last ON of ours had its readback grace (lineTrendReference): no
   // push while an ON (or re-ON) may yet take effect, nor against the fall that called for it.
   const ref = lineTrendReference(s, nowMs);
