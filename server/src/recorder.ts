@@ -758,6 +758,16 @@ export interface NightLedgerRow {
    *  whose line is on the nameplate pool. */
   cushion_pool_scale: number | null;
   cushion_pool_scale_basis: string | null;
+  /** v1.201.0 — the Cores' standby the islanded-outage cushion counted (NightChargePlan.cushionStandby;
+   *  nightChargeAdvisor.cushionStandbyKwh): the figure (W, the runway's pool overhead for the connected Cores),
+   *  its basis ('runway-overhead', or 'implausible' — 0 W — where the figure passed was no reading) and its
+   *  energy over the cushion's hours (kWh, inside cushion_kwh). With them the row explains its own line step:
+   *  cushion_kwh − cushion_standby_kwh is the cushion without the standby, to its rounding. NULL where none
+   *  applied (a legacy-pct or disabled cushion, a null plan) and on rows written before v1.201.0, whose cushion
+   *  has no standby. */
+  cushion_standby_w: number | null;
+  cushion_standby_basis: string | null;
+  cushion_standby_kwh: number | null;
   /** v1.200.0 — the outage line above the 50% reserve the plan CARRIES with the night force-charge to the
    *  window close: its ask, ⌈line⌉ (NightChargePlan.forceChargeLine.askPct; lineForceChargeLedgerColumns).
    *  NULL where the plan carries none, on a null plan, and on every row written before v1.200.0. A strike on
@@ -1144,6 +1154,8 @@ const NIGHT_LEDGER_COLUMNS: readonly (keyof NightLedgerRow)[] = [
   'window_close_soc_pct',
   // v1.199.0 — the measured capacity scale the cushion line was converted on.
   'cushion_pool_scale', 'cushion_pool_scale_basis',
+  // v1.201.0 — the Cores' standby the islanded-outage cushion counted.
+  'cushion_standby_w', 'cushion_standby_basis', 'cushion_standby_kwh',
   // v1.200.0 — the outage line above the reserve envelope: carried (its ask) or disclosed.
   'cushion_line_force_charge_pct', 'cushion_envelope_shortfall',
   // v1.189.0 — the charge cycle (NightLedgerRow.window_kind).
@@ -1426,6 +1438,8 @@ export function createRecorder(
     'window_close_soc_pct REAL',
     // v1.199.0 — see NightLedgerRow.cushion_pool_scale.
     'cushion_pool_scale REAL', 'cushion_pool_scale_basis TEXT',
+    // v1.201.0 — see NightLedgerRow.cushion_standby_w.
+    'cushion_standby_w REAL', 'cushion_standby_basis TEXT', 'cushion_standby_kwh REAL',
     // v1.200.0 — see NightLedgerRow.cushion_line_force_charge_pct.
     'cushion_line_force_charge_pct REAL', 'cushion_envelope_shortfall INTEGER',
     // v1.189.0 — the charge cycle, from the list the allowlist reads (CHARGE_CYCLE_LEDGER_SCHEMA).

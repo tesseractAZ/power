@@ -128,6 +128,8 @@ import {
   RUNWAY_DISCHARGE_EFFICIENCY,
   hourlyRateCents,
   mpcFallbackPair,
+  // v1.201.0 — the runway's overhead rule, read by the cushion standby's door alone (cushionStandbyOverheadW).
+  runwayPoolOverheadW,
 } from './analytics.js';
 import type {
   ProbabilisticForecast, MultiDayForecast, DayForecast, EvWindowPrediction, ForecastHour,
@@ -223,6 +225,8 @@ import {
   buildCostSurplusLoad, costSurplusLedgerColumns,
   // v1.199.0 — the cushion line's measured capacity scale: its ledger columns and its log line.
   cushionPoolScaleLedgerColumns, cushionScaleLogText, type CushionPoolScale, type CushionScaleBasis,
+  // v1.201.0 — the Cores' standby in the outage cushion: its ledger columns and its log line.
+  cushionStandbyLedgerColumns, cushionStandbyLogText,
   lineForceChargeLedgerColumns,
   // v1.187.22 — the expected buy: its ledger columns, and what a spoken line states (the level
   // the write drives to and the expected draw — never the worst case, which only logs name).
@@ -2740,6 +2744,13 @@ function measuredCushionScale(
     return null;
   }
 }
+/** v1.201.0 — THE PLANNER'S SECOND RUNWAY-BASIS INPUT (runwayBasisContracts.test.ts, SCOPE): the Cores' standby
+ *  draw the islanded-outage cushion counts, W — the runway's own overhead rule for the connected Cores the cushion
+ *  tracker counted (measuredCushionScale's result, the same snapshot). Never under the runway's floor while the
+ *  panel reports a pool: a tracker that threw (null) counts no Core, which is that floor. */
+function cushionStandbyOverheadW(poolScale: { connectedCores: number } | null, poolReported: boolean): number {
+  return runwayPoolOverheadW(poolScale?.connectedCores ?? 0, poolReported);
+}
 const lastPanelRunways = new Map<string, PanelRunway>();
 const panelRunwayAlarms = new Map<string, ReturnType<typeof createRunwayAlarm>>();
 const panelRunwayGrid = new Map<string, GridBackstop>();
@@ -3064,6 +3075,8 @@ let lastLoggedBuyDebiasKey: string | null = null;
 let lastLoggedCostLoadKey: string | null = null;
 // v1.199.0 — the cushion line's capacity basis: last logged value (log on change only).
 let lastLoggedCushionScaleKey: string | null = null;
+// v1.201.0 — the Cores' standby the outage cushion counts: last logged value (log on change only).
+let lastLoggedCushionStandbyW: number | null = null;
 /**
  * v1.125.0 — the ISLANDED load, kW: the SHP2's own circuit sum.
  *
@@ -3758,6 +3771,14 @@ async function recomputeNightChargePlan(
       app.log.info(cushionScaleLogText(cushionPoolScale));
     }
   }
+  // v1.201.0 — THE CORES' STANDBY IN THE OUTAGE CUSHION: the runway's pool overhead figure for the Cores the
+  // tracker above counted, the panel reporting a pool (fullWh > 0 here). The second door through the SCOPE
+  // contract: the same snapshot, before the first await. Logged on change, live legs only.
+  const cushionStandbyW = cushionStandbyOverheadW(cushionPoolScale, fullWh > 0);
+  if (!shadowLeg && cushionStandbyW !== lastLoggedCushionStandbyW) {
+    lastLoggedCushionStandbyW = cushionStandbyW;
+    app.log.info(cushionStandbyLogText(cushionStandbyW, cushionPoolScale?.connectedCores ?? 0));
+  }
 
   // I11 — SoC coherence (% vs remainWh/fullWh). false ⇒ the sizer returns null.
   const socCoherent = remainWh != null && Math.abs((remainWh / fullWh) * 100 - socNowPct) <= 8;
@@ -4078,6 +4099,8 @@ async function recomputeNightChargePlan(
     outageCushionHours, islandedLoadSafety, objectiveMode, costMaxSocPct,
     // v1.199.0 — the cushion line's measured capacity scale (null: the nameplate line).
     cushionPoolScale,
+    // v1.201.0 — the Cores' standby draw the islanded-outage cushion counts (W; the runway's figure).
+    cushionStandbyW,
     legEff, dischargeEff, chargeCapKw, gridInputCapKw,
     periodIdAt, cheapPeriodId, cheapNight, windowScanHours: 30,
     bandHours, dayRollups, realizedDailyErrHalfFrac, nextRechargeMs,
@@ -4317,6 +4340,9 @@ function recordNightPlanRow(planDate: string, plan: NightChargePlan, extras: Nig
     // v1.199.0 — the measured capacity scale that line was converted on, and its basis. Written
     // unconditionally (null with none), for the same reason.
     ...cushionPoolScaleLedgerColumns(plan),
+    // v1.201.0 — the Cores' standby the cushion counted: its figure, basis and energy. Written unconditionally
+    // (null with none), for the same reason.
+    ...cushionStandbyLedgerColumns(plan),
     // v1.200.0 — the outage line above the reserve envelope: the ask carried by the night force-charge,
     // or the envelope disclosed. Written unconditionally (null with none), for the same reason.
     ...lineForceChargeLedgerColumns(plan),

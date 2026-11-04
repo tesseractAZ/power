@@ -45,11 +45,14 @@ import type { DeviceSnapshot } from '../src/snapshot.js';
  *
  * (1) SCOPE — the measured basis is scoped to the runway and its alarms: the night-charge
  *     planner, its cushion, the JIT force-charge and the MPC/dispatch recommendations are
- *     UNCHANGED, with ONE exception (v1.199.0): the cushion LINE's kWh → percent conversion
+ *     UNCHANGED, with TWO exceptions. (v1.199.0) The cushion LINE's kWh → percent conversion
  *     takes the house pool's measured capacity scale, so the reserve written at the line holds
  *     the whole cushion on the packs' measured capacity (nightChargeAdvisor.ts cushionLineKwh).
  *     It enters through one door, pinned below: index.ts measuredCushionScale, evaluated on the
- *     main thread's own tracker from the planner's own snapshot. The day forecast,
+ *     main thread's own tracker from the planner's own snapshot. (v1.201.0) The islanded-outage
+ *     cushion counts the Cores' standby draw for its hours: the runway's overhead figure for the
+ *     connected Cores that tracker counted — one number, through a second door pinned below
+ *     (index.ts cushionStandbyOverheadW), read once in the advisor (plausibleStandbyW). The day forecast,
  *     the probabilistic band and the multi-day forecast now carry a measured SoC trajectory;
  *     everything the planner and the MPC read from them must be byte-identical between the
  *     pre-v1.187.19 basis (the legacy override: nameplate kWh, load/η) and the measured one,
@@ -239,6 +242,16 @@ test('★★★ SCOPE — the planner and MPC inputs are byte-identical on the l
   // …and the exception is real, not vacuous: the scale moves the line (16% + 12.77 kWh on 92.16 × 0.944).
   assert.deepEqual(scaledM.cushionPoolScale, SCALE);
   assert.deepEqual([sizedM.cushionLineSocPct, scaledM.cushionLineSocPct], [29.86, 30.68]);
+  // v1.201.0 — the second exception, the same way: the standby figure passed to both (with and without the
+  // scale) gives identical plans, and it is real — 12.77 + 4 h × 0.27 kW = 13.85 kWh of cushion.
+  const standbyL = planFrom(legacy, nowMs, { ...sized, cushionStandbyW: 270 });
+  const standbyM = planFrom(measured, nowMs, { ...sized, cushionStandbyW: 270 });
+  assert.deepEqual(standbyM, standbyL);
+  const bothL = planFrom(legacy, nowMs, { ...sized, cushionPoolScale: SCALE, cushionStandbyW: 270 });
+  const bothM = planFrom(measured, nowMs, { ...sized, cushionPoolScale: SCALE, cushionStandbyW: 270 });
+  assert.deepEqual(bothM, bothL);
+  assert.deepEqual([sizedM.cushionKwh, standbyM.cushionKwh], [12.77, 13.85]);
+  assert.deepEqual([standbyM.cushionLineSocPct, bothM.cushionLineSocPct], [31.03, 31.92]);
   // The recommend-only dispatch plan reads the panel's own figures and the PV/load series.
   resetForecastCachesForTesting();
   const dL = computeDispatchPlan(fleet(), legacy.fc);
@@ -262,7 +275,7 @@ function topLevelFunctions(text: string): Map<string, string> {
   return out;
 }
 
-test('★★★ SCOPE — source pins: the planner, JIT force-charge and MPC never read the measured basis — except the cushion line, through ONE door', () => {
+test('★★★ SCOPE — source pins: the planner, JIT force-charge and MPC never read the measured basis — except the cushion line and its standby, through TWO doors', () => {
   const SRC = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
   const src = (p: string) => readFileSync(resolve(SRC, p), 'utf8');
   const index = src('index.ts');
@@ -279,9 +292,15 @@ test('★★★ SCOPE — source pins: the planner, JIT force-charge and MPC nev
   // So is every other way to the scale that does not spell `cushionPoolScale` itself: the ledger
   // helper that returns it (cushionPoolScale\w+: cushionPoolScaleLedgerColumns), the ledger's columns
   // (cushion_pool_scale, _basis) and the tracker's file (defaultPoolEnergyBasisPath, pool-energy-basis*).
-  const forbidden = /\b(projectedSocPct|minProjectedSoc|minProjectedSocTs|p10SocPct|p50SocPct|p90SocPct|pAboveReservePct|pFullCharge|socPct|poolFullWh|poolCapacityScale|poolCapacityBasis|poolOverheadW|runwayDrainW|runwayEnergyBasis|capacityScale|computeRunway|panelPoolBasisTracker|PoolEnergyBasisTracker|cushionPoolBasisTracker|measuredCushionScale|cushionPoolScale\w+|cushion_pool_scale\w*|defaultPoolEnergyBasisPath|pool-energy-basis)\b|report\('runway'\)|report<[^>]*>\('runway'\)/;
+  // v1.201.0 — and the runway's overhead in every spelling: its rule (runwayPoolOverheadW — the old
+  // \bpoolOverheadW\b never matched it), its options, its marginal efficiency, the second door and the standby's
+  // ledger helper and columns.
+  const forbidden = /\b(projectedSocPct|minProjectedSoc|minProjectedSocTs|p10SocPct|p50SocPct|p90SocPct|pAboveReservePct|pFullCharge|socPct|poolFullWh|poolCapacityScale|poolCapacityBasis|poolOverheadW|runwayDrainW|runwayEnergyBasis|capacityScale|computeRunway|panelPoolBasisTracker|PoolEnergyBasisTracker|cushionPoolBasisTracker|measuredCushionScale|cushionPoolScale\w+|cushion_pool_scale\w*|defaultPoolEnergyBasisPath|pool-energy-basis|runwayPoolOverheadW|RUNWAY_POOL_OVERHEAD_FLOOR_W|RUNWAY_CORE_OVERHEAD_W|RUNWAY_DRAIN_MARGINAL_EFFICIENCY|cushionStandbyOverheadW|cushionStandbyLedgerColumns|cushion_standby\w*)\b|report\('runway'\)|report<[^>]*>\('runway'\)/;
+  assert.ok(forbidden.test('runwayPoolOverheadW(3, true)') && forbidden.test('cushion_standby_w'), 'the hole is closed');
   /** Every spelling of the scale itself: the plan's field, the ledger helper and the ledger's columns. */
   const SCALE = /\bcushionPoolScale\w*|\bcushion_pool_scale\w*/;
+  /** v1.201.0 — every spelling of the standby: the inputs' and the plan's fields, the helpers, the ledger's columns. */
+  const STANDBY = /\bcushionStandby\w*|\bcushion_standby\w*/;
 
   // ── (b) THE DOOR, pinned exactly ─────────────────────────────────────────────────────────────
   // The house panel's own main-thread tracker and file, and the helper that reads it: the scale and
@@ -315,6 +334,25 @@ test('★★★ SCOPE — source pins: the planner, JIT force-charge and MPC nev
   const LEDGER = '    ...cushionPoolScaleLedgerColumns(plan),\n';
   assert.equal(count(index, 'cushionPoolScaleLedgerColumns('), 1, 'the ledger helper, called once');
   assert.equal(count(tops.get('recordNightPlanRow') ?? '', LEDGER), 1, 'by recordNightPlanRow, into the row');
+
+  // ── (b2) v1.201.0 — THE SECOND DOOR, pinned exactly ─────────────────────────────────────────────
+  // The runway's own overhead rule for the Cores the cushion tracker counted (the scale door's result), the
+  // panel reporting a pool: one number, W. A tracker that threw (null) counts no Core — the runway's floor.
+  const DOOR_B = [
+    'function cushionStandbyOverheadW(poolScale: { connectedCores: number } | null, poolReported: boolean): number {',
+    '  return runwayPoolOverheadW(poolScale?.connectedCores ?? 0, poolReported);',
+    '}',
+  ].join('\n');
+  assert.equal(tops.get('cushionStandbyOverheadW'), DOOR_B, 'the second door, character for character');
+  assert.equal(count(index, 'cushionStandbyOverheadW('), 2, 'defined, and called once');
+  assert.equal(count(index, 'runwayPoolOverheadW('), 1, 'the runway rule, called by the door alone');
+  assert.equal(count(index, 'runwayPoolOverheadW'), 2, 'imported, and read by the door alone');
+  const analyticsImport = index.slice(0, index.indexOf("} from './analytics.js';"));
+  assert.ok(analyticsImport.slice(analyticsImport.lastIndexOf('import {')).includes('\n  runwayPoolOverheadW,\n'), 'imported from analytics.ts');
+  // The standby's ledger helper returns the figure: called once, by the ledger writer, into the row.
+  const LEDGER_B = '    ...cushionStandbyLedgerColumns(plan),\n';
+  assert.equal(count(index, 'cushionStandbyLedgerColumns('), 1, 'the standby ledger helper, called once');
+  assert.equal(count(tops.get('recordNightPlanRow') ?? '', LEDGER_B), 1, 'by recordNightPlanRow, into the row');
   // In the planner: the device map read once, the door called once from it, BEFORE the first await
   // (the scale and fullWh from one snapshot), its result logged on a live leg and passed as an input.
   const plan = fnBody('recomputeNightChargePlan');
@@ -326,29 +364,46 @@ test('★★★ SCOPE — source pins: the planner, JIT force-charge and MPC nev
   assert.ok(plan.indexOf('  const fullKwh = fullWh / 1000;\n') < plan.indexOf(CALL), 'beside the pool it converts on');
   assert.ok(plan.includes(`${CALL}  if (!shadowLeg) {\n`), 'a shadow leg evaluates the tracker (and writes its file) but never logs');
   assert.ok(plan.includes('    // v1.199.0 — the cushion line\'s measured capacity scale (null: the nameplate line).\n    cushionPoolScale,\n'), 'passed as the input');
+  // v1.201.0 — the second door: called once, from the scale door's result and the pool fullWh came from, after
+  // the scale's log block and before the first await; logged on a live leg only; passed as an input once.
+  const CALL_B = '  const cushionStandbyW = cushionStandbyOverheadW(cushionPoolScale, fullWh > 0);\n';
+  assert.equal(count(plan, CALL_B), 1);
+  assert.equal(count(plan, 'cushionStandbyOverheadW('), 1);
+  assert.ok(plan.indexOf(CALL) < plan.indexOf(CALL_B) && plan.indexOf(CALL_B) < plan.indexOf('await '), 'beside the scale, before the first await');
+  assert.ok(plan.indexOf('  const fullKwh = fullWh / 1000;\n') < plan.indexOf(CALL_B));
+  assert.ok(plan.includes(`      app.log.info(cushionScaleLogText(cushionPoolScale));\n    }\n  }\n${'  // '}`), 'the scale\'s log block closes before the second door');
+  assert.ok(plan.includes(`${CALL_B}  if (!shadowLeg && cushionStandbyW !== lastLoggedCushionStandbyW) {\n`), 'a shadow leg never logs the standby');
+  const PASS_B = "    // v1.201.0 — the Cores' standby draw the islanded-outage cushion counts (W; the runway's figure).\n    cushionStandbyW,\n";
+  assert.equal(count(plan, PASS_B), 1, 'passed as the input');
+  assert.equal(count(plan, '\n    cushionStandbyW,\n'), 1, 'one deps line');
 
   // ── (a) + (d) the planner, the JIT force-charge, the reserve actuator, the MPC: no forbidden token —
   // the planner's body with EXACTLY the one pinned call line removed first, the others with none.
   for (const name of ['recomputeNightChargePlan', 'runForceChargeTick', 'runNightActuationTickInner']) {
-    const body = name === 'recomputeNightChargePlan' ? plan.replace(CALL, '') : fnBody(name);
+    const body = name === 'recomputeNightChargePlan' ? plan.replace(CALL, '').replace(CALL_B, '') : fnBody(name);
     assert.ok(body.includes('backupFullCapWh'), `${name} must read the panel's own pool capacity`);
     assert.ok(!forbidden.test(body), `${name} reads ${body.match(forbidden)?.[0]}`);
-    if (name !== 'recomputeNightChargePlan') assert.ok(!SCALE.test(body), `${name} takes the cushion scale (${body.match(SCALE)?.[0]})`);
+    if (name !== 'recomputeNightChargePlan') {
+      assert.ok(!SCALE.test(body), `${name} takes the cushion scale (${body.match(SCALE)?.[0]})`);
+      assert.ok(!STANDBY.test(body) && !/\bcushionStandbyW\b/.test(body), `${name} takes the cushion standby (${body.match(STANDBY)?.[0]})`);
+    }
   }
   const recommend = index.slice(index.indexOf("app.get('/api/dispatch/recommend'"), index.indexOf("app.get('/api/backtest/forecast'"));
   assert.ok(recommend.length > 100 && !forbidden.test(recommend), `MPC reads ${recommend.match(forbidden)?.[0]}`);
   assert.ok(!SCALE.test(recommend), `MPC takes the cushion scale (${recommend.match(SCALE)?.[0]})`);
+  assert.ok(!STANDBY.test(recommend), `MPC takes the cushion standby (${recommend.match(STANDBY)?.[0]})`);
 
   // ── (c) NO LAUNDERING through a helper. The token check above reads only the consumer's own text,
   // so a helper holding the tokens would pass it. Every top-level function of index.ts the consumers
-  // reach, by name, at any depth, must hold no forbidden token — except the one allowlisted pair
-  // (recomputeNightChargePlan → measuredCushionScale), which is not descended into.
+  // reach, by name, at any depth, must hold no forbidden token — except the two allowlisted pairs
+  // (recomputeNightChargePlan → measuredCushionScale, and v1.201.0 recomputeNightChargePlan →
+  // cushionStandbyOverheadW), which are not descended into.
   assert.ok(tops.size >= 85, `${tops.size} top-level functions: the walk must see the module`);
-  for (const n of ['recomputeNightChargePlan', 'runForceChargeTick', 'runNightActuationTickInner', 'measuredCushionScale', 'reconnectObsDevices']) {
+  for (const n of ['recomputeNightChargePlan', 'runForceChargeTick', 'runNightActuationTickInner', 'measuredCushionScale', 'cushionStandbyOverheadW', 'reconnectObsDevices']) {
     assert.ok(tops.has(n), `the walk sees ${n}`);
   }
   const tainted = [...tops].filter(([, b]) => forbidden.test(b)).map(([n]) => n);
-  assert.ok(tainted.includes('reconnectObsDevices') && tainted.includes('measuredCushionScale'), `the walk sees a tainted function (${tainted.join(', ')})`);
+  assert.ok(tainted.includes('reconnectObsDevices') && tainted.includes('measuredCushionScale') && tainted.includes('cushionStandbyOverheadW'), `the walk sees a tainted function (${tainted.join(', ')})`);
   assert.ok(tainted.includes('recordNightPlanRow'), 'the walk sees the ledger writer, which holds the scale, as tainted');
   const refs = (body: string, self: string): string[] =>
     [...new Set([...body.matchAll(/\b([A-Za-z_]\w*)\b/g)].map((m) => m[1]))].filter((n) => n !== self && tops.has(n));
@@ -363,18 +418,25 @@ test('★★★ SCOPE — source pins: the planner, JIT force-charge and MPC nev
       const [from, n] = queue.shift()!;
       if (seen.has(n)) continue;
       seen.add(n);
-      if (from === 'recomputeNightChargePlan' && n === 'measuredCushionScale') continue; // THE door
+      if (from === 'recomputeNightChargePlan' && (n === 'measuredCushionScale' || n === 'cushionStandbyOverheadW')) continue; // THE doors
       const b = tops.get(n)!;
       assert.ok(!forbidden.test(b), `${root} reaches ${n} (from ${from}), which reads ${b.match(forbidden)?.[0]}`);
       assert.ok(!SCALE.test(b), `${root} reaches ${n} (from ${from}), which takes the cushion scale (${b.match(SCALE)?.[0]})`);
+      assert.ok(!STANDBY.test(b), `${root} reaches ${n} (from ${from}), which takes the cushion standby (${b.match(STANDBY)?.[0]})`);
       for (const m of refs(b, n)) queue.push([n, m]);
     }
-    if (root !== 'recomputeNightChargePlan') assert.ok(!seen.has('measuredCushionScale'), `${root} reaches the door`);
+    if (root !== 'recomputeNightChargePlan') {
+      assert.ok(!seen.has('measuredCushionScale'), `${root} reaches the door`);
+      assert.ok(!seen.has('cushionStandbyOverheadW'), `${root} reaches the second door`);
+    }
   }
 
   // ── (e) THE ADVISOR: nothing of the runway's basis; the scale read once, into the one line ────────
+  // v1.201.0 — nor the runway's overhead rule, its options or its marginal efficiency, comments included: the
+  // advisor names the runway's options in words only, and takes the figure as one number (cushionStandbyW).
   const advisor = src('nightChargeAdvisor.ts');
-  assert.ok(!/poolEnergyBasis|runwayDrainW|runwayEnergyBasis|RUNWAY_CORE_OVERHEAD_W/.test(advisor), 'nightChargeAdvisor.ts must not read the runway basis');
+  const RUNWAY_IN_ADVISOR = /poolEnergyBasis|runwayDrainW|runwayEnergyBasis|RUNWAY_CORE_OVERHEAD_W|runwayPoolOverheadW|RUNWAY_POOL_OVERHEAD_FLOOR_W|RUNWAY_DRAIN_MARGINAL_EFFICIENCY|\boverheadW\b/;
+  assert.ok(!RUNWAY_IN_ADVISOR.test(advisor), `nightChargeAdvisor.ts must not read the runway basis (${advisor.match(RUNWAY_IN_ADVISOR)?.[0]})`);
   // Its imports are the ones it had: no module reaches the planner that is not named here. Every module
   // specifier in the file counts — a static import, a re-export, a dynamic import(), wherever it sits.
   const advisorImports = [...new Set([...advisor.matchAll(/(?:\bfrom\s+|\bimport\s*\(?\s*)['"]([^'"]+)['"]/g)].map((m) => m[1]))].sort();
@@ -399,6 +461,35 @@ test('★★★ SCOPE — source pins: the planner, JIT force-charge and MPC nev
     '...(cushionLine.applied != null ? { cushionPoolScale: cushionLine.applied } : {}),',
   ]);
   assert.equal(count(advisor, 'cushionLine.'), count(sizing, 'cushionLine.'), 'nowhere outside the sizing');
+  // v1.201.0 — the standby: read ONCE (plausibleStandbyW, the validated figure every later reader takes), turned
+  // into the cushion's energy once, and added to the load leg once — before the one line, which divides the
+  // whole cushion by the scale.
+  const STANDBY_LINES = [
+    '  const standbyW = plausibleStandbyW(inputs.cushionStandbyW);',
+    '  const standby = cushionStandbyKwh({ cushionBasis: cushion.basis, outageHours: inputs.outageCushionHours ?? DEFAULT_OUTAGE_CUSHION_HOURS, standby: standbyW });',
+    "  const cushionKwh = standby?.basis === 'runway-overhead' ? round2(cushion.kwh + standby.kwh) : cushion.kwh;",
+    '  const cushionBasis = cushion.basis;',
+    '',
+  ].join('\n');
+  assert.equal(count(sizing, STANDBY_LINES), 1, 'the standby read once, added once, into the one cushion');
+  assert.ok(sizing.indexOf(STANDBY_LINES) < sizing.indexOf(LINE), 'before the line divides the cushion by the scale');
+  assert.equal(count(sizing, 'inputs.cushionStandbyW'), 1);
+  assert.equal(count(sizing, 'const cushionKwh ='), 1, 'one cushion');
+  assert.equal(count(advisor, 'plausibleStandbyW('), 2, 'THE ONE READ: defined, and called once');
+  assert.equal(count(advisor, 'cushionStandbyKwh('), 2, 'defined, and called once');
+  // Every code use of the validated figure and its energy in the sizing (comment lines aside): the three lines,
+  // the rationale's clause, and the two plan spreads.
+  const isCode = (l: string): boolean => !/^(\/\/|\*|\/\*)/.test(l);
+  const standbyUses = [...sizing.matchAll(/^.*\b(?:standby|standbyW)\b.*$/gm)].map((m) => m[0].trim()).filter(isCode);
+  assert.deepEqual(standbyUses, [
+    'const standbyW = plausibleStandbyW(inputs.cushionStandbyW);',
+    'const standby = cushionStandbyKwh({ cushionBasis: cushion.basis, outageHours: inputs.outageCushionHours ?? DEFAULT_OUTAGE_CUSHION_HOURS, standby: standbyW });',
+    "const cushionKwh = standby?.basis === 'runway-overhead' ? round2(cushion.kwh + standby.kwh) : cushion.kwh;",
+    "const standbyNote = standby != null && standby.basis === 'runway-overhead' && standby.w > 0",
+    "? `, ${round1(standby.kwh)} kWh of it the runway's ${Math.round(standby.w)} W standby figure`",
+    '...(standby != null ? { cushionStandby: standby } : {}),',
+    '...(standby != null ? { cushionStandby: standby } : {}),',
+  ]);
 
   // ── (f) EVERY place the scale may appear, across src (code lines; comment lines aside) ───────────
   // Every spelling (SCALE): the plan's field, the ledger helper that returns it and the ledger's
@@ -426,6 +517,9 @@ test('★★★ SCOPE — source pins: the planner, JIT force-charge and MPC nev
       "const scaleKey = cushionPoolScale == null ? 'unavailable'",
       ': `${cushionPoolScale.basis}:${cushionPoolScale.scale.toFixed(4)}:${cushionPoolScale.connectedCores}`;',
       'app.log.info(cushionScaleLogText(cushionPoolScale));',
+      // v1.201.0 — the second door's call reads the first door's result (its Core count), and so does its log.
+      'const cushionStandbyW = cushionStandbyOverheadW(cushionPoolScale, fullWh > 0);',
+      'app.log.info(cushionStandbyLogText(cushionStandbyW, cushionPoolScale?.connectedCores ?? 0));',
       'cushionPoolScale,', // deps
       '...cushionPoolScaleLedgerColumns(plan),', // recordNightPlanRow: written, never read back
     ]],
@@ -446,6 +540,49 @@ test('★★★ SCOPE — source pins: the planner, JIT force-charge and MPC nev
     const code = src(f).split('\n').map((l) => l.trim()).filter((l) => SCALE.test(l) && !isComment(l));
     assert.deepEqual(code, ALLOWED.get(f) ?? [], `${f}: the cushion scale appears where no pin allows it`);
   }
+  // v1.201.0 — the same inventory for the standby (STANDBY): every code line, in file order.
+  const ALLOWED_STANDBY = new Map<string, string[]>([
+    ['nightChargeAdvisor.ts', [
+      'cushionStandbyW?: number | null;', // NightChargeInputs
+      'cushionStandby?: CushionStandby;', // NightChargePlan
+      'const standbyW = plausibleStandbyW(inputs.cushionStandbyW);', // THE ONE READ
+      'const standby = cushionStandbyKwh({ cushionBasis: cushion.basis, outageHours: inputs.outageCushionHours ?? DEFAULT_OUTAGE_CUSHION_HOURS, standby: standbyW });',
+      '...(standby != null ? { cushionStandby: standby } : {}),', // the hold plan
+      '...(standby != null ? { cushionStandby: standby } : {}),', // the charge plan
+      'cushionStandbyW?: number | null;', // NightChargeInputDeps
+      'cushionStandbyW,', // buildNightChargeInputs' destructure
+      '...(cushionStandbyW !== undefined ? { cushionStandbyW } : {}),', // and its pass-through
+      'export function cushionStandbyKwh(o: {', // the energy over the cushion's hours
+      'export function cushionStandbyLedgerColumns(', // the ledger helper: the plan's standby, to the row
+      "plan: Pick<NightChargePlan, 'cushionStandby'>,",
+      '): { cushion_standby_w: number | null; cushion_standby_basis: string | null; cushion_standby_kwh: number | null } {',
+      'cushion_standby_w: plan.cushionStandby?.w ?? null,',
+      'cushion_standby_basis: plan.cushionStandby?.basis ?? null,',
+      'cushion_standby_kwh: plan.cushionStandby?.kwh ?? null,',
+      'export function cushionStandbyLogText(w: number, connectedCores: number): string {', // the log line
+    ]],
+    ['index.ts', [
+      'cushionStandbyLedgerColumns, cushionStandbyLogText,', // the import
+      'function cushionStandbyOverheadW(poolScale: { connectedCores: number } | null, poolReported: boolean): number {', // THE second door
+      'const cushionStandbyW = cushionStandbyOverheadW(cushionPoolScale, fullWh > 0);',
+      'if (!shadowLeg && cushionStandbyW !== lastLoggedCushionStandbyW) {',
+      'lastLoggedCushionStandbyW = cushionStandbyW;',
+      'app.log.info(cushionStandbyLogText(cushionStandbyW, cushionPoolScale?.connectedCores ?? 0));',
+      'cushionStandbyW,', // deps
+      '...cushionStandbyLedgerColumns(plan),', // recordNightPlanRow: written, never read back
+    ]],
+    ['recorder.ts', [
+      'cushion_standby_w: number | null;',
+      'cushion_standby_basis: string | null;',
+      'cushion_standby_kwh: number | null;',
+      "'cushion_standby_w', 'cushion_standby_basis', 'cushion_standby_kwh',",
+      "'cushion_standby_w REAL', 'cushion_standby_basis TEXT', 'cushion_standby_kwh REAL',",
+    ]],
+  ]);
+  for (const f of files) {
+    const code = src(f).split('\n').map((l) => l.trim()).filter((l) => STANDBY.test(l) && !isComment(l));
+    assert.deepEqual(code, ALLOWED_STANDBY.get(f) ?? [], `${f}: the cushion standby appears where no pin allows it`);
+  }
 
   // ── (g) NO LAUNDERING through another module ───────────────────────────────────────────────────
   // The runway's basis module is imported where it was, and by index.ts only for its two trackers'
@@ -460,11 +597,14 @@ test('★★★ SCOPE — source pins: the planner, JIT force-charge and MPC nev
     const callers = files.filter((f) => f !== 'poolEnergyBasis.ts' && src(f).includes(fn));
     assert.deepEqual(callers, [], `${fn} is called outside poolEnergyBasis.ts`);
   }
+  // v1.201.0 — the runway's overhead rule is called where the runway computes it and by the second door only.
+  assert.deepEqual(files.filter((f) => src(f).includes('runwayPoolOverheadW(')).sort(), ['analytics.ts', 'index.ts']);
 
   for (const f of ['nightForceCharge.ts', 'nightChargeActuator.ts', 'dispatch/mpc.ts']) {
     const s = src(f);
     assert.ok(!/poolEnergyBasis|runwayDrainW|runwayEnergyBasis|RUNWAY_CORE_OVERHEAD_W/.test(s), `${f} must not read the runway basis`);
     assert.ok(!SCALE.test(s) && !/cushionLineKwh|defaultPoolEnergyBasisPath|pool-energy-basis/.test(s), `${f} must not read the cushion scale`);
+    assert.ok(!STANDBY.test(s) && !/runwayPoolOverheadW|cushionStandbyOverheadW|plausibleStandbyW|RUNWAY_POOL_OVERHEAD_FLOOR_W/.test(s), `${f} must not read the cushion standby`);
   }
   assert.equal(RUNWAY_DISCHARGE_EFFICIENCY, 0.94, "the planner's discharge leg is unchanged");
 });

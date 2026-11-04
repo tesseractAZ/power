@@ -60,6 +60,11 @@
  * (cushionLineKwh). index.ts passes the house pool's measured capacity scale
  * (cushionPoolScale, from its own main-thread tracker) and cushionLineKwh alone reads it;
  * every walk here stays on nameplate kWh per percent.
+ * v1.201.0 — A SECOND EXCEPTION, pinned by the same test: the islanded-outage cushion counts the
+ * Cores' standby draw for its hours. index.ts passes the runway's pool overhead figure for the
+ * connected Cores as ONE number (cushionStandbyW, from its second door); plausibleStandbyW reads it
+ * once and cushionStandbyKwh adds H × that draw to the cushion's load leg — not × the safety factor,
+ * not ÷ the discharge efficiency. The walks here still drain the bare load/η.
  * v1.194.0 — a POSITIVE change is a surplus the Cores charge the cells with, and it is
  * stored at legEff (chargeLegStep, physics/chargeLeg.ts): every walk here (simulate, the
  * with-buy window walk, expectedCarryKwh, expectedPvChargeWalk, expectedForceChargeStart)
@@ -214,6 +219,11 @@ export interface NightChargeInputs {
    *  measured input the planner takes, read only by cushionLineKwh to convert an islanded-outage
    *  cushion's energy to the panel's percent. Absent / null ⇒ the nameplate line, exactly as before. */
   cushionPoolScale?: CushionPoolScale | null;
+  /** v1.201.0 — the Cores' standby draw, W (index.ts cushionStandbyOverheadW: the runway's pool overhead figure
+   *  for the connected Cores, the planner's second runway-basis input): read ONCE, by plausibleStandbyW, and
+   *  counted in an islanded-outage cushion for its hours (cushionStandbyKwh). Absent / null ⇒ the cushion
+   *  without it, exactly as before; a figure that is no reading counts as 0 W, recorded 'implausible'. */
+  cushionStandbyW?: number | null;
   /** v1.127.0 — 'cost' sizes the buy to minimise the bill; 'resilience' (the
    *  legacy behaviour) sizes it to hold floor+cushion. Cost mode is bounded
    *  BELOW by the resilience answer, so it can never buy less. */
@@ -701,13 +711,19 @@ export interface NightChargePlan {
   cushionPct: number;
   /** v1.125.0 — how cushionKwh was derived: the bounded islanded-outage energy,
    *  or the legacy flat band when no islanded-load measurement was available. */
-  /** v1.125.0 — the cushion in kWh, as actually applied. */
+  /** v1.125.0 — the cushion in kWh, as actually applied.
+   *  v1.201.0 — on the islanded-outage basis it includes the Cores' standby for its hours (cushionStandby.kwh). */
   cushionKwh?: number;
   cushionBasis?: CushionBasis;
   /** v1.199.0 — the scale the cushion line was converted on (cushionLineKwh): present only where one
    *  was passed and the cushion is an islanded-outage energy; basis 'implausible' (scale 1) where the
    *  scale passed was ignored. Absent otherwise, so that plan's JSON is unchanged. */
   cushionPoolScale?: { scale: number; basis: CushionScaleBasis | 'implausible' };
+  /** v1.201.0 — the Cores' standby the islanded-outage cushion counts (cushionStandbyKwh): the figure (W), its
+   *  energy over the cushion's hours (kWh, inside cushionKwh) and its basis — 'implausible' (0 W, 0 kWh) where
+   *  the figure passed was no reading. Present only where a figure was passed and the cushion is an
+   *  islanded-outage energy; absent otherwise, so that plan's JSON is unchanged. */
+  cushionStandby?: CushionStandby;
   /** v1.127.0 — which ceiling bound the cost-mode target. R2 — 'pv-curtail' on a mid-day leg. */
   costCeilingBasis?: CostCeilingBasis | null;
   /** v1.165.0 — the economic ceiling itself, % of pool (null in resilience mode).
@@ -1699,7 +1715,15 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
     dischargeEff,
     legacyCushionKwh,
   });
-  const cushionKwh = cushion.kwh;
+  // v1.201.0 — THE CORES' STANDBY DRAW for the cushion's hours (cushionStandbyKwh): on an island the Cores'
+  // electronics draw whether or not the backup circuits load, and that draw is not in the panel load the
+  // cushion is sized from. The figure (the runway's pool overhead for the connected Cores, index.ts) is read
+  // ONCE, here (plausibleStandbyW: the validated figure every later reader takes), and added to the load leg
+  // once: not × the safety factor, not ÷ the discharge efficiency. Every reader of cushionKwh and of the line
+  // below follows from this one cushion; the line divides all of it by the scale, once.
+  const standbyW = plausibleStandbyW(inputs.cushionStandbyW);
+  const standby = cushionStandbyKwh({ cushionBasis: cushion.basis, outageHours: inputs.outageCushionHours ?? DEFAULT_OUTAGE_CUSHION_HOURS, standby: standbyW });
+  const cushionKwh = standby?.basis === 'runway-overhead' ? round2(cushion.kwh + standby.kwh) : cushion.kwh;
   const cushionBasis = cushion.basis;
   // v1.199.0 — the line the pack must hold, the ONE place the measured capacity scale is read
   // (cushionLineKwh): an islanded-outage cushion's energy on the packs' measured capacity, so the
@@ -2001,10 +2025,16 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   const measuredCushionNote = cushionLine.applied != null && cushionLine.applied.scale < 1
     ? `, ${round1(((targetFloorKwh - reserveKwh) / fullKwh) * 100)}% of the packs' measured capacity at ×${cushionLine.applied.scale.toFixed(3)} of nameplate`
     : '';
+  // v1.201.0 — where the Cores' standby is in the cushion, its share, named as the runway's figure: part of
+  // what the line is sized to carry, not a measurement and not an outcome. Nowhere else (no figure, 0 W, or a
+  // figure that was no reading): that text is unchanged.
+  const standbyNote = standby != null && standby.basis === 'runway-overhead' && standby.w > 0
+    ? `, ${round1(standby.kwh)} kWh of it the runway's ${Math.round(standby.w)} W standby figure`
+    : '';
   const cushionDesc = cushionBasis === 'disabled'
     ? `the ${reserveFloorPct}% reserve floor alone — the outage cushion is DISABLED, so nothing is held back for an outage`
     : cushionBasis === 'islanded-outage'
-      ? `the ${reserveFloorPct}% reserve floor plus ${round1(inputs.outageCushionHours ?? DEFAULT_OUTAGE_CUSHION_HOURS)} h of islanded backup load (${round1(cushionKwh)} kWh${measuredCushionNote})`
+      ? `the ${reserveFloorPct}% reserve floor plus ${round1(inputs.outageCushionHours ?? DEFAULT_OUTAGE_CUSHION_HOURS)} h of islanded backup load (${round1(cushionKwh)} kWh${standbyNote}${measuredCushionNote})`
       : `the ${round1(reserveFloorPct + cushionPct)}% floor+cushion`;
   const baselineTrough = troughAtLift(0);
   // v1.125.0 — the DISCLOSED trough stays the whole-house one: "if the entire
@@ -2033,6 +2063,8 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
       cushionBasis,
       // v1.199.0 — the scale the line was converted on, only where one applied.
       ...(cushionLine.applied != null ? { cushionPoolScale: cushionLine.applied } : {}),
+      // v1.201.0 — the Cores' standby the cushion counted, only where a figure was passed (islanded-outage).
+      ...(standby != null ? { cushionStandby: standby } : {}),
       cushionOutageHours: inputs.outageCushionHours ?? DEFAULT_OUTAGE_CUSHION_HOURS,
       buyKwh: 0,
       buyKwhDebiased: 0,
@@ -2380,8 +2412,9 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   // pool percent the panel holds (~0.944 of nameplate on this fleet), so ⌈line⌉ − floor points of
   // that capacity hold the whole cushion wherever the write is under the 50% envelope (a line above
   // it is truncated, and the reserve sentence below says so). Until v1.199.0 the line was on the
-  // nameplate fullKwh and the write held about 0.944 of the cushion. The Cores' standby is still not
-  // in the cushion (header).
+  // nameplate fullKwh and the write held about 0.944 of the cushion.
+  // v1.201.0 — and the cushion counts the Cores' standby for its hours (header), so ⌈line⌉ − floor points of the
+  // measured capacity hold the safety-factored load AND the runway's standby figure for the configured hours.
   // v1.200.0 (review) — askOf, the ONE expression the line force-charge's ask reads too (forceChargeLine.askPct).
   const lineAskPct = !setpointOnWalk && !baselineHolds ? askOf(targetFloorKwh, fullKwh) : 0;
   const setpointSocPct = middayReserve != null ? middayReserve.pct : Math.max(
@@ -2749,6 +2782,8 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
     cushionBasis,
     // v1.199.0 — the scale the line was converted on, only where one applied.
     ...(cushionLine.applied != null ? { cushionPoolScale: cushionLine.applied } : {}),
+    // v1.201.0 — the Cores' standby the cushion counted, only where a figure was passed (islanded-outage).
+    ...(standby != null ? { cushionStandby: standby } : {}),
     cushionOutageHours: inputs.outageCushionHours ?? DEFAULT_OUTAGE_CUSHION_HOURS,
     // R2 — a mid-day leg only: which term set its reserve write (middayReserveTargetPct).
     ...(middayReserve != null ? { reserveTargetBasis: middayReserve.basis } : {}),
@@ -2987,6 +3022,8 @@ export interface NightChargeInputDeps {
   islandedLoadSafety?: number;
   /** v1.199.0 — forwarded verbatim (see NightChargeInputs). */
   cushionPoolScale?: CushionPoolScale | null;
+  /** v1.201.0 — forwarded verbatim (see NightChargeInputs): the planner judges it (plausibleStandbyW). */
+  cushionStandbyW?: number | null;
   /** v1.127.0 — buy sizing objective; cost mode is bounded below by resilience. */
   objectiveMode?: 'resilience' | 'cost';
   /** v1.127.0 — hard SoC ceiling for cost mode when no PV surplus is known. */
@@ -3320,6 +3357,9 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     // v1.199.0 — the cushion line's measured capacity scale (the same hazard: not copied, it is
     // undefined and the line silently stays on nameplate).
     cushionPoolScale,
+    // v1.201.0 — the Cores' standby figure (the same hazard: not copied, it is undefined and the cushion
+    // silently leaves the standby out).
+    cushionStandbyW,
     objectiveMode, costMaxSocPct,
     // R2 — the leg (WindowSpec): its pinned window, and its role's objective and force-charge.
     windowSpec,
@@ -3569,6 +3609,8 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     islandedLoadSafety,
     // v1.199.0 — only when given, so inputs built without it carry exactly what they did.
     ...(cushionPoolScale !== undefined ? { cushionPoolScale } : {}),
+    // v1.201.0 — the same: only when given.
+    ...(cushionStandbyW !== undefined ? { cushionStandbyW } : {}),
     objectiveMode: legObjective(legRole, objectiveMode),
     costMaxSocPct,
     socCoherent,
@@ -3882,6 +3924,15 @@ export function buyDebiasUnmeasuredLogLine(
  * FAIL-CLOSED. With no islanded-load measurement the legacy flat band and the
  * legacy whole-house trough both stand, which keeps the old (permanently
  * shortfalling) behaviour rather than silently granting a weaker guarantee.
+ *
+ * v1.201.0 — THE CORES' STANDBY. The islanded load is the panel's own circuit sum,
+ * and the Cores' standby draw (the runway's pool overhead, 270 W at the defaults) is
+ * not in it. The sizing adds it for the cushion's hours (cushionStandbyKwh):
+ *
+ *     cushionKwh = round2(outageHours x (islandedLoadKw x safetyFactor / dischargeEff + standbyW / 1000))
+ *
+ * (the load leg keeps its own round2 here; the standby is not multiplied by the
+ * safety factor and not divided by the discharge efficiency).
  */
 /**
  * v1.127.0 — COST OBJECTIVE: size the buy to minimise the bill.
@@ -4446,6 +4497,8 @@ export const DEFAULT_ISLANDED_LOAD_SAFETY = 1.25;
  */
 export type CushionBasis = 'islanded-outage' | 'legacy-pct' | 'disabled';
 
+/** The cushion's LOAD leg (H × L × k ÷ η, rounded) and its basis. v1.201.0 — on the islanded-outage basis the
+ *  sizing adds the Cores' standby for the same hours to it (cushionStandbyKwh); this stays the load leg alone. */
 export function outageCushionKwh(o: {
   islandedLoadKw: number | null | undefined;
   outageHours: number;
@@ -4544,6 +4597,67 @@ export function cushionLineKwh(o: {
   return { kwh: o.reserveKwh + o.cushionKwh / scale, applied: { scale, basis: o.poolScale.basis } };
 }
 
+/** v1.201.0 — how the Cores' standby draw entered the cushion: the runway's pool overhead figure as given
+ *  ('runway-overhead'), or a figure that was no reading at all ('implausible': counted as 0 W, the cushion
+ *  without it). */
+export type CushionStandbyBasis = 'runway-overhead' | 'implausible';
+/** v1.201.0 — the standby an islanded-outage cushion counted: the figure (W), its energy over the cushion's
+ *  hours (kWh) and its basis (NightChargePlan.cushionStandby). */
+export interface CushionStandby { w: number; kwh: number; basis: CushionStandbyBasis }
+/** v1.201.0 — the highest standby figure that is a reading at all: the runway's standby-floor option's own upper
+ *  clamp (0..1500 W), which is also the panel's three source slots at the per-Core option's upper clamp (500 W).
+ *  Above it, a bad reading. */
+export const CUSHION_STANDBY_PLAUSIBLE_MAX_W = 1500;
+
+/**
+ * v1.201.0 — THE ONE READ of the Cores' standby figure (NightChargeInputs.cushionStandbyW). PURE.
+ *
+ * Every reader of the standby in the planner takes the figure this returns, never the input: null where none was
+ * passed (undefined, null — every caller before v1.201.0: the cushion without it, byte for byte); the figure as
+ * given where it is a reading (a finite number in 0..CUSHION_STANDBY_PLAUSIBLE_MAX_W, float noise above the top
+ * included); 0 W recorded 'implausible' otherwise (not finite, negative, above the clamp, not a number). 0 is the
+ * cushion without the standby, which the house rule allows for a figure that is not a reading; the runway's
+ * default is not restated here (the planner reads nothing of the runway's basis, runwayBasisContracts.test.ts),
+ * and the door in index.ts cannot produce such a figure: its options are clamped and the panel has three slots.
+ */
+export function plausibleStandbyW(w: unknown): { w: number; basis: CushionStandbyBasis } | null {
+  if (w == null) return null;
+  if (typeof w !== 'number' || !Number.isFinite(w) || w < 0 || w > CUSHION_STANDBY_PLAUSIBLE_MAX_W + 1e-9) {
+    return { w: 0, basis: 'implausible' };
+  }
+  return { w, basis: 'runway-overhead' };
+}
+
+/**
+ * v1.201.0 — THE CORES' STANDBY IN THE ISLANDED-OUTAGE CUSHION. PURE.
+ *
+ * The runway drains the pool by the load leg plus the Cores' standby (analytics.ts: ≈ 267 W + load ÷ 0.94 on 30
+ * clean pack-only discharge spans, a pool figure fitted with three Cores connected; 270 W at the defaults). That
+ * standby never appears in the panel load the cushion is sized from, so on an island the cushion ran short by it
+ * for its hours: on the reference plant 13.94 kWh lasts 3.71 of 4 h at the safety-factored load plus 270 W. The
+ * cushion therefore adds the standby's energy over the configured hours:
+ *
+ *     kwh = outageHours × w ÷ 1000        (cushion = round2(H·L·k ÷ η + kwh), the line ÷ the scale)
+ *
+ *  - ADDITIVE: the runway's drain at its default marginal efficiency (max(load ÷ η, overhead + load ÷ η_m) with
+ *    η = η_m is always the second term); on an island the Cores' inverters form the grid and their electronics
+ *    draw whether or not the backup circuits load.
+ *  - NOT × the safety factor: that multiplies the measured panel load (its CT scaling and its variability against
+ *    a 7-day mean); the standby is not read from the panel load.
+ *  - NOT ÷ the discharge efficiency: the figure is already pack-side (DC), the intercept of the pack's drain.
+ *  - Islanded-outage only: the legacy band is a percent of the pool with no hours, and a disabled cushion is 0.
+ *
+ * null where none applies (no figure passed, or a cushion that is not an islanded-outage energy).
+ */
+export function cushionStandbyKwh(o: {
+  cushionBasis: CushionBasis;
+  outageHours: number;
+  standby: { w: number; basis: CushionStandbyBasis } | null;
+}): CushionStandby | null {
+  if (o.cushionBasis !== 'islanded-outage' || o.standby == null) return null;
+  return { w: o.standby.w, kwh: (o.outageHours * o.standby.w) / 1000, basis: o.standby.basis };
+}
+
 /**
  * v1.199.0 — the night ledger's record of the scale the cushion line was converted on: written
  * unconditionally by recordNightPlanRow (null with none — a legacy-pct or disabled cushion, a null
@@ -4557,6 +4671,23 @@ export function cushionPoolScaleLedgerColumns(
   return {
     cushion_pool_scale: plan.cushionPoolScale?.scale ?? null,
     cushion_pool_scale_basis: plan.cushionPoolScale?.basis ?? null,
+  };
+}
+
+/**
+ * v1.201.0 — the night ledger's record of the Cores' standby the cushion counted: the figure, its basis and its
+ * energy over the cushion's hours. Written unconditionally by recordNightPlanRow (null with none — a legacy-pct
+ * or disabled cushion, a null plan, a plan snapshot from before v1.201.0) so a re-issued plan never leaves an
+ * earlier plan's standby beside its own cushion. With it a row explains its own line step: cushion_kwh −
+ * cushion_standby_kwh is the cushion without the standby, to its rounding. PURE.
+ */
+export function cushionStandbyLedgerColumns(
+  plan: Pick<NightChargePlan, 'cushionStandby'>,
+): { cushion_standby_w: number | null; cushion_standby_basis: string | null; cushion_standby_kwh: number | null } {
+  return {
+    cushion_standby_w: plan.cushionStandby?.w ?? null,
+    cushion_standby_basis: plan.cushionStandby?.basis ?? null,
+    cushion_standby_kwh: plan.cushionStandby?.kwh ?? null,
   };
 }
 
@@ -4586,6 +4717,12 @@ export function cushionScaleLogText(s: (CushionPoolScale & { connectedCores?: nu
     return `night-charge: the outage-cushion line is on nameplate — no pack capacity ratio has been measured yet${cores ? ` (${cores.slice(2)})` : ''}`;
   }
   return `night-charge: the outage-cushion line counts the cushion on the packs' measured capacity, ×${s.scale.toFixed(3)} of nameplate (${s.basis}${cores})`;
+}
+
+/** v1.201.0 — the log line for the Cores' standby the outage cushion counts (index.ts logs it on change, live
+ *  legs only): the figure, and the connected Cores it is the runway's figure for. PURE. */
+export function cushionStandbyLogText(w: number, connectedCores: number): string {
+  return `night-charge: the outage cushion counts the Cores' standby draw, ${Math.round(w)} W (the runway's figure for ${connectedCores} connected Core(s))`;
 }
 
 export function plannerSizingNeedBuyKwh(opts: {

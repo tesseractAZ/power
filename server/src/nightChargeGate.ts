@@ -105,7 +105,13 @@ function maxYmd(a: string, b: string): string { return a >= b ? a : b; }
  *  for — remains a STRIKE, fail-closed; a carried night whose sizing fell short (cushion_shortfall 1, the
  *  caps note, cushion_envelope_shortfall 0) is exempt as any disclosed row is, unless its armed force-charge
  *  never switched on (armedNeverRanUnder). `lineForceChargeStrikes` counts the strikes with an ask so they
- *  read apart from the planner's. (v1.194.0 — the rule stated
+ *  read apart from the planner's. v1.201.0 — so does the islanded-outage cushion counting the Cores' standby
+ *  draw for its hours (nightChargeAdvisor.ts cushionStandbyKwh), a physics change of the cushion's SIZE: cushion_kwh
+ *  and cushion_line_soc_pct are still the cushion and the line the plan was sized on and wrote (cushion_standby_w /
+ *  _basis / _kwh record the standby inside them), and every verdict keeps its rule on the row's own line — buy_err_kwh
+ *  (the cushion moves the planned buy and the planner's own need together), plan_traj_floor_breached,
+ *  cushion_breached. A pool held at ⌈line⌉ reads at or above the line; a line the standby lifts above the 50%
+ *  envelope is carried or disclosed, as above. (v1.194.0 — the rule stated
  *  as practised; it read "bumped on ANY planner physics/algorithm change", which no change since v1.105.0
  *  followed.)
  *
