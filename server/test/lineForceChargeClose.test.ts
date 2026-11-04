@@ -47,6 +47,10 @@ import { emptyActuationState, type NightActuationState } from '../src/nightCharg
  * (review 3) …and logs the ON-reading shape as index.ts does: never on the measured latch (the re-ON working is not the
  * unmeasured one), on every onLatch night that closes under. The push comes after the latch on all but one of those
  * nights (PIN_ON_LATCH_PUSHED_BEFORE_LATCH), and on the measured latch it goes on 2 (5 floored) of 3,740 nights that hold.
+ * (review 4) A RE-ON THE CLOUD ACCEPTS THAT NEVER TAKES EFFECT — also UNMEASURED (variant 'reOnInert'): the re-ON's check
+ * finds it not applied, and the push reaches 169 of the 390 year nights that close under and 2,308 of 2,615 at lines of
+ * 70-90% (PIN_REON_INERT); the rest have their last check inside the last 21 minutes. The plant stamps each check through
+ * index.ts's own pure stamp (lineReOnCheckedStamp).
  * Three discriminators show the grid can see the mutants it is meant to kill: a software stop at ⌈L⌉ (design
  * A's hold, F-i), a start timed to ⌈L⌉ without the + 5 (F-iii), and no re-ON after the latch.
  */
@@ -64,8 +68,10 @@ const EV_MAX_KW = 11.52;
 
 /** 'onLatch' (review 2) — the ON-READING latch, UNMEASURED on this plant: at the ceiling a slot stops importing but
  *  keeps reading Charge Now ON, and imports again only once an ON of ours takes effect (none comes: the re-ON keys
- *  on slots reading OFF). */
-type Variant = 'real' | 'hold' | 'askStart' | 'noReOn' | 'onLatch';
+ *  on slots reading OFF). 'reOnInert' (review 4) — the latch as measured (the slots read OFF), but a line re-ON the
+ *  cloud accepts never takes effect: its slots still read OFF at its readback check (lineReOnCheckDue), a failure
+ *  path the add-on is built to handle (its own check, its own push cause), never measured here. */
+type Variant = 'real' | 'hold' | 'askStart' | 'noReOn' | 'onLatch' | 'reOnInert';
 interface Knobs {
   p0: number; evFromMin: number | null; evKw: number; standbyKw: number; onDelayMin: number; staleMin: number; floor: boolean;
   /** The plan's predicted window EV (kWh) the tick passes as evDisplacedKwh; 'exact' = the EV that comes. */
@@ -82,9 +88,10 @@ type LineState = NightActuationState & {
 
 /** (review 3) `shapeAtMs` — the tick the once-a-night ON-reading-shape log fires (index.ts: on a tick that decides
  *  nothing); `lossAtMs` — 'onLatch' only: the minute the slots stopped importing while reading ON (the event that loses
- *  the line there); `pushCause` — the line-at-risk push's cause. */
+ *  the line there); `pushCause` — the line-at-risk push's cause. (review 4) `reOnsFailed` — re-ONs whose readback check
+ *  found every slot not applied. */
 function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Variant): {
-  close: number; onMin: number; reOns: number; pushedAtMs: number | null; shapeAtMs: number | null; lossAtMs: number | null; pushCause: string | null;
+  close: number; onMin: number; reOns: number; reOnsFailed: number; pushedAtMs: number | null; shapeAtMs: number | null; lossAtMs: number | null; pushCause: string | null;
 } {
   const ask = Math.ceil(L - 1e-9);
   const cost = typeof kn.costPct === 'function' ? Math.min(100, kn.costPct(ask)) : kn.costPct;
@@ -108,6 +115,7 @@ function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Varian
   let lossAtMs: number | null = null;
   let onMin = 0;
   let reOns = 0;
+  let reOnsFailed = 0;
   const readings: number[] = [];
   const tail: number[] = [];
   const evKwh = kn.evFromMin != null ? kn.evKw * Math.min(kn.evFromMin, (W1 - W0) / MIN) / 60 : 0;
@@ -160,13 +168,15 @@ function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Varian
     } else if (a.kind === 'lineReOn') {
       if (variant !== 'noReOn') {
         s = { ...s, forceChargeLineReOns: s.forceChargeLineReOns + 1, forceChargeLineReOnAtMs: t, forceChargeLineReOnSlots: [...a.slots] };
-        onEffectiveMs = t + kn.onDelayMin * MIN;
+        // 'reOnInert': the write is accepted and stamped, and the slots keep reading OFF.
+        if (variant !== 'reOnInert') onEffectiveMs = t + kn.onDelayMin * MIN;
         reOns += 1;
       }
     } else if (a.kind === 'lineReOnChecked') {
-      // (review 2) index.ts records the re-ON's readback check; the budget's next re-ON is the retry.
-      s = { ...s, forceChargeLineReOnCheckedAtMs: t, forceChargeLineReOnNotAppliedSlots: [...a.notApplied],
-        forceChargeLineReOnsNotApplied: s.forceChargeLineReOnsNotApplied + (a.notApplied.length > 0 ? 1 : 0) };
+      // (review 2) index.ts records the re-ON's readback check; the budget's next re-ON is the retry. (review 4) Through
+      // the same pure stamp index.ts persists (the latest re-ON that took effect included).
+      s = { ...s, ...nfc.lineReOnCheckedStamp(s, t, a) };
+      if (a.notApplied.length > 0 && a.notApplied.length === a.slots.length) reOnsFailed += 1;
     } else if (a.kind === 'off') {
       s = { ...s, forceChargeOffAtMs: t, forceChargeOffReason: a.reason };
       chargeNowOn = false; onEffectiveMs = null;
@@ -188,7 +198,7 @@ function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Varian
   }
   tail.sort((x, y) => x - y);
   const m = Math.floor(tail.length / 2);
-  return { close: tail.length % 2 ? tail[m] : (tail[m - 1] + tail[m]) / 2, onMin, reOns, pushedAtMs, shapeAtMs, lossAtMs, pushCause };
+  return { close: tail.length % 2 ? tail[m] : (tail[m - 1] + tail[m]) / 2, onMin, reOns, reOnsFailed, pushedAtMs, shapeAtMs, lossAtMs, pushCause };
 }
 
 const YEAR_LINES = [50.45, 50.61, 51.15, 51.43, 52.62, 54.33, 55.55, 57.52, 59.1, 65.95];
@@ -325,6 +335,33 @@ test('★★★ T7 (review 2) the ON-READING latch — UNMEASURED here: no re-ON
   const o = { enabled: false, lineEnabled: true, gridPresent: true, gridStaLost: false, slotsOn: [1, 2, 3], connectedSlots: [1, 2, 3],
     vitalsRed: false, socCoherent: true, slotSocPct: { 1: 62, 2: 62, 3: 62 }, ceilingReadbackPct: 80, poolSocPct: 62, fullKwh: NAME } as ForceChargeOpts;
   assert.deepEqual(nfc.lineOnReadingShape(s, W1 - H, o)?.slots, [1, 2, 3]);
+});
+
+test('★★★ T7 (review 4) a re-ON the cloud accepts that never takes effect (UNMEASURED here): the line-at-risk push reaches the nights it loses once the check says so; pinned exactly', () => {
+  const got: Record<string, Array<[number, number]>> = {};
+  const sum = { year: { n: 0, under: 0, reached: 0 }, high: { n: 0, under: 0, reached: 0 } };
+  let held = 0;
+  for (const [name, kn] of PREDICTED) {
+    got[name] = [];
+    for (const [lines, floor] of [[YEAR_LINES, false], [YEAR_LINES, true], [HIGH_LINES, false], [HIGH_LINES, true]] as const) {
+      const r = cell(lines as number[], { ...kn, floor }, KS, 'reOnInert');
+      got[name].push([r.under, r.underPushed]);
+      assert.equal(r.latePushed, 0, 'never inside the lead');
+      held += r.pushed - r.underPushed;
+      const t = sum[lines === YEAR_LINES ? 'year' : 'high'];
+      t.n += r.n; t.under += r.under; t.reached += r.underPushed;
+    }
+  }
+  assert.deepEqual(got, PIN_REON_INERT);
+  assert.deepEqual(sum, PIN_REON_INERT_SUM);
+  assert.equal(held, PIN_REON_INERT_HELD_PUSHES, 'pushes on nights that still held');
+  // The round-4 reviewer's night: L 65.95, a 3.6 kW house, k 1.25, 20 kWh predicted, a 7 kW EV from 90 min. Both re-ONs (54
+  // and 38 min before the close) are checked not applied (39 and 23 min before) and the night closes at 60: the push goes
+  // the minute after the second check, 22 min before the close, naming the re-ON that did not take effect. Judged against
+  // the not-applied re-ON as an ON of ours, the earliest reference came 25 min after it — inside the 20-min lead: no push.
+  const ex = night(65.95, 3.6, 1.25, { ...BASE, predEvKwh: 20, evFromMin: 90 }, 'reOnInert');
+  assert.deepEqual([ex.close, ex.reOns, ex.reOnsFailed, ex.pushCause], [60, 2, 2, 'reOnNotApplied']);
+  assert.equal(ex.pushedAtMs, W1 - 22 * MIN);
 });
 
 test('★★★ T7 the line force-charge actually runs: ON to the close on a 50% pool, no OFF before it', () => {
@@ -494,6 +531,30 @@ const PIN_REAL_PREDICTED_PUSHES = { round: 2, floor: 5 };
  *  floored readings. The pool sat flat at ⌈L⌉ beside the EV 167 min before the close (a true warning then), recovered
  *  to the ceiling, latched 49 min before the close and closed at 72: the night's one push was already spent. */
 const PIN_ON_LATCH_PUSHED_BEFORE_LATCH = 1;
+/** (review 4) A RE-ON THAT NEVER TAKES EFFECT — UNMEASURED on this plant (the cloud accepts it; the slots still read OFF at
+ *  its readback check). Per PREDICTED cell: [under, of them the nights the line-at-risk push reached] for [year rounded,
+ *  year floored, high rounded, high floored], of 200 / 200 / 140 / 140. */
+const PIN_REON_INERT: Record<string, Array<[number, number]>> = {
+  '20 kWh predicted, 7 kW EV from 60 min': [[1, 0], [2, 0], [84, 19], [93, 28]],
+  '20 kWh predicted, 7 kW EV from 90 min': [[8, 1], [9, 1], [137, 123], [139, 125]],
+  '30 kWh predicted, 11 kW EV from 90 min': [[44, 16], [47, 19], [140, 140], [140, 140]],
+  '30 kWh predicted, 11 kW EV from 120 min': [[31, 24], [32, 25], [140, 140], [140, 140]],
+  'predicted exactly, 7 kW EV from 90 min': [[0, 0], [0, 0], [52, 30], [55, 32]],
+  'predicted exactly, 11.52 kW EV from 90 min': [[8, 5], [8, 6], [105, 102], [105, 104]],
+  'predicted exactly, 11.52 kW EV from 120 min': [[8, 5], [8, 6], [105, 102], [105, 104]],
+  '36 kWh predicted, 11.52 kW EV from 90 min': [[65, 22], [72, 22], [140, 140], [140, 140]],
+  '36 kWh predicted, 11.52 kW EV from 180 min': [[10, 7], [10, 8], [124, 106], [127, 109]],
+  'pool 77 + 20 kWh predicted, 7 kW EV from 90 min': [[5, 0], [7, 1], [140, 127], [140, 134]],
+  'all: standby, ON 5 min late, 3 min stale + 20 kWh predicted, 7 kW EV from 90 min': [[7, 0], [8, 1], [131, 107], [133, 116]],
+};
+/** …summed, rounded and floored (year: 11 cells × 400 nights; lines of 70-90%: 11 × 280). The nights not reached each have
+ *  their last re-ON checked inside the last 21 minutes, after which no push fits before the 20-min lead (the check's own
+ *  tick decides the check). Before review 4 the trend took a re-ON checked not applied as an ON of ours, and the push
+ *  waited 25-35 min after it: 90 of the 390 year nights and 1,740 of the 2,615 at lines of 70-90%. */
+const PIN_REON_INERT_SUM = { year: { n: 4400, under: 390, reached: 169 }, high: { n: 3080, under: 2615, reached: 2308 } };
+/** …and its pushes on nights that still held (the 36 kWh / 11.52 kW from 180 min cell at lines of 70-90%, as on the latch as
+ *  measured). */
+const PIN_REON_INERT_HELD_PUSHES = 6;
 /** (review 2) …and on the KNOWN late-unpredicted-load cells: the under nights the push reached, in PIN_KNOWN's order. It needs
  *  the pool NOT RISING with at least 20 min left: a load that slows the charge without stopping it (7 kW from 120 min;
  *  an ON 5 min late with a 7 kW EV) still rises, short of the line, and is not pushed — a residual, pinned. */
