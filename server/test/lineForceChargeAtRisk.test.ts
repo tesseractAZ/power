@@ -595,6 +595,66 @@ test('★★★ W1 (review 5) a re-ON handed back (every write rate-limited): no
   assert.doesNotMatch(body, /grid known present|No action needed/);
 });
 
+test('★★★ W1 (review 6) the hand-back hold counts the ticks: the retry is the first tick 15 min or more after a stamp written after the writes — no hand-back loses both its retry and the push', () => {
+  // The round-6 reviewer's probe: index.ts stamps a hand-back (forceChargeLineReOnAtMs: Date.now()) after its writes, a little
+  // after its tick's nowMs, and the tick runs every FORCE_CHARGE_TICK_MS (index.ts's setInterval). Fifteen ticks on, the tick
+  // reads 15 min less that lag: the retry is the 16th. Held while the stamp + 15 min fell before the cutoff, a hand-back 35-36
+  // min before the close got neither its retry (the cutoff refused the 16th tick) nor the push (the lead refused it too).
+  const SEC = 1000;
+  const handedBack = (tHb: number, lagMs: number) => onNight({ forceChargeLinePanelOffAtMs: tHb - 30 * M, forceChargeLineReOns: 0,
+    forceChargeLineReOnAtMs: tHb + lagMs, forceChargeLineReOnSlots: null, forceChargeLineOffSlots: [1, 2, 3],
+    forceChargeLinePoolSamples: [{ pct: 61, atMs: tHb - 12 * M }, { pct: 60, atMs: tHb - 2 * M }] });
+  const off59 = offReading({ poolSocPct: 59, slotsOn: [], slotSocPct: at(59) });
+  /** Every tick after the hand-back's (each `driftMs` late on the last), past the cutoff: the retry, and the push. The push is
+   *  once a night and the ticks run on after it, so a retry after a 'reOnRefused' push ("it does not try again") is seen. */
+  const after = (tHb: number, lagMs: number, driftMs = 0): string[] => {
+    let s = handedBack(tHb, lagMs);
+    const ev: string[] = [];
+    for (let k = 1; tHb + k * (M + driftMs) < WIN_END - 15 * M; k++) {
+      const r = tick(s, tHb + k * (M + driftMs), off59);
+      s = r.s;
+      if (r.push != null) ev.push(`+${k} push ${r.push.cause}`);
+      if (r.kind !== 'none') { ev.push(`+${k} ${r.kind}`); if (r.kind === 'lineReOn') break; }
+    }
+    return ev;
+  };
+  // The probe's hand-backs, 35m50s and 35m30s before the close, the writes stamped 2 s after their tick: the 16th tick falls
+  // past the cutoff, so there is no retry — the push goes the next minute, as 'reOnRefused'.
+  assert.deepEqual(after(WIN_END - 35 * M - 50 * SEC, 2 * SEC), ['+1 push reOnRefused']);
+  assert.deepEqual(after(WIN_END - 35 * M - 30 * SEC, 2 * SEC), ['+1 push reOnRefused']);
+  // On the minute (the close plant's ticks) with the writes 2 s late: the 16th tick IS the cutoff instant, which refuses it.
+  assert.deepEqual(after(WIN_END - 36 * M, 2 * SEC), ['+1 push reOnRefused']);
+  // Ten seconds earlier the 16th tick is still before the cutoff: the retry comes on it, and nothing is pushed meanwhile.
+  assert.deepEqual(after(WIN_END - 36 * M - 10 * SEC, 2 * SEC), ['+16 lineReOn']);
+  assert.deepEqual(after(WIN_END - 37 * M + 10 * SEC, 2 * SEC), ['+16 lineReOn']);
+  // Stamped on its tick's own millisecond, the 15th tick is the retry: a hand-back 36 min out still gets it, 21 min out.
+  assert.deepEqual(after(WIN_END - 36 * M, 0), ['+15 lineReOn']);
+  // Swept: hand-back ticks 34-38 min before the close every 5 s, the stamp 0 ms, 1 ms, 2 s or 20 s after its tick, the ticks on
+  // the cadence or drifting 1 ms each. Every hand-back gets exactly one of the two: its retry, or the push — never neither
+  // (the reviewer's sweep of eed0363a: none from 35m05s to 36m00s out whenever the lag exceeded the drift), and never a
+  // 'reOnRefused' push followed by the retry it says does not come.
+  const neither: string[] = [];
+  const both: string[] = [];
+  for (let back = 38 * M; back >= 34 * M; back -= 5 * SEC) {
+    for (const lag of [0, 1, 2 * SEC, 20 * SEC]) {
+      for (const drift of [0, 1]) {
+        const ev = after(WIN_END - back, lag, drift);
+        const retry = ev.some((e) => e.endsWith('lineReOn'));
+        const pushed = ev.some((e) => e.includes(' push '));
+        const at0 = `${back / SEC}s out, lag ${lag} ms, drift ${drift} ms`;
+        if (!retry && !pushed) neither.push(at0);
+        if (retry && pushed) both.push(`${at0}: ${ev.join(', ')}`);
+      }
+    }
+  }
+  assert.deepEqual(neither, [], 'a hand-back with neither its retry nor the push');
+  assert.deepEqual(both, [], "a 'reOnRefused' push, then the retry");
+  // The cadence the hold counts is the one index.ts runs the tick on: the actuation tick, and the safety tick.
+  assert.equal(nfc.FORCE_CHARGE_TICK_MS, 60_000);
+  assert.ok(INDEX.includes('setInterval(() => { void runNightActuationTick(); }, FORCE_CHARGE_TICK_MS);'), 'the actuation tick runs on the cadence the hold counts');
+  assert.match(INDEX, /runForceChargeTick\(\{ forceDisabled: true \}\)[\s\S]{0,300}\n\}, FORCE_CHARGE_TICK_MS\);\nforceChargeSafetyTick\.unref\(\);/, 'and the safety tick');
+});
+
 test('★★ W1 (review 5) a slot its check found not applied that reads ON since is not named as not taking effect', () => {
   const due = nfc.lineAtRiskPushDue;
   const spent = (notApplied: number[]) => risky({ forceChargeLineReOns: 2, forceChargeLineReOnAtMs: T - H, forceChargeLineReOnSlots: [1, 2, 3],
@@ -978,6 +1038,47 @@ test('★★★ W3 (review 5) the read-off is the last re-ON\'s check, unless a 
   assert.equal(line(b).onSeenAtMs, null);
   assert.equal(line(handedBack).reOnNotAppliedSlots, null);
   assert.equal(line({ ...b, forceChargeLineReOnCheckedAtMs: WIN_END - 160 * M } as S).reOnNotAppliedSlots, null, 'a check older than the last re-ON');
+});
+
+test('★★★ W3 (review 6) a slot seen ON again opens a new panel-stop episode: a person\'s ON, then the panel\'s stop at its ceiling, is the stop the morning names', () => {
+  const obs = nfc.lineNightObservations;
+  const ceiling = fo({ poolSocPct: 80, slotsOn: [], slotSocPct: at(80) });
+  const stopped = (over: Record<string, unknown>) => onNight({ forceChargeLinePanelOffAtMs: T - H, forceChargeLineOffSlots: [1, 2, 3],
+    forceChargeLinePoolSamples: [{ pct: 80, atMs: T - 5 * M }], ...over });
+  // A slot seen ON after the recorded stop (a reading: no grace to wait), then every slot OFF with a Core at the ceiling: a stop.
+  assert.deepEqual(obs(stopped({ forceChargeLineOnSeenAtMs: T - 30 * M }), T, ceiling), { forceChargeLinePanelOffAtMs: T });
+  assert.deepEqual(obs(stopped({ forceChargeLineOnSeenAtMs: T - M }), T, ceiling), { forceChargeLinePanelOffAtMs: T }, 'the reading after it');
+  // Seen ON before the recorded stop: the same episode. Stamped after the seen ON: once per episode.
+  assert.equal(obs(stopped({ forceChargeLineOnSeenAtMs: T - 2 * H }), T, ceiling), null);
+  assert.equal(obs(stopped({ forceChargeLinePanelOffAtMs: T - 10 * M, forceChargeLineOnSeenAtMs: T - 30 * M }), T, ceiling), null);
+  // All OFF with no Core at the ceiling after a seen ON (Charge Now switched off in the app): no stop.
+  assert.equal(obs(stopped({ forceChargeLineOnSeenAtMs: T - 30 * M }), T, fo({ poolSocPct: 70, slotsOn: [], slotSocPct: at(70) })), null);
+  // The round-6 reviewer's night (probe 1): the panel's stop re-stamped at 02:30 after the second re-ON took effect (the budget
+  // spent), the push at 02:50, and a person's ON 5 minutes later. The pool climbs to the 80% ceiling and the panel switches every
+  // slot off again at 03:40. Only a re-ON of ours opened a new episode, so that stop was never stamped and the seen ON read as
+  // the charge resumed to the close: "ran to the window close" — Charge Now had been off since 03:40.
+  const P = WIN_END - 130 * M;
+  const spent = onNight({ forceChargeLinePanelOffAtMs: P - 20 * M, forceChargeLineReOns: 2, forceChargeLineReOnAtMs: P - 80 * M,
+    forceChargeLineReOnSlots: [1, 2, 3], forceChargeLineReOnCheckedAtMs: P - 65 * M, forceChargeLineReOnNotAppliedSlots: [],
+    forceChargeLineReOnAppliedAtMs: P - 80 * M, forceChargeLineAtRiskPushedAtMs: P, forceChargeLineOffSlots: [1, 2, 3],
+    forceChargeLinePoolSamples: [{ pct: 60, atMs: P - 12 * M }, { pct: 59, atMs: P - 2 * M }] });
+  const pool = (m: number) => (m < 5 ? 58 : m < 50 ? Math.min(80, 58 + Math.floor((m - 5) / 2)) : Math.max(72, 80 - Math.floor((m - 50) / 10)));
+  const run = drive(spent, P, 1, 129, (m) => (m >= 5 && m < 50 ? [1, 2, 3] : []), pool);
+  assert.equal(run.s.forceChargeLineOnSeenAtMs, P + 5 * M, 'the person\'s ON seen');
+  assert.equal(run.s.forceChargeLinePanelOffAtMs, P + 50 * M, 'the stop after it stamped');
+  const closed = (s: S) => ({ ...s, forceChargeOffAtMs: WIN_END, forceChargeOffReason: 'windowEnd' }) as S;
+  const text = sum(nfc.forceChargeNightOutcome(closed(run.s), lineGates), { closePoolPct: 72 });
+  assert.ok(text.includes("force-charge ran for the 55.6% outage line until the panel's own stop switched Charge Now off at 3:40am; "
+    + "Charge Now was switched back on 2 time(s) after the panel's own stop; the pool read 72% at the close"), text);
+  assert.doesNotMatch(text, /to the window close/);
+  // The reviewer's second night: no re-ON (the stop at 01:00), a slot seen ON at 02:00, then every slot OFF at the ceiling at
+  // 02:30 — "until the panel's own stop switched Charge Now off at 2:30am", not "ran to the window close".
+  const noReOn = onNight({ forceChargeLinePanelOffAtMs: WIN_START + 2 * H, forceChargeLineOnSeenAtMs: WIN_START + 3 * H, forceChargeLineOffSlots: [1, 2, 3],
+    forceChargeLinePoolSamples: [{ pct: 80, atMs: WIN_START + 3.5 * H - 5 * M }] });
+  const stamped = { ...noReOn, ...obs(noReOn, WIN_START + 3.5 * H, ceiling) } as S;
+  assert.equal(stamped.forceChargeLinePanelOffAtMs, WIN_START + 3.5 * H);
+  const text2 = sum(nfc.forceChargeNightOutcome(closed(stamped), lineGates), { closePoolPct: 52 });
+  assert.ok(text2.includes("force-charge ran for the 55.6% outage line until the panel's own stop switched Charge Now off at 2:30am; the pool read 52% at the close, under the 55.6% outage line"), text2);
 });
 
 test('★★★ W3 a COST-DOMINANT line night\'s morning account says where it closed against its line', () => {

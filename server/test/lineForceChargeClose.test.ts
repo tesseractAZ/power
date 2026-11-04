@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import * as nfc from '../src/nightForceCharge.js';
 import { decideForceCharge, forceChargeRateKw, evDisplacedPackKwh, type ForceChargeOpts } from '../src/nightForceCharge.js';
 import { emptyActuationState, type NightActuationState } from '../src/nightChargeActuator.js';
+import { buildNightChargeMorningSummary } from '../src/notify.js';
 
 /**
  * v1.200.0 — THE CLOSE GUARANTEE OF THE LINE FORCE-CHARGE (plan §5.4 T7).
@@ -55,6 +56,9 @@ import { emptyActuationState, type NightActuationState } from '../src/nightCharg
  * reading at the check ('reOnGlitch'), Charge Now switched on by a person after the push ('reOnPerson') — is waited out
  * (lineNightObservations stamps it, lineTrendReference waits): the ON-reading shape is never logged on any of them. And a
  * re-ON handed back rate-limited ('reOnLimited') is never pushed as the gates inside its retry's spacing (PIN_REVIEW5).
+ * (review 6) …nor lost: with the ticks off the minute (`phaseMs`) and every re-ON stamped after its writes (`lagMs`, as
+ * index.ts stamps Date.now()), each hand-back gets its retry or the push, never neither and never both (PIN_REVIEW6). And a
+ * person's ON followed by the panel's stop at its ceiling ('reOnPerson') is stamped as a stop, and the morning names it.
  * Three discriminators show the grid can see the mutants it is meant to kill: a software stop at ⌈L⌉ (design
  * A's hold, F-i), a start timed to ⌈L⌉ without the + 5 (F-iii), and no re-ON after the latch.
  */
@@ -87,8 +91,11 @@ interface Knobs {
   predEvKwh: number | 'exact' | null;
   /** The record's cost ceiling, with the cost gate on (null: the cost gate off, a resilience-objective night). */
   costPct: number | ((ask: number) => number) | null;
+  /** (review 6) The ticks' phase against the minute (the close, W1, stays on it), and how long after its tick a re-ON is
+   *  stamped (index.ts stamps forceChargeLineReOnAtMs: Date.now() after the writes), ms. */
+  phaseMs: number; lagMs: number;
 }
-const BASE: Knobs = { p0: 50, evFromMin: null, evKw: 7, standbyKw: 0, onDelayMin: 0, staleMin: 0, floor: false, predEvKwh: null, costPct: null };
+const BASE: Knobs = { p0: 50, evFromMin: null, evKw: 7, standbyKw: 0, onDelayMin: 0, staleMin: 0, floor: false, predEvKwh: null, costPct: null, phaseMs: 0, lagMs: 0 };
 
 type LineState = NightActuationState & {
   forceChargeLineAskPct: number | null; forceChargeLinePct: number | null; forceChargeCeilingSyncedPct: number | null;
@@ -98,9 +105,13 @@ type LineState = NightActuationState & {
 /** (review 3) `shapeAtMs` — the tick the once-a-night ON-reading-shape log fires (index.ts: on a tick that decides
  *  nothing); `lossAtMs` — 'onLatch' only: the minute the slots stopped importing while reading ON (the event that loses
  *  the line there); `pushCause` — the line-at-risk push's cause. (review 4) `reOnsFailed` — re-ONs whose readback check
- *  found every slot not applied. */
+ *  found every slot not applied. (review 6) `handBackAtMs` / `retryAtMs` — 'reOnLimited': the hand-back's tick and its
+ *  retry's; `personOnAtMs` / `personStopAtMs` — 'reOnPerson': the person's ON taking effect, and the panel's stop at its
+ *  ceiling after it; `panelOffAtMs` — the panel's stop on the record at the close; `stopNamed` — the morning account (the
+ *  real builders, the record closed by the window) names the panel's stop as what ended the charge. */
 function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Variant): {
   close: number; onMin: number; reOns: number; reOnsFailed: number; pushedAtMs: number | null; shapeAtMs: number | null; lossAtMs: number | null; pushCause: string | null;
+  handBackAtMs: number | null; retryAtMs: number | null; personOnAtMs: number | null; personStopAtMs: number | null; panelOffAtMs: number | null; stopNamed: boolean;
 } {
   const ask = Math.ceil(L - 1e-9);
   const cost = typeof kn.costPct === 'function' ? Math.min(100, kn.costPct(ask)) : kn.costPct;
@@ -126,11 +137,16 @@ function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Varian
   let reOns = 0;
   let reOnsFailed = 0;
   let handedBack = false;
+  let handBackAtMs: number | null = null;
+  let retryAtMs: number | null = null;
+  let personPending = false;
+  let personOnAtMs: number | null = null;
+  let personStopAtMs: number | null = null;
   const readings: number[] = [];
   const tail: number[] = [];
   const evKwh = kn.evFromMin != null ? kn.evKw * Math.min(kn.evFromMin, (W1 - W0) / MIN) / 60 : 0;
   const pred = kn.predEvKwh === 'exact' ? evKwh : kn.predEvKwh;
-  for (let t = W0; t < W1; t += MIN) {
+  for (let t = W0 + kn.phaseMs; t < W1; t += MIN) {
     if (pendingCeiling != null) { panelCeiling = pendingCeiling; pendingCeiling = null; }
     const raw = (pack / CAP) * 100;
     const now = kn.floor ? Math.floor(raw) : Math.round(raw);
@@ -144,7 +160,10 @@ function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Varian
     const evDisplacedKwh = pred != null && pred > 0
       ? evDisplacedPackKwh({ evKwh: pred, peakEvKw: kn.evKw, rateKw: chargeRateKw, unboundedRateKw: Math.max(1, (17 - load) * LEG), legEff: LEG })
       : null;
-    if (onEffectiveMs != null && t >= onEffectiveMs) { chargeNowOn = true; importing = true; onEffectiveMs = null; }
+    if (onEffectiveMs != null && t >= onEffectiveMs) {
+      chargeNowOn = true; importing = true; onEffectiveMs = null;
+      if (personPending) { personPending = false; personOnAtMs = t; }
+    }
     // (review 5) 'reOnGlitch': the readback on the re-ON check's tick alone shows every slot OFF.
     const glitch = variant === 'reOnGlitch' && s.forceChargeLineReOnSlots != null && s.forceChargeLineReOnAtMs != null
       && t === s.forceChargeLineReOnAtMs + nfc.FORCE_CHARGE_ON_VERIFY_AFTER_MS;
@@ -164,7 +183,7 @@ function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Varian
       if (risk != null) {
         pushedAtMs = t; pushCause = risk.cause; s = { ...s, forceChargeLineAtRiskPushedAtMs: t };
         // (review 5) 'reOnPerson': the person switches Charge Now on in the app 5 min after a push naming slots reading OFF.
-        if (variant === 'reOnPerson' && risk.offSlots.length > 0 && !chargeNowOn) onEffectiveMs = t + 5 * MIN;
+        if (variant === 'reOnPerson' && risk.offSlots.length > 0 && !chargeNowOn) { onEffectiveMs = t + 5 * MIN; personPending = true; }
       }
     }
     if (a.kind === 'none' && shapeAtMs == null && nfc.lineOnReadingShape(s, t, o) != null) shapeAtMs = t;
@@ -185,10 +204,12 @@ function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Varian
     } else if (a.kind === 'lineReOn') {
       if (variant === 'reOnLimited' && !handedBack) {
         // (review 5) index.ts: every write rate-limited — the count handed back, no slots, the stamp moved to the write.
-        handedBack = true;
-        s = { ...s, forceChargeLineReOnAtMs: t, forceChargeLineReOnSlots: null };
+        // (review 6) …stamped `lagMs` after the tick (Date.now() after the writes).
+        handedBack = true; handBackAtMs = t;
+        s = { ...s, forceChargeLineReOnAtMs: t + kn.lagMs, forceChargeLineReOnSlots: null };
       } else if (variant !== 'noReOn') {
-        s = { ...s, forceChargeLineReOns: s.forceChargeLineReOns + 1, forceChargeLineReOnAtMs: t, forceChargeLineReOnSlots: [...a.slots] };
+        if (handBackAtMs != null && retryAtMs == null) retryAtMs = t;
+        s = { ...s, forceChargeLineReOns: s.forceChargeLineReOns + 1, forceChargeLineReOnAtMs: t + kn.lagMs, forceChargeLineReOnSlots: [...a.slots] };
         // 'reOnInert' ('reOnPerson'): the write is accepted and stamped, and the slots keep reading OFF. 'reOnLate': it
         // takes effect a minute after its readback check.
         if (variant !== 'reOnInert' && variant !== 'reOnPerson') {
@@ -215,14 +236,29 @@ function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Varian
       // stop importing and keep reading ON (unmeasured).
       if (chargeNowOn) {
         onMin += 1;
-        if (variant === 'onLatch') { if (importing) lossAtMs = t; importing = false; } else chargeNowOn = false;
+        if (variant === 'onLatch') { if (importing) lossAtMs = t; importing = false; } else {
+          chargeNowOn = false;
+          if (personOnAtMs != null && personStopAtMs == null) personStopAtMs = t;
+        }
       }
       if (pack > 0.5 * CAP) pack = Math.max(0.5 * CAP, pack - (load / DIS + kn.standbyKw) * (MIN / H));
     }
   }
   tail.sort((x, y) => x - y);
   const m = Math.floor(tail.length / 2);
-  return { close: tail.length % 2 ? tail[m] : (tail[m - 1] + tail[m]) / 2, onMin, reOns, reOnsFailed, pushedAtMs, shapeAtMs, lossAtMs, pushCause };
+  const close = tail.length % 2 ? tail[m] : (tail[m - 1] + tail[m]) / 2;
+  // (review 6) The morning account of a night whose person's ON the panel stopped: index.ts's builders on the record the window
+  // closes (the window's OFF).
+  let stopNamed = false;
+  if (personStopAtMs != null) {
+    const fc = nfc.forceChargeNightOutcome({ ...s, forceChargeOffAtMs: W1, forceChargeOffReason: 'windowEnd' }, gates);
+    stopNamed = buildNightChargeMorningSummary({ day: s.day, targetPct: 50, restorePct: 30, expectedKwh: 17.6, forceCharge: fc, closePoolPct: close, linePct: L } as never)
+      .body.includes("until the panel's own stop switched Charge Now off at");
+  }
+  return {
+    close, onMin, reOns, reOnsFailed, pushedAtMs, shapeAtMs, lossAtMs, pushCause,
+    handBackAtMs, retryAtMs, personOnAtMs, personStopAtMs, panelOffAtMs: s.forceChargeLinePanelOffAtMs ?? null, stopNamed,
+  };
 }
 
 const YEAR_LINES = [50.45, 50.61, 51.15, 51.43, 52.62, 54.33, 55.55, 57.52, 59.1, 65.95];
@@ -235,17 +271,39 @@ const KS = [0.9, 1.0, 1.1, 1.25];
  *  (review 3) `underPushedEarly` — of the nights under, those whose only push came BEFORE the event that lost the line
  *  ('onLatch': the latch), a once-a-night budget spent on a pool still charging; `shapes` — nights the ON-reading-shape
  *  log fired; `heldPushes` — pushes whose cause is 'reOnHeld'. (review 5) `refusedPushes` — pushes whose cause is
- *  'reOnRefused' (a handed-back re-ON whose retry the cutoff refuses). */
+ *  'reOnRefused' (a handed-back re-ON whose retry the cutoff refuses). (review 6) `handBacks` — nights with a hand-back;
+ *  `lost` — of them, those with neither its retry nor a push though a tick came between the hand-back and the lead;
+ *  `lastTick` — those handed back on the last tick before the re-ON's cutoff (the next tick is at or past it and the push's
+ *  lead: no retry, no push); `refusedRetried` — a 'reOnRefused' push followed by the retry it says does not come; `personOn` — nights a person's ON took effect; `personStop` — of them, those the panel stopped at its
+ *  ceiling after it; `stopStamped` — of those, the panel's stop on the record after the person's ON; `stopNamed` — the morning
+ *  account naming the panel's stop as what ended the charge. */
 function cell(lines: number[], kn: Partial<Knobs>, ks: number[] = KS, variant: Variant = 'real'): {
   under: number; n: number; worst: number; meanOn: number; reOns: number; pushed: number; underPushed: number; latePushed: number;
   underPushedEarly: number; shapes: number; heldPushes: number; refusedPushes: number;
+  handBacks: number; lost: number; lastTick: number; refusedRetried: number; personOn: number; personStop: number; stopStamped: number; stopNamed: number;
 } {
   const k2 = { ...BASE, ...kn };
   let under = 0, n = 0, worst = Infinity, on = 0, reOns = 0, pushed = 0, underPushed = 0, latePushed = 0, underPushedEarly = 0, shapes = 0, heldPushes = 0, refusedPushes = 0;
+  let handBacks = 0, lost = 0, lastTick = 0, refusedRetried = 0, personOn = 0, personStop = 0, stopStamped = 0, stopNamed = 0;
   for (const L of lines) for (const h of HOUSES) for (const k of ks) {
     const r = night(L, h, k, k2, variant);
     n += 1; on += r.onMin; reOns += r.reOns; worst = Math.min(worst, r.close - L);
     if (r.shapeAtMs != null) shapes += 1;
+    if (r.handBackAtMs != null) {
+      handBacks += 1;
+      if (r.retryAtMs == null && r.pushedAtMs == null) {
+        if (r.handBackAtMs + MIN >= W1 - nfc.FORCE_CHARGE_LINE_AT_RISK_LEAD_MS) lastTick += 1; else lost += 1;
+      }
+      if (r.pushCause === 'reOnRefused' && r.retryAtMs != null && r.pushedAtMs != null && r.retryAtMs > r.pushedAtMs) refusedRetried += 1;
+    }
+    if (r.personOnAtMs != null) {
+      personOn += 1;
+      if (r.personStopAtMs != null) {
+        personStop += 1;
+        if (r.panelOffAtMs != null && r.panelOffAtMs > r.personOnAtMs) stopStamped += 1;
+        if (r.stopNamed) stopNamed += 1;
+      }
+    }
     if (r.pushedAtMs != null) {
       pushed += 1;
       if (r.pushedAtMs >= W1 - nfc.FORCE_CHARGE_LINE_AT_RISK_LEAD_MS) latePushed += 1;
@@ -257,7 +315,10 @@ function cell(lines: number[], kn: Partial<Knobs>, ks: number[] = KS, variant: V
       if (r.pushedAtMs != null) { underPushed += 1; if (r.lossAtMs != null && r.pushedAtMs < r.lossAtMs) underPushedEarly += 1; }
     }
   }
-  return { under, n, worst, meanOn: on / n, reOns, pushed, underPushed, latePushed, underPushedEarly, shapes, heldPushes, refusedPushes };
+  return {
+    under, n, worst, meanOn: on / n, reOns, pushed, underPushed, latePushed, underPushedEarly, shapes, heldPushes, refusedPushes,
+    handBacks, lost, lastTick, refusedRetried, personOn, personStop, stopStamped, stopNamed,
+  };
 }
 
 const STRESSES: Array<[string, Partial<Knobs>]> = [
@@ -412,6 +473,41 @@ test('★★★ T7 (review 5) an ON seen on the readback that no ON write of our
     assert.equal(t.heldCause, 0, `${v}: ${t.heldCause} 'reOnHeld' pushes`);
   }
   assert.deepEqual(got, PIN_REVIEW5);
+});
+
+test('★★★ T7 (review 6) with the ticks off the minute and each re-ON stamped after its writes, a handed-back re-ON gets its retry or the push — never neither, never both; a person\'s ON the panel then stops is stamped and named; pinned exactly', () => {
+  const runs: Array<[string, Variant, Partial<Knobs>]> = [
+    ['reOnLimited, stamped 2 s after its tick', 'reOnLimited', { lagMs: 2_000 }],
+    ['reOnLimited, ticks 30 s off the minute, stamped 2 s after', 'reOnLimited', { phaseMs: 30_000, lagMs: 2_000 }],
+    ['reOnPerson', 'reOnPerson', {}],
+  ];
+  const got: Record<string, Record<string, number>> = {};
+  for (const [label, variant, knobs] of runs) {
+    const t = { under: 0, reached: 0, held: 0, shapes: 0, heldCause: 0, refused: 0, handBacks: 0, lost: 0, lastTick: 0, refusedRetried: 0,
+      personOn: 0, personStop: 0, stopStamped: 0, stopNamed: 0 };
+    for (const [, kn] of PREDICTED) {
+      for (const [lines, floor] of [[YEAR_LINES, false], [YEAR_LINES, true], [HIGH_LINES, false], [HIGH_LINES, true]] as const) {
+        const r = cell(lines as number[], { ...kn, ...knobs, floor }, KS, variant);
+        assert.equal(r.latePushed, 0, `${label}: never inside the lead`);
+        t.under += r.under; t.reached += r.underPushed; t.held += r.pushed - r.underPushed;
+        t.shapes += r.shapes; t.heldCause += r.heldPushes; t.refused += r.refusedPushes;
+        t.handBacks += r.handBacks; t.lost += r.lost; t.lastTick += r.lastTick; t.refusedRetried += r.refusedRetried;
+        t.personOn += r.personOn; t.personStop += r.personStop; t.stopStamped += r.stopStamped; t.stopNamed += r.stopNamed;
+      }
+    }
+    got[label] = t;
+  }
+  for (const [label, t] of Object.entries(got)) {
+    // No hand-back loses both its retry and the push (eed0363a held the push while the stamp + 15 min fell before the cutoff,
+    // and the retry came a tick later, past it), and no 'reOnRefused' push ("it does not try again tonight") is followed by one.
+    assert.equal(t.lost, 0, `${label}: ${t.lost} hand-backs with neither the retry nor the push`);
+    assert.equal(t.refusedRetried, 0, `${label}: ${t.refusedRetried} 'reOnRefused' pushes followed by the retry`);
+    assert.equal(t.shapes + t.heldCause, 0, `${label}: shape logs or 'reOnHeld' pushes`);
+    // A person's ON that the panel stops at its ceiling is a stop on the record, and the morning names it.
+    assert.equal(t.stopStamped, t.personStop, `${label}: ${t.stopStamped} of ${t.personStop} stops after the person's ON stamped`);
+    assert.equal(t.stopNamed, t.personStop, `${label}: ${t.stopNamed} of ${t.personStop} named by the morning account`);
+  }
+  assert.deepEqual(got, PIN_REVIEW6);
 });
 
 test('★★★ T7 the line force-charge actually runs: ON to the close on a 50% pool, no OFF before it', () => {
@@ -619,15 +715,44 @@ const PIN_REON_INERT_HELD_PUSHES = 6;
  *  - reOnPerson: the person's ON 5 min after the push carries 927 of reOnInert's 3,005 nights under (those 927 pushes
  *    are on nights that then held); 1,550 of the 2,078 left are reached, as reOnInert's (their last check inside the last
  *    21 min). The shape log fired on 2,476 of the 2,483 pushed nights before.
- *  - reOnLimited: every night under reached. 356 pushes are 'reOnRefused' — a hand-back 23-35 min before the close, whose
+ *  - reOnLimited: every night under reached. 356 pushes are 'reOnRefused' — a hand-back 22-35 min before the close, whose
  *    retry would fall inside the re-ON's 20-min cutoff (236 of those nights still held on their margin) — and none
  *    'reOnHeld' inside a retry's spacing (3,256 before); the other 92 on held nights are reOnLate's kind (flat at ⌈L⌉
- *    beside an 11 kW or larger EV). */
+ *    beside an 11 kW or larger EV). Its re-ONs are stamped on their tick's own minute: PIN_REVIEW6 stamps them later. */
 const PIN_REVIEW5 = {
   reOnLate: { under: 0, reached: 0, held: 88, shapes: 0, heldCause: 0, refused: 0 },
   reOnGlitch: { under: 0, reached: 0, held: 7, shapes: 0, heldCause: 0, refused: 0 },
   reOnPerson: { under: 2078, reached: 1550, held: 933, shapes: 0, heldCause: 0, refused: 0 },
   reOnLimited: { under: 121, reached: 121, held: 328, shapes: 0, heldCause: 0, refused: 356 },
+};
+/** (review 6) Summed over every PREDICTED cell (7,480 nights each, rounded and floored, year and 70-90% lines), as PIN_REVIEW5
+ *  plus: `handBacks`, `lost` (neither the retry nor a push, a tick left before the lead), `lastTick` (handed back on the last
+ *  tick before the re-ON's cutoff: the next tick is past it and the push's lead — none of those nights closes under),
+ *  `refusedRetried`, and the person's ON the panel then stops. All unmeasured on this plant.
+ *  - reOnLimited with each re-ON stamped 2 s after its tick (index.ts stamps Date.now() after the writes): the retry is the
+ *    16th tick after the hand-back's, so a hand-back 36 min out has none (the 16th tick is the cutoff instant): 30 such
+ *    nights, 25 of them under (with the stamp on its tick they got the retry and held). eed0363a held their push for a retry
+ *    that never came — 30 hand-backs lost, 25 of the 146 under never reached; now 386 'reOnRefused' pushes (22-36 min out)
+ *    and every night under reached. The other 187 pushes on held nights are reOnLate's kind (flat at ⌈L⌉ beside an 11 kW or
+ *    larger EV, 26-36 min after the retry; 92 with the stamp on its tick).
+ *  - …with the ticks 30 s off the minute too: the same — eed0363a lost 31, 22 of the 155 under never reached.
+ *  - reOnPerson: of the 2,476 nights a person's ON took effect, 3 reach the panel's ceiling before the close; each stop is on
+ *    the record and named by the morning account. (Its re-ONs never take effect, so the recorded stop stays before them and
+ *    the re-ON's own rule stamped these 3 at eed0363a too; the round-6 reviewer's night — the stop re-stamped after a re-ON
+ *    that took effect, then a person's ON — is lineForceChargeAtRisk.test.ts's.) */
+const PIN_REVIEW6: Record<string, Record<string, number>> = {
+  'reOnLimited, stamped 2 s after its tick': {
+    under: 146, reached: 146, held: 428, shapes: 0, heldCause: 0, refused: 386, handBacks: 3278, lost: 0, lastTick: 18, refusedRetried: 0,
+    personOn: 0, personStop: 0, stopStamped: 0, stopNamed: 0,
+  },
+  'reOnLimited, ticks 30 s off the minute, stamped 2 s after': {
+    under: 155, reached: 155, held: 426, shapes: 0, heldCause: 0, refused: 394, handBacks: 3292, lost: 0, lastTick: 17, refusedRetried: 0,
+    personOn: 0, personStop: 0, stopStamped: 0, stopNamed: 0,
+  },
+  reOnPerson: {
+    under: 2078, reached: 1550, held: 933, shapes: 0, heldCause: 0, refused: 0, handBacks: 0, lost: 0, lastTick: 0, refusedRetried: 0,
+    personOn: 2476, personStop: 3, stopStamped: 3, stopNamed: 3,
+  },
 };
 /** (review 2) …and on the KNOWN late-unpredicted-load cells: the under nights the push reached, in PIN_KNOWN's order. It needs
  *  the pool NOT RISING with at least 20 min left: a load that slows the charge without stopping it (7 kW from 120 min;
