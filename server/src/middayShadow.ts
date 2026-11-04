@@ -919,7 +919,10 @@ export function middayShadowAnnounceInput(rec: MiddayShadowRecord, model: Tariff
   // The backup the notice names: the one that would arm; in advisory mode the one the plan calls for;
   // in a refused cycle the one the plan called for ("no outage backup tonight because …").
   const backupNamed = b != null && b.basisComplete && b.chargeTonight && (advisory || refused != null || b.wouldArm);
-  const forceCharge = c.levelPct != null && c.reservePct != null && c.levelPct > c.reservePct + 0.05;
+  // Charge Now rides the leg: its level clears the reserve, or (v1.200.0, A5) the line force-charge is armed on it —
+  // armFromPlan's lineRides, whatever the stated level. lineAskPct is set only where the leg's line gate is on; a line
+  // leg stated at the 50% reserve (H1's floor, or no start expected) is still armed, and Charge Now switched on just in time.
+  const forceCharge = c.lineAskPct != null || (c.levelPct != null && c.reservePct != null && c.levelPct > c.reservePct + 0.05);
   return {
     nowMs: rec.computedAtMs,
     mode: rec.mode,

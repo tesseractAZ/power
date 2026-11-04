@@ -197,7 +197,8 @@ export interface MiddayCostText {
   buyKwh: number | null;
   /** The window closes before the level is reached (chargeIsWindowBound). */
   toward: boolean;
-  /** Charge Now rides the leg: switched on just in time to reach `levelPct`. */
+  /** Charge Now rides the leg: switched on just in time to reach `levelPct`, or (v1.200.0, A5) for the outage line the
+   *  leg's force-charge is armed for (`lineAskPct`), whatever the stated level. */
   forceCharge: boolean;
   /** The plan calls for a charge (its worst case reaches the minimum buy). */
   charges: boolean;
