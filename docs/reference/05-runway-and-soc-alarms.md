@@ -192,8 +192,12 @@ not divided by η; its load leg keeps `RUNWAY_DISCHARGE_EFFICIENCY`, and η_m st
 The contract pins the door character for character, every spelling of the standby (the inputs' and
 the plan's fields, the ledger helper, the `cushion_standby_*` columns), and the callers of
 `runwayPoolOverheadW` (analytics.ts and index.ts only); its forbidden list names the overhead rule,
-both overhead options and η_m. Every planner walk still drains `load/η` with no overhead (chapter
-15 part 1, "The Cores' standby in the cushion").
+both overhead options and η_m, each as analytics.ts's constant and as the `limits` getter the constant
+is read from (`runwayPoolOverheadFloorW`, `runwayCoreOverheadW`, `runwayDrainMarginalEfficiency`,
+which index.ts could reach through its own `limits` import), and two inventories across the source
+pin who names the options at all: the getters in limits.ts and analytics.ts only, the option names
+in config.ts, limits.ts and analytics.ts only. Every planner walk still drains `load/η` with no
+overhead (chapter 15 part 1, "The Cores' standby in the cushion").
 
 #### 1.4 Key constants
 
