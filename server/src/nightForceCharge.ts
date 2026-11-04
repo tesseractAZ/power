@@ -1402,8 +1402,14 @@ export const FORCE_CHARGE_LINE_TREND_MS = 10 * 60_000;
 export const FORCE_CHARGE_LINE_AT_RISK_LEAD_MS = FORCE_CHARGE_MIN_RUN_MS;
 /** v1.200.0 (review 6) — the force-charge tick's cadence: index.ts runs the night actuation tick (and the force-charge
  *  safety tick) on a setInterval of this. A decision that waits for a later tick counts the ticks by it
- *  (lineAtRiskPushDue's hand-back hold): a later tick lands a whole number of these after this one, not at any instant. */
+ *  (lineAtRiskPushDue's hand-back hold): a later tick lands a whole number of these after this one, or (review 7) a little
+ *  more — never at any instant. */
 export const FORCE_CHARGE_TICK_MS = 60_000;
+/** v1.200.0 (review 7) — how much later than the cadence the ticks a decision counts may run, all told (lineAtRiskPushDue's
+ *  hand-back hold counts to the earliest tick the retry can come). setInterval re-arms from each callback's start, so the
+ *  ticks drift later — 1-2 ms a tick measured on Node, under 30 ms over the 16 the hold counts — and a tick reads its nowMs a
+ *  few ms after it fires, after the steps before the force-charge's. One second: far more than that, far less than a tick. */
+export const FORCE_CHARGE_TICK_LATE_TOL_MS = 1_000;
 
 /** v1.200.0 (review 2) — one pool reading of a line night's trail (forceChargeLinePoolSamples). */
 export interface LinePoolSample { pct: number; atMs: number }
@@ -1610,12 +1616,18 @@ export function lineAtRiskPushDue(s: NightActuationState, nowMs: number, o: Forc
   // number of FORCE_CHARGE_TICK_MS from this one — not at the stamp + 15 min. index.ts stamps a hand-back after its writes,
   // a little after its tick's nowMs, so that tick is the 16th after the hand-back's: held while the stamp + 15 min fell
   // before the cutoff, a hand-back 35-36 min before the close got neither its retry (the cutoff) nor the push (the lead).
-  // Judged again on every tick, so setInterval's drift is counted from the latest one; what is left is one tick's lateness.
+  // (review 7) …counted to the EARLIEST tick it can come. The push is once a night: one sent on an early tick is not taken
+  // back by a later one. The ticks only run late (setInterval re-arms from each callback's start), and later ticks that run
+  // late reach the stamp + 15 min in fewer ticks — a stamp 5 ms after its tick, the ticks 1 ms late each: the 15th, not
+  // the 16th, came 14 min after a 'reOnRefused' push ("it does not try again tonight"). So the count is to the stamp + 15 min
+  // less FORCE_CHARGE_TICK_LATE_TOL_MS, and at least one tick (this one's retry did not come). What is left: the tick the
+  // hold waits for, due before the cutoff, running late onto it (a window of that tick's own lateness, ~1 ms).
   const reOnAt = s.forceChargeLineReOnAtMs;
   const handedBack = reOnAt != null && (s.forceChargeLineReOnSlots == null || s.forceChargeLineReOnSlots.length === 0)
     && s.forceChargeLineReOns < FORCE_CHARGE_LINE_REON_MAX && nowMs - reOnAt < FORCE_CHARGE_ON_VERIFY_AFTER_MS;
   if (handedBack) {
-    const retryAtMs = nowMs + Math.ceil((reOnAt! + FORCE_CHARGE_ON_VERIFY_AFTER_MS - nowMs) / FORCE_CHARGE_TICK_MS) * FORCE_CHARGE_TICK_MS;
+    const ticks = Math.max(1, Math.ceil((reOnAt! + FORCE_CHARGE_ON_VERIFY_AFTER_MS - FORCE_CHARGE_TICK_LATE_TOL_MS - nowMs) / FORCE_CHARGE_TICK_MS));
+    const retryAtMs = nowMs + ticks * FORCE_CHARGE_TICK_MS;
     if (retryAtMs < closeAtMs - FORCE_CHARGE_ON_RETRY_CUTOFF_MS) return null;
   }
   // (review 3) The trend only on readings after the last ON of ours had its readback grace (lineTrendReference): no
