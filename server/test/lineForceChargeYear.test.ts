@@ -4,7 +4,9 @@ import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import * as nca from '../src/nightChargeAdvisor.js';
 import { computeNightChargePlan, buildNightChargeInputs, type NightChargePlan, type CushionPoolScale } from '../src/nightChargeAdvisor.js';
+import * as cardText from '../../web/src/cards/nightChargeText.js';
 import * as nfc from '../src/nightForceCharge.js';
 import { armedForceChargeCeilingPct } from '../src/nightChargeActuator.js';
 import { legacyIdentityCases, planDigest } from './fixtures/legacyIdentityFixtures.js';
@@ -32,7 +34,8 @@ import { MEASURED_SCALE } from './fixtures/measuredCushionLineFigures.js';
  *    deliver; the year's windows are overnight, no P50 sun), never under the 50% reserve, and a stated panel stop
  *    needs that reach;
  *  - the texts: a line-mode night under its line says so, a line above a full pool says so, an armed night never
- *    says "no force-charge".
+ *    says "no force-charge";
+ *  - (T19) lineNotHeldOf, the predicate every surface words by, and the card's mirror agree with the walk on every plan.
  * The expected close and the expected buy are NOT monotone in the line (a latching walk: a higher line starts earlier
  * and latches sooner): their falls are pinned as counts, not asserted (PIN_A5). With ARB_COST_MAX_SOC_PCT above 95
  * the start target can fall as the line crosses 90 (the cost ceiling to 95%): pinned, the ceiling still never falls.
@@ -91,14 +94,19 @@ interface Sweep {
   kinds: { closeUnder: number; aboveFull: number; nearFull: number };
   eFalls: number; eFallsNonBoundGt5: number; eFallMaxNonBound: number; buyFalls: number; closeUnderVanish: number;
   meanBuyQual: Record<number, number | null>;
+  /** T19 — plans lineNotHeldOf and the card's lineNotHeldOfCard were checked on, and those either disagreed with the walk. */
+  parity: { checked: number; mismatch: number };
   ex: string[];
 }
+type NotHeldFn = (p: unknown) => string | null;
+const serverKind = (nca as unknown as { lineNotHeldOf?: NotHeldFn }).lineNotHeldOf;
+const cardKind = (cardText as unknown as { lineNotHeldOfCard?: NotHeldFn }).lineNotHeldOfCard;
 
 function sweep(basis: Basis, depsOf: (d: Deps) => Deps): Sweep {
   const s: Sweep = {
     m1: 0, m2: 0, m3: 0, m4: 0, undisclosedUnder: 0, carrierRest: 0, reachOver: 0, stopUnreached: 0, underFloor: 0, textMissing: 0, noForceCharge: 0,
     armed: 0, carried: 0, nearFull: 0, closeUnder: 0, kinds: { closeUnder: 0, aboveFull: 0, nearFull: 0 },
-    eFalls: 0, eFallsNonBoundGt5: 0, eFallMaxNonBound: 0, buyFalls: 0, closeUnderVanish: 0, meanBuyQual: {}, ex: [],
+    eFalls: 0, eFallsNonBoundGt5: 0, eFallMaxNonBound: 0, buyFalls: 0, closeUnderVanish: 0, meanBuyQual: {}, parity: { checked: 0, mismatch: 0 }, ex: [],
   };
   const buySum: Record<number, number> = {};
   const qualN: Record<number, number> = {};
@@ -123,6 +131,10 @@ function sweep(basis: Basis, depsOf: (d: Deps) => Deps): Sweep {
         kind: !lineMode || L == null ? null : L > 100 ? 'aboveFull' : !holds(E, L) ? 'closeUnder' : p.cushionEnvelopeReason === 'nearFull' ? 'nearFull' : null,
       };
       const where = `${c.label} ${basis} ${h} h`;
+      if (serverKind != null && cardKind != null) {
+        s.parity.checked += 1;
+        if (serverKind(p) !== r.kind || cardKind(p) !== r.kind) { s.parity.mismatch += 1; note(`${where}: walk ${r.kind}, server ${serverKind(p)}, card ${cardKind(p)}`); }
+      }
       // Per plan: the carry, the carrier rest, the reach, the texts.
       if (r.armed) {
         s.armed += 1;
@@ -188,12 +200,20 @@ const PINNED = (s: Sweep) => ({
 });
 const ALL_ZERO = { m1: 0, m2: 0, m3: 0, m4: 0, undisclosedUnder: 0, carrierRest: 0, reachOver: 0, stopUnreached: 0, underFloor: 0, textMissing: 0, noForceCharge: 0 };
 
-/** Measured on the landed A5 (emulated, the planner over the year), the live cost gate: what is pinned, not asserted. */
+/** Measured on the landed A5 (emulated, the planner over the year), the live cost gate: what is pinned, not asserted.
+ *  `armed` / `carried` — plans with forceChargeLine, and of them those with no envelope cause; `nearFull` / `closeUnder`
+ *  — the reasons; `kinds` — lineNotHeldOf over every line-mode plan (closeUnder: the reason's, the near-full lines' under
+ *  their walk, and carried nights whose sizing fell short); `eFalls` — h steps whose expected close falls (any amount),
+ *  of them `eFallsNonBoundGt5` by more than 5 points after a walk that was not deliverable-bound, the largest such fall
+ *  `eFallMaxNonBound` (2027-08-09 21:30, 13 → 14 h on nameplate, 71.8 → 52.9%; 12 → 13 h at 0.944, 77.2 → 57.3%, both
+ *  now 'closeUnder'); `buyFalls` — steps whose expected buy falls; `closeUnderVanish` — a 'closeUnder' disclosure gone at
+ *  the next hour (its walk rose above the rising line); `meanBuyQual` — the mean expected buy per armed or disclosed plan,
+ *  per hour (not monotone: the set grows with h). */
 const PIN_A5: Record<Basis, ReturnType<typeof PINNED>> = {
   np: {
     armed: 5262, carried: 4819, nearFull: 418, closeUnder: 25, kinds: { closeUnder: 777, aboveFull: 95, nearFull: 175 },
     eFalls: 384, eFallsNonBoundGt5: 29, eFallMaxNonBound: 18.9, buyFalls: 136, closeUnderVanish: 6,
-    meanBuyQual: { 4: null, 5: 40.35, 6: 29.96, 7: 32.29, 8: 28.89, 9: 30.44, 10: 32.1, 11: 32.22, 12: 32.44, 13: 33.09, 14: 33.23, 15: 34.07, 16: 35.18, 17: 35.87, 18: 36.18, 19: 36.99, 20: 37.66 },
+    meanBuyQual: { 4: null, 5: 40.35, 6: 29.96, 7: 32.29, 8: 28.89, 9: 30.44, 10: 32.1, 11: 32.09, 12: 32.44, 13: 33.09, 14: 33.23, 15: 34.07, 16: 35.18, 17: 35.87, 18: 36.18, 19: 36.99, 20: 37.66 },
   },
   m: {
     armed: 5664, carried: 5030, nearFull: 602, closeUnder: 32, kinds: { closeUnder: 895, aboveFull: 194, nearFull: 209 },
@@ -204,9 +224,15 @@ const PIN_A5: Record<Basis, ReturnType<typeof PINNED>> = {
 /** (L1) ARB_COST_MAX_SOC_PCT 100 on the year's cost cases at 90 or more: the start-target falls as a line crosses 90%. */
 const PIN_A5_COST100: Record<Basis, { m1: number }> = { np: { m1: 14 }, m: { m1: 19 } };
 
+const swept = new Map<string, Sweep>();
+const sweepLive = (basis: Basis): Sweep => {
+  if (!swept.has(basis)) swept.set(basis, sweep(basis, liveGate));
+  return swept.get(basis)!;
+};
+
 for (const basis of ['np', 'm'] as const) {
   test(`★★★ T15 the year at 4-20 h (${basis === 'np' ? 'nameplate' : '×0.944'}), live cost gate: the force-charge never disarms and its target and ceiling never fall as the cushion rises; no carried night closes under its line undisclosed; the stated close within the window's reach`, () => {
-    const s = sweep(basis, liveGate);
+    const s = sweepLive(basis);
     assert.deepEqual(ZERO(s), ALL_ZERO, s.ex.join('\n'));
     assert.deepEqual(PINNED(s), PIN_A5[basis]);
   });
@@ -216,6 +242,10 @@ for (const basis of ['np', 'm'] as const) {
     const { m1: _m1, ...zero } = ALL_ZERO;
     assert.deepEqual(rest, zero, s.ex.join('\n'));
     assert.deepEqual({ m1 }, PIN_A5_COST100[basis]);
+  });
+  test(`★★ T19 (${basis === 'np' ? 'nameplate' : '×0.944'}) lineNotHeldOf and the card's lineNotHeldOfCard agree with the walk on every plan of the year at 4-20 h`, () => {
+    const s = sweepLive(basis);
+    assert.deepEqual(s.parity, { checked: CASES.length * (HMAX - HMIN + 1), mismatch: 0 }, s.ex.join('\n'));
   });
 }
 

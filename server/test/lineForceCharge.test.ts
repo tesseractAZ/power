@@ -1219,9 +1219,13 @@ const yearPlanAt = (label: string, h: number, basis: 'np' | 'm', o: { gate?: 'li
   if ((o.gate ?? 'live') === 'live') deps.forceChargeEligible = deps.objectiveMode === 'cost' && ((deps.costMaxSocPct as number | undefined) ?? 90) > 50;
   return L(computeNightChargePlan(buildNightChargeInputs(deps as never)));
 };
-/** The supervised context the evening job passes: the armed record (armFromPlan) through armedForceChargeAnnouncement. */
+/** The supervised context the evening job passes: the armed record (armFromPlan) through armedForceChargeAnnouncement.
+ *  A plan issued inside its window (a mid-window re-plan, which arms nothing) gets the record armFromPlan would write. */
 const armedSupervised = (p: LinePlan, costGate: boolean) => {
-  const rec = (armFromPlan as (...a: unknown[]) => NightActuationState | null)(emptyActuationState(), '2027-01-01', p, p.generatedAt, 30, costGate, null, true);
+  const rec = p.generatedAt < p.window!.startMs
+    ? (armFromPlan as (...a: unknown[]) => NightActuationState | null)(emptyActuationState(), '2027-01-01', p, p.generatedAt, 30, costGate, null, true)
+    : { ...emptyActuationState(), forceChargeRides: true, forceChargeCeilingPct: p.costCeilingSocPct ?? null,
+      forceChargeLineAskPct: p.forceChargeLine?.askPct ?? null, forceChargeLinePct: p.forceChargeLine?.linePct ?? null } as NightActuationState;
   assert.ok(rec != null, 'armed');
   return {
     cancelDeadlineText: 'tonight at 11:00 PM', cancelDeadlineTextEs: 'esta noche a las 11:00 PM', targetPct: 50,

@@ -62,6 +62,9 @@ import { buildNightChargeMorningSummary } from '../src/notify.js';
  * stamped as a stop, and the morning names it.
  * Three discriminators show the grid can see the mutants it is meant to kill: a software stop at ⌈L⌉ (design
  * A's hold, F-i), a start timed to ⌈L⌉ without the + 5 (F-iii), and no re-ON after the latch.
+ * (A5, T18) A LINE WITHIN 10 POINTS OF FULL is armed and runs as a 90% line (start 95, ceiling 100): its nights under the
+ * line, the push on them, ≤ 3 ON-kind writes a night, the ON minutes, and the lines a full pool cannot hold, pinned on the
+ * measured latch and on the ON-reading one; the panel's own stop at 100% is unmeasured.
  */
 
 const MIN = 60_000;
@@ -640,35 +643,44 @@ test('★★ T18 (A5) near-full lines: the measured latch and the unmeasured ON-
     { kind: 'line', targetPct: 98, askPct: 98, startTargetPct: 95, panelCeilingPct: 100 });
 });
 
-/** (A5) Measured on the landed change, the near-full lines (6 lines × 5 houses × 4 rate factors = 120 nights a cell; 30 at a
- *  single rate factor): [under rounded, under floored, of them pushed rounded, pushed floored]. The measured latch (the
- *  panel's own OFF at its ceiling, read at 80 and 90% only: the stop at 100% is UNMEASURED) and the ON-reading latch
- *  (unmeasured). The re-ON and the push key on 95, under a line of 96-98 (a residual, stated). */
+/** (A5) Measured on the landed change (962e4668's plant: the hand-back hold, the lagged stamps and the earliest-tick count
+ *  change none of these), the near-full lines (6 lines × 5 houses × 4 rate factors = 120 nights a cell; 30 at a single
+ *  rate factor): [under rounded, under floored, of them pushed rounded, pushed floored].
+ *  - 'real': the measured latch (the panel's own OFF at its ceiling, read at 80 and 90% only — its stop at 100% is
+ *    UNMEASURED). The nights under close so in the last 20 minutes (past the re-ON's cutoff and the push's lead) or still
+ *    rising (the 70% rate): the push reaches none of them. The re-ON and the push key on the start target, 95, under a
+ *    line of 96-98 (a residual, stated). Matches the design's and the critic's emulation on 11019c18's plant (rounded).
+ *  - 'onLatch': a slot that keeps reading ON at its ceiling and stops importing (unmeasured anywhere): no re-ON keys on
+ *    it, so a predicted EV that comes after the latch closes every near-full night under; the push reaches all 120 of
+ *    the EV-90 cell and 34 of the 69 all-window ones (their fall comes too late for its 20-min lead). */
 const PIN_NEAR: Record<string, Record<string, [number, number, number, number]>> = {
   real: {
-    'baseline (pool 50 at the open)': [3, 0, 0, 0],
-    '20 kWh predicted, 7 kW EV from 90 min': [19, 0, 0, 0],
-    '7 kW EV all window, predicted': [41, 0, 0, 0],
-    'pool 77 at the open': [1, 0, 0, 0],
+    'baseline (pool 50 at the open)': [3, 6, 0, 0],
+    '20 kWh predicted, 7 kW EV from 90 min': [19, 34, 0, 0],
+    '7 kW EV all window, predicted': [41, 43, 0, 0],
+    'pool 77 at the open': [1, 4, 0, 0],
     'the pack at 70% of the rate': [30, 30, 0, 0],
   },
   onLatch: {
-    'baseline (pool 50 at the open)': [3, 0, 0, 0],
-    '20 kWh predicted, 7 kW EV from 90 min': [120, 0, 120, 0],
-    '7 kW EV all window, predicted': [69, 0, 34, 0],
-    'pool 77 at the open': [0, 0, 0, 0],
+    'baseline (pool 50 at the open)': [3, 6, 0, 0],
+    '20 kWh predicted, 7 kW EV from 90 min': [120, 120, 120, 120],
+    '7 kW EV all window, predicted': [69, 72, 34, 34],
+    'pool 77 at the open': [1, 4, 0, 0],
     'the pack at 70% of the rate': [30, 30, 0, 0],
   },
 };
-/** (A5) Lines at or above a full pool's reach (99.3, 100.4, 104: ⌈L⌉ 100), the measured latch, rounded: [under, nights]. */
+/** (A5) Lines at or above what a full pool can hold to the close (99.3, 100.4, 104: ⌈L⌉ 100), the measured latch, rounded:
+ *  [under, nights] — known, not claimed (the plan discloses every one: 'nearFull', 'aboveFull' above 100). */
 const PIN_TOP: Record<string, [number, number]> = {
-  'baseline (pool 50 at the open)': [0, 60],
-  '20 kWh predicted, 7 kW EV from 90 min': [0, 60],
-  '7 kW EV all window, predicted': [0, 60],
-  'pool 77 at the open': [0, 60],
-  'the pack at 70% of the rate': [0, 15],
+  'baseline (pool 50 at the open)': [56, 60],
+  '20 kWh predicted, 7 kW EV from 90 min': [58, 60],
+  '7 kW EV all window, predicted': [60, 60],
+  'pool 77 at the open': [53, 60],
+  'the pack at 70% of the rate': [15, 15],
 };
-/** (A5) Mean minutes a slot reads Charge Now ON on the near-full lines (the measured latch, rounded). */
+/** (A5) Mean minutes a slot reads Charge Now ON on the near-full lines (the measured latch, rounded): the exposure a
+ *  near-full night adds (v1.199.1 armed none on a resilience night). 294 / 359 with the predicted EV under the ON-reading
+ *  latch (unmeasured). */
 const PIN_NEAR_MEAN_ON: Record<string, number> = {
   'baseline (pool 50 at the open)': 182,
   '20 kWh predicted, 7 kW EV from 90 min': 224,
