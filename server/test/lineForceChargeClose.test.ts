@@ -413,7 +413,8 @@ test('★★ T7 (review) cost-dominant nights (the cost stop at ⌈L⌉ + 10 or 
   }
   assert.deepEqual(got, PIN_COST);
   // (review 3) The line-at-risk push on those nights: the under nights it reached. It goes only BEFORE the cost
-  // force-charge's own software stop (an OFF of ours ends it), so a late EV after that stop is not pushed — pinned.
+  // force-charge's own software stop (an OFF of ours ends it), so a late EV after that stop is not pushed, nor a slow
+  // pack still rising at the close — pinned.
   const reach: Record<string, [number, number, number, number]> = {};
   for (const [name, kn] of COST_CELLS) {
     const r = (lines: number[], floor: boolean) => { const c = cell(lines, { ...kn, floor }); assert.equal(c.latePushed, 0); return c.underPushed; };
@@ -490,7 +491,9 @@ const PIN_COST: Record<string, [number, number, number, number]> = {
 };
 /** (review 3) …the under nights the line-at-risk push reached, in PIN_COST's order. The push stops at the cost
  *  force-charge's own software stop (an OFF of ours); a late EV that takes the pool under after that stop is not
- *  pushed. The nights it does reach end with no OFF of ours (the panel's own ceiling stop). */
+ *  pushed. The nights it does reach end with no OFF of ours (the panel's own ceiling stop). (review 4) Of the 59 of
+ *  PIN_COST's 89 it does not reach, 49 end after the cost stop; 10 have no OFF of ours but are slow packs still rising
+ *  at the close (7 floored with the 7 kW EV from 90 min, 3 floored with the 11.52 kW one): a load that slows the charge. */
 const PIN_COST_PUSHED: Record<string, [number, number, number, number]> = {
   'cost ⌈L⌉ + 10, baseline': [0, 0, 0, 0],
   'cost ⌈L⌉ + 10, 7 kW EV from 60 min': [0, 0, 0, 0],

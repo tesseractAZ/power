@@ -115,8 +115,10 @@
  *    11.52 kW EV (EV_MAX_LOAD_W's default) arriving 90 min before the close closes 73 of 200 year nights
  *    under the line; a 7 kW one from 120 min, 5; an ON 5 min late with a 7 kW EV from 90 min, 1. Slow
  *    packs at lines of 70-90% (8 / 35 at 70% of the rate). A cost-dominant night (cost mode, its own
- *    software stop) with a late EV at a line of 70-90% (5 to 15 of 140); the line-at-risk push ends at that
- *    stop (an OFF of ours), so it reaches 30 of those 89 emulated nights, none after the stop.
+ *    software stop) with a late EV at a line of 70-90% (5 to 15 of 140). Over its cells (⌈L⌉ + 10 or + 15; a
+ *    7 kW EV from 60 or 90 min, an 11.52 kW one from 60; rounded and floored) 89 nights close under; the
+ *    line-at-risk push ends at that stop (an OFF of ours) and reaches 30 of them: 49 end after the stop, and
+ *    10 slow packs are still rising at the close (no OFF, not pushed).
  *    THE ON-READING LATCH — UNMEASURED on this plant (no per-slot readback has shown a slot that stops
  *    importing at its ceiling and keeps reading ON; 2026-09-18's slot state is the add-on's record): no
  *    re-ON keys on a slot reading ON, so per predicted-EV cell 0-65 of 200 year nights close under the
@@ -129,6 +131,10 @@
  *    the shape, when seen, is logged once a night (lineOnReadingShape), never on the measured latch.
  *    It also reaches most late unpredicted loads (69 of the 73 year nights under with the 11.52 kW EV from
  *    90 min); a load that only slows the charge leaves the pool rising and is not pushed.
+ *    A RE-ON THE CLOUD ACCEPTS THAT NEVER TAKES EFFECT — UNMEASURED too (its readback check finds the slots still
+ *    OFF): the trend reads past it (lineTrendReference, review 4), so the push goes the minute after that check.
+ *    Emulated (variant reOnInert) it reaches 169 of the 390 predicted-EV year nights that close under and 2,308 of
+ *    2,615 at lines of 70-90%; the rest have their last check inside the last 21 min, too late for the lead.
  * The measured capacity scale never reaches this module: the record carries one whole percent (⌈L⌉), a
  * plan output like the setpoint (runwayBasisContracts.test.ts pin 6).
  *
