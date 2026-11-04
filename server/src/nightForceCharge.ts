@@ -135,6 +135,9 @@
  *    OFF): the trend reads past it (lineTrendReference, review 4), so the push goes the minute after that check.
  *    Emulated (variant reOnInert) it reaches 169 of the 390 predicted-EV year nights that close under and 2,308 of
  *    2,615 at lines of 70-90%; the rest have their last check inside the last 21 min, too late for the lead.
+ *    (review 5) An ON no write of ours explains in time — a re-ON applied a minute after its check, one all-OFF reading
+ *    at the check, Charge Now switched on by a person after the push — is waited out (forceChargeLineOnSeenAtMs):
+ *    emulated, the shape is logged on none of them, and a re-ON handed back rate-limited is never pushed as its gates.
  * The measured capacity scale never reaches this module: the record carries one whole percent (⌈L⌉), a
  * plan output like the setpoint (runwayBasisContracts.test.ts pin 6).
  *
@@ -1468,7 +1471,7 @@ function oursOf(s: Pick<NightActuationState, 'forceChargeSlots'>): number[] {
  *  - (review 5) THE SLOTS READ OFF (forceChargeLineOffSlots), and an ON SEEN AGAIN (forceChargeLineOnSeenAtMs): a slot
  *    the last live readback showed OFF reading ON now, outside the FORCE_CHARGE_ON_VERIFY_AFTER_MS readback grace of an
  *    ON write of ours that reached the panel (the last re-ON with slots on the record, else the ON's last attempt).
- *    Nothing of ours explains it in time: a re-ON applied after its check found it not applied (an ON readback lagged
+ *    Nothing of ours explains it in time: a re-ON applied after its check found it not applied (an ON readback lagged past
  *    14 min on 2026-10-06), a check whose one reading showed every slot OFF, Charge Now switched on in the app after the
  *    push. The trend waits it out like an ON of ours (lineTrendReference).
  * Only on a night whose record carries a line ask; null when there is nothing new to stamp.
