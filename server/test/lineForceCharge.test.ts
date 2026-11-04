@@ -1368,7 +1368,14 @@ test('★ T20 the carry tolerance is the scorer\'s; lineWalkHolds at its edge', 
   const edge = Array.from({ length: 501 }, (_, i) => (500 + i) / 10).map((e) => [e, Math.round((e + 0.05) * 100) / 100] as const);
   assert.deepEqual(edge.filter(([e, l]) => !n.lineWalkHolds(e, l)), [], 'every close exactly at its line less 0.05 holds');
   assert.deepEqual(edge.filter(([e, l]) => n.lineWalkHolds(e, Math.round((l + 0.01) * 100) / 100)), [], 'and 0.01 under it does not');
-  // …and the scorer at the same edge: the realized close verdict, its no-reading branch, and the armed-never-ran strike.
+  // …the card's mirror words the same edge alike (a carried edge night never shows "under the line")…
+  const edgePlan = (e: number, l: number) => ({ forceChargeLine: { askPct: Math.ceil(l), linePct: l }, expectedForceChargeMode: 'line', expectedWriteLevelPct: e, cushionLineSocPct: l });
+  const ctEdge = cardText as unknown as { lineNotHeldOfCard: NotHeldFn };
+  const edgeUpTo100 = edge.filter(([, l]) => l + 0.01 <= 100);
+  assert.deepEqual(edgeUpTo100.filter(([e, l]) => ctEdge.lineNotHeldOfCard(edgePlan(e, l)) !== null), [], 'the card: every edge close holds');
+  assert.deepEqual(edgeUpTo100.filter(([e, l]) => ctEdge.lineNotHeldOfCard(edgePlan(e, Math.round((l + 0.01) * 100) / 100)) !== 'closeUnder'), [], 'the card: 0.01 under is under');
+  assert.deepEqual(edgeUpTo100.filter(([e, l]) => lineNotHeldOf(edgePlan(e, l)) !== null), [], 'the server alike');
+  // …and the scorer at the same edge: the realized close verdict and its no-reading branch (the armed-never-ran strike: T10b).
   const { realizedCushionBreach } = await import('../src/nightChargeGate.js');
   const closeRow = (close: number | null, low: number | null, line: number) => ({
     reserve_floor_pct: 30, cushion_pct: 15, cushion_line_soc_pct: line, actual_min_soc_pct: low, window_kind: 'overnight', window_close_soc_pct: close,
