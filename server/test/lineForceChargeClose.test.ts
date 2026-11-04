@@ -113,8 +113,10 @@ type LineState = NightActuationState & {
 function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Variant): {
   close: number; onMin: number; reOns: number; reOnsFailed: number; pushedAtMs: number | null; shapeAtMs: number | null; lossAtMs: number | null; pushCause: string | null;
   handBackAtMs: number | null; retryAtMs: number | null; personOnAtMs: number | null; personStopAtMs: number | null; panelOffAtMs: number | null; stopNamed: boolean;
+  onWrites: number;
 } {
-  const ask = Math.ceil(L - 1e-9);
+  // (A5) The record's ask is ⌈L⌉ at most 100 (askOf, coerceLineAskPct): a line above a full pool asks 100.
+  const ask = Math.min(100, Math.ceil(L - 1e-9));
   const cost = typeof kn.costPct === 'function' ? Math.min(100, kn.costPct(ask)) : kn.costPct;
   let s: LineState = {
     ...emptyActuationState(),
@@ -137,6 +139,8 @@ function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Varian
   let onMin = 0;
   let reOns = 0;
   let reOnsFailed = 0;
+  /** (A5) ON-kind writes the night made: the ON, its retry, the line re-ONs (a handed-back one wrote nothing). */
+  let onWrites = 0;
   let handedBack = false;
   let handBackAtMs: number | null = null;
   let retryAtMs: number | null = null;
@@ -196,12 +200,14 @@ function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Varian
       if (variant !== 'askStart' || t >= nfc.forceChargeLineStartAtMs(W1, ask, seen, NAME, chargeRateKw, evDisplacedKwh, 3)) {
         s = { ...s, ...nfc.forceChargeOnStamp(s, t, a.slots, gates), forceChargeOnLastAttemptMs: t } as LineState;
         onEffectiveMs = t + kn.onDelayMin * MIN;
+        onWrites += 1;
       }
     } else if (a.kind === 'onVerified') {
       s = { ...s, forceChargeOnVerifiedAtMs: t };
     } else if (a.kind === 'onRetry') {
       s = { ...s, forceChargeOnRetries: s.forceChargeOnRetries + 1, forceChargeOnLastAttemptMs: t };
       onEffectiveMs = t + kn.onDelayMin * MIN;
+      onWrites += 1;
     } else if (a.kind === 'lineReOn') {
       if (variant === 'reOnLimited' && !handedBack) {
         // (review 5) index.ts: every write rate-limited — the count handed back, no slots, the stamp moved to the write.
@@ -217,6 +223,7 @@ function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Varian
           onEffectiveMs = t + (variant === 'reOnLate' ? nfc.FORCE_CHARGE_ON_VERIFY_AFTER_MS + MIN : kn.onDelayMin * MIN);
         }
         reOns += 1;
+        onWrites += 1;
       }
     } else if (a.kind === 'lineReOnChecked') {
       // (review 2) index.ts records the re-ON's readback check; the budget's next re-ON is the retry. (review 4) Through
@@ -258,7 +265,7 @@ function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Varian
   }
   return {
     close, onMin, reOns, reOnsFailed, pushedAtMs, shapeAtMs, lossAtMs, pushCause,
-    handBackAtMs, retryAtMs, personOnAtMs, personStopAtMs, panelOffAtMs: s.forceChargeLinePanelOffAtMs ?? null, stopNamed,
+    handBackAtMs, retryAtMs, personOnAtMs, personStopAtMs, panelOffAtMs: s.forceChargeLinePanelOffAtMs ?? null, stopNamed, onWrites,
   };
 }
 
@@ -283,13 +290,14 @@ function cell(lines: number[], kn: Partial<Knobs>, ks: number[] = KS, variant: V
   under: number; n: number; worst: number; meanOn: number; reOns: number; pushed: number; underPushed: number; latePushed: number;
   underPushedEarly: number; shapes: number; heldPushes: number; refusedPushes: number;
   handBacks: number; lost: number; lastTick: number; refusedRetried: number; personOn: number; personStop: number; stopStamped: number; stopNamed: number;
+  maxOnWrites: number;
 } {
   const k2 = { ...BASE, ...kn };
   let under = 0, n = 0, worst = Infinity, on = 0, reOns = 0, pushed = 0, underPushed = 0, latePushed = 0, underPushedEarly = 0, shapes = 0, heldPushes = 0, refusedPushes = 0;
-  let handBacks = 0, lost = 0, lastTick = 0, refusedRetried = 0, personOn = 0, personStop = 0, stopStamped = 0, stopNamed = 0;
+  let handBacks = 0, lost = 0, lastTick = 0, refusedRetried = 0, personOn = 0, personStop = 0, stopStamped = 0, stopNamed = 0, maxOnWrites = 0;
   for (const L of lines) for (const h of HOUSES) for (const k of ks) {
     const r = night(L, h, k, k2, variant);
-    n += 1; on += r.onMin; reOns += r.reOns; worst = Math.min(worst, r.close - L);
+    n += 1; on += r.onMin; reOns += r.reOns; worst = Math.min(worst, r.close - L); maxOnWrites = Math.max(maxOnWrites, r.onWrites);
     if (r.shapeAtMs != null) shapes += 1;
     if (r.handBackAtMs != null) {
       handBacks += 1;
@@ -319,7 +327,7 @@ function cell(lines: number[], kn: Partial<Knobs>, ks: number[] = KS, variant: V
   }
   return {
     under, n, worst, meanOn: on / n, reOns, pushed, underPushed, latePushed, underPushedEarly, shapes, heldPushes, refusedPushes,
-    handBacks, lost, lastTick, refusedRetried, personOn, personStop, stopStamped, stopNamed,
+    handBacks, lost, lastTick, refusedRetried, personOn, personStop, stopStamped, stopNamed, maxOnWrites,
   };
 }
 
@@ -590,6 +598,82 @@ test('★★ T7 the discriminators: a software stop at ⌈L⌉, a start timed to
   const noReOn30 = cell(YEAR_LINES, { predEvKwh: 30, evKw: 11, evFromMin: 90 }, KS, 'noReOn');
   assert.ok(noReOn20.under >= 8 && noReOn30.under >= 40, `no re-ON: 20 kWh/7 kW from 90 ${noReOn20.under}, 30 kWh/11 kW from 90 ${noReOn30.under}`);
 });
+
+/* ══ T18 (A5) — a line within 10 points of a full pool: armed, run as a 90% line (start 95, ceiling 100), disclosed ═══ */
+
+/** Near-full lines (⌈L⌉ 91-98), and lines at or above a full pool's reach (⌈L⌉ 100). */
+const NEAR_LINES = [90.4, 91.6, 93.0, 94.6, 96.2, 97.9];
+const TOP_LINES = [99.3, 100.4, 104.0];
+const NEAR_CELLS: Array<[string, Partial<Knobs>, number[]?]> = [
+  ['baseline (pool 50 at the open)', {}],
+  ['20 kWh predicted, 7 kW EV from 90 min', { predEvKwh: 20, evFromMin: 90 }],
+  ['7 kW EV all window, predicted', { predEvKwh: 'exact', evKw: 7, evFromMin: 360 }],
+  ['pool 77 at the open', { p0: 77 }],
+  ['the pack at 70% of the rate', {}, [0.7]],
+];
+
+test('★★ T18 (A5) near-full lines: the measured latch and the unmeasured ON-reading one, rounded and floored — the nights under the line, the line-at-risk push on them, ≤ 3 ON-kind writes a night; lines at or above a full pool pinned as known', () => {
+  const got: Record<string, Record<string, [number, number, number, number]>> = { real: {}, onLatch: {} };
+  const top: Record<string, [number, number]> = {};
+  let maxWrites = 0;
+  for (const variant of ['real', 'onLatch'] as const) {
+    for (const [name, kn, ks] of NEAR_CELLS) {
+      const r = cell(NEAR_LINES, { ...kn, floor: false }, ks ?? KS, variant);
+      const f = cell(NEAR_LINES, { ...kn, floor: true }, ks ?? KS, variant);
+      for (const c of [r, f]) { assert.equal(c.latePushed, 0, `${variant} ${name}: never inside the lead`); maxWrites = Math.max(maxWrites, c.maxOnWrites); }
+      got[variant][name] = [r.under, f.under, r.underPushed, f.underPushed];
+    }
+  }
+  for (const [name, kn, ks] of NEAR_CELLS) {
+    const r = cell(TOP_LINES, { ...kn, floor: false }, ks ?? KS);
+    top[name] = [r.under, r.n];
+  }
+  assert.ok(maxWrites <= 3, `ON-kind writes a night: ${maxWrites}`);
+  assert.deepEqual(got, PIN_NEAR);
+  assert.deepEqual(top, PIN_TOP);
+  // The exposure: mean minutes Charge Now reads ON on the near-full lines (the measured latch, rounded).
+  const meanOn = Object.fromEntries(NEAR_CELLS.slice(0, 3).map(([name, kn]) => [name, Math.round(cell(NEAR_LINES, kn).meanOn)]));
+  assert.deepEqual(meanOn, PIN_NEAR_MEAN_ON);
+  // The near-full line runs as a 90% line does: a 98% line's start target is 95, its ceiling 100 (never a start at or
+  // above the ceiling, which would leave the re-ON nothing to re-ON from).
+  assert.deepEqual(nfc.forceChargeModeOf({ forceChargeCeilingPct: null, forceChargeLineAskPct: 98 } as never, { cost: false, line: true }),
+    { kind: 'line', targetPct: 98, askPct: 98, startTargetPct: 95, panelCeilingPct: 100 });
+});
+
+/** (A5) Measured on the landed change, the near-full lines (6 lines × 5 houses × 4 rate factors = 120 nights a cell; 30 at a
+ *  single rate factor): [under rounded, under floored, of them pushed rounded, pushed floored]. The measured latch (the
+ *  panel's own OFF at its ceiling, read at 80 and 90% only: the stop at 100% is UNMEASURED) and the ON-reading latch
+ *  (unmeasured). The re-ON and the push key on 95, under a line of 96-98 (a residual, stated). */
+const PIN_NEAR: Record<string, Record<string, [number, number, number, number]>> = {
+  real: {
+    'baseline (pool 50 at the open)': [3, 0, 0, 0],
+    '20 kWh predicted, 7 kW EV from 90 min': [19, 0, 0, 0],
+    '7 kW EV all window, predicted': [41, 0, 0, 0],
+    'pool 77 at the open': [1, 0, 0, 0],
+    'the pack at 70% of the rate': [30, 30, 0, 0],
+  },
+  onLatch: {
+    'baseline (pool 50 at the open)': [3, 0, 0, 0],
+    '20 kWh predicted, 7 kW EV from 90 min': [120, 0, 120, 0],
+    '7 kW EV all window, predicted': [69, 0, 34, 0],
+    'pool 77 at the open': [0, 0, 0, 0],
+    'the pack at 70% of the rate': [30, 30, 0, 0],
+  },
+};
+/** (A5) Lines at or above a full pool's reach (99.3, 100.4, 104: ⌈L⌉ 100), the measured latch, rounded: [under, nights]. */
+const PIN_TOP: Record<string, [number, number]> = {
+  'baseline (pool 50 at the open)': [0, 60],
+  '20 kWh predicted, 7 kW EV from 90 min': [0, 60],
+  '7 kW EV all window, predicted': [0, 60],
+  'pool 77 at the open': [0, 60],
+  'the pack at 70% of the rate': [0, 15],
+};
+/** (A5) Mean minutes a slot reads Charge Now ON on the near-full lines (the measured latch, rounded). */
+const PIN_NEAR_MEAN_ON: Record<string, number> = {
+  'baseline (pool 50 at the open)': 182,
+  '20 kWh predicted, 7 kW EV from 90 min': 224,
+  '7 kW EV all window, predicted': 335,
+};
 
 /** Measured when the change was made (v1.200.0) on the real decideForceCharge. Rounded readings match the
  *  integrator's emulation (rtcSim4-highasks.out: 1/140, 8/35, 30/35); floored readings cost a point at the

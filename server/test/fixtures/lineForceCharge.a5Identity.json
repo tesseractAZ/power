@@ -1,0 +1,824 @@
+{
+ "generatedOn": "962e4668",
+ "cases": 1104,
+ "plans": 219426,
+ "guard": "eligibility false or absent; at eligibility true: no line ask, the backup disclosure, carried in cost mode, carried in line mode not deliverable-bound with E >= L - 0.05",
+ "groups": {
+  "4|np|fixture|true": {
+   "n": 1104,
+   "sha": "fab5cc0dfe06c0bfef39"
+  },
+  "4|np|fixture|false": {
+   "n": 1104,
+   "sha": "fab5cc0dfe06c0bfef39"
+  },
+  "4|np|fixture|absent": {
+   "n": 1104,
+   "sha": "fab5cc0dfe06c0bfef39"
+  },
+  "4|np|live|true": {
+   "n": 1104,
+   "sha": "2f7aec8062f6ed3b2f5e"
+  },
+  "4|np|live|false": {
+   "n": 1104,
+   "sha": "2f7aec8062f6ed3b2f5e"
+  },
+  "4|np|live|absent": {
+   "n": 1104,
+   "sha": "2f7aec8062f6ed3b2f5e"
+  },
+  "4|m|fixture|true": {
+   "n": 1104,
+   "sha": "3755481f3ea29b1ae020"
+  },
+  "4|m|fixture|false": {
+   "n": 1104,
+   "sha": "3755481f3ea29b1ae020"
+  },
+  "4|m|fixture|absent": {
+   "n": 1104,
+   "sha": "3755481f3ea29b1ae020"
+  },
+  "4|m|live|true": {
+   "n": 1104,
+   "sha": "3a4c06548b24b3efe08b"
+  },
+  "4|m|live|false": {
+   "n": 1104,
+   "sha": "3a4c06548b24b3efe08b"
+  },
+  "4|m|live|absent": {
+   "n": 1104,
+   "sha": "3a4c06548b24b3efe08b"
+  },
+  "5|np|fixture|true": {
+   "n": 1103,
+   "sha": "41af40dc323f0f8538ac"
+  },
+  "5|np|fixture|false": {
+   "n": 1104,
+   "sha": "33bb09152c9c88af1ca6"
+  },
+  "5|np|fixture|absent": {
+   "n": 1104,
+   "sha": "3d208fd4a53c3ba970e7"
+  },
+  "5|np|live|true": {
+   "n": 1103,
+   "sha": "de2304f82859257d5ccd"
+  },
+  "5|np|live|false": {
+   "n": 1104,
+   "sha": "067eb6ecb6538ca2e35d"
+  },
+  "5|np|live|absent": {
+   "n": 1104,
+   "sha": "3d4950b588af7deabbf8"
+  },
+  "5|m|fixture|true": {
+   "n": 1102,
+   "sha": "22259993dc1710d0ac2f"
+  },
+  "5|m|fixture|false": {
+   "n": 1104,
+   "sha": "5db701d711a85c62f837"
+  },
+  "5|m|fixture|absent": {
+   "n": 1104,
+   "sha": "06bf1425fdadcfcbfb0b"
+  },
+  "5|m|live|true": {
+   "n": 1102,
+   "sha": "3cedadfc73f50be96da1"
+  },
+  "5|m|live|false": {
+   "n": 1104,
+   "sha": "b2c0be6ec7764f9839e3"
+  },
+  "5|m|live|absent": {
+   "n": 1104,
+   "sha": "5778317f794356b0d455"
+  },
+  "6|np|fixture|true": {
+   "n": 1101,
+   "sha": "ff358fb965f5222a5bcc"
+  },
+  "6|np|fixture|false": {
+   "n": 1104,
+   "sha": "384f57f3c2eee67ee024"
+  },
+  "6|np|fixture|absent": {
+   "n": 1104,
+   "sha": "15a064124730dcc926e0"
+  },
+  "6|np|live|true": {
+   "n": 1101,
+   "sha": "75ee8510c04c43ba6eee"
+  },
+  "6|np|live|false": {
+   "n": 1104,
+   "sha": "f182e2044d9321cf268a"
+  },
+  "6|np|live|absent": {
+   "n": 1104,
+   "sha": "35dc66cf148796e09e76"
+  },
+  "6|m|fixture|true": {
+   "n": 1100,
+   "sha": "a55312bb07f4ff63c7bf"
+  },
+  "6|m|fixture|false": {
+   "n": 1104,
+   "sha": "5f94cedb6fca12f6e191"
+  },
+  "6|m|fixture|absent": {
+   "n": 1104,
+   "sha": "dc2ff685b0494573d5d3"
+  },
+  "6|m|live|true": {
+   "n": 1101,
+   "sha": "1d32eb411379762aaca9"
+  },
+  "6|m|live|false": {
+   "n": 1104,
+   "sha": "524b4cdcb1defc6828a4"
+  },
+  "6|m|live|absent": {
+   "n": 1104,
+   "sha": "f49646e1489939df5e44"
+  },
+  "7|np|fixture|true": {
+   "n": 1095,
+   "sha": "0aef1d3cbacb9a007a5c"
+  },
+  "7|np|fixture|false": {
+   "n": 1104,
+   "sha": "f86c68a816d897bba12d"
+  },
+  "7|np|fixture|absent": {
+   "n": 1104,
+   "sha": "6b07429dbb1b8eb25bae"
+  },
+  "7|np|live|true": {
+   "n": 1096,
+   "sha": "834947064549ea87e3cb"
+  },
+  "7|np|live|false": {
+   "n": 1104,
+   "sha": "82aeb8d88f1c20d0f5a2"
+  },
+  "7|np|live|absent": {
+   "n": 1104,
+   "sha": "66d4344b3f811bfb50af"
+  },
+  "7|m|fixture|true": {
+   "n": 1093,
+   "sha": "33dec308443592e6089b"
+  },
+  "7|m|fixture|false": {
+   "n": 1104,
+   "sha": "ca5262bfc7179c57f482"
+  },
+  "7|m|fixture|absent": {
+   "n": 1104,
+   "sha": "9dab118c83c32a1d09e1"
+  },
+  "7|m|live|true": {
+   "n": 1094,
+   "sha": "f04245e8a930c4d59f23"
+  },
+  "7|m|live|false": {
+   "n": 1104,
+   "sha": "a0177fb13eba543be147"
+  },
+  "7|m|live|absent": {
+   "n": 1104,
+   "sha": "a71aceaccd8ef869c200"
+  },
+  "8|np|fixture|true": {
+   "n": 1093,
+   "sha": "d07c12bfe21f59b8706a"
+  },
+  "8|np|fixture|false": {
+   "n": 1104,
+   "sha": "bc16622944a33c7e59d5"
+  },
+  "8|np|fixture|absent": {
+   "n": 1104,
+   "sha": "7e026a59ebc43fece311"
+  },
+  "8|np|live|true": {
+   "n": 1094,
+   "sha": "eef6195af5ef2edd07cb"
+  },
+  "8|np|live|false": {
+   "n": 1104,
+   "sha": "1c52085d4b5ce0b8c058"
+  },
+  "8|np|live|absent": {
+   "n": 1104,
+   "sha": "cc6d1120e70e2821a9d2"
+  },
+  "8|m|fixture|true": {
+   "n": 1089,
+   "sha": "02e35e1e03c05f9b4192"
+  },
+  "8|m|fixture|false": {
+   "n": 1104,
+   "sha": "54345b44900da82bd96e"
+  },
+  "8|m|fixture|absent": {
+   "n": 1104,
+   "sha": "5c8111227a0ae95ef23e"
+  },
+  "8|m|live|true": {
+   "n": 1090,
+   "sha": "f44979ba1c7945f652e1"
+  },
+  "8|m|live|false": {
+   "n": 1104,
+   "sha": "c964d92b443e6476e1aa"
+  },
+  "8|m|live|absent": {
+   "n": 1104,
+   "sha": "01737cfd01ecc1adecfb"
+  },
+  "9|np|fixture|true": {
+   "n": 1086,
+   "sha": "d508c1d6aa808cfdcee3"
+  },
+  "9|np|fixture|false": {
+   "n": 1104,
+   "sha": "be2ed16fb26b0401b522"
+  },
+  "9|np|fixture|absent": {
+   "n": 1104,
+   "sha": "d6e26639b4abc9badfcc"
+  },
+  "9|np|live|true": {
+   "n": 1088,
+   "sha": "e12ea013563e602918e3"
+  },
+  "9|np|live|false": {
+   "n": 1104,
+   "sha": "a24ca6a53642a2541793"
+  },
+  "9|np|live|absent": {
+   "n": 1104,
+   "sha": "e50577b6f329f9eafdb9"
+  },
+  "9|m|fixture|true": {
+   "n": 1085,
+   "sha": "b71a4f09f59670b789b1"
+  },
+  "9|m|fixture|false": {
+   "n": 1104,
+   "sha": "0de6f389387ee1af7791"
+  },
+  "9|m|fixture|absent": {
+   "n": 1104,
+   "sha": "2dff9b37955eff7247f4"
+  },
+  "9|m|live|true": {
+   "n": 1087,
+   "sha": "af28a046cbb6d9d2302d"
+  },
+  "9|m|live|false": {
+   "n": 1104,
+   "sha": "440a0f6ceeb7c2569c48"
+  },
+  "9|m|live|absent": {
+   "n": 1104,
+   "sha": "46fb1ff324ac27d81632"
+  },
+  "10|np|fixture|true": {
+   "n": 1077,
+   "sha": "c9e1f0f47cefb2d6a653"
+  },
+  "10|np|fixture|false": {
+   "n": 1104,
+   "sha": "9e506419ad8bfaa7a62b"
+  },
+  "10|np|fixture|absent": {
+   "n": 1104,
+   "sha": "9a07b39706f2abfc4602"
+  },
+  "10|np|live|true": {
+   "n": 1079,
+   "sha": "45342903ff259301c2db"
+  },
+  "10|np|live|false": {
+   "n": 1104,
+   "sha": "48088167654801c77b61"
+  },
+  "10|np|live|absent": {
+   "n": 1104,
+   "sha": "404f06c7f56ef18b6502"
+  },
+  "10|m|fixture|true": {
+   "n": 1076,
+   "sha": "b387fbda550be52295f4"
+  },
+  "10|m|fixture|false": {
+   "n": 1104,
+   "sha": "7e447f1a6d640393b418"
+  },
+  "10|m|fixture|absent": {
+   "n": 1104,
+   "sha": "5e7380741977d69d41c6"
+  },
+  "10|m|live|true": {
+   "n": 1078,
+   "sha": "b55b4f2b4ffa58be5c3e"
+  },
+  "10|m|live|false": {
+   "n": 1104,
+   "sha": "508a6f08f37b9b373cc6"
+  },
+  "10|m|live|absent": {
+   "n": 1104,
+   "sha": "231a24822a0b643fcf9f"
+  },
+  "11|np|fixture|true": {
+   "n": 1070,
+   "sha": "ef13fb778b4b5a3f881c"
+  },
+  "11|np|fixture|false": {
+   "n": 1104,
+   "sha": "e0a4603aa181628d0e53"
+  },
+  "11|np|fixture|absent": {
+   "n": 1104,
+   "sha": "59b29e527a83fcf6367e"
+  },
+  "11|np|live|true": {
+   "n": 1072,
+   "sha": "376d646d3be0bb3824ea"
+  },
+  "11|np|live|false": {
+   "n": 1104,
+   "sha": "26f3583a241f839627f5"
+  },
+  "11|np|live|absent": {
+   "n": 1104,
+   "sha": "77ef0f260688d6fc3999"
+  },
+  "11|m|fixture|true": {
+   "n": 1061,
+   "sha": "bf428d18ac7990c13470"
+  },
+  "11|m|fixture|false": {
+   "n": 1104,
+   "sha": "8b248d448fc92c1c2ce4"
+  },
+  "11|m|fixture|absent": {
+   "n": 1104,
+   "sha": "e09ecd5deecd51a1e945"
+  },
+  "11|m|live|true": {
+   "n": 1064,
+   "sha": "d90030db00555e25c4b1"
+  },
+  "11|m|live|false": {
+   "n": 1104,
+   "sha": "15ac201e33731c5353aa"
+  },
+  "11|m|live|absent": {
+   "n": 1104,
+   "sha": "2aee4042fb3708f26637"
+  },
+  "12|np|fixture|true": {
+   "n": 1054,
+   "sha": "b6ac7e551afd8aa956a2"
+  },
+  "12|np|fixture|false": {
+   "n": 1104,
+   "sha": "f645f952f5b4fd982c42"
+  },
+  "12|np|fixture|absent": {
+   "n": 1104,
+   "sha": "4c62d530cf16ece51f53"
+  },
+  "12|np|live|true": {
+   "n": 1057,
+   "sha": "f2171e06e7c378e5c5f4"
+  },
+  "12|np|live|false": {
+   "n": 1104,
+   "sha": "05a2efb6725dc24ec6c2"
+  },
+  "12|np|live|absent": {
+   "n": 1104,
+   "sha": "abacfdc7f6ef825311ce"
+  },
+  "12|m|fixture|true": {
+   "n": 1041,
+   "sha": "185034d7663e8b177ee1"
+  },
+  "12|m|fixture|false": {
+   "n": 1104,
+   "sha": "3bc58ccd6bde006fdf1c"
+  },
+  "12|m|fixture|absent": {
+   "n": 1104,
+   "sha": "67fe4319722356206156"
+  },
+  "12|m|live|true": {
+   "n": 1044,
+   "sha": "b6d8b5d93b4a71a53234"
+  },
+  "12|m|live|false": {
+   "n": 1104,
+   "sha": "159077d73679b5eb0bec"
+  },
+  "12|m|live|absent": {
+   "n": 1104,
+   "sha": "56642d6256499e48bfaa"
+  },
+  "13|np|fixture|true": {
+   "n": 1039,
+   "sha": "885fe26e4748e70706e0"
+  },
+  "13|np|fixture|false": {
+   "n": 1104,
+   "sha": "f114cf54b4dd529d274a"
+  },
+  "13|np|fixture|absent": {
+   "n": 1104,
+   "sha": "61cee9805b6f0c845544"
+  },
+  "13|np|live|true": {
+   "n": 1043,
+   "sha": "2bd0262d9ffa106f741e"
+  },
+  "13|np|live|false": {
+   "n": 1104,
+   "sha": "f6a649107c2f70d99a8b"
+  },
+  "13|np|live|absent": {
+   "n": 1104,
+   "sha": "30c25d6a0d38d9fd0b7e"
+  },
+  "13|m|fixture|true": {
+   "n": 1028,
+   "sha": "0b2789c316df1b696889"
+  },
+  "13|m|fixture|false": {
+   "n": 1104,
+   "sha": "f7f15a2e4dfc2ecec047"
+  },
+  "13|m|fixture|absent": {
+   "n": 1104,
+   "sha": "dde10c98fe5f77b5be50"
+  },
+  "13|m|live|true": {
+   "n": 1032,
+   "sha": "36f92711bb1b83b02921"
+  },
+  "13|m|live|false": {
+   "n": 1104,
+   "sha": "91117dd59327f7ff8ddd"
+  },
+  "13|m|live|absent": {
+   "n": 1104,
+   "sha": "764a146924b7bd0f5406"
+  },
+  "14|np|fixture|true": {
+   "n": 1024,
+   "sha": "9e3e3ba187a59c373910"
+  },
+  "14|np|fixture|false": {
+   "n": 1104,
+   "sha": "68337487d98e8cb5f790"
+  },
+  "14|np|fixture|absent": {
+   "n": 1104,
+   "sha": "327fd12b26cf580efc98"
+  },
+  "14|np|live|true": {
+   "n": 1028,
+   "sha": "26d0737c29c04228bcc2"
+  },
+  "14|np|live|false": {
+   "n": 1104,
+   "sha": "2bb64c79dde72f0714d3"
+  },
+  "14|np|live|absent": {
+   "n": 1104,
+   "sha": "b53293c85547822802f3"
+  },
+  "14|m|fixture|true": {
+   "n": 1014,
+   "sha": "842b92221dbe97db0951"
+  },
+  "14|m|fixture|false": {
+   "n": 1104,
+   "sha": "c59f7eff2665314dbad4"
+  },
+  "14|m|fixture|absent": {
+   "n": 1104,
+   "sha": "5bf7c566eef78670cfda"
+  },
+  "14|m|live|true": {
+   "n": 1017,
+   "sha": "8a8f6851257b96ffb91c"
+  },
+  "14|m|live|false": {
+   "n": 1104,
+   "sha": "b69ac7166175ca5a20da"
+  },
+  "14|m|live|absent": {
+   "n": 1104,
+   "sha": "5df51903040867b6b8de"
+  },
+  "15|np|fixture|true": {
+   "n": 1007,
+   "sha": "7bd99c4fe885bb8d5bcf"
+  },
+  "15|np|fixture|false": {
+   "n": 1104,
+   "sha": "237e3ce144b3a02db131"
+  },
+  "15|np|fixture|absent": {
+   "n": 1104,
+   "sha": "3940f5c47410b96874e7"
+  },
+  "15|np|live|true": {
+   "n": 1010,
+   "sha": "5f9c1f440bfbee496ecd"
+  },
+  "15|np|live|false": {
+   "n": 1104,
+   "sha": "e4a0d0de9dbdcb7df9c2"
+  },
+  "15|np|live|absent": {
+   "n": 1104,
+   "sha": "01af286b1efee29bddf1"
+  },
+  "15|m|fixture|true": {
+   "n": 991,
+   "sha": "03d6e3a94bde284673ed"
+  },
+  "15|m|fixture|false": {
+   "n": 1104,
+   "sha": "8e4e19f00579234352be"
+  },
+  "15|m|fixture|absent": {
+   "n": 1104,
+   "sha": "44ffcb5d61f1fa0ea6d7"
+  },
+  "15|m|live|true": {
+   "n": 993,
+   "sha": "34192e7bd52b8bf93da6"
+  },
+  "15|m|live|false": {
+   "n": 1104,
+   "sha": "672be31dee3d527f38a4"
+  },
+  "15|m|live|absent": {
+   "n": 1104,
+   "sha": "3425a90ae02297645c8d"
+  },
+  "16|np|fixture|true": {
+   "n": 983,
+   "sha": "29894adfa6f0075fada1"
+  },
+  "16|np|fixture|false": {
+   "n": 1104,
+   "sha": "0e759c468fe8ddb27390"
+  },
+  "16|np|fixture|absent": {
+   "n": 1104,
+   "sha": "d1895b7e98ce2d291f1c"
+  },
+  "16|np|live|true": {
+   "n": 985,
+   "sha": "b33ee170547b2590d508"
+  },
+  "16|np|live|false": {
+   "n": 1104,
+   "sha": "205b94f50eba062157e3"
+  },
+  "16|np|live|absent": {
+   "n": 1104,
+   "sha": "a3a1417a92765c9212d2"
+  },
+  "16|m|fixture|true": {
+   "n": 962,
+   "sha": "854fe4a328f9ca8feb05"
+  },
+  "16|m|fixture|false": {
+   "n": 1104,
+   "sha": "c6db49c6f607adfc9640"
+  },
+  "16|m|fixture|absent": {
+   "n": 1104,
+   "sha": "babe95c4992c0ab2f270"
+  },
+  "16|m|live|true": {
+   "n": 964,
+   "sha": "9010e02ebba96681cf8a"
+  },
+  "16|m|live|false": {
+   "n": 1104,
+   "sha": "56061a80ce874680d543"
+  },
+  "16|m|live|absent": {
+   "n": 1104,
+   "sha": "9d49abe0dd94d6a048bc"
+  },
+  "17|np|fixture|true": {
+   "n": 960,
+   "sha": "cb1c85904e00d563fd08"
+  },
+  "17|np|fixture|false": {
+   "n": 1104,
+   "sha": "44a498a7b5abe996bf8c"
+  },
+  "17|np|fixture|absent": {
+   "n": 1104,
+   "sha": "facb592182f03a6de8f3"
+  },
+  "17|np|live|true": {
+   "n": 962,
+   "sha": "93b7952ad694cfe9741d"
+  },
+  "17|np|live|false": {
+   "n": 1104,
+   "sha": "c1e7f7144166baee2fb7"
+  },
+  "17|np|live|absent": {
+   "n": 1104,
+   "sha": "dae0ebe17e1e18e5523c"
+  },
+  "17|m|fixture|true": {
+   "n": 922,
+   "sha": "9e9ba4555a1042544f68"
+  },
+  "17|m|fixture|false": {
+   "n": 1104,
+   "sha": "842d6f8da57ba309ef25"
+  },
+  "17|m|fixture|absent": {
+   "n": 1104,
+   "sha": "235642bae893d8a5e460"
+  },
+  "17|m|live|true": {
+   "n": 924,
+   "sha": "f66e8be6fdd129e13295"
+  },
+  "17|m|live|false": {
+   "n": 1104,
+   "sha": "aed821da0304bf1cfd6d"
+  },
+  "17|m|live|absent": {
+   "n": 1104,
+   "sha": "c70cd14905d341dfec91"
+  },
+  "18|np|fixture|true": {
+   "n": 922,
+   "sha": "537dcb5b20aba7350d17"
+  },
+  "18|np|fixture|false": {
+   "n": 1104,
+   "sha": "14d9cd06834890f776d1"
+  },
+  "18|np|fixture|absent": {
+   "n": 1104,
+   "sha": "df134c6c001871f06467"
+  },
+  "18|np|live|true": {
+   "n": 924,
+   "sha": "4d8b8aeafd477fcaf4af"
+  },
+  "18|np|live|false": {
+   "n": 1104,
+   "sha": "258fa46f0269dfbeb634"
+  },
+  "18|np|live|absent": {
+   "n": 1104,
+   "sha": "9eb6bf2916e7412182ea"
+  },
+  "18|m|fixture|true": {
+   "n": 878,
+   "sha": "e50ba0f890255477487b"
+  },
+  "18|m|fixture|false": {
+   "n": 1104,
+   "sha": "64a7beb8641432d2cde1"
+  },
+  "18|m|fixture|absent": {
+   "n": 1104,
+   "sha": "f71588c3410196787a22"
+  },
+  "18|m|live|true": {
+   "n": 880,
+   "sha": "ee95db782886fbbb7e80"
+  },
+  "18|m|live|false": {
+   "n": 1104,
+   "sha": "a0e3e6f4e3db9c3215d3"
+  },
+  "18|m|live|absent": {
+   "n": 1104,
+   "sha": "d50ddbdc89916a89d84a"
+  },
+  "19|np|fixture|true": {
+   "n": 880,
+   "sha": "4cf6ecd79d424841e48b"
+  },
+  "19|np|fixture|false": {
+   "n": 1104,
+   "sha": "d744eaff28f01082a611"
+  },
+  "19|np|fixture|absent": {
+   "n": 1104,
+   "sha": "92208b3dcbeb0be64149"
+  },
+  "19|np|live|true": {
+   "n": 882,
+   "sha": "4a0188328eca2b77da0b"
+  },
+  "19|np|live|false": {
+   "n": 1104,
+   "sha": "57557d7d9ed78fa37312"
+  },
+  "19|np|live|absent": {
+   "n": 1104,
+   "sha": "6e0d95a6a7d9655f9842"
+  },
+  "19|m|fixture|true": {
+   "n": 833,
+   "sha": "51ed92b3032296213c7e"
+  },
+  "19|m|fixture|false": {
+   "n": 1104,
+   "sha": "0b01b65bbd03db3b7c5a"
+  },
+  "19|m|fixture|absent": {
+   "n": 1104,
+   "sha": "56476d694abbc678ac7f"
+  },
+  "19|m|live|true": {
+   "n": 835,
+   "sha": "cd12b163e170885d00d8"
+  },
+  "19|m|live|false": {
+   "n": 1104,
+   "sha": "5cec5f5d4a5c3e0fafc5"
+  },
+  "19|m|live|absent": {
+   "n": 1104,
+   "sha": "fa9fa4d41d3118faede9"
+  },
+  "20|np|fixture|true": {
+   "n": 835,
+   "sha": "84596ba40ed255853d35"
+  },
+  "20|np|fixture|false": {
+   "n": 1104,
+   "sha": "6c4b19dcc47ba4cdf17d"
+  },
+  "20|np|fixture|absent": {
+   "n": 1104,
+   "sha": "7c6f43753a2cd35f1909"
+  },
+  "20|np|live|true": {
+   "n": 837,
+   "sha": "c7718db87042cce0ee49"
+  },
+  "20|np|live|false": {
+   "n": 1104,
+   "sha": "e351dea70beefca9df52"
+  },
+  "20|np|live|absent": {
+   "n": 1104,
+   "sha": "a2e247f96c48e54d8c32"
+  },
+  "20|m|fixture|true": {
+   "n": 797,
+   "sha": "6c9500b966c142ac5e5d"
+  },
+  "20|m|fixture|false": {
+   "n": 1104,
+   "sha": "475e68f73fa7f226e0f8"
+  },
+  "20|m|fixture|absent": {
+   "n": 1104,
+   "sha": "75354ae221d4adf69506"
+  },
+  "20|m|live|true": {
+   "n": 799,
+   "sha": "6ba844e277d04d068c8d"
+  },
+  "20|m|live|false": {
+   "n": 1104,
+   "sha": "10f933469439a7f20144"
+  },
+  "20|m|live|absent": {
+   "n": 1104,
+   "sha": "d7d7991147b566fd02bb"
+  }
+ }
+}
