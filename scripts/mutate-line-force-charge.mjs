@@ -38,7 +38,10 @@
  * Charge Now switched on in the app) is stamped and waited out by the trend; no push inside a handed-back re-ON's retry
  * spacing, and 'reOnRefused' when the cutoff refuses the retry; a not-applied slot reading ON since is not named.
  * W1-xlii..lv. The morning read-off is the last re-ON's, unless a slot read ON again after it; a slot seen ON after the
- * panel's stop resumed the charge; the outcome names only the last re-ON's check. W3-xxii..xxvii. The ceiling lowering lowers only what the
+ * panel's stop resumed the charge; the outcome names only the last re-ON's check. W3-xxii..xxvii.
+ * (review 6) The hand-back hold counts the ticks (FORCE_CHARGE_TICK_MS, the cadence index.ts runs the tick on): it holds only
+ * while the first tick 15 min or more after the stamp falls before the cutoff; a slot seen ON again opens a new panel-stop
+ * episode. W1-lvi..lxii. The ceiling lowering lowers only what the
  * panel holds. W4-i..iii. A cost-dominant line night's ON failure and declined start; the declined start once a night
  * across restarts; the reserve-apply failure on a line night. W5-i..ix.
  * (M) THE MORNING REFRESH never lowers or drops the line. M-i, M-ii.
@@ -650,8 +653,8 @@ const MUTANTS = [
   {
     id: 'W1-xviii. ★★ the panel\'s stop re-stamped inside a re-ON\'s readback grace',
     file: NFC, tests: [T_RISK],
-    find: '    const newEpisode = prev == null || (reOn != null && reOn > prev && nowMs - reOn >= FORCE_CHARGE_ON_VERIFY_AFTER_MS);',
-    to: '    const newEpisode = prev == null || (reOn != null && reOn > prev); /* MUTANT */',
+    find: '    const newEpisode = prev == null || (reOn != null && reOn > prev && nowMs - reOn >= FORCE_CHARGE_ON_VERIFY_AFTER_MS)\n',
+    to: '    const newEpisode = prev == null || (reOn != null && reOn > prev) /* MUTANT */\n',
     why: 'A re-ON just written (its slots still read OFF) is recorded as the panel stopping the charge again.',
   },
   {
@@ -867,15 +870,15 @@ const MUTANTS = [
   {
     id: 'W1-xlviii. ★★★ pushed inside a handed-back re-ON\'s retry spacing',
     file: NFC, tests: [T_RISK, T_CLOSE],
-    find: '  if (handedBack && reOnAt! + FORCE_CHARGE_ON_VERIFY_AFTER_MS < closeAtMs - FORCE_CHARGE_ON_RETRY_CUTOFF_MS) return null;',
-    to: '  /* MUTANT */',
+    find: '    if (retryAtMs < closeAtMs - FORCE_CHARGE_ON_RETRY_CUTOFF_MS) return null;',
+    to: '    /* MUTANT */',
     why: 'Round-5 findings 2/5: the night\'s only push goes a minute after a rate-limited re-ON, 14 min before the add-on\'s own retry switches Charge Now back on.',
   },
   {
     id: 'W1-xlix. ★★ a handed-back re-ON whose retry the cutoff refuses is never pushed',
     file: NFC, tests: [T_RISK, T_CLOSE],
-    find: '  if (handedBack && reOnAt! + FORCE_CHARGE_ON_VERIFY_AFTER_MS < closeAtMs - FORCE_CHARGE_ON_RETRY_CUTOFF_MS) return null;',
-    to: '  if (handedBack) return null; /* MUTANT */',
+    find: '    if (retryAtMs < closeAtMs - FORCE_CHARGE_ON_RETRY_CUTOFF_MS) return null;',
+    to: '    return null; /* MUTANT */',
     why: 'A hand-back 30 min before the close: no retry fits before the cutoff, no reference 15 min after it fits before the lead — the line is lost in silence.',
   },
   {
@@ -919,6 +922,56 @@ const MUTANTS = [
     find: '    forceChargeLineOffSlots: slotList(o.forceChargeLineOffSlots),',
     to: '    forceChargeLineOffSlots: null, /* MUTANT */',
     why: 'A slot switched on in the app across a restart is never seen ON again.',
+  },
+  /* (review 6) the hand-back hold counts the ticks at their cadence; a slot seen ON again opens a new panel-stop episode. */
+  {
+    id: 'W1-lvi. ★★★ the hand-back hold takes the retry at the stamp + 15 min',
+    file: NFC, tests: [T_RISK, T_CLOSE],
+    find: '    const retryAtMs = nowMs + Math.ceil((reOnAt! + FORCE_CHARGE_ON_VERIFY_AFTER_MS - nowMs) / FORCE_CHARGE_TICK_MS) * FORCE_CHARGE_TICK_MS;',
+    to: '    const retryAtMs = reOnAt! + FORCE_CHARGE_ON_VERIFY_AFTER_MS; /* MUTANT */',
+    why: 'Round-6 finding 1 (eed0363a\'s rule): the hand-back is stamped after its writes, so its retry is the 16th tick; a hand-back 35-36 min before the close gets neither the retry (the cutoff) nor the push (the lead) — 30 lost in the close plant with the stamp 2 s late, 25 nights under never reached.',
+  },
+  {
+    id: 'W1-lvii. ★★ the retry\'s tick counted a tick early',
+    file: NFC, tests: [T_RISK],
+    find: '    const retryAtMs = nowMs + Math.ceil((reOnAt! + FORCE_CHARGE_ON_VERIFY_AFTER_MS - nowMs) / FORCE_CHARGE_TICK_MS) * FORCE_CHARGE_TICK_MS;',
+    to: '    const retryAtMs = nowMs + Math.floor((reOnAt! + FORCE_CHARGE_ON_VERIFY_AFTER_MS - nowMs) / FORCE_CHARGE_TICK_MS) * FORCE_CHARGE_TICK_MS; /* MUTANT */',
+    why: 'A stamp any later than its tick is counted to the 15th tick, which is too early for the retry: the same loss as W1-lvi.',
+  },
+  {
+    id: 'W1-lviii. ★★ a retry due on the cutoff instant itself is held for',
+    file: NFC, tests: [T_RISK],
+    find: '    if (retryAtMs < closeAtMs - FORCE_CHARGE_ON_RETRY_CUTOFF_MS) return null;',
+    to: '    if (retryAtMs <= closeAtMs - FORCE_CHARGE_ON_RETRY_CUTOFF_MS) return null; /* MUTANT */',
+    why: 'lineReOnDue refuses AT the cutoff: a hand-back 36 min out on the minute, stamped 2 s late, waits for a retry the cutoff refuses, and the push past the lead never goes.',
+  },
+  {
+    id: 'W1-lix. ★★ the hold gives up a tick early (one tick of margin past the real one)',
+    file: NFC, tests: [T_RISK, T_CLOSE],
+    find: '    const retryAtMs = nowMs + Math.ceil((reOnAt! + FORCE_CHARGE_ON_VERIFY_AFTER_MS - nowMs) / FORCE_CHARGE_TICK_MS) * FORCE_CHARGE_TICK_MS;',
+    to: '    const retryAtMs = reOnAt! + FORCE_CHARGE_ON_VERIFY_AFTER_MS + FORCE_CHARGE_TICK_MS; /* MUTANT */',
+    why: 'A hand-back stamped on its tick 36 min out is pushed as "it does not try again tonight", and its retry comes 14 min later.',
+  },
+  {
+    id: 'W1-lx. ★ index.ts: the actuation tick on a cadence the hold does not count',
+    file: IDX, tests: [T_RISK],
+    find: '  const nightActuationTick = setInterval(() => { void runNightActuationTick(); }, FORCE_CHARGE_TICK_MS);',
+    to: '  const nightActuationTick = setInterval(() => { void runNightActuationTick(); }, 2 * FORCE_CHARGE_TICK_MS); /* MUTANT */',
+    why: 'The hold counts 60-s ticks while the retry waits for 120-s ones: the 16th count is the 8th tick, and the loss of W1-lvi returns with every lag.',
+  },
+  {
+    id: 'W1-lxi. ★★★ a slot seen ON again never opens a new panel-stop episode',
+    file: NFC, tests: [T_RISK],
+    find: '      || (seenOn != null && seenOn > prev);',
+    to: '      || false; /* MUTANT */',
+    why: 'Round-6 finding 2: a person switches Charge Now on after the push, the panel stops it at its ceiling 45 min later, and the morning says the force-charge ran to the window close.',
+  },
+  {
+    id: 'W1-lxii. ★★ a slot seen ON before the recorded stop re-opens it',
+    file: NFC, tests: [T_RISK],
+    find: '      || (seenOn != null && seenOn > prev);',
+    to: '      || (seenOn != null); /* MUTANT */',
+    why: 'Every all-OFF reading at the ceiling after the stop moves the stop later: the morning names the last reading, not the stop.',
   },
 
   /* ── (review 2) W5: a cost-dominant line night; the declined start across restarts; the apply failure ── */
