@@ -34,6 +34,8 @@
  * (all slots / some), the declined start per blocker class once it persists and its latest start, the
  * morning account of an early OFF, the envelope note by its reason, a line night not expected to start.
  * T-v(b), T-viii..xviii. (P) also the min-buy hold, the 90/91 edge, the one ask, the reason. P-x..xii.
+ * (review 2) a walk that reaches the panel ceiling is worded by the panel's own stop and the re-ON, never "stays on
+ * until the window closes" (the rationale, the push, the card). T-xix..xxiv.
  * (G) THE GATE: a carried night under its line is a strike. G-i.
  * (R) THE LEDGER: the plan columns written unconditionally. R-i, R-ii.
  *
@@ -818,8 +820,8 @@ const MUTANTS = [
     id: 'T-iii(b). ★★ the rationale\'s line sentence on a cost-dominant night',
     file: NCA, tests: [T_LINE],
     // v1.200.0 (review) — anchor moved: the line sentence follows the armed-not-started branch.
-    find: "      : expected.mode === 'line'\n        ? ` ${envelopeHead}, so the panel's force-charge ${lineStartText}stays on",
-    to: "      : forceChargeLine != null /* MUTANT */\n        ? ` ${envelopeHead}, so the panel's force-charge ${lineStartText}stays on",
+    find: "        : expected.mode === 'line'\n          ? ` ${envelopeHead}, so the panel's force-charge ${lineStartText}stays on",
+    to: "        : forceChargeLine != null /* MUTANT */\n          ? ` ${envelopeHead}, so the panel's force-charge ${lineStartText}stays on",
     why: 'The same in the rationale.',
   },
   {
@@ -944,6 +946,49 @@ const MUTANTS = [
     file: CARD, tests: [T_LINE],
     find: '    if (plan.expectedForceChargeStartMs === null) {',
     to: '    if (plan.expectedForceChargeStartMs === null && plan.cushionLineSocPct === -1) { /* MUTANT */',
+    why: 'The same on the card.',
+  },
+  /* (review 2, finding 4) a walk that reaches the panel ceiling: the panel switches Charge Now off there; the texts say so. */
+  {
+    id: 'T-xix. ★★ the walk never reports reaching the panel ceiling',
+    file: NCA, tests: [T_LINE],
+    find: '  return { closeKwh: pack, startMs, startPackKwh: startMs != null ? startPackKwh : pack, gridKwh, ceilingReached: reached || latched };',
+    to: '  return { closeKwh: pack, startMs, startPackKwh: startMs != null ? startPackKwh : pack, gridKwh, ceilingReached: false }; /* MUTANT */',
+    why: 'Every line night is told the force-charge stays on until the window closes, and the panel\'s own stop at 80% is called a backstop.',
+  },
+  {
+    id: 'T-xx. ★★ the plan claims the panel\'s stop on every started line walk',
+    file: NCA, tests: [T_LINE],
+    find: "  const lineCeilingStop = expected.mode === 'line' && expected.ceilingStop === true && expected.forceChargeStartMs != null",
+    to: "  const lineCeilingStop = expected.mode === 'line' && expected.forceChargeStartMs != null /* MUTANT */",
+    why: 'A night whose pool stays under the ceiling is told the panel switches it off at 80% and the add-on switches it back on.',
+  },
+  {
+    id: 'T-xxi. ★★ the rationale\'s reserve sentence says "stays on until the window closes" on a walk that reaches the ceiling',
+    file: NCA, tests: [T_LINE],
+    find: "      : expected.mode === 'line' && lineCeilingStop != null",
+    to: "      : false && expected.mode === 'line' && lineCeilingStop != null /* MUTANT */",
+    why: 'The 2026-10-29 night says Charge Now stays on to 05:00; the app shows it off from ~02:00 and the pool falling.',
+  },
+  {
+    id: 'T-xxii. ★★ the rationale\'s expected sentence says "runs to the window close" on a walk that reaches the ceiling',
+    file: NCA, tests: [T_LINE],
+    find: '      if (lineCeilingStop != null) {',
+    to: '      if (lineCeilingStop == null && lineCeilingStop != null) { /* MUTANT */',
+    why: 'Two sentences of one rationale disagree on whether Charge Now stays on.',
+  },
+  {
+    id: 'T-xxiii. ★★ the push says "keeps it on until the window closes" on a walk that reaches the ceiling',
+    file: NTF, tests: [T_LINE],
+    find: '    if (stop != null) {\n      return `Then, ${at}, it switches',
+    to: '    if (stop != null && stop.ceilingPct < 0) { /* MUTANT */\n      return `Then, ${at}, it switches',
+    why: 'The evening push calls the 80% ceiling a backstop on a night expected to stop there.',
+  },
+  {
+    id: 'T-xxiv. ★★ the card says "stays on to the window close" on a walk that reaches the ceiling',
+    file: CARD, tests: [T_LINE],
+    find: '    if (stop != null) {\n      return `outage line ${r1(',
+    to: '    if (stop != null && stop.ceilingPct < 0) { /* MUTANT */\n      return `outage line ${r1(',
     why: 'The same on the card.',
   },
 

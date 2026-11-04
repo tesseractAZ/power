@@ -83,6 +83,8 @@ import {
   FORCE_CHARGE_LINE_HEADROOM_PCT, forceChargeModeOf, forceChargeLineStartAtMs,
   // v1.200.0 (review) — the panel's latch at its ceiling and the tick's line re-ON, walked as decided.
   FORCE_CHARGE_LINE_REON_MAX, FORCE_CHARGE_ON_RETRY_CUTOFF_MS, FORCE_CHARGE_ON_VERIFY_AFTER_MS,
+  // v1.200.0 (review 2) — the re-ON budget in words, for the texts of a night whose walk reaches the ceiling.
+  lineReOnTimesWords,
 } from './nightForceCharge.js';
 // R2 — the window resolver and the per-leg rules live with the cycle chooser; the taper ceiling
 // with the curtailment engine's taper band. (chargeWindows.ts imports only tariff.ts;
@@ -566,6 +568,13 @@ export interface NightChargePlan {
    *  20 min, it runs to the close, and expectedWriteLevelPct is the expected CLOSE. Every surface states
    *  the line sentence only then (never on a cost-dominant night). Absent otherwise. */
   expectedForceChargeMode?: 'line';
+  /** v1.200.0 (review 2) — beside `expectedForceChargeMode`, and only where the expected walk starts the line
+   *  force-charge and REACHES the panel ceiling: there the panel switches Charge Now off by itself (the measured
+   *  OFF-reading latch, 2026-09-23 / 2026-10-02), and the tick switches it back on under `startTargetPct` before the
+   *  close (lineReOnDue, at most FORCE_CHARGE_LINE_REON_MAX a night). The rationale, the push and the card then say
+   *  so — never "stays on until the window closes", never "the ceiling is the backstop". Absent otherwise (that
+   *  plan's JSON is unchanged). */
+  expectedLineCeilingStop?: { ceilingPct: number; startTargetPct: number };
 
   /** v1.60.0 — EV-contention disclosure for tonight's window (see the type).
    *  null only on a null plan (no window was even resolved). */
@@ -1112,6 +1121,13 @@ export interface ExpectedBuy {
   /** v1.200.0 (review) — with `mode`: the line mode's panel ceiling (the level the pool must be under for a
    *  start; a night whose pool stays at or above it is armed but not expected to start). */
   panelCeilingPct?: number;
+  /** v1.200.0 (review 2) — with `mode`: the start target the tick times the start to and switches Charge Now back
+   *  on under (forceChargeModeOf's startTargetPct). */
+  startTargetPct?: number;
+  /** v1.200.0 (review 2) — with `mode`: the walk reaches the panel ceiling, where the panel switches Charge Now off
+   *  by itself (the measured OFF-reading latch). The texts then say so, never "stays on until the window closes"
+   *  and never "the ceiling is the backstop". Absent on a walk that stays under it. */
+  ceilingStop?: true;
 }
 
 /**
@@ -1142,7 +1158,7 @@ export function expectedLineForceChargeWalk(o: {
   envelopeKw: number | null;
   legEff: number;
   acceptKw?: number | null;
-}): { closeKwh: number; startMs: number | null; startPackKwh: number; gridKwh: number } | null {
+}): { closeKwh: number; startMs: number | null; startPackKwh: number; gridKwh: number; ceilingReached: boolean } | null {
   const byHour = hoursByEpoch(o.hours);
   let pack = Math.max(0, Math.min(o.fullKwh, o.startKwh));
   const floor = Math.min(Math.max(0, o.reserveKwh), pack);
@@ -1155,6 +1171,8 @@ export function expectedLineForceChargeWalk(o: {
   let latched = false;
   let reOns = 0;
   let lastOnMs = o.fromMs;
+  // v1.200.0 (review 2) — the walk reached the ceiling at least once (the texts say the panel switches it off there).
+  let reached = false;
   for (let t = o.fromMs; t < o.windowEndMs; t += EXPECTED_JIT_STEP_MS) {
     const h = p50HourAt(byHour, Math.floor(t / HOUR_MS) * HOUR_MS, o.fromMs);
     if (h == null) return null;
@@ -1189,6 +1207,7 @@ export function expectedLineForceChargeWalk(o: {
       // from here the house draws the pool again (below), until the tick's re-ON (lineReOnDue).
       if (pack >= capKwh - 1e-9) latched = true;
     } else if (startMs != null) {
+      reached = true;
       // LATCHED at the ceiling: the house runs from the pool, held at the written reserve, as before the
       // start. Back under the start target the tick switches the slots back ON — at most
       // FORCE_CHARGE_LINE_REON_MAX a night, FORCE_CHARGE_ON_VERIFY_AFTER_MS apart, outside the last
@@ -1207,7 +1226,7 @@ export function expectedLineForceChargeWalk(o: {
       pack = Math.max(floor, Math.min(o.fullKwh, pack + chargeLegStep(((pv - loadW / o.dischargeEff) / 1000) * dtH, o.legEff)));
     }
   }
-  return { closeKwh: pack, startMs, startPackKwh: startMs != null ? startPackKwh : pack, gridKwh };
+  return { closeKwh: pack, startMs, startPackKwh: startMs != null ? startPackKwh : pack, gridKwh, ceilingReached: reached || latched };
 }
 
 /**
@@ -1321,7 +1340,8 @@ function expectedLineBuy(
   const reservePct = clampReserveTarget(o.setpointSocPct!);
   const floorLevel = Math.max(reservePct, mode.startTargetPct);
   const panelCeilingPct = mode.panelCeilingPct;
-  if (o.startKwh == null || o.deliverableKwh == null) return { buyKwh: null, levelPct: floorLevel, mode: 'line', panelCeilingPct };
+  const startTargetPct = mode.startTargetPct;
+  if (o.startKwh == null || o.deliverableKwh == null) return { buyKwh: null, levelPct: floorLevel, mode: 'line', panelCeilingPct, startTargetPct };
   const reserveKwh = (reservePct / 100) * o.fullKwh;
   let liftKwh = Math.max(0, reserveKwh - o.startKwh);
   const reserveLeg = expectedPvChargeWalk({
@@ -1336,10 +1356,11 @@ function expectedLineBuy(
     dischargeEff: o.window.dischargeEff, chargeCapKw: o.window.chargeCapKw, envelopeKw: o.window.envelopeKw, legEff: o.legEff,
     acceptKw: o.window.acceptKw ?? null,
   });
-  if (walk == null) return { buyKwh: null, levelPct: floorLevel, mode: 'line', panelCeilingPct };
+  if (walk == null) return { buyKwh: null, levelPct: floorLevel, mode: 'line', panelCeilingPct, startTargetPct };
   const out: ExpectedBuy = {
     buyKwh: null, levelPct: round1(Math.max(reservePct, (walk.closeKwh / o.fullKwh) * 100)), mode: 'line', panelCeilingPct,
-    forceChargeStartMs: walk.startMs, forceChargeFromPct: round1((walk.startPackKwh / o.fullKwh) * 100),
+    startTargetPct, forceChargeStartMs: walk.startMs, forceChargeFromPct: round1((walk.startPackKwh / o.fullKwh) * 100),
+    ...(walk.ceilingReached ? { ceilingStop: true as const } : {}),
   };
   liftKwh += walk.gridKwh;
   const deliverable = Math.max(0, o.deliverableKwh);
@@ -2313,6 +2334,10 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
       window: { hours: horizon, fromMs: effChargeStartMs, windowEndMs: windowEnd, dischargeEff, chargeCapKw, envelopeKw, acceptKw },
     })
     : { buyKwh: 0, levelPct: null };
+  // v1.200.0 (review 2) — the line walk starts and reaches the panel ceiling (NightChargePlan.expectedLineCeilingStop).
+  const lineCeilingStop = expected.mode === 'line' && expected.ceilingStop === true && expected.forceChargeStartMs != null
+    && expected.levelPct != null && expected.panelCeilingPct != null && expected.startTargetPct != null
+    ? { ceilingPct: expected.panelCeilingPct, startTargetPct: expected.startTargetPct } : null;
   // R2 — THE RE-ENTRY HOLD (plan §3.3), a mid-day cost leg only (middayReentryLinePct): a write whose
   // level is under floor + 25 leaves the pool, at the restore, where the panel holds it instead of
   // discharging, and the grid carries the house into on-peak. Such a leg holds.
@@ -2374,6 +2399,10 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
     const at = fmtSiteDayHm(fcAt, nowMs);
     // v1.200.0 — a line night's force-charge runs to the window close.
     if (expected.mode === 'line') {
+      // v1.200.0 (review 2) — unless the walk reaches the panel ceiling, where the panel switches it off itself.
+      if (lineCeilingStop != null) {
+        return `${start < writtenPct ? `, and tonight's write charges it to the ${writtenPct}% reserve` : `, above the ${writtenPct}% reserve`}; the force-charge for the outage line switches on at ~${at} and the panel switches it off at its ${lineCeilingStop.ceilingPct}% ceiling, ~${level}% expected at the close`;
+      }
       return `${start < writtenPct ? `, and tonight's write charges it to the ${writtenPct}% reserve` : `, above the ${writtenPct}% reserve`}; the force-charge for the outage line runs from ~${at} to the window close and takes it ${to}${asFar}`;
     }
     if (start < writtenPct) return `, and tonight's write charges it ${to} (the ${writtenPct}% reserve, then force-charge from ~${at})${asFar}`;
@@ -2429,15 +2458,21 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   const lineText = `tonight's ${cushionLineSocPct}% outage line is above it`;
   const envelopeHead = `The reserve is set to ${writtenPct}%, the most the panel accepts as a backup reserve; ${lineText}`;
   const lineStartText = expected.forceChargeStartMs != null ? `switches on at ~${fmtSiteDayHm(expected.forceChargeStartMs, nowMs)} and ` : 'switches on just in time and ';
+  const lineReOnTimesText = lineReOnTimesWords(FORCE_CHARGE_LINE_REON_MAX);
   const envelopeNote: string | null = lineDisclosed
     ? ` ${envelopeHead} and ${cushionEnvelopeReason === 'backupLeg' ? 'the outage backup leg writes the reserve only' : cushionEnvelopeReason === 'tooHigh' ? 'too close to a full pool for the force-charge to carry' : 'no force-charge runs in advisory mode'}, so the cushion is not fully held — residual risk remains.`
     : expected.mode === 'line' && expected.forceChargeStartMs === null
       // v1.200.0 (review) — armed, not expected to start: the pool stays at or above the panel ceiling, which
       // is above the line. Never "stays on until the window closes" for a force-charge that never switches on.
       ? ` ${envelopeHead}, so the panel's force-charge is armed for it, but is not expected to start: the pool is expected to stay at or above the panel's ${expected.panelCeilingPct}% force-charge ceiling. After the window the reserve returns to ${round1(reserveFloorPct)}% and the house can draw the pool down as usual.`
-      : expected.mode === 'line'
-        ? ` ${envelopeHead}, so the panel's force-charge ${lineStartText}stays on until the window closes${expected.levelPct != null && expected.forceChargeStartMs != null ? `, taking the pool to ~${expected.levelPct}%` : ''}. After the window the reserve returns to ${round1(reserveFloorPct)}% and the house can draw the pool down as usual.`
-        : null;
+      // v1.200.0 (review 2) — a walk that reaches the panel ceiling: the panel switches Charge Now off there by
+      // itself, and the add-on switches it back on under the start target before the close (lineReOnDue). Never
+      // "stays on until the window closes" for a night expected to see the panel's own stop.
+      : expected.mode === 'line' && lineCeilingStop != null
+        ? ` ${envelopeHead}, so the panel's force-charge ${lineStartText}runs until the panel switches it off at its ${lineCeilingStop.ceilingPct}% ceiling; the add-on switches it back on if the pool falls under ${lineCeilingStop.startTargetPct}% before the window closes (at most ${lineReOnTimesText}), ~${expected.levelPct}% expected at the close. After the window the reserve returns to ${round1(reserveFloorPct)}% and the house can draw the pool down as usual.`
+        : expected.mode === 'line'
+          ? ` ${envelopeHead}, so the panel's force-charge ${lineStartText}stays on until the window closes${expected.levelPct != null && expected.forceChargeStartMs != null ? `, taking the pool to ~${expected.levelPct}%` : ''}. After the window the reserve returns to ${round1(reserveFloorPct)}% and the house can draw the pool down as usual.`
+          : null;
   const reserveNote = envelopeNote ?? setpointNote;
   const holdReason = starved
     ? `this window can deliver only ~${round1(buyKwh)} kWh, under the ${round1(minBuyKwh)} kWh minimum-buy threshold${holdCapName} — against a requirement of ${meetable ? `~${round1(requiredExtraKwh)} kWh` : 'more than the pool can hold'}. The window cannot serve the need; this is not a night with little worth buying.`
@@ -2472,6 +2507,7 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
     ...(cushionEnvelopeReason != null ? { cushionEnvelopeReason } : {}),
     ...(forceChargeLine != null ? { forceChargeLine } : {}),
     ...(expected.mode === 'line' ? { expectedForceChargeMode: 'line' as const } : {}),
+    ...(lineCeilingStop != null ? { expectedLineCeilingStop: lineCeilingStop } : {}),
     evContention,
     minProjSocPct,
     minProjSocTsMs: houseWithBuy.minTs,   // v1.125.0 — matches the disclosed house trough

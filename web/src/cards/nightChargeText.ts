@@ -220,9 +220,17 @@ export interface CushionNotePlan {
   forceChargeLine?: { askPct: number; linePct: number } | null;
   /** 'line' when the expected walk ran the line force-charge (never on a cost-dominant night). */
   expectedForceChargeMode?: 'line';
+  /** The server's NightChargePlan.expectedLineCeilingStop (review 2): the expected walk reaches the panel ceiling,
+   *  where the panel switches Charge Now off, and the add-on switches it back on under the start target. */
+  expectedLineCeilingStop?: { ceilingPct: number; startTargetPct: number };
   expectedWriteLevelPct?: number | null;
   expectedForceChargeStartMs?: number | null;
 }
+
+/** v1.200.0 (review 2) — the server's FORCE_CHARGE_LINE_REON_MAX in words (nightForceCharge.lineReOnTimesWords): the
+ *  re-ONs a line night may spend after the panel's own stop. lineForceCharge.test.ts pins the card's row against the
+ *  server's rationale, so a change of the budget there shows here. */
+export const LINE_REON_TIMES_TEXT = 'twice';
 
 /** v1.200.0 — the "charge/pool caps" row: only where the plan's SIZING fell short (the server's
  *  cushionShortfall less an envelope-only cause), never on a plan whose only shortfall is the envelope. */
@@ -257,6 +265,14 @@ export function outageLineRow(plan: CushionNotePlan, maxPct: number | null = nul
     }
     const lvl = plan.expectedWriteLevelPct;
     const tail = lvl != null && Number.isFinite(lvl) && plan.expectedForceChargeStartMs != null ? `, ~${r1(lvl)}% expected at the close` : '';
+    // v1.200.0 (review 2) — a walk that reaches the panel ceiling: the panel switches Charge Now off there, and the
+    // add-on switches it back on under the start target before the close. Never "stays on to the window close".
+    const stop = plan.expectedLineCeilingStop;
+    if (stop != null) {
+      return `outage line ${r1(plan.forceChargeLine.linePct)}% is above the ${max}% reserve — the panel's force-charge runs until the panel `
+        + `switches it off at its ${stop.ceilingPct}% ceiling, and the add-on switches it back on under ${stop.startTargetPct}% before the close `
+        + `(at most ${LINE_REON_TIMES_TEXT})${tail}`;
+    }
     return `outage line ${r1(plan.forceChargeLine.linePct)}% is above the ${max}% reserve — the panel's force-charge stays on to the window close${tail}`;
   }
   return null;

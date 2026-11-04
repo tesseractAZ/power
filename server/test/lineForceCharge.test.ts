@@ -68,7 +68,9 @@ const PIN_T4 = { carried: [22, 37], disclosedOn: [0, 0], lineMode: [14, 25], exp
 /** Measured (v1.200.0 review) on the same year: carried plans whose setpoint is the force-charge's own ask; and of
  *  the line-mode plans with an expected figure, those whose expected buy exceeds the worst case (and the de-biased
  *  one), with and without a predicted window EV. */
-const PIN_T4_REVIEW = { setpointIsAsk: 32, expLine: 39, expOverWorst: 24, expOverDebiased: 20, expLineNoEv: 20, expOverWorstNoEv: 12 };
+/** (review 2, finding 4) `ceilingStop` — the line-mode plans whose expected walk reaches the panel ceiling (the panel
+ *  switches Charge Now off there): 2026-10-29 21:30, 13:00 and +1 01:30 and 2027-01-04 +1 01:30, at both scales. */
+const PIN_T4_REVIEW = { setpointIsAsk: 32, expLine: 39, expOverWorst: 24, expOverDebiased: 20, expLineNoEv: 20, expOverWorstNoEv: 12, ceilingStop: 8 };
 
 /** The sizing fields no part of v1.200.0 may move (I-A1). */
 const SIZING = ['chargeTonight', 'buyKwh', 'buyKwhDebiased', 'requiredExtraKwh', 'targetSocPct', 'setpointSocPct',
@@ -156,7 +158,10 @@ test('★★★ T2 2026-10-29 21:30 at 0.944 (line 65.95, setpoint = target = 66
   assert.doesNotMatch(base.rationale, /outage line|only accepts/, 'precondition: today the rationale is silent');
   const carried = L(yearPlan('2026-10-29 21:30', true));
   assert.deepEqual(carried.forceChargeLine, { askPct: 66, linePct: 65.95 });
-  assert.match(carried.rationale, /tonight's 65\.95% outage line is above it, so the panel's force-charge switches on at ~\S+ and stays on until the window closes, taking the pool to ~[\d.]+%\./);
+  // (review 2) its expected walk reaches the 80% panel ceiling (a predicted EV pulls the start to the open): the
+  // rationale says the panel switches it off there, never that it stays on until the window closes.
+  assert.match(carried.rationale, /tonight's 65\.95% outage line is above it, so the panel's force-charge switches on at ~\S+ and runs until the panel switches it off at its 80% ceiling; the add-on switches it back on if the pool falls under 71% before the window closes \(at most twice\), ~[\d.]+% expected at the close\./);
+  assert.doesNotMatch(carried.rationale, /stays on until the window closes/);
   const disclosed = L(yearPlan('2026-10-29 21:30', false));
   assert.equal(disclosed.cushionShortfallCause, 'envelope');
   assert.match(disclosed.rationale, /tonight's 65\.95% outage line is above it and no force-charge runs in advisory mode, so the cushion is not fully held — residual risk remains\./);
@@ -333,6 +338,18 @@ test('★★★ T4 the year: no sizing figure moves, every over-envelope charge 
           if (on.expectedBuyKwh > (on.buyKwh ?? Infinity)) { add('expOverWorst'); if (noEv) add('expOverWorstNoEv'); }
           if (on.expectedBuyKwh > (on.buyKwhDebiased ?? Infinity)) add('expOverDebiased');
         }
+        // Review 2 (finding 4) — a walk that reaches the panel ceiling (the panel switches Charge Now off there) is
+        // worded so, never "stays on until the window closes"; a walk that stays under it keeps those words.
+        if (on.expectedForceChargeMode === 'line' && on.expectedForceChargeStartMs != null) {
+          if (on.expectedLineCeilingStop != null) {
+            add('ceilingStop');
+            assert.doesNotMatch(on.rationale, /stays on until the window closes|to the window close and takes it/, `${c.label} ${scaleName}`);
+            assert.match(on.rationale, /runs until the panel switches it off at its \d+% ceiling; the add-on switches it back on if the pool falls under \d+% before the window closes \(at most twice\)/, `${c.label} ${scaleName}`);
+          } else {
+            assert.doesNotMatch(on.rationale, /the panel switches it off at its/, `${c.label} ${scaleName}`);
+            assert.match(on.rationale, /stays on until the window closes/, `${c.label} ${scaleName}`);
+          }
+        }
         // R6d — the line sentence only in line mode: a cost-dominant night's cost force-charge already
         // clears ⌈L⌉ + 10, and its rationale says nothing of the line.
         if (on.forceChargeLine != null && on.expectedForceChargeMode !== 'line') {
@@ -369,7 +386,8 @@ test('★★★ T4 the year: no sizing figure moves, every over-envelope charge 
   );
   assert.deepEqual(
     { setpointIsAsk: counts.setpointIsAsk ?? 0, expLine: counts.expLine ?? 0, expOverWorst: counts.expOverWorst ?? 0,
-      expOverDebiased: counts.expOverDebiased ?? 0, expLineNoEv: counts.expLineNoEv ?? 0, expOverWorstNoEv: counts.expOverWorstNoEv ?? 0 },
+      expOverDebiased: counts.expOverDebiased ?? 0, expLineNoEv: counts.expLineNoEv ?? 0, expOverWorstNoEv: counts.expOverWorstNoEv ?? 0,
+      ceilingStop: counts.ceilingStop ?? 0 },
     PIN_T4_REVIEW,
   );
 });
@@ -662,17 +680,22 @@ test('★★★ T6 (review) the expected walk is the tick\'s: at the panel ceili
   assert.equal(p.expectedForceChargeMode, 'line');
   assert.equal(p.expectedWriteLevelPct, PIN_T2_CLOSE, 'drawn back under the ceiling (still above ⌈L⌉ + 5 = 71: no re-ON)');
   assert.ok(p.expectedWriteLevelPct! < 80 && p.expectedWriteLevelPct! >= 71 - 1, String(p.expectedWriteLevelPct));
-  assert.match(p.rationale, new RegExp(`taking the pool to ~${PIN_T2_CLOSE}%`));
-  // The walk itself: a pool that reaches the ceiling early latches, drains, and is switched back on once.
-  // A quiet house until the last hour, when 6 kW arrives: the start (pool ≥ 61%) is due 35 min before the close,
-  // the pool reaches 80% and latches; the house then draws it for the last minutes (no re-ON so late).
+  // (review 2) the walk reaches the ceiling, so the plan says the panel's own stop and the re-ON, never "stays on".
+  assert.deepEqual(p.expectedLineCeilingStop, { ceilingPct: 80, startTargetPct: 71 });
+  assert.ok(p.rationale.includes(`runs until the panel switches it off at its 80% ceiling; the add-on switches it back on if the pool falls under 71% before the window closes (at most twice), ~${PIN_T2_CLOSE}% expected at the close.`), p.rationale);
+  assert.ok(p.rationale.includes(`the force-charge for the outage line switches on at ~23:00 and the panel switches it off at its 80% ceiling, ~${PIN_T2_CLOSE}% expected at the close.`), p.rationale);
+  assert.doesNotMatch(p.rationale, /stays on until the window closes|runs from ~\S+ to the window close/);
+  // The walk itself. A quiet house until the last hour, when 6 kW arrives: the start (pool ≥ 61%) is due 35 min
+  // before the close from ~70.4%, and the walk closes ~76.8% — under the 80% ceiling, which it does not reach
+  // (review 2: ceilingReached false, so its texts keep "stays on until the window closes").
   const hours = Array.from({ length: 8 }, (_, i) => ({ ts: WIN_START + i * H, pvP10W: 0, pvP50W: 0, loadP90W: 4000, loadP50W: i === 5 ? 6000 : 300, evP90W: 0 }));
   const walk = (nca as unknown as { expectedLineForceChargeWalk: (o: unknown) => { closeKwh: number; startMs: number | null } }).expectedLineForceChargeWalk({
     startKwh: 0.75 * 92.16, reserveKwh: 0.5 * 92.16, fullKwh: 92.16, tickPoolKwh: 92.16, startTargetPct: 61, panelCeilingPct: 80,
     hours, fromMs: WIN_START, windowEndMs: WIN_END, dischargeEff: 0.94, chargeCapKw: 17, envelopeKw: 17, legEff: 0.927,
   });
   assert.equal(walk.startMs, WIN_END - 35 * M);
-  assert.ok(walk.closeKwh < 0.8 * 92.16 - 0.5, `the close ${(walk.closeKwh / 92.16 * 100).toFixed(1)}% is under the ceiling (it once held there)`);
+  assert.equal((walk as unknown as { ceilingReached: boolean }).ceilingReached, false, 'it never reached the ceiling');
+  assert.ok(walk.closeKwh < 0.8 * 92.16 - 0.5, `the close ${(walk.closeKwh / 92.16 * 100).toFixed(1)}% is under the ceiling`);
   assert.ok(walk.closeKwh >= 0.61 * 92.16, `the close ${(walk.closeKwh / 92.16 * 100).toFixed(1)}% stays at or above the start target`);
   // An EV predicted for the whole window starts the walk at the open; a 9 kW median load then latches it at 80%
   // by ~02:45 and draws it under 61% before the last 20 min: the walk switches it back on, as the tick does
@@ -683,6 +706,7 @@ test('★★★ T6 (review) the expected walk is the tick\'s: at the panel ceili
     hours: evHours, fromMs: WIN_START, windowEndMs: WIN_END, dischargeEff: 0.94, chargeCapKw: 17, envelopeKw: 17, legEff: 0.927,
   });
   assert.equal(reOn.startMs, WIN_START);
+  assert.equal((reOn as unknown as { ceilingReached: boolean }).ceilingReached, true);
   assert.ok(reOn.closeKwh >= 0.61 * 92.16 && reOn.closeKwh < 0.8 * 92.16, `the close ${(reOn.closeKwh / 92.16 * 100).toFixed(2)}%`);
   assert.ok(reOn.gridKwh > 0.3 * 92.16 + 1, `bought again after the re-ON: ${reOn.gridKwh.toFixed(2)} kWh`);
 });
@@ -810,6 +834,34 @@ test('★★ T9 the supervised push: the title, the clause, the spoken notice an
   // The card's row names the line and the same level.
   const row = (cardText as unknown as { outageLineRow: (p: unknown) => string | null }).outageLineRow(p);
   assert.ok(row != null && row.includes(`~${Math.round(level * 10) / 10}%`), String(row));
+});
+
+test('★★★ T9 (review 2, finding 4) a line night whose expected walk reaches the panel ceiling: the rationale, the push and the card say the panel switches it off there and the add-on switches it back on — never "stays on until the window closes"', () => {
+  // 2026-10-29 21:30 at 0.944: a predicted EV pulls the start to the open, the walk reaches the 80% ceiling and the house
+  // draws it to ~72.1% by the close (above the 71% start target: no re-ON expected).
+  const p = L(yearPlan('2026-10-29 21:30', true));
+  assert.deepEqual(p.expectedLineCeilingStop, { ceilingPct: 80, startTargetPct: 71 });
+  const supervised = {
+    cancelDeadlineText: 'tonight at 11:55 PM', targetPct: 50, forceChargeTargetPct: null,
+    forceChargeLine: { askPct: 66, linePct: 65.95, panelCeilingPct: 80 },
+  };
+  const msg = buildNightChargeMessage(p, 'charge', supervised as never);
+  assert.match(msg.body, new RegExp(`Then, at ~\\S+, it switches the panel's force-charge ON for tonight's [\\d.]+% outage line \\(above the 50% the panel holds as a reserve\\); `
+    + `the panel switches it off at its 80% force-charge ceiling, and the add-on switches it back on if the pool falls under 71% before the window closes \\(at most twice\\), `
+    + `~${PIN_T2_CLOSE}% expected at the close\\. After the window the reserve returns to 30% and the house uses the pool as usual\\. `), msg.body);
+  assert.doesNotMatch(msg.body, /keeps it on until the window closes|is the backstop/);
+  const title = /~([\d.]+)%/.exec(msg.title)?.[1];
+  assert.equal(Number(title), PIN_T2_CLOSE, 'one level: the title is the clause\'s close');
+  const ct = cardText as unknown as { outageLineRow: (p: unknown) => string | null; LINE_REON_TIMES_TEXT: string };
+  assert.equal(ct.outageLineRow(p), `outage line 66% is above the 50% reserve — the panel's force-charge runs until the panel switches it off at its 80% ceiling, `
+    + `and the add-on switches it back on under 71% before the close (at most twice), ~${PIN_T2_CLOSE}% expected at the close`);
+  assert.equal(ct.LINE_REON_TIMES_TEXT, nfc.lineReOnTimesWords(nfc.FORCE_CHARGE_LINE_REON_MAX), 'the card mirrors the server\'s re-ON budget');
+  // A walk that stays under the ceiling (2027-01-04 21:30): no field, and the words are v1.200.0's.
+  const under = L(yearPlan('2027-01-04 21:30', true));
+  assert.equal('expectedLineCeilingStop' in under, false);
+  const underMsg = buildNightChargeMessage(under, 'charge', { ...supervised, forceChargeLine: { askPct: 56, linePct: 55.55, panelCeilingPct: 80 } } as never);
+  assert.match(underMsg.body, /keeps it on until the window closes, .*the panel's 80% force-charge ceiling is the backstop\. /);
+  assert.match(ct.outageLineRow(under)!, /the panel's force-charge stays on to the window close, ~[\d.]+% expected at the close$/);
 });
 
 test('★★ T9 the spoken clause fits the 560-character bound at the longest deadline; never beside the shortfall or "toward"', () => {

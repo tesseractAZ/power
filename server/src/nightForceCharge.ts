@@ -441,6 +441,12 @@ export const FORCE_CHARGE_LINE_HEADROOM_PCT = 5;
  *  draws the pool back down. Two re-ONs cover a second latch on a long night (lineForceChargeClose.test.ts). */
 export const FORCE_CHARGE_LINE_REON_MAX = 2;
 
+/** v1.200.0 (review 2) — a re-ON budget in words ("twice"), for the texts that say the add-on switches Charge Now
+ *  back on after the panel's own stop "at most twice" (the rationale, the evening push; the card mirrors it). PURE. */
+export function lineReOnTimesWords(n: number): string {
+  return n === 1 ? 'once' : n === 2 ? 'twice' : `${n} times`;
+}
+
 /**
  * v1.200.0 — the outage-line force-charge's gate: any write mode (supervised or auto). Not the cost
  * objective, not ARB_COST_MAX_SOC_PCT: those gate the COST force-charge only (forceChargeEnabled). The

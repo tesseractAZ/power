@@ -13,7 +13,7 @@ import {
   provisionalBandText,
 } from './nightChargeAdvisor.js';
 import {
-  forceChargeStopPct, partialForceChargeOnFailureSlots, forceChargeFailedSlotsText, FORCE_CHARGE_LINE_REON_MAX,
+  forceChargeStopPct, partialForceChargeOnFailureSlots, forceChargeFailedSlotsText, FORCE_CHARGE_LINE_REON_MAX, lineReOnTimesWords,
   type ForceChargeNightOutcome, type ForceChargeSlotCore, type LineAtRisk,
 } from './nightForceCharge.js';
 import { isNoChargeKwh, revertRetryText, RESERVE_WRITE_MAX_PCT, type NightChargeMode, type RevertResendOnReport, type RestoreSummaryKind } from './nightChargeActuator.js';
@@ -611,6 +611,16 @@ export function buildNightChargeMessage(
       return `It also arms the panel's force-charge ${why}; it is not expected to start (the pool is expected to stay at or above the panel's ${l.panelCeilingPct}% force-charge ceiling). `;
     }
     const at = lineStartMs === undefined ? 'just in time' : `at ~${fmtPhoenixDayHm(lineStartMs, plan.generatedAt)}`;
+    // v1.200.0 (review 2) — a night whose expected walk reaches the panel ceiling (plan.expectedLineCeilingStop): the
+    // panel switches Charge Now off there by itself, and the add-on switches it back on under the start target before
+    // the close. Never "keeps it on until the window closes", and the ceiling is no backstop there.
+    const stop = plan.expectedLineCeilingStop;
+    if (stop != null) {
+      return `Then, ${at}, it switches the panel's force-charge ON ${why}; the panel switches it off at its ${stop.ceilingPct}% force-charge ceiling, `
+        + `and the add-on switches it back on if the pool falls under ${stop.startTargetPct}% before the window closes (at most ${lineReOnTimesWords(FORCE_CHARGE_LINE_REON_MAX)}), `
+        + `${levelText} expected at the close. `
+        + `After the window the reserve returns to ${round1(plan.reserveFloorPct)}% and the house uses the pool as usual. `;
+    }
     return `Then, ${at}, it switches the panel's force-charge ON and keeps it on until the window closes, ${why}, `
       + `taking the pool ${to} ${levelText}; the panel's ${l.panelCeilingPct}% force-charge ceiling is the backstop. `
       + `After the window the reserve returns to ${round1(plan.reserveFloorPct)}% and the house uses the pool as usual. `;
