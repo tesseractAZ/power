@@ -1380,8 +1380,10 @@ export function expectedBuyFromPlan(o: {
  * lift by 57.92 kWh at most (~92.8%). There the stated close is capped at the window-open pack plus that deliverable
  * plus the window's P50 PV (all of it into the pack: an upper bound), never above 100, and floored at the reserve —
  * the convention of every window-bound night (the pool may close lower: 206 / 224 bound line plans of the year at
- * 4-20 h reach less than 50%, every one disclosed; a line in (50, 50.05] there would read as held — none on the year,
- * and the gate grades its close). The panel's stop (ceilingStop) is stated only where that reach clears the panel
+ * 4-20 h reach less than 50%, every one disclosed). A line stated at 50% (its raw value a hair above it, so asked at 51)
+ * there reads as held: 2026-11-25 21:30 and 13:00 on nameplate at 11 h (the window reaches ~28% and ~30%), both carried
+ * with the caps note — their sizing fell short — so no line-specific NOTE is added; the gate grades the close. The
+ * panel's stop (ceilingStop) is stated only where that reach clears the panel
  * ceiling. On a walk that is not bound the cap cannot bind (its close is the open plus a lift within the deliverable
  * plus PV, less the drains).
  */
@@ -2439,7 +2441,18 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   // R2 — THE RE-ENTRY HOLD (plan §3.3), a mid-day cost leg only (middayReentryLinePct): a write whose
   // level is under floor + 25 leaves the pool, at the restore, where the panel holds it instead of
   // discharging, and the grid carries the house into on-peak. Such a leg holds.
-  if (midday && !backupLeg && chargeTonight) {
+  // v1.200.0 (A5) — never a leg the line force-charge is ARMED on: the hold writes nothing and runs no force-charge,
+  // leaving the pool where it stands against an outage line above the 50% reserve; and on a line-mode leg the level is
+  // the walk's close (capped at the window's reach, H1), not a write's target, so more cushion turned a charging, armed
+  // leg into a hold (a 31% floor and a 5 kW window: armed at 7 h, held from 8 h; lineForceCharge.test.ts T23). The
+  // outage line outranks the re-entry economy: the leg charges, judged against its line as any armed night is, and the
+  // rationale says the re-entry line is not met (reentryNote).
+  const reentryExemptLinePct = midday && !backupLeg && chargeTonight && lineArmed
+    ? middayReentryLinePct(expected.levelPct, reserveFloorPct) : null;
+  const reentryNote = reentryExemptLinePct != null && expected.levelPct != null
+    ? ` The re-entry hold does not apply: the force-charge for the outage line is armed, so the leg charges although ~${round1(expected.levelPct)}% is under the ${reentryExemptLinePct}% re-entry line (the ${round1(reserveFloorPct)}% reserve + ${MIDDAY_REENTRY_MARGIN_PCT}); after the restore the panel may hold the pool while the house buys from the grid into on-peak.`
+    : '';
+  if (midday && !backupLeg && chargeTonight && !lineArmed) {
     const arrivalPct = expected.levelPct;
     const linePct = middayReentryLinePct(arrivalPct, reserveFloorPct);
     if (arrivalPct != null && linePct != null) {
@@ -2592,7 +2605,7 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
     ? `this window can deliver only ~${round1(buyKwh)} kWh, under the ${round1(minBuyKwh)} kWh minimum-buy threshold${holdCapName} — against a requirement of ${meetable ? `~${round1(requiredExtraKwh)} kWh` : 'more than the pool can hold'}. The window cannot serve the need; this is not a night with little worth buying.`
     : `the buy this window would make (~${round1(buyKwh)} kWh) is under the ${round1(minBuyKwh)} kWh minimum-buy threshold — the projected need is genuinely small.`;
   const rationale = chargeTonight
-    ? `${chargeHeadline}${expectedNote}${sizingNote}${reserveNote} ${costMode ? `Objective: COST — buying cheap ${midday ? 'super off-peak' : 'overnight'} energy to displace dearer grid energy later, up to the ${costCeilingBasis === 'pv-headroom' ? `morning-solar headroom${headroomNote}` : costCeilingBasis === 'pv-curtail' ? `solar headroom under the ${round1(spec?.curtailFromPct ?? 0)}% charge taper${headroomNote}` : `${inputs.costMaxSocPct ?? DEFAULT_COST_MAX_SOC_PCT}% state-of-charge ceiling`}${longGap ? longGapNote : ''}. ` : ''}The cushion is ${cushionDesc}; without the buy a whole-house island would trough at ~${baselineMinSocPct}%.${baselineHolds ? ` Resilience needs no buy tonight — the pack at window close (${noBuyPct}%) already covers the cushion; this buy is economic only.` : ''}${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${bindingCap === 'overBuy' ? ' NOTE: buy exceeds morning-PV headroom; a small clip is accepted to hold resilience.' : ''}${evNote}${preWindowNote}`
+    ? `${chargeHeadline}${expectedNote}${sizingNote}${reserveNote}${reentryNote} ${costMode ? `Objective: COST — buying cheap ${midday ? 'super off-peak' : 'overnight'} energy to displace dearer grid energy later, up to the ${costCeilingBasis === 'pv-headroom' ? `morning-solar headroom${headroomNote}` : costCeilingBasis === 'pv-curtail' ? `solar headroom under the ${round1(spec?.curtailFromPct ?? 0)}% charge taper${headroomNote}` : `${inputs.costMaxSocPct ?? DEFAULT_COST_MAX_SOC_PCT}% state-of-charge ceiling`}${longGap ? longGapNote : ''}. ` : ''}The cushion is ${cushionDesc}; without the buy a whole-house island would trough at ~${baselineMinSocPct}%.${baselineHolds ? ` Resilience needs no buy tonight — the pack at window close (${noBuyPct}%) already covers the cushion; this buy is economic only.` : ''}${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${bindingCap === 'overBuy' ? ' NOTE: buy exceeds morning-PV headroom; a small clip is accepted to hold resilience.' : ''}${evNote}${preWindowNote}`
     : `Hold — ${holdReason}${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${evNote}${preWindowNote}`;
 
   return {
@@ -2672,6 +2685,8 @@ export const MIDDAY_REENTRY_MARGIN_PCT = 25;
  * a P50 basis. A window that cannot deliver all of it ends below it, and the window's PV beyond the
  * write is not counted: a level under the line cannot be lifted over it by the write. Returns the
  * line (floor + MIDDAY_REENTRY_MARGIN_PCT) when the level is under it — the leg holds — else null.
+ * v1.200.0 (A5) — a leg the line force-charge is armed on never holds (its level there is the walk's close): the planner
+ * reads this only to say that leg's re-entry line is not met.
  */
 export function middayReentryLinePct(levelPct: number | null, floorPct: number): number | null {
   if (levelPct == null || !Number.isFinite(levelPct) || !Number.isFinite(floorPct)) return null;
