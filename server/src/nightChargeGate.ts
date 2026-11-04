@@ -42,7 +42,7 @@
  * ═════════════════════════════════════════════════════════════════════════ */
 
 import type { NightLedgerRow } from './recorder.js';
-import { PLAN_TRAJ_BREACH_TOLERANCE_PCT } from './nightChargeAdvisor.js';
+import { LINE_CLOSE_EDGE_EPS, PLAN_TRAJ_BREACH_TOLERANCE_PCT } from './nightChargeAdvisor.js';
 import { siteYmd } from './siteTime.js';
 
 const DAY_MS = 86_400_000;
@@ -241,6 +241,10 @@ function mean(xs: number[]): number | null {
  *  is rounding, not a pool under its line. The written reserve is the line asked to the whole
  *  percent above it, so a pool held at the reserve reads at or above the line. */
 export const REALIZED_CLOSE_TOLERANCE_PCT = 0.05;
+/** v1.200.0 (A5) — PURE. A reading at or above the line less REALIZED_CLOSE_TOLERANCE_PCT, the edge itself included
+ *  (LINE_CLOSE_EDGE_EPS: in binary 50.35 − 0.05 is 50.300000000000004, so a 50.3 close read as under a 50.35 line). */
+const holdsLineAtClose = (readingPct: number, linePct: number): boolean =>
+  readingPct >= linePct - REALIZED_CLOSE_TOLERANCE_PCT - LINE_CLOSE_EDGE_EPS;
 
 /** v1.196.0 — how close a recorded line must sit to reserve_floor_pct + cushion_pct to be the
  *  legacy band: on `legacy-pct` the line is round2(floor + cushionPct) by construction. An
@@ -286,8 +290,8 @@ export function realizedCushionBreach(
   }
   const line = asNum(r.cushion_line_soc_pct)!;
   const close = asNum(r.window_close_soc_pct);
-  if (close != null) return close < line - REALIZED_CLOSE_TOLERANCE_PCT ? 1 : 0;
-  return low != null && low >= line - REALIZED_CLOSE_TOLERANCE_PCT ? 0 : null;
+  if (close != null) return holdsLineAtClose(close, line) ? 0 : 1;
+  return low != null && holdsLineAtClose(low, line) ? 0 : null;
 }
 
 /** Autocorrelation-adjusted effective sample size (§5.2). Positive lag-1
@@ -536,7 +540,7 @@ export function computeNightChargeReadiness(
     if (asNum(r.cushion_line_force_charge_pct) == null || !truthy(r.actuated) || r.force_charge_on_at_ms != null) return false;
     const line = asNum(r.cushion_line_soc_pct);
     const close = asNum(r.window_close_soc_pct);
-    if (line != null && close != null) return close < Math.min(line, 100) - REALIZED_CLOSE_TOLERANCE_PCT;
+    if (line != null && close != null) return !holdsLineAtClose(close, Math.min(line, 100));
     return realizedBreached(r);
   };
   const strikeRows = currentAlgo.filter((r) => {

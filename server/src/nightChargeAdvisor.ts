@@ -331,10 +331,15 @@ export interface ForceChargeLine { askPct: number; linePct: number }
  *  scorer's REALIZED_CLOSE_TOLERANCE_PCT (half the close reading's 0.1 step), restated here because nightChargeGate.ts
  *  imports this module; lineForceCharge.test.ts T20 pins the two equal. */
 export const LINE_CARRY_CLOSE_TOLERANCE_PCT = 0.05;
+/** v1.200.0 (A5) — the float slack at that edge, so a close exactly at L − 0.05 holds as the rule states: in binary
+ *  50.35 − 0.05 is 50.300000000000004, and a round1 close against a round2 line read as under it on 128 of the 501
+ *  pairs E = 50.0..100.0, L = E + 0.05. Far below any stated precision (closes 0.1, lines 0.01). The scorer's
+ *  comparisons at the same edge (nightChargeGate.ts) use it too. */
+export const LINE_CLOSE_EDGE_EPS = 1e-9;
 /** v1.200.0 (A5) — PURE. The plan's own line walk holds the line: its expected close at or above L less the tolerance.
  *  null (no P50 basis) holds: the walk's level is then the start target, above the line. */
 export function lineWalkHolds(closePct: number | null, linePct: number): boolean {
-  return closePct == null || closePct >= linePct - LINE_CARRY_CLOSE_TOLERANCE_PCT;
+  return closePct == null || closePct >= linePct - LINE_CARRY_CLOSE_TOLERANCE_PCT - LINE_CLOSE_EDGE_EPS;
 }
 /** v1.200.0 — NightChargePlan.cushionShortfallCause. */
 export type CushionShortfallCause = 'envelope' | 'envelope+caps';
