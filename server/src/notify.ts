@@ -1065,13 +1065,18 @@ export function buildLineForceChargeDeclinedStart(o: {
  * ours); slots reading ON while the pool is not rising — off and on again may restart the charge (the ON-reading
  * shape, unmeasured on this plant; or a load taking the grid cap). Never "No action needed". (review 4) The spent budget
  * is "after the panel's own stop" only with that stop on record (a slot switched off in the app reads the same).
- * (review 5) A handed-back re-ON whose retry the cutoff refuses ('reOnRefused') says so, never the gates. PURE.
+ * (review 5) A handed-back re-ON whose retry the cutoff may refuse ('reOnRefused') says so, never the gates. (review 8) In
+ * words true whether or not the retry comes (the push is held only while it is due a full tick before the cutoff, so one
+ * pushed may still come): the cooldown refused it, the add-on may try once more before the re-ON's cutoff, and the slots to
+ * switch on now. PURE.
  */
 export function buildLineForceChargeAtRisk(o: {
   day: string | null;
   risk: Pick<LineAtRisk, 'cause' | 'offSlots' | 'onSlots' | 'poolPct' | 'refPct' | 'thresholdPct' | 'linePct' | 'reOnNotAppliedSlots' | 'panelOffAtMs'>;
   /** When the add-on switches the force-charge off (writeWindowEndMs), as clock text. */
   closeText: string;
+  /** (review 8) The re-ON's own cutoff (closeAtMs − FORCE_CHARGE_ON_RETRY_CUTOFF_MS), as clock text: no re-ON at or after it. */
+  reOnCutoffText: string;
 }): NotifyMessage {
   const r = o.risk;
   const line = round1(r.linePct);
@@ -1097,7 +1102,7 @@ export function buildLineForceChargeAtRisk(o: {
       : r.cause === 'reOnHeld'
         ? 'The add-on cannot switch Charge Now back on now (it needs the grid known present, healthy host vitals and a live panel reading). '
         : r.cause === 'reOnRefused'
-          ? "The add-on's last try to switch Charge Now back on was refused by its own write cooldown; it does not try again tonight. "
+          ? `The add-on's last try to switch Charge Now back on was refused by its own write cooldown; it may try once more before ~${o.reOnCutoffText} if the cooldown allows. `
           : '';
   const off = r.offSlots.length > 0
     ? `To hold the line, switch Charge Now on for slot(s) ${r.offSlots.join(', ')} in the EcoFlow app (the add-on switches it off at the close).`

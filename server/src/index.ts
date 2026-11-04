@@ -6205,6 +6205,26 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
   // (persisted only when it moves, once per ten minutes) and the panel's own stop (nightForceCharge.lineNightObservations).
   const obs = lineNightObservations(nightActuationMem, nowMs, fcOpts);
   if (obs != null) { persistNightActuation({ ...nightActuationMem, ...obs }); state = nightActuationMem; }
+  // v1.200.0 (review 2) — THE LINE AT RISK after the verified ON, while a person can still act and the add-on
+  // cannot (nightForceCharge.lineAtRiskPushDue): once a night, stamped on the record BEFORE the push goes. (review 8) Judged
+  // on a tick that decides nothing, and on a line re-ON's own tick when every write came back rate-limited (handed back):
+  // one on the last tick before the re-ON's cutoff has no later tick for it (the next is past the cutoff and the lead).
+  const pushLineAtRiskIfDue = (): void => {
+    const risk = lineAtRiskPushDue(nightActuationMem, nowMs, fcOpts);
+    if (risk != null) {
+      persistNightActuation({ ...nightActuationMem, forceChargeLineAtRiskPushedAtMs: nowMs });
+      const reOnCutoffText = fmtSiteClock(risk.closeAtMs - FORCE_CHARGE_ON_RETRY_CUTOFF_MS);
+      const why = risk.cause === 'reOnRefused'
+        ? `its last re-ON was refused by its own write cooldown and it may try once more before ${reOnCutoffText} (reOnRefused)`
+        : `the add-on cannot act (${risk.cause})`;
+      app.log.warn(`night-charge: the ${state.day} outage line (${risk.linePct}%) is AT RISK — the pool reads ${risk.poolPct}% (${risk.refPct}% at ${fmtSiteClock(risk.refAtMs)}), under its ${risk.thresholdPct}% at-risk threshold and ${risk.poolPct < risk.refPct ? 'falling' : 'flat'}; ${why}; slot(s) reading OFF: ${risk.offSlots.join(',') || 'none'}, reading ON: ${risk.onSlots.join(',') || 'none'}. Pushed once tonight.`);
+      void sendNotification(loadNotifyConfig(), buildLineForceChargeAtRisk({
+        day: state.day, risk,
+        closeText: fmtSiteClock(risk.closeAtMs),
+        reOnCutoffText,
+      })).catch((e: any) => app.log.debug(`night-charge: line-at-risk notify failed (${e?.message ?? e})`));
+    }
+  };
   const action = decideForceCharge(state, nowMs, fcOpts);
   if (action.kind === 'none') {
     // v1.166.0 — "chose not to" must never read like "broke". While a night is live
@@ -6241,17 +6261,7 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
       })).catch((e: any) => app.log.debug(`night-charge: line force-charge declined-start notify failed (${e?.message ?? e})`));
       app.log.warn(`night-charge: the force-charge for ${state.day}'s ${declinedLinePct}% outage line cannot start yet — ${action.why}; held ${Math.round(FORCE_CHARGE_LINE_DECLINED_PERSIST_MS / 60_000)} min, pushed once tonight for this cause.`);
     }
-    // v1.200.0 (review 2) — THE LINE AT RISK after the verified ON, while a person can still act and the add-on
-    // cannot (nightForceCharge.lineAtRiskPushDue): once a night, stamped on the record BEFORE the push goes.
-    const risk = lineAtRiskPushDue(nightActuationMem, nowMs, fcOpts);
-    if (risk != null) {
-      persistNightActuation({ ...nightActuationMem, forceChargeLineAtRiskPushedAtMs: nowMs });
-      app.log.warn(`night-charge: the ${state.day} outage line (${risk.linePct}%) is AT RISK — the pool reads ${risk.poolPct}% (${risk.refPct}% at ${fmtSiteClock(risk.refAtMs)}), under its ${risk.thresholdPct}% at-risk threshold and ${risk.poolPct < risk.refPct ? 'falling' : 'flat'}; the add-on cannot act (${risk.cause}); slot(s) reading OFF: ${risk.offSlots.join(',') || 'none'}, reading ON: ${risk.onSlots.join(',') || 'none'}. Pushed once tonight.`);
-      void sendNotification(loadNotifyConfig(), buildLineForceChargeAtRisk({
-        day: state.day, risk,
-        closeText: fmtSiteClock(risk.closeAtMs),
-      })).catch((e: any) => app.log.debug(`night-charge: line-at-risk notify failed (${e?.message ?? e})`));
-    }
+    pushLineAtRiskIfDue();
     // v1.200.0 (review 2) — the ON-READING SHAPE (unmeasured on this plant): logged once a night when seen, whatever
     // the push conditions, so its first real occurrence is on record (nightForceCharge.lineOnReadingShape).
     const shape = lineOnReadingShape(nightActuationMem, nowMs, fcOpts);
@@ -6431,6 +6441,8 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     });
     if (allLimited) results.push('all rate-limited — re-ON not counted');
     app.log.warn(`night-charge: LINE force-charge re-ON for ${state.day} — slot(s) ${action.slots.join(',')} read FORCE_CHARGE_OFF (the panel switches a slot off at its ${state.forceChargeCeilingSyncedPct ?? '?'}% ceiling) and the pool reads ${socNowPct ?? '?'}%, back under the start target for the ${state.forceChargeLinePct ?? state.forceChargeLineAskPct ?? '?'}% outage line; switching them back ON (${state.forceChargeLineReOns + 1}/${FORCE_CHARGE_LINE_REON_MAX}): ${results.join(', ')}.`);
+    // (review 8) A re-ON handed back is judged for the line-at-risk push on this, its own tick (after the stamp above).
+    if (allLimited) pushLineAtRiskIfDue();
     return;
   }
 

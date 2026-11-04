@@ -147,11 +147,17 @@
  *    emulated, the shape is logged on none of them, and a re-ON handed back rate-limited is never pushed as its gates.
  *    (review 6) Nor is one lost: the push's hold counts the ticks (FORCE_CHARGE_TICK_MS). With each re-ON stamped 2 s after
  *    its tick, as index.ts stamps it, the retry is the 16th tick, and 30 hand-backs had neither it nor the push (25 of the
- *    146 nights under never reached); now every one of the 146 is, 386 of the pushes 'reOnRefused' (PIN_REVIEW6). And a
- *    person's ON the panel then stops at its ceiling is a stop of its own on the record, the one the morning names.
- *    (review 7) The count is to the earliest tick the retry can come (FORCE_CHARGE_TICK_LATE_TOL_MS): the ticks only run
- *    late, which brought a retry on the 15th tick after a 'reOnRefused' push for a stamp a few ms after its tick.
- *    PIN_REVIEW6 is unchanged: the plant's ticks do not drift.
+ *    146 nights under never reached); now every one of the 146 is (PIN_REVIEW6). And a person's ON the panel then stops at
+ *    its ceiling is a stop of its own on the record, the one the morning names.
+ *    (review 8) Rounds 5-7 tuned that hold's prediction, and each tuning opened the opposite window: a push saying "it does
+ *    not try again tonight" and then the retry, or a hold for a tick that ran late onto the cutoff and then neither. By
+ *    design now, every doubt goes to the push: it is held only while the retry's tick lands a full tick before the re-ON's
+ *    cutoff, it is judged on the hand-back's own tick too (index.ts), and its words say the add-on may try once more. Neither
+ *    then needs the tick after a hold to be lost (the in-flight lock held past it) or a whole tick late; a push may be
+ *    followed by the retry. In the plant (stamps 2 s late): 429 'reOnRefused' pushes, 18 of them on the last tick before the
+ *    cutoff (none there before), 25 then retried (PIN_REVIEW6). Swept at sub-second phases with drift, late reads and stamp
+ *    lags (lineForceChargeAtRisk.test.ts PIN_HANDBACK_CADENCE): neither on none of 43,156 hand-backs, and on 5 of 86,400 with
+ *    a tick lost, each the tick the last hold awaited.
  *    (A5) A NEAR-FULL LINE (⌈L⌉ 91-100: start target 95, ceiling 100) re-ONs, and is pushed, under 95 — under a line of
  *    96-100. Emulated (T18, the measured latch, 120 nights a cell): 3 / 19 / 41 near-full nights close under at baseline,
  *    with a 20 kWh EV predicted and with a 7 kW one all window (6 / 34 / 43 floored), and 30 of 30 at 70% of the rate;
@@ -1429,14 +1435,9 @@ export const FORCE_CHARGE_LINE_TREND_MS = 10 * 60_000;
 export const FORCE_CHARGE_LINE_AT_RISK_LEAD_MS = FORCE_CHARGE_MIN_RUN_MS;
 /** v1.200.0 (review 6) — the force-charge tick's cadence: index.ts runs the night actuation tick (and the force-charge
  *  safety tick) on a setInterval of this. A decision that waits for a later tick counts the ticks by it
- *  (lineAtRiskPushDue's hand-back hold): a later tick lands a whole number of these after this one, or (review 7) a little
- *  more — never at any instant. */
+ *  (lineAtRiskPushDue's hand-back hold) and (review 8) keeps one of them as its margin: a later tick reads about a whole
+ *  number of these after this one — later by setInterval's drift and its own read lateness, sooner by this tick's. */
 export const FORCE_CHARGE_TICK_MS = 60_000;
-/** v1.200.0 (review 7) — how much later than the cadence the ticks a decision counts may run, all told (lineAtRiskPushDue's
- *  hand-back hold counts to the earliest tick the retry can come). setInterval re-arms from each callback's start, so the
- *  ticks drift later — 1-2 ms a tick measured on Node, under 30 ms over the 16 the hold counts — and a tick reads its nowMs a
- *  few ms after it fires, after the steps before the force-charge's. One second: far more than that, far less than a tick. */
-export const FORCE_CHARGE_TICK_LATE_TOL_MS = 1_000;
 
 /** v1.200.0 (review 2) — one pool reading of a line night's trail (forceChargeLinePoolSamples). */
 export interface LinePoolSample { pct: number; atMs: number }
@@ -1561,7 +1562,8 @@ export function lineNightObservations(
  *    coherent reading, no live panel ceiling the pool is under);
  *  - 'reOnRefused' — (review 5) the last re-ON came back rate-limited on every write (the add-on's own per-slot write
  *    cooldown; handed back: no slots on the record) and its retry — (review 6) the first tick FORCE_CHARGE_ON_VERIFY_AFTER_MS
- *    or more after it — falls at or after the re-ON's cutoff: the add-on does not try again tonight;
+ *    or more after it — (review 8) is not due a full tick before the re-ON's cutoff: it may still come before the cutoff,
+ *    or not;
  *  - 'costMode' — a COST-DOMINANT night: its cost force-charge has its own stop and no re-ON. */
 export type LineAtRiskCause = 'onNotRising' | 'reOnSpent' | 'reOnNotApplied' | 'reOnHeld' | 'reOnRefused' | 'costMode';
 
@@ -1606,7 +1608,8 @@ export interface LineAtRisk {
  *    more) is an economic level, and falling short of it is no line risk; ⌈L⌉ + H is the same margin over the
  *    line the line mode times its start and its re-ON to;
  *  - the add-on cannot act on it now: no re-ON due, nor (review 5) a handed-back re-ON's retry still to come before the
- *    re-ON's cutoff — (review 6) on a tick, counted at FORCE_CHARGE_TICK_MS from this one;
+ *    re-ON's cutoff — (review 6) on a tick, counted at FORCE_CHARGE_TICK_MS from this one, (review 8) with a full tick of
+ *    margin before the cutoff;
  *  - the pool NOT RISING against a reading at least FORCE_CHARGE_LINE_TREND_MS older taken at least
  *    FORCE_CHARGE_ON_VERIFY_AFTER_MS after the last ON of ours (lineTrendReference, review 3) — so none while a re-ON (or
  *    the ON) may yet take effect; FALLING under the threshold, or FLAT at or under ⌈L⌉ (review 3: a flat pool above
@@ -1639,23 +1642,25 @@ export function lineAtRiskPushDue(s: NightActuationState, nowMs: number, o: Forc
   // spacing has run. While that retry can still come before the re-ON's cutoff, it is the add-on's to make: no push (one
   // here blamed the gates — "it needs the grid known present, …" — 14 min before the add-on switched Charge Now back on).
   // A retry the cutoff refuses is none: the push goes, as 'reOnRefused'.
-  // (review 6) The retry comes on a TICK: the first one FORCE_CHARGE_ON_VERIFY_AFTER_MS or more after the stamp, a whole
-  // number of FORCE_CHARGE_TICK_MS from this one — not at the stamp + 15 min. index.ts stamps a hand-back after its writes,
-  // a little after its tick's nowMs, so that tick is the 16th after the hand-back's: held while the stamp + 15 min fell
-  // before the cutoff, a hand-back 35-36 min before the close got neither its retry (the cutoff) nor the push (the lead).
-  // (review 7) …counted to the EARLIEST tick it can come. The push is once a night: one sent on an early tick is not taken
-  // back by a later one. The ticks only run late (setInterval re-arms from each callback's start), and later ticks that run
-  // late reach the stamp + 15 min in fewer ticks — a stamp 5 ms after its tick, the ticks 1 ms late each: the 15th, not
-  // the 16th, came 14 min after a 'reOnRefused' push ("it does not try again tonight"). So the count is to the stamp + 15 min
-  // less FORCE_CHARGE_TICK_LATE_TOL_MS, and at least one tick (this one's retry did not come). What is left: the tick the
-  // hold waits for, due before the cutoff, running late onto it (a window of that tick's own lateness, ~1 ms).
+  // (review 6) The retry comes on a TICK: the first one FORCE_CHARGE_ON_VERIFY_AFTER_MS or more after the stamp — index.ts
+  // stamps a hand-back after its writes, so on the cadence the 16th after the hand-back's. (review 7 counted to the earliest
+  // tick, with a 1-s tolerance; rounds 5-7 each tuned this prediction and each opened the opposite window.)
+  // (review 8) BY DESIGN, every doubt goes to the push. retryAtMs is the retry's tick on THIS tick's cadence (at least the
+  // next). The tick it comes on reads up to a tick sooner (a tick before it, running late, reaches the stamp + 15 min) or a
+  // tick later plus that tick's read lateness (the awaited one, read less late than this one, falls just short). So the push
+  // is held only while retryAtMs lands a FULL FORCE_CHARGE_TICK_MS before the re-ON's cutoff: every hold then leaves two ticks
+  // of its cadence before the cutoff, and the next tick — which judges again — reads before the cutoff unless it is lost
+  // (the in-flight lock held past it) or reads a whole tick late. Only then is there neither the retry nor the push. The
+  // push is once a night, so one sent while the retry's tick falls within a tick of the cutoff may still be followed by the
+  // retry: its words say the add-on may try once more ('reOnRefused', notify.buildLineForceChargeAtRisk). index.ts also
+  // judges the push on the hand-back's own tick, so one on the last tick before the cutoff is pushed there.
   const reOnAt = s.forceChargeLineReOnAtMs;
   const handedBack = reOnAt != null && (s.forceChargeLineReOnSlots == null || s.forceChargeLineReOnSlots.length === 0)
     && s.forceChargeLineReOns < FORCE_CHARGE_LINE_REON_MAX && nowMs - reOnAt < FORCE_CHARGE_ON_VERIFY_AFTER_MS;
   if (handedBack) {
-    const ticks = Math.max(1, Math.ceil((reOnAt! + FORCE_CHARGE_ON_VERIFY_AFTER_MS - FORCE_CHARGE_TICK_LATE_TOL_MS - nowMs) / FORCE_CHARGE_TICK_MS));
+    const ticks = Math.max(1, Math.ceil((reOnAt! + FORCE_CHARGE_ON_VERIFY_AFTER_MS - nowMs) / FORCE_CHARGE_TICK_MS));
     const retryAtMs = nowMs + ticks * FORCE_CHARGE_TICK_MS;
-    if (retryAtMs < closeAtMs - FORCE_CHARGE_ON_RETRY_CUTOFF_MS) return null;
+    if (retryAtMs + FORCE_CHARGE_TICK_MS < closeAtMs - FORCE_CHARGE_ON_RETRY_CUTOFF_MS) return null;
   }
   // (review 3) The trend only on readings after the last ON of ours had its readback grace (lineTrendReference): no
   // push while an ON (or re-ON) may yet take effect, nor against the fall that called for it.
