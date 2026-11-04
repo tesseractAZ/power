@@ -788,16 +788,22 @@ export function buildNightChargeMorningSummary(o: {
     // readback check found not applied. (review 3) A last re-ON that did not take effect (or never reached the panel)
     // resumed nothing: the panel's stop still ended the charge. (review 4) Every re-ON at or after the stop counts, not
     // the last alone: one that took effect (reOnAppliedAtMs, the latest such) resumed the charge, whatever a later one did.
+    // (review 5) So does a slot of ours seen ON again after it that no ON write of ours explains (onSeenAtMs: a re-ON
+    // applied late, Charge Now switched on in the app).
     const panelAt = line?.panelOffAtMs != null && Number.isFinite(line.panelOffAtMs) ? line.panelOffAtMs : null;
     const lastReOn = line?.lastReOnAtMs != null && Number.isFinite(line.lastReOnAtMs) ? line.lastReOnAtMs : null;
     const offAt = line?.offAtMs != null && Number.isFinite(line.offAtMs) ? line.offAtMs : null;
     const reOnResumed = line?.lastReOnApplied !== false;
     const appliedAt = line?.reOnAppliedAtMs != null && Number.isFinite(line.reOnAppliedAtMs) ? line.reOnAppliedAtMs : null;
-    const resumedSince = (t: number): boolean => (lastReOn != null && lastReOn >= t && reOnResumed) || (appliedAt != null && appliedAt >= t);
+    const seenAt = line?.onSeenAtMs != null && Number.isFinite(line.onSeenAtMs) ? line.onSeenAtMs : null;
+    const resumedSince = (t: number): boolean => (lastReOn != null && lastReOn >= t && reOnResumed) || (appliedAt != null && appliedAt >= t)
+      || (seenAt != null && seenAt >= t);
     const panelEnded = panelAt != null && !resumedSince(panelAt) && !(early && offAt != null && offAt <= panelAt);
-    // (review 4) No stop on record, and no re-ON resumed anything (each checked not applied, or never written): slots of
-    // ours read off before the close (a re-ON is only ever written to them) — never "ran to the window close".
-    const readOff = panelAt == null && !early && lastReOn != null && !reOnResumed && appliedAt == null;
+    // (review 5) The LAST re-ON resumed nothing (its check found every slot it switched still OFF, or it never reached the
+    // panel): it was written to slots of ours reading OFF, and they read off before the close whatever an earlier re-ON
+    // did — never "ran to the window close" — unless a slot of ours read ON again after it. Beside the panel's stop when
+    // that stop did not end the charge (an earlier re-ON resumed it).
+    const readOff = !panelEnded && !early && lastReOn != null && !reOnResumed && !(seenAt != null && seenAt >= lastReOn);
     const ranLine = panelEnded
       ? `ran${toward} until the panel's own stop switched Charge Now off at ${phxShortClock(panelAt!)}`
       : early
@@ -1057,7 +1063,8 @@ export function buildLineForceChargeDeclinedStart(o: {
  * on (every cause, the cost-dominant night's included), and what to switch: slots reading OFF — switch Charge Now on (the add-on's close OFF covers them, they are
  * ours); slots reading ON while the pool is not rising — off and on again may restart the charge (the ON-reading
  * shape, unmeasured on this plant; or a load taking the grid cap). Never "No action needed". (review 4) The spent budget
- * is "after the panel's own stop" only with that stop on record (a slot switched off in the app reads the same). PURE.
+ * is "after the panel's own stop" only with that stop on record (a slot switched off in the app reads the same).
+ * (review 5) A handed-back re-ON whose retry the cutoff refuses ('reOnRefused') says so, never the gates. PURE.
  */
 export function buildLineForceChargeAtRisk(o: {
   day: string | null;
@@ -1088,7 +1095,9 @@ export function buildLineForceChargeAtRisk(o: {
         + 'and it did not take effect; it does not try again tonight. '
       : r.cause === 'reOnHeld'
         ? 'The add-on cannot switch Charge Now back on now (it needs the grid known present, healthy host vitals and a live panel reading). '
-        : '';
+        : r.cause === 'reOnRefused'
+          ? "The add-on's last try to switch Charge Now back on was refused by its own write cooldown; it does not try again tonight. "
+          : '';
   const off = r.offSlots.length > 0
     ? `To hold the line, switch Charge Now on for slot(s) ${r.offSlots.join(', ')} in the EcoFlow app (the add-on switches it off at the close).`
     : '';

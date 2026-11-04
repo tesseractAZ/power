@@ -29,14 +29,20 @@ import { buildNightChargeApplyFailure, buildNightChargeMorningSummary, buildNigh
  *       own cutoff instant, and a cost-dominant night's push worded by its margin over the line and its reason.
  *       (review 4) A re-ON checked not applied (or never written) is no ON of ours: the trend reads past it, so a night
  *       whose re-ONs never took is pushed as soon as the check says so; the spent budget is "after the panel's own stop"
- *       only with that stop on record.
+ *       only with that stop on record. (review 5) A slot of ours reading ON again after a readback showed it OFF, outside
+ *       the grace of an ON write of ours (a re-ON applied after its check said not, a glitch at the check, Charge Now
+ *       switched on in the app after the push), is waited out like an ON of ours (forceChargeLineOnSeenAtMs); no push
+ *       while a handed-back re-ON's retry can still come, and 'reOnRefused' when it cannot; a not-applied slot that reads
+ *       ON since is not named as not taking effect.
  *  W2 — a line re-ON is readback-checked FORCE_CHARGE_ON_VERIFY_AFTER_MS after it, like the first ON. (review 4) The check
  *       keeps the latest re-ON that took effect (lineReOnCheckedStamp), across the next re-ON and a restart.
  *  W3 — the morning account of a line-ask night: under the line said so; an unread close said so; the panel's
  *       own stop and the re-ONs named. A cost night with no line ask reads word for word as v1.199.1. (review 3) A
  *       re-ON resumes the charge only when it took effect; "after the panel's own stop" only when that stop is on record.
  *       (review 4) Every re-ON after the stop counts, not the last alone; with no stop on record and no re-ON that took,
- *       never "ran to the window close".
+ *       never "ran to the window close". (review 5) The read-off is the LAST re-ON's: its check found every slot it
+ *       switched still OFF (or it never reached the panel), whatever an earlier one did — unless a slot of ours read ON
+ *       again after it; a slot seen ON again after the panel's stop resumed the charge.
  *  W4 — lineCeilingLoweringDue lowers only what the panel holds (never a raise, also under red vitals).
  *  W5 — (#1) a cost-dominant line night's ON failure and declined start speak for the line; (#9) the declined-
  *       start push is once a night per class ACROSS RESTARTS; (#6) the reserve-apply failure on a line night.
@@ -253,7 +259,9 @@ test('★★★ W1 the observations a line night\'s tick stamps: the pool trail 
   assert.equal(obs(onNight(), T, fo({ poolSocPct: 70, socCoherent: false, slotsOn: [1, 2, 3] })), null);
   assert.equal(obs(onNight({ forceChargeLinePoolSamples: [{ pct: 70, atMs: T - 5 * M }] }), T, fo({ poolSocPct: 70, slotsOn: [1, 2, 3] })), null, 'unchanged: nothing to persist');
   // The panel's own stop: after the verified ON, every slot of ours reads OFF with a Core at the stop ceiling.
-  const latch = (o: Partial<ForceChargeOpts>) => obs(onNight({ forceChargeLinePoolSamples: [{ pct: 80, atMs: T - 5 * M }] }), T, fo({ poolSocPct: 80, ...o }));
+  // (review 5) The record already holds this readback's slots OFF (forceChargeLineOffSlots, below): only the stop is new.
+  const latch = (o: Partial<ForceChargeOpts>) => obs(onNight({ forceChargeLinePoolSamples: [{ pct: 80, atMs: T - 5 * M }],
+    forceChargeLineOffSlots: [1, 2, 3].filter((n) => !(o.slotsOn ?? []).includes(n)) }), T, fo({ poolSocPct: 80, ...o }));
   assert.deepEqual(latch({ slotsOn: [], slotSocPct: { 1: 79.5, 2: 80, 3: 78 } }), { forceChargeLinePanelOffAtMs: T });
   assert.deepEqual(latch({ slotsOn: [], slotSocPct: { 1: 79, 2: 79, 3: 78 } }), { forceChargeLinePanelOffAtMs: T }, 'a Core one point under the ceiling still reads as the stop');
   assert.equal(latch({ slotsOn: [3], slotSocPct: at(80) }), null, 'one slot still ON: the charge has not ended');
@@ -261,13 +269,54 @@ test('★★★ W1 the observations a line night\'s tick stamps: the pool trail 
   assert.equal(latch({ slotsOn: null, slotSocPct: null }), null);
   assert.equal(obs(onNight({ forceChargeOnVerifiedAtMs: null, forceChargeLinePoolSamples: [{ pct: 80, atMs: T - 5 * M }] }), T, fo({ poolSocPct: 80, slotsOn: [], slotSocPct: at(80) })), null, 'before the ON verified: the ON verify\'s');
   // Stamped once per episode: again only after a re-ON's readback grace (a second latch).
-  const stopped = { forceChargeLinePanelOffAtMs: T - H, forceChargeLinePoolSamples: [{ pct: 80, atMs: T - 5 * M }] };
+  const stopped = { forceChargeLinePanelOffAtMs: T - H, forceChargeLinePoolSamples: [{ pct: 80, atMs: T - 5 * M }], forceChargeLineOffSlots: [1, 2, 3] };
   assert.equal(obs(onNight(stopped), T, fo({ poolSocPct: 80, slotsOn: [], slotSocPct: at(80) })), null);
   assert.equal(obs(onNight({ ...stopped, forceChargeLineReOns: 1, forceChargeLineReOnAtMs: T - 14 * M }), T, fo({ poolSocPct: 80, slotsOn: [], slotSocPct: at(80) })), null, 'inside the re-ON\'s grace');
   assert.deepEqual(obs(onNight({ ...stopped, forceChargeLineReOns: 1, forceChargeLineReOnAtMs: T - 15 * M }), T, fo({ poolSocPct: 80, slotsOn: [], slotSocPct: at(80) })), { forceChargeLinePanelOffAtMs: T });
   const raw = (v: unknown) => (coerceActuationState(JSON.parse(JSON.stringify({ ...night(), forceChargeLinePanelOffAtMs: v }))) as unknown as Record<string, unknown>).forceChargeLinePanelOffAtMs;
   assert.equal(raw(5), 5);
   assert.equal(raw('5'), null);
+});
+
+test('★★★ W1 (review 5) the observations keep the slots a readback showed OFF, and stamp an ON seen again that no ON write of ours explains', () => {
+  const obs = nfc.lineNightObservations;
+  const rd = (slotsOn: number[] | null) => fo({ poolSocPct: 58, slotsOn, slotSocPct: at(58) });
+  const stopped = (over: Record<string, unknown> = {}) => onNight({ forceChargeLinePoolSamples: [{ pct: 58, atMs: T - 5 * M }], ...over });
+  // The readback memory: the slots of ours reading OFF, persisted only when it moves (nothing while every slot reads ON).
+  assert.equal(obs(stopped(), T, rd([1, 2, 3])), null, 'every slot ON and none seen OFF: nothing to persist');
+  assert.deepEqual(obs(stopped(), T, rd([2])), { forceChargeLineOffSlots: [1, 3] });
+  assert.equal(obs(stopped({ forceChargeLineOffSlots: [1, 3] }), T, rd([2])), null, 'unchanged');
+  assert.equal(obs(stopped({ forceChargeLineOffSlots: [1, 3] }), T, rd(null)), null, 'a stale readback says nothing');
+  assert.equal(obs(stopped({ forceChargeOnVerifiedAtMs: null }), T, rd([])), null, 'before the ON verified');
+  assert.equal(obs(stopped({ forceChargeOffAtMs: T - M, forceChargeOffReason: 'onPeakGuard' }), T, rd([])), null, 'after an OFF of ours');
+  // A slot that read OFF reads ON again, the last ON of ours (01:00) long past its readback grace: an ON seen (a late apply,
+  // Charge Now switched on in the app), stamped at this reading.
+  assert.deepEqual(obs(stopped({ forceChargeLineOffSlots: [1, 2, 3] }), T, rd([1])), { forceChargeLineOffSlots: [2, 3], forceChargeLineOnSeenAtMs: T });
+  assert.deepEqual(obs(stopped({ forceChargeLineOffSlots: [1, 2, 3] }), T, rd([1, 2, 3])), { forceChargeLineOffSlots: [], forceChargeLineOnSeenAtMs: T });
+  // Inside the readback grace of a re-ON of ours (its write 14 min ago), the slots reading ON are that re-ON's: no stamp.
+  const reOn = (at: number, slots: number[] | null) => stopped({ forceChargeLineOffSlots: [1, 2, 3], forceChargeLineReOns: 1, forceChargeLineReOnAtMs: at, forceChargeLineReOnSlots: slots });
+  assert.deepEqual(obs(reOn(T - 14 * M, [1, 2, 3]), T, rd([1, 2, 3])), { forceChargeLineOffSlots: [] });
+  // From its grace on (the check found it not applied at 15 min; the slots read ON at 16), it is a seen ON.
+  assert.deepEqual(obs(reOn(T - 15 * M, [1, 2, 3]), T, rd([1, 2, 3])), { forceChargeLineOffSlots: [], forceChargeLineOnSeenAtMs: T });
+  // A re-ON handed back (every write rate-limited: no slots on the record) never reached the panel: no grace of its own.
+  assert.deepEqual(obs(reOn(T - 2 * M, null), T, rd([1, 2, 3])), { forceChargeLineOffSlots: [], forceChargeLineOnSeenAtMs: T });
+  // The ON's own grace (its last attempt 10 min ago) likewise.
+  assert.deepEqual(obs(stopped({ forceChargeLineOffSlots: [1, 2, 3], forceChargeOnLastAttemptMs: T - 10 * M }), T, rd([1, 2, 3])), { forceChargeLineOffSlots: [] });
+  // A slot ON that never read OFF is no transition.
+  assert.deepEqual(obs(stopped({ forceChargeLineOffSlots: [3] }), T, rd([1, 2])), null);
+  // Coerced on load: slot numbers of the panel, a finite time; null when absent (every record from before the fields).
+  const raw = (o2: Record<string, unknown>) => coerceActuationState(JSON.parse(JSON.stringify({ ...night(), ...o2 }))) as unknown as Record<string, unknown>;
+  assert.deepEqual(raw({ forceChargeLineOffSlots: [3, 1, 9, 'x'] }).forceChargeLineOffSlots, [3, 1]);
+  assert.deepEqual(raw({ forceChargeLineOffSlots: [] }).forceChargeLineOffSlots, []);
+  assert.equal(raw({ forceChargeLineOffSlots: 'x' }).forceChargeLineOffSlots, null);
+  assert.equal(raw({ forceChargeLineOnSeenAtMs: 7 }).forceChargeLineOnSeenAtMs, 7);
+  assert.equal(raw({ forceChargeLineOnSeenAtMs: '7' }).forceChargeLineOnSeenAtMs, null);
+  const old = JSON.parse(JSON.stringify(night())) as Record<string, unknown>;
+  delete old.forceChargeLineOffSlots; delete old.forceChargeLineOnSeenAtMs;
+  const e = coerceActuationState(old) as unknown as Record<string, unknown>;
+  assert.deepEqual([e.forceChargeLineOffSlots, e.forceChargeLineOnSeenAtMs], [null, null]);
+  const e0 = emptyActuationState() as unknown as Record<string, unknown>;
+  assert.deepEqual([e0.forceChargeLineOffSlots, e0.forceChargeLineOnSeenAtMs], [null, null]);
 });
 
 test('★★★ W1 lineAtRiskPushDue — every way the line is lost after the start, while a person can still act', () => {
@@ -431,6 +480,123 @@ test('★★★ W1 (review 4) a re-ON checked NOT APPLIED, or never written, is 
   // The ON-reading shape reads the same reference.
   assert.equal(nfc.lineOnReadingShape(failedTwice(), C - 22 * M, onReading()) != null, true);
   assert.equal(nfc.lineOnReadingShape(unchecked, C - 22 * M, onReading()), null);
+});
+
+/** (review 5) One tick as index.ts runs it on a line night: the observations on the record before the decision, the re-ON
+ *  check's stamp, and on a tick that decides nothing the at-risk push and the ON-reading shape. */
+const tick = (s: S, t: number, o: ForceChargeOpts): { s: S; kind: string; push: nfc.LineAtRisk | null; shape: nfc.LineOnReadingShape | null } => {
+  const obs = nfc.lineNightObservations(s, t, o);
+  let rec = obs != null ? ({ ...s, ...obs } as S) : s;
+  const a = decideForceCharge(rec, t, o);
+  if (a.kind === 'lineReOnChecked') rec = { ...rec, ...nfc.lineReOnCheckedStamp(rec, t, a) } as S;
+  const none = a.kind === 'none';
+  const push = none ? nfc.lineAtRiskPushDue(rec, t, o) : null;
+  if (push != null) rec = { ...rec, forceChargeLineAtRiskPushedAtMs: t } as S; // write-ahead, once a night
+  return { s: rec, kind: a.kind, push, shape: none ? nfc.lineOnReadingShape(rec, t, o) : null };
+};
+/** Drive minutes `from`..`to` after `t0` through `tick`, the readback and the pool given per minute. */
+const drive = (s0: S, t0: number, from: number, to: number, slotsOn: (m: number) => number[] | null, pool: (m: number) => number) => {
+  let s = s0;
+  const out: Array<{ m: number; kind: string; push: nfc.LineAtRisk | null; shape: nfc.LineOnReadingShape | null }> = [];
+  for (let m = from; m <= to; m++) {
+    const r = tick(s, t0 + m * M, fo({ poolSocPct: pool(m), slotsOn: slotsOn(m), slotSocPct: at(pool(m)) }));
+    s = r.s;
+    out.push({ m, kind: r.kind, push: r.push, shape: r.shape });
+  }
+  return { s, out };
+};
+
+test('★★★ W1 (review 5) a re-ON checked not applied whose slots then read ON (a late apply, a glitch at the check) is waited out from that reading: no push, no shape log on a pool now charging', () => {
+  // The round-5 reviewer's probe: a re-ON at 03:00 after the panel's stop (the slots read OFF on the record), the pool
+  // falling 60 → 58. LATE: the check at +15 finds every slot still OFF (not applied); at +16 the slots read ON and the
+  // pool climbs from 58. Read past the "not applied" re-ON to the ON at 01:00, the 60 at +5 made the next ticks a pool
+  // "falling" with Charge Now ON: the night's one push ('onNotRising', "switching it off and on again … may restart the
+  // charge") and the shape log fired on the re-ON working.
+  const R = WIN_END - 2 * H;
+  const at0 = onNight({ forceChargeLinePanelOffAtMs: R - 40 * M, forceChargeLineReOns: 1, forceChargeLineReOnAtMs: R, forceChargeLineReOnSlots: [1, 2, 3],
+    forceChargeLineOffSlots: [1, 2, 3], forceChargeLinePoolSamples: [{ pct: 61, atMs: R - 5 * M }] });
+  const climbing = (m: number) => (m < 7 ? 60 : m < 14 ? 59 : m < 20 ? 58 : 59 + Math.floor((m - 20) / 5));
+  const late = drive(at0, R, 1, 45, (m) => (m <= 15 ? [] : [1, 2, 3]), climbing);
+  assert.equal(late.out.find((x) => x.m === 15)?.kind, 'lineReOnChecked');
+  assert.equal(nfc.lastLineReOnApplied(late.s), false, 'the check found it not applied');
+  assert.deepEqual(late.out.filter((x) => x.push != null || x.shape != null).map((x) => `+${x.m} ${x.push?.cause ?? ''} ${x.shape != null ? 'shape' : ''}`), [], 'no push, no shape on the late apply');
+  assert.equal(late.s.forceChargeLineOnSeenAtMs, R + 16 * M, 'the slots seen ON at +16');
+  // GLITCH: the re-ON took at +2 (the slots read ON), but the readback at the check, +15, showed every slot OFF; ON again at
+  // +16. The pool, slow beside a load, sits a point under the 60 taken at the re-ON (59 to +20, then rising).
+  const glitch = drive({ ...at0, forceChargeLinePoolSamples: [{ pct: 62, atMs: R - 10 * M }, { pct: 60, atMs: R }] } as S, R, 1, 45,
+    (m) => (m < 2 || m === 15 ? [] : [1, 2, 3]), (m) => (m <= 20 ? 59 : 59 + Math.floor((m - 20) / 5)));
+  assert.equal(glitch.out.find((x) => x.m === 15)?.kind, 'lineReOnChecked');
+  assert.equal(nfc.lastLineReOnApplied(glitch.s), false);
+  assert.deepEqual(glitch.out.filter((x) => x.push != null || x.shape != null).map((x) => `+${x.m} ${x.push?.cause ?? ''} ${x.shape != null ? 'shape' : ''}`), [], 'no push, no shape on the glitch');
+  assert.equal(glitch.s.forceChargeLineOnSeenAtMs, R + 16 * M, 'seen ON again after the one all-OFF reading (not at +2: the re-ON\'s own grace)');
+  // The wait is the readback grace after the reading that saw it, as for an ON of ours: a reference 15 min after it counts.
+  const seen = R + 16 * M;
+  const after = (refAt: number) => ({ ...late.s, forceChargeLinePoolSamples: [{ pct: 62, atMs: refAt }] } as S);
+  assert.equal(nfc.lineTrendReference(after(seen + 15 * M - 1), seen + 26 * M), null);
+  assert.deepEqual(nfc.lineTrendReference(after(seen + 15 * M), seen + 26 * M), { pct: 62, atMs: seen + 15 * M });
+  assert.equal(nfc.lineAtRiskPushDue(after(seen + 15 * M), seen + 26 * M, onReading())?.cause, 'onNotRising', 'a pool falling after the wait is pushed');
+  // A seen ON older than the last ON of ours (the ON at 01:00, read past the failed re-ON) waits nothing extra.
+  assert.deepEqual(nfc.lineTrendReference({ ...after(R + 20 * M), forceChargeLineOnSeenAtMs: R - 3 * H } as S, R + 31 * M), { pct: 62, atMs: R + 20 * M });
+});
+
+test('★★★ W1 (review 5) Charge Now switched on in the app after the push is waited out: the ON-reading shape is not logged on the person\'s fix', () => {
+  // The close plant's reOnInert night with a person following the push: both re-ONs checked not applied, the push sent at P
+  // naming slots 1, 2, 3 reading OFF, the pool falling 60 → 58. Five minutes later the person switches Charge Now on: the
+  // slots read ON, their Cores under the stop, and the pool sits under the 60 taken 17 min before — the shape the log keeps
+  // for the unmeasured latch ("a slot reading ON that does not import"), on the person's fix.
+  const P = WIN_END - 50 * M;
+  const pushed = onNight({ forceChargeLineReOns: 2, forceChargeLineReOnAtMs: P - 20 * M, forceChargeLineReOnSlots: [1, 2, 3],
+    forceChargeLineReOnCheckedAtMs: P - 5 * M, forceChargeLineReOnNotAppliedSlots: [1, 2, 3], forceChargeLineReOnsNotApplied: 2,
+    forceChargeLineAtRiskPushedAtMs: P, forceChargeLineOffSlots: [1, 2, 3], forceChargeLinePoolSamples: [{ pct: 60, atMs: P - 12 * M }, { pct: 59, atMs: P - 2 * M }] });
+  const run = drive(pushed, P, 1, 40, (m) => (m < 5 ? [] : [1, 2, 3]), (m) => (m < 10 ? 58 : 58 + Math.floor((m - 5) / 5)));
+  assert.deepEqual(run.out.filter((x) => x.shape != null).map((x) => `+${x.m}`), [], 'no shape log on the person\'s ON');
+  assert.equal(run.s.forceChargeLineOnSeenAtMs, P + 5 * M);
+  assert.ok(run.out.every((x) => x.push == null), 'the push is once a night');
+});
+
+test('★★★ W1 (review 5) a re-ON handed back (every write rate-limited): no push while its retry can still come; past the cutoff, \'reOnRefused\' — never the gates', () => {
+  const due = nfc.lineAtRiskPushDue;
+  // The round-5 reviewer's probe: the panel's stop on record, the pool 61 → 60 → 59 under the 61% start target, the slots
+  // OFF, and the night's first re-ON at 03:00 handed back. The grid is present, vitals green, the ceiling read back: the
+  // add-on's retry comes at +15. A push meanwhile said "it needs the grid known present, healthy host vitals and a live
+  // panel reading" — all three held — and spent the night's only push 14 min before the add-on switched Charge Now back on.
+  const handedBack = (H0: number) => onNight({ forceChargeLinePanelOffAtMs: H0 - 30 * M, forceChargeLineReOns: 0, forceChargeLineReOnAtMs: H0,
+    forceChargeLineReOnSlots: null, forceChargeLineOffSlots: [1, 2, 3], forceChargeLinePoolSamples: [{ pct: 61, atMs: H0 - 12 * M }, { pct: 60, atMs: H0 - 2 * M }] });
+  const H0 = WIN_END - 2 * H;
+  const off59 = offReading({ poolSocPct: 59, slotSocPct: at(59) });
+  for (const m of [1, 5, 9, 14]) {
+    assert.equal(decideForceCharge(handedBack(H0), H0 + m * M, off59).kind, 'none', `+${m}`);
+    assert.equal(due(handedBack(H0), H0 + m * M, off59), null, `+${m}: the retry is the add-on's`);
+  }
+  assert.deepEqual(decideForceCharge(handedBack(H0), H0 + 15 * M, off59), { kind: 'lineReOn', slots: [1, 2, 3] });
+  // A retry the re-ON's cutoff (20 min before the close) would refuse is none: the push goes, with its own cause — not the
+  // gates. The hand-back 35 min before the close: its retry instant IS the cutoff.
+  const last = WIN_END - 35 * M;
+  assert.equal(nfc.lineReOnDue(handedBack(last), last + 15 * M, off59, [1, 2, 3]), null, 'the cutoff refuses the retry');
+  assert.equal(due(handedBack(last), last + M, off59)?.cause, 'reOnRefused');
+  assert.equal(due(handedBack(last - 1), last - 1 + M, off59), null, 'a millisecond earlier the retry fits');
+  assert.equal(due(handedBack(WIN_END - 30 * M), WIN_END - 29 * M, off59)?.cause, 'reOnRefused');
+  // After the spacing the push is the gates' to explain (here the grid not known present), as for any re-ON held.
+  assert.equal(due(handedBack(H0), H0 + 16 * M, offReading({ poolSocPct: 59, slotSocPct: at(59), gridPresent: null }))?.cause, 'reOnHeld');
+  // The words: the add-on's own write cooldown refused it, and it does not try again tonight.
+  const build = (notify as unknown as { buildLineForceChargeAtRisk: (o: unknown) => { body: string } }).buildLineForceChargeAtRisk;
+  const risk = due(handedBack(last), last + M, off59);
+  const body = build({ day: '2026-09-16', risk, closeText: '5am' }).body;
+  assert.ok(body.includes("The add-on's last try to switch Charge Now back on was refused by its own write cooldown; it does not try again tonight. "
+    + 'To hold the line, switch Charge Now on for slot(s) 1, 2, 3 in the EcoFlow app (the add-on switches it off at the close).'), body);
+  assert.doesNotMatch(body, /grid known present|No action needed/);
+});
+
+test('★★ W1 (review 5) a slot its check found not applied that reads ON since is not named as not taking effect', () => {
+  const due = nfc.lineAtRiskPushDue;
+  const spent = (notApplied: number[]) => risky({ forceChargeLineReOns: 2, forceChargeLineReOnAtMs: T - H, forceChargeLineReOnSlots: [1, 2, 3],
+    forceChargeLineReOnCheckedAtMs: T - 44 * M, forceChargeLineReOnNotAppliedSlots: notApplied, forceChargeLineReOnsNotApplied: 1 });
+  // Slot 1 reads ON now (applied late, or switched on in the app): the push names slots 2 and 3 as not taking effect.
+  const r = due(spent([1, 2, 3]), T, offReading({ slotsOn: [1] }));
+  assert.deepEqual([r?.cause, r?.reOnNotAppliedSlots, r?.offSlots, r?.onSlots], ['reOnNotApplied', [2, 3], [2, 3], [1]]);
+  // The only slot not applied reads ON now: the budget is spent, nothing of it failed that still reads OFF.
+  const r2 = due(spent([2]), T, offReading({ slotsOn: [2] }));
+  assert.deepEqual([r2?.cause, r2?.reOnNotAppliedSlots], ['reOnSpent', []]);
 });
 
 test('★★★ W1 the push words: the pool, the start target, the line, the close; what to switch — never "No action needed"', () => {
@@ -712,18 +878,21 @@ test('★★★ W3 (review 3) a re-ON resumes the charge only when it took effec
 test('★★★ W3 (review 4) every re-ON after the panel\'s stop counts, not the last alone; with no stop on record and no re-ON that took, never "ran to the window close"', () => {
   // The round-4 reviewer's case (a): the panel stopped the charge at 01:00; re-ON 1 at 02:00 took effect (its check stamped
   // it); re-ON 2 at 04:00, for slot 1 only, was checked not applied. The charge resumed at 02:00: the 1am stop did not end it.
+  // (review 5) But re-ON 2 was written because slot 1 read OFF at 04:00, and its check found it still OFF: slot 1 read off
+  // before the close, whatever re-ON 1 did — never "ran to the window close".
   const a = onNight({
     forceChargeLinePanelOffAtMs: WIN_START + 2 * H, forceChargeLineReOns: 2, forceChargeLineReOnAppliedAtMs: WIN_START + 3 * H,
     forceChargeLineReOnAtMs: WIN_START + 5 * H, forceChargeLineReOnSlots: [1], forceChargeLineReOnCheckedAtMs: WIN_START + 5 * H + 15 * M,
     forceChargeLineReOnNotAppliedSlots: [1], forceChargeLineReOnsNotApplied: 1, forceChargeOffAtMs: WIN_END, forceChargeOffReason: 'windowEnd',
   });
   const aText = sum(nfc.forceChargeNightOutcome(a, lineGates), { closePoolPct: 60 });
-  assert.ok(aText.includes("force-charge ran to the window close for the 55.6% outage line; Charge Now was switched back on 2 time(s) after the panel's own stop (1 of them did not take effect); the pool read 60% at the close"), aText);
-  assert.doesNotMatch(aText, /until the panel's own stop/);
-  // …the same night whose second re-ON never reached the panel (every write rate-limited: handed back, no slots).
+  assert.ok(aText.includes("force-charge ran for the 55.6% outage line; Charge Now read off on slot(s) 1 before the window close and was switched back on 2 time(s) after the panel's own stop (1 of them did not take effect); the pool read 60% at the close"), aText);
+  assert.doesNotMatch(aText, /until the panel's own stop|to the window close for/);
+  // …the same night whose second re-ON never reached the panel (every write rate-limited: handed back, no slots). It was
+  // written to slots reading OFF, and nothing of ours switched them on after it: read off, no slot named (no check judged it).
   const aLimited = sum(nfc.forceChargeNightOutcome({ ...a, forceChargeLineReOns: 1, forceChargeLineReOnSlots: null, forceChargeLineReOnCheckedAtMs: WIN_START + 3 * H + 15 * M,
     forceChargeLineReOnNotAppliedSlots: [], forceChargeLineReOnsNotApplied: 0 } as S, lineGates), { closePoolPct: 60 });
-  assert.ok(aLimited.includes("force-charge ran to the window close for the 55.6% outage line; Charge Now was switched back on 1 time(s) after the panel's own stop;"), aLimited);
+  assert.ok(aLimited.includes("force-charge ran for the 55.6% outage line; Charge Now read off before the window close and was switched back on 1 time(s) after the panel's own stop;"), aLimited);
   // A second panel stop AFTER the re-ON that took effect (re-stamped once its grace ran), then a re-ON that did not: the
   // second stop ended it.
   const again = sum(nfc.forceChargeNightOutcome({ ...a, forceChargeLinePanelOffAtMs: WIN_START + 4 * H } as S, lineGates), { closePoolPct: 52 });
@@ -743,9 +912,16 @@ test('★★★ W3 (review 4) every re-ON after the panel\'s stop counts, not th
   const bLimited = sum(nfc.forceChargeNightOutcome(onNight({ forceChargeLineReOnAtMs: WIN_END - 40 * M, forceChargeLineReOnSlots: null,
     forceChargeOffAtMs: WIN_END, forceChargeOffReason: 'windowEnd' }), lineGates), { closePoolPct: 52 });
   assert.ok(bLimited.includes('force-charge ran for the 55.6% outage line; Charge Now read off before the window close; the pool read 52% at the close'), bLimited);
-  // …but one re-ON that took effect (no stop on record) resumed it: "ran to the window close", as before.
+  // (review 5) …and an earlier re-ON that took effect does not undo the last one's check: re-ON 2 (02:30, every slot of ours)
+  // was written to slots reading OFF and found them still OFF, with the budget spent — read off, never "ran to the window
+  // close" (the round-5 reviewer's NOSTOP-MIXED night).
   const bTook = sum(nfc.forceChargeNightOutcome({ ...b, forceChargeLineReOnAppliedAtMs: WIN_END - 180 * M, forceChargeLineReOnsNotApplied: 1 } as S, lineGates), { closePoolPct: 60 });
-  assert.ok(bTook.includes('force-charge ran to the window close for the 55.6% outage line; Charge Now was switched back on 2 time(s) (1 of them did not take effect)'), bTook);
+  assert.ok(bTook.includes('force-charge ran for the 55.6% outage line; Charge Now read off on slot(s) 1, 2, 3 before the window close and was switched back on 2 time(s) (1 of them did not take effect); the pool read 60% at the close'), bTook);
+  assert.doesNotMatch(bTook, /to the window close for/);
+  // …the same with a stop on record before re-ON 1 (STOP-MIXED): re-ON 1 resumed the charge, re-ON 2's slots read off.
+  const stopMixed = sum(nfc.forceChargeNightOutcome({ ...b, forceChargeLinePanelOffAtMs: WIN_END - 250 * M, forceChargeLineReOnAppliedAtMs: WIN_END - 210 * M,
+    forceChargeLineReOnsNotApplied: 1 } as S, lineGates), { closePoolPct: 50 });
+  assert.ok(stopMixed.includes("force-charge ran for the 55.6% outage line; Charge Now read off on slot(s) 1, 2, 3 before the window close and was switched back on 2 time(s) after the panel's own stop (1 of them did not take effect); the pool read 50% at the close, under the 55.6% outage line"), stopMixed);
   // An early OFF of ours still says when and why, whatever the re-ONs did.
   const bEarly = sum(nfc.forceChargeNightOutcome({ ...b, forceChargeOffAtMs: WIN_END - 30 * M, forceChargeOffReason: 'gridLoss' } as S, lineGates), { closePoolPct: 52 });
   assert.ok(bEarly.includes('force-charge ran for the 55.6% outage line until 4:30am (switched off: the grid was lost); Charge Now was switched back on 2 time(s)'), bEarly);
@@ -753,6 +929,47 @@ test('★★★ W3 (review 4) every re-ON after the panel\'s stop counts, not th
   const line = (s: S) => (nfc.forceChargeNightOutcome(s, lineGates) as unknown as { line: { reOnAppliedAtMs: number | null; reOnNotAppliedSlots: number[] | null } }).line;
   assert.deepEqual([line(a).reOnAppliedAtMs, line(a).reOnNotAppliedSlots], [WIN_START + 3 * H, [1]]);
   assert.deepEqual([line(b).reOnAppliedAtMs, line(b).reOnNotAppliedSlots], [null, [1, 2, 3]]);
+});
+
+test('★★★ W3 (review 5) the read-off is the last re-ON\'s check, unless a slot of ours read ON again after it; a slot seen ON after the panel\'s stop resumed the charge', () => {
+  // Both re-ONs checked not applied, no stop on record (case b above), and then a slot of ours read ON again (the last re-ON
+  // applied late, or Charge Now switched on in the app — forceChargeLineOnSeenAtMs). Charge Now did not simply read off
+  // to the close: "ran to the window close", the re-ONs that did not take effect named as before.
+  const b = onNight({
+    forceChargeLineReOns: 2, forceChargeLineReOnAtMs: WIN_END - 150 * M, forceChargeLineReOnSlots: [1, 2, 3],
+    forceChargeLineReOnCheckedAtMs: WIN_END - 135 * M, forceChargeLineReOnNotAppliedSlots: [1, 2, 3], forceChargeLineReOnsNotApplied: 2,
+    forceChargeOffAtMs: WIN_END, forceChargeOffReason: 'windowEnd',
+  });
+  const seenAfter = sum(nfc.forceChargeNightOutcome({ ...b, forceChargeLineOnSeenAtMs: WIN_END - 120 * M } as S, lineGates), { closePoolPct: 60 });
+  assert.ok(seenAfter.includes('force-charge ran to the window close for the 55.6% outage line; Charge Now was switched back on 2 time(s) (2 of them did not take effect); the pool read 60% at the close'), seenAfter);
+  assert.doesNotMatch(seenAfter, /read off/);
+  // A slot seen ON BEFORE the last re-ON (the re-ON was written to it once it read OFF again): still read off.
+  const seenBefore = sum(nfc.forceChargeNightOutcome({ ...b, forceChargeLineOnSeenAtMs: WIN_END - 200 * M } as S, lineGates), { closePoolPct: 52 });
+  assert.ok(seenBefore.includes('Charge Now read off on slot(s) 1, 2, 3 before the window close'), seenBefore);
+  // The panel's stop at 01:00, both re-ONs after it checked not applied, then a slot read ON again at 03:00: the stop did not
+  // end the charge.
+  const stop = { ...b, forceChargeLinePanelOffAtMs: WIN_START + 2 * H } as S;
+  const stopThenSeen = sum(nfc.forceChargeNightOutcome({ ...stop, forceChargeLineOnSeenAtMs: WIN_START + 4 * H } as S, lineGates), { closePoolPct: 60 });
+  assert.ok(stopThenSeen.includes("force-charge ran to the window close for the 55.6% outage line; Charge Now was switched back on 2 time(s) after the panel's own stop (2 of them did not take effect)"), stopThenSeen);
+  assert.doesNotMatch(stopThenSeen, /until the panel's own stop/);
+  // …seen ON before the stop: the stop ended it.
+  const seenThenStop = sum(nfc.forceChargeNightOutcome({ ...stop, forceChargeLineOnSeenAtMs: WIN_START + H } as S, lineGates), { closePoolPct: 52 });
+  assert.ok(seenThenStop.includes("until the panel's own stop switched Charge Now off at 1am"), seenThenStop);
+  // A re-ON handed back after one whose check found slot 2 not applied: the read-off names no slot — that check judged the
+  // re-ON before (the hand-back was written to whatever read OFF then, and no check judged it).
+  const handedBack = onNight({
+    forceChargeLineReOns: 1, forceChargeLineReOnAtMs: WIN_END - 60 * M, forceChargeLineReOnSlots: null, forceChargeLineReOnAppliedAtMs: WIN_END - 180 * M,
+    forceChargeLineReOnCheckedAtMs: WIN_END - 165 * M, forceChargeLineReOnNotAppliedSlots: [2], forceChargeLineReOnsNotApplied: 1,
+    forceChargeOffAtMs: WIN_END, forceChargeOffReason: 'windowEnd',
+  });
+  const hb = sum(nfc.forceChargeNightOutcome(handedBack, lineGates), { closePoolPct: 52 });
+  assert.ok(hb.includes('force-charge ran for the 55.6% outage line; Charge Now read off before the window close and was switched back on 1 time(s) (1 of them did not take effect)'), hb);
+  // The outcome carries the seen ON, and the last check's slots only when that check judged the last re-ON.
+  const line = (s: S) => (nfc.forceChargeNightOutcome(s, lineGates) as unknown as { line: { onSeenAtMs: number | null; reOnNotAppliedSlots: number[] | null } }).line;
+  assert.equal(line({ ...b, forceChargeLineOnSeenAtMs: WIN_END - 120 * M } as S).onSeenAtMs, WIN_END - 120 * M);
+  assert.equal(line(b).onSeenAtMs, null);
+  assert.equal(line(handedBack).reOnNotAppliedSlots, null);
+  assert.equal(line({ ...b, forceChargeLineReOnCheckedAtMs: WIN_END - 160 * M } as S).reOnNotAppliedSlots, null, 'a check older than the last re-ON');
 });
 
 test('★★★ W3 a COST-DOMINANT line night\'s morning account says where it closed against its line', () => {

@@ -644,6 +644,16 @@ export interface NightActuationState {
    *  Core at the panel's stop ceiling (its own stop: 2026-09-23, 2026-10-02), the latest such episode (a second
    *  latch after a re-ON re-stamps it). The morning account says the panel's stop ended the charge. null = never. */
   forceChargeLinePanelOffAtMs: number | null;
+  /** v1.200.0 (review 5) — the slots of ours the latest live readback after the verified ON showed reading OFF
+   *  (nightForceCharge.lineNightObservations), persisted when it moves: a slot among them that reads ON again is an ON
+   *  the record has to account for. null = none seen OFF yet, and every record from before the field. */
+  forceChargeLineOffSlots: number[] | null;
+  /** v1.200.0 (review 5) — the latest live readback at which a slot of forceChargeLineOffSlots read ON again outside the
+   *  readback grace of an ON write of ours that reached the panel: an ON no write of ours explains in time (a re-ON
+   *  applied after its check found it not applied, a check that read every slot OFF once, Charge Now switched on in the
+   *  app). The line-at-risk trend and the ON-reading shape wait it out like an ON of ours (lineTrendReference); the
+   *  morning account counts it as Charge Now back on. null = none tonight, and every record from before the field. */
+  forceChargeLineOnSeenAtMs: number | null;
   /** v1.200.0 (review 2) — the pool trail of a line night while ON: at most two fresh, coherent readings, the
    *  newer replaced once it is FORCE_CHARGE_LINE_TREND_MS old (nightForceCharge.linePoolSamplesStep), so a
    *  reading at least that much older is always at hand: "is the pool rising?" for the line-at-risk push. */
@@ -730,7 +740,7 @@ export function emptyActuationState(): NightActuationState {
     forceChargeLineReOns: 0, forceChargeLineReOnAtMs: null,
     forceChargeLineReOnSlots: null, forceChargeLineReOnCheckedAtMs: null,
     forceChargeLineReOnsNotApplied: 0, forceChargeLineReOnNotAppliedSlots: null, forceChargeLineReOnAppliedAtMs: null,
-    forceChargeLinePanelOffAtMs: null, forceChargeLinePoolSamples: null,
+    forceChargeLinePanelOffAtMs: null, forceChargeLineOffSlots: null, forceChargeLineOnSeenAtMs: null, forceChargeLinePoolSamples: null,
     forceChargeLineAtRiskPushedAtMs: null, forceChargeLineDeclinedPushed: [],
     nextOnPeakStartMs: null,
     foreignReservePct: null, foreignSeenAtMs: null, foreignSettledAtMs: null,
@@ -839,6 +849,8 @@ export function coerceActuationState(raw: unknown): NightActuationState {
     forceChargeLineReOnNotAppliedSlots: slotList(o.forceChargeLineReOnNotAppliedSlots),
     forceChargeLineReOnAppliedAtMs: num(o.forceChargeLineReOnAppliedAtMs),
     forceChargeLinePanelOffAtMs: num(o.forceChargeLinePanelOffAtMs),
+    forceChargeLineOffSlots: slotList(o.forceChargeLineOffSlots),
+    forceChargeLineOnSeenAtMs: num(o.forceChargeLineOnSeenAtMs),
     forceChargeLinePoolSamples: coercePoolSamples(o.forceChargeLinePoolSamples),
     forceChargeLineAtRiskPushedAtMs: num(o.forceChargeLineAtRiskPushedAtMs),
     forceChargeLineDeclinedPushed: Array.isArray(o.forceChargeLineDeclinedPushed)
