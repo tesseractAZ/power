@@ -445,16 +445,16 @@ arrival = 66%). None did on nameplate (`lineForceCharge.test.ts` T4).
   reserve to 50% in the app: once the panel reads it, the force-charge starts as planned.
 - **The line at risk** (`lineAtRiskPushDue`). After the verified ON the re-ON is the only in-night
   remedy, so a line lost another way (a re-ON not applied or spent, its gates holding, a late load taking
-  the grid cap, the ON-reading latch below) pushes once a night, stamped on the record before it goes
+  the grid cap, the ON-reading latch below) pushes once a night, stamped before it goes
   (`forceChargeLineAtRiskPushedAtMs`). It needs a record with a line ask (a cost-dominant one too) and
   the line gate on, no OFF issued (a cost-dominant night's own stop too), more than 20 minutes before
   the add-on's close OFF (`FORCE_CHARGE_LINE_AT_RISK_LEAD_MS`, the re-ON's cutoff), a fresh, coherent
   pool under the start target (⌈L⌉ + 5 on a cost-dominant night) and below a reading at least 10 minutes
   older, or level with it at or under ⌈L⌉ (`FORCE_CHARGE_LINE_TREND_MS`, the two-sample trail
-  `lineNightObservations` stamps before the tick decides, with the panel's own stop; `lineTrendReference`
+  `lineNightObservations` stamps first, with the panel's own stop, anew after a re-ON or a slot seen ON; `lineTrendReference`
   takes only a reading 15 minutes or more after the last ON or re-ON, past one checked not applied, or a
   slot seen ON again that no ON of ours explains, `forceChargeLineOnSeenAtMs`), and no re-ON due nor a
-  rate-limited one's retry (`reOnRefused` when the cutoff leaves none). It names the slots: reading OFF, switch Charge Now on; reading ON with the pool not
+  rate-limited one's retry due on a tick before the cutoff (else `reOnRefused`). It names the slots: reading OFF, switch Charge Now on; reading ON with the pool not
   rising, off and on again may restart the charge. A cost-dominant night's push names ⌈L⌉ + 5 by its margin over the
   line, and says its cost force-charge is not switched back on. No write rests on the ON-reading shape;
   when it is seen (slots of ours ON, their Cores under the ceiling, the pool falling against
@@ -491,11 +491,11 @@ arrival = 66%). None did on nameplate (`lineForceCharge.test.ts` T4).
   every night under each of these stresses, one at a time: rounded or floored readings, 0.27 kW of Core
   standby, an ON 5 minutes late, a reading 3 minutes stale, a 7 kW EV starting 15, 25, 30, 60 or 90
   minutes before the close, a pack taking 60% or 70% of the rate, and a pool of 60% or 77% at the open.
-  So do the predicted-EV nights, at lines of 70-90% as well: 20-36 kWh predicted, or predicted exactly,
+  So do the predicted-EV nights, at lines of 70-90% too: 20-36 kWh predicted, or predicted exactly,
   with a 7, 11 or 11.52 kW EV arriving 60-180 minutes out, also with the other stresses combined. That
   rests on the re-ON; without it up to 65 of 200 year nights close under (36 kWh predicted, an 11.52 kW
   EV arriving 90 minutes out). The cost is the overshoot: the close sits about 13 points above ⌈L⌉ on
-  average, overnight energy stored rather than lost.
+  average: overnight energy stored, not lost.
 - **What it does not carry** (pinned exactly, never claimed carried). The start is timed on the live
   rate, so an **unpredicted** load that takes the grid cap after the start leaves the pack short. Of
   the year's 200 nights, rounded readings first and floored second:

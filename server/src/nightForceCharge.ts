@@ -138,6 +138,10 @@
  *    (review 5) An ON no write of ours explains in time — a re-ON applied a minute after its check, one all-OFF reading
  *    at the check, Charge Now switched on by a person after the push — is waited out (forceChargeLineOnSeenAtMs):
  *    emulated, the shape is logged on none of them, and a re-ON handed back rate-limited is never pushed as its gates.
+ *    (review 6) Nor is one lost: the push's hold counts the ticks (FORCE_CHARGE_TICK_MS). With each re-ON stamped 2 s after
+ *    its tick, as index.ts stamps it, the retry is the 16th tick, and 30 hand-backs had neither it nor the push (25 of the
+ *    146 nights under never reached); now every one of the 146 is, 386 of the pushes 'reOnRefused' (PIN_REVIEW6). And a
+ *    person's ON the panel then stops at its ceiling is a stop of its own on the record, the one the morning names.
  * The measured capacity scale never reaches this module: the record carries one whole percent (⌈L⌉), a
  * plan output like the setpoint (runwayBasisContracts.test.ts pin 6).
  *

@@ -33,7 +33,8 @@ import { buildNightChargeApplyFailure, buildNightChargeMorningSummary, buildNigh
  *       the grace of an ON write of ours (a re-ON applied after its check said not, a glitch at the check, Charge Now
  *       switched on in the app after the push), is waited out like an ON of ours (forceChargeLineOnSeenAtMs); no push
  *       while a handed-back re-ON's retry can still come, and 'reOnRefused' when it cannot; a not-applied slot that reads
- *       ON since is not named as not taking effect.
+ *       ON since is not named as not taking effect. (review 6) The retry comes on a tick: the hold counts them at
+ *       FORCE_CHARGE_TICK_MS (index.ts's cadence), so a hand-back stamped after its writes gets its retry or the push.
  *  W2 — a line re-ON is readback-checked FORCE_CHARGE_ON_VERIFY_AFTER_MS after it, like the first ON. (review 4) The check
  *       keeps the latest re-ON that took effect (lineReOnCheckedStamp), across the next re-ON and a restart.
  *  W3 — the morning account of a line-ask night: under the line said so; an unread close said so; the panel's
@@ -42,7 +43,8 @@ import { buildNightChargeApplyFailure, buildNightChargeMorningSummary, buildNigh
  *       (review 4) Every re-ON after the stop counts, not the last alone; with no stop on record and no re-ON that took,
  *       never "ran to the window close". (review 5) The read-off is the LAST re-ON's: its check found every slot it
  *       switched still OFF (or it never reached the panel), whatever an earlier one did — unless a slot of ours read ON
- *       again after it; a slot seen ON again after the panel's stop resumed the charge.
+ *       again after it; a slot seen ON again after the panel's stop resumed the charge. (review 6) …and a stop after that
+ *       seen ON is a new episode, stamped and named.
  *  W4 — lineCeilingLoweringDue lowers only what the panel holds (never a raise, also under red vitals).
  *  W5 — (#1) a cost-dominant line night's ON failure and declined start speak for the line; (#9) the declined-
  *       start push is once a night per class ACROSS RESTARTS; (#6) the reserve-apply failure on a line night.
