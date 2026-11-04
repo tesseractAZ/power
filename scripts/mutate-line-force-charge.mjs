@@ -1612,7 +1612,7 @@ const MUTANTS = [
     id: 'A5-xii(a). ★ the 21:30 line: no "Line NOT held"',
     file: NFC, tests: [T_LINE],
     find: "  const tail = o.notHeld == null ? ''",
-    to: "  const tail = o.notHeld != null || o.notHeld == null ? '' /* MUTANT */",
+    to: "  const tail = o.notHeld == null || o.linePct > -1 ? '' /* MUTANT */",
     why: 'The ARMED log line reads as a carried night on a night the plan disclosed.',
   },
   {
