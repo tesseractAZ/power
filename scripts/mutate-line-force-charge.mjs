@@ -65,7 +65,7 @@
  * T-xvi, T-xvii and G-i re-anchored on the A5 lines). The spoken notice of a window-bound line night: its level is the
  * window's reach, so "which ends before it gets there" only where the 50% floor lifts it above that reach. A5-xxx.
  * (A5 fix) The mid-day re-entry hold never holds a leg the line force-charge is armed on, and says so (A5-xxxi); a close
- * exactly at L − 0.05 holds, in the planner and the scorer (A5-v(c), (d)); strikesMeasurable counts an armed, actuated
+ * exactly at L − 0.05 holds, in the planner, the scorer and the card (A5-v(c), (d), A5-xxix(b)); strikesMeasurable counts an armed, actuated
  * disclosed row (A5-xxiii(c), (d)); the mid-day push keeps the backup leg's sentence beside an armed leg (A5-xxxii); no
  * not-held or caps sentence on a held armed night or leg (A5-xxxiii); the H1 reach's PV term not over-counted (A5-xxxiv).
  *
@@ -1785,9 +1785,16 @@ const MUTANTS = [
   {
     id: 'A5-xxix. ★★ the card\'s mirror keys on the reason, not the walk\'s close',
     file: CARD, tests: [T_LINE, T_YEAR],
-    find: "  if (e != null && e < l - 0.05) return 'closeUnder';",
+    find: "  if (e != null && e < l - 0.05 - 1e-9) return 'closeUnder';",
     to: "  if (plan.cushionEnvelopeReason === 'closeUnder') return 'closeUnder'; /* MUTANT */",
     why: 'The card says "within 10 points" where the server says "under the line".',
+  },
+  {
+    id: 'A5-xxix(b). ★ the card\'s mirror drops the edge slack',
+    file: CARD, tests: [T_LINE],
+    find: "  if (e != null && e < l - 0.05 - 1e-9) return 'closeUnder';",
+    to: "  if (e != null && e < l - 0.05) return 'closeUnder'; /* MUTANT */",
+    why: 'A carried night closing exactly at L − 0.05 (50.3% against 50.35%) shows "under the line; residual risk remains" on the card while the push words it held.',
   },
 
   /* ── A5 (docs stage): the spoken notice of a window-bound line night (T22) ── */
