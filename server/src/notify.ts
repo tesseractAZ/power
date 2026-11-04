@@ -786,28 +786,36 @@ export function buildNightChargeMorningSummary(o: {
     // v1.200.0 (review 2) — the panel's own stop ended the charge when it is the latest thing that switched Charge
     // Now off: after the last re-ON, and before any early OFF of ours. The re-ONs after it are named, and those a
     // readback check found not applied. (review 3) A last re-ON that did not take effect (or never reached the panel)
-    // resumed nothing: the panel's stop still ended the charge.
+    // resumed nothing: the panel's stop still ended the charge. (review 4) Every re-ON at or after the stop counts, not
+    // the last alone: one that took effect (reOnAppliedAtMs, the latest such) resumed the charge, whatever a later one did.
     const panelAt = line?.panelOffAtMs != null && Number.isFinite(line.panelOffAtMs) ? line.panelOffAtMs : null;
     const lastReOn = line?.lastReOnAtMs != null && Number.isFinite(line.lastReOnAtMs) ? line.lastReOnAtMs : null;
     const offAt = line?.offAtMs != null && Number.isFinite(line.offAtMs) ? line.offAtMs : null;
     const reOnResumed = line?.lastReOnApplied !== false;
-    const panelEnded = panelAt != null && (lastReOn == null || panelAt > lastReOn || !reOnResumed) && !(early && offAt != null && offAt <= panelAt);
+    const appliedAt = line?.reOnAppliedAtMs != null && Number.isFinite(line.reOnAppliedAtMs) ? line.reOnAppliedAtMs : null;
+    const resumedSince = (t: number): boolean => (lastReOn != null && lastReOn >= t && reOnResumed) || (appliedAt != null && appliedAt >= t);
+    const panelEnded = panelAt != null && !resumedSince(panelAt) && !(early && offAt != null && offAt <= panelAt);
+    // (review 4) No stop on record, and no re-ON resumed anything (each checked not applied, or never written): slots of
+    // ours read off before the close (a re-ON is only ever written to them) — never "ran to the window close".
+    const readOff = panelAt == null && !early && lastReOn != null && !reOnResumed && appliedAt == null;
     const ranLine = panelEnded
       ? `ran${toward} until the panel's own stop switched Charge Now off at ${phxShortClock(panelAt!)}`
       : early
         ? `ran${toward} until ${offAt != null ? phxShortClock(offAt) : 'before the window close'} `
           + `(switched off: ${forceChargeOffWords(line!.offReason!)})`
-        : `ran to the window close${toward}`;
+        : readOff ? `ran${toward}` : `ran to the window close${toward}`;
     const reOns = line?.reOns ?? 0;
     const reOnsNotApplied = line?.reOnsNotApplied ?? 0;
+    const offSlots = line?.reOnNotAppliedSlots ?? [];
+    const readOffText = readOff ? `; Charge Now read off${offSlots.length > 0 ? ` on slot(s) ${offSlots.join(', ')}` : ''} before the window close` : '';
     // (review 3) "after the panel's own stop" only when that stop is on record: a re-ON also follows a slot switched off
     // in the app, or a stop the readback never caught with every slot off.
     const reOnText = reOns > 0
-      ? `; Charge Now was switched back on ${reOns} time(s)${panelAt != null ? " after the panel's own stop" : ''}${reOnsNotApplied > 0 ? ` (${reOnsNotApplied} of them did not take effect)` : ''}`
+      ? `${readOff ? ' and was' : '; Charge Now was'} switched back on ${reOns} time(s)${panelAt != null ? " after the panel's own stop" : ''}${reOnsNotApplied > 0 ? ` (${reOnsNotApplied} of them did not take effect)` : ''}`
       : '';
     night = fc.kind === 'ran'
       ? (line != null
-        ? `${reserve}, and force-charge ${ranLine}${reOnText}${close}${note}; ${restored}`
+        ? `${reserve}, and force-charge ${ranLine}${readOffText}${reOnText}${close}${note}; ${restored}`
         : `${reserve}, and force-charge ran${toward}${close}${note}; ${restored}`)
       : `${reserve}${note}; force-charge${toward} ${fc.kind === 'neverStarted' ? 'never started'
         : fc.kind === 'failed' ? failedOn
@@ -1048,11 +1056,12 @@ export function buildLineForceChargeDeclinedStart(o: {
  * night has no start target) and the line, when the window closes, why the add-on cannot switch Charge Now back
  * on (every cause, the cost-dominant night's included), and what to switch: slots reading OFF — switch Charge Now on (the add-on's close OFF covers them, they are
  * ours); slots reading ON while the pool is not rising — off and on again may restart the charge (the ON-reading
- * shape, unmeasured on this plant; or a load taking the grid cap). Never "No action needed". PURE.
+ * shape, unmeasured on this plant; or a load taking the grid cap). Never "No action needed". (review 4) The spent budget
+ * is "after the panel's own stop" only with that stop on record (a slot switched off in the app reads the same). PURE.
  */
 export function buildLineForceChargeAtRisk(o: {
   day: string | null;
-  risk: Pick<LineAtRisk, 'cause' | 'offSlots' | 'onSlots' | 'poolPct' | 'refPct' | 'thresholdPct' | 'linePct' | 'reOnNotAppliedSlots'>;
+  risk: Pick<LineAtRisk, 'cause' | 'offSlots' | 'onSlots' | 'poolPct' | 'refPct' | 'thresholdPct' | 'linePct' | 'reOnNotAppliedSlots' | 'panelOffAtMs'>;
   /** When the add-on switches the force-charge off (writeWindowEndMs), as clock text. */
   closeText: string;
 }): NotifyMessage {
@@ -1073,7 +1082,7 @@ export function buildLineForceChargeAtRisk(o: {
   const why = costMode
     ? "Tonight's force-charge is the cost plan's, with its own stop: the add-on does not switch Charge Now back on for the line. "
     : r.cause === 'reOnSpent'
-    ? `The add-on has switched Charge Now back on ${FORCE_CHARGE_LINE_REON_MAX} times tonight after the panel's own stop, the most it does in a night. `
+    ? `The add-on has switched Charge Now back on ${FORCE_CHARGE_LINE_REON_MAX} times tonight${r.panelOffAtMs != null ? " after the panel's own stop" : ''}, the most it does in a night. `
     : r.cause === 'reOnNotApplied'
       ? `The add-on switched Charge Now back on for slot(s) ${(r.reOnNotAppliedSlots != null && r.reOnNotAppliedSlots.length > 0 ? r.reOnNotAppliedSlots : r.offSlots).join(', ')} `
         + 'and it did not take effect; it does not try again tonight. '

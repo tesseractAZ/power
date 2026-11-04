@@ -66,6 +66,8 @@ import {
   // line-ask night's texts whatever its mode, and the declined-start push across restarts.
   lineDeclinedPushTick, type LineDeclinedPushMem, lineAtRiskPushDue, lineOnReadingShape, lineNightObservations,
   forceChargeLineNightPct, forceChargeOnFailureNight, type ForceChargeOpts,
+  // v1.200.0 (review 4) — what a line re-ON's readback check stamps, the re-ON that took effect included.
+  lineReOnCheckedStamp,
 } from './nightForceCharge.js';
 import {
   extractSettingsSurface, evaluateDrift, freshDriftState, loadConfirmedSurface,
@@ -6377,14 +6379,10 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
   if (action.kind === 'lineReOnChecked') {
     // v1.200.0 (review 2) — a line re-ON's readback check, its grace after it (nightForceCharge.lineReOnCheckDue):
     // the slots still reading OFF did not take it. Recorded for the line-at-risk push and the morning account; the
-    // budget's next re-ON (if any is left) is the retry. Writes nothing.
+    // budget's next re-ON (if any is left) is the retry. Writes nothing. (review 4) The stamp is the pure
+    // lineReOnCheckedStamp's: a re-ON that took effect is kept as the latest that did (forceChargeLineReOnAppliedAtMs).
     const failedReOn = action.notApplied.length > 0;
-    persistNightActuation({
-      ...nightActuationMem,
-      forceChargeLineReOnCheckedAtMs: nowMs,
-      forceChargeLineReOnNotAppliedSlots: [...action.notApplied],
-      ...(failedReOn ? { forceChargeLineReOnsNotApplied: nightActuationMem.forceChargeLineReOnsNotApplied + 1 } : {}),
-    });
+    persistNightActuation({ ...nightActuationMem, ...lineReOnCheckedStamp(nightActuationMem, nowMs, action) });
     if (failedReOn) {
       app.log.warn(`night-charge: LINE force-charge re-ON for ${state.day} did NOT take effect — slot(s) ${action.notApplied.join(',')} of ${action.slots.join(',')} still read FORCE_CHARGE_OFF ${Math.round((nowMs - (state.forceChargeLineReOnAtMs ?? nowMs)) / 60_000)}m after it, their Cores under the panel's ceiling (re-ON ${state.forceChargeLineReOns}/${FORCE_CHARGE_LINE_REON_MAX}).`);
     } else {

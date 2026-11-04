@@ -862,11 +862,14 @@ export function armedForceChargeStopPct(
  *  the line re-ONs issued after it, `reOnsNotApplied` those a readback check found not applied, `lastReOnAtMs` the
  *  last one: the morning account names the panel's stop when it ended the charge, and the re-ONs.
  *  (review 3) `lastReOnApplied` — whether the last re-ON resumed the charge (lastLineReOnApplied): a re-ON after the
- *  panel's stop that did not take effect leaves the stop as what ended it. */
+ *  panel's stop that did not take effect leaves the stop as what ended it.
+ *  (review 4) `reOnAppliedAtMs` — the latest re-ON that took effect (forceChargeLineReOnAppliedAtMs): a re-ON after the
+ *  stop that resumed the charge is not undone by a later one that did not; `reOnNotAppliedSlots` — the last check's
+ *  slots still reading OFF, named when no re-ON resumed anything and no stop is on record. */
 export interface ForceChargeOutcomeLine {
   askPct: number; linePct: number; offReason?: string | null; offAtMs?: number | null;
   panelOffAtMs?: number | null; reOns?: number; reOnsNotApplied?: number; lastReOnAtMs?: number | null;
-  lastReOnApplied?: boolean | null;
+  lastReOnApplied?: boolean | null; reOnAppliedAtMs?: number | null; reOnNotAppliedSlots?: number[] | null;
 }
 
 /** v1.200.0 (review 3) — PURE. Whether the night's LAST line re-ON resumed the charge, from its readback check
@@ -898,7 +901,7 @@ export function forceChargeNightOutcome(
     | 'forceChargeRides' | 'forceChargeSlots' | 'forceChargeOnFailedSlots'>
     & Partial<Pick<NightActuationState, 'forceChargeLineAskPct' | 'forceChargeLinePct' | 'forceChargeMode' | 'forceChargeOffReason' | 'forceChargeOffAtMs'
       | 'forceChargeLinePanelOffAtMs' | 'forceChargeLineReOns' | 'forceChargeLineReOnsNotApplied' | 'forceChargeLineReOnAtMs'
-      | 'forceChargeLineReOnSlots' | 'forceChargeLineReOnCheckedAtMs' | 'forceChargeLineReOnNotAppliedSlots'>>,
+      | 'forceChargeLineReOnSlots' | 'forceChargeLineReOnCheckedAtMs' | 'forceChargeLineReOnNotAppliedSlots' | 'forceChargeLineReOnAppliedAtMs'>>,
   /** Force-charge enabled NOW: read only for a record armed before the stamp. v1.200.0 — or both gates
    *  now (ForceChargeGates), which also say whether a night that never started was a line night. */
   enabled: boolean | ForceChargeGates,
@@ -919,6 +922,8 @@ export function forceChargeNightOutcome(
       panelOffAtMs: s.forceChargeLinePanelOffAtMs ?? null, reOns: s.forceChargeLineReOns ?? 0,
       reOnsNotApplied: s.forceChargeLineReOnsNotApplied ?? 0, lastReOnAtMs: s.forceChargeLineReOnAtMs ?? null,
       lastReOnApplied: lastLineReOnApplied(s),
+      reOnAppliedAtMs: s.forceChargeLineReOnAppliedAtMs ?? null,
+      reOnNotAppliedSlots: s.forceChargeLineReOnNotAppliedSlots != null ? [...s.forceChargeLineReOnNotAppliedSlots] : null,
     };
     if (on === 'failed') return { kind: 'failed', stopPct: null, expectedLeg, partialSlots: partialForceChargeOnFailureSlots(s), line: ran };
     return { kind: on === 'verified' ? 'ran' : 'unconfirmed', stopPct: null, expectedLeg, line: ran };
@@ -1291,6 +1296,26 @@ export function lineReOnCheckDue(
 }
 
 /**
+ * v1.200.0 (review 4) — PURE. What a re-ON's readback check (lineReOnCheckDue) stamps on the record (index.ts persists it;
+ * the check writes nothing): when it ran, the slots still reading OFF, a re-ON with any of them counted not applied, and —
+ * when a slot it switched took it (as lastLineReOnApplied judges) — that re-ON's write time as the latest re-ON that took
+ * effect (forceChargeLineReOnAppliedAtMs). That stamp outlives the next re-ON: a later one that did not take effect leaves
+ * it the last ON of ours that did (lineTrendReference, the morning account).
+ */
+export function lineReOnCheckedStamp(
+  s: Pick<NightActuationState, 'forceChargeLineReOnAtMs' | 'forceChargeLineReOnsNotApplied'>,
+  nowMs: number, a: Pick<Extract<ForceChargeAction, { kind: 'lineReOnChecked' }>, 'slots' | 'notApplied'>,
+): Partial<Pick<NightActuationState, 'forceChargeLineReOnCheckedAtMs' | 'forceChargeLineReOnNotAppliedSlots' | 'forceChargeLineReOnsNotApplied' | 'forceChargeLineReOnAppliedAtMs'>> {
+  const took = a.slots.some((n) => !a.notApplied.includes(n));
+  return {
+    forceChargeLineReOnCheckedAtMs: nowMs,
+    forceChargeLineReOnNotAppliedSlots: [...a.notApplied],
+    ...(a.notApplied.length > 0 ? { forceChargeLineReOnsNotApplied: s.forceChargeLineReOnsNotApplied + 1 } : {}),
+    ...(took && s.forceChargeLineReOnAtMs != null ? { forceChargeLineReOnAppliedAtMs: s.forceChargeLineReOnAtMs } : {}),
+  };
+}
+
+/**
  * v1.200.0 (review) — PURE. The WRITE-AHEAD stamp of an ON (index.ts persists it before the writes):
  *  - `forceChargeMode`: the mode it is switched ON in (forceChargeModeOf on the record and the gates NOW) —
  *    the ledger's force_charge_mode, the ON-failure push's line sentence, the morning account;
@@ -1379,13 +1404,19 @@ export function linePoolReference(samples: ReadonlyArray<LinePoolSample> | null 
  *  ON-reading shape): linePoolReference, but only a reading taken at least FORCE_CHARGE_ON_VERIFY_AFTER_MS after the
  *  last ON of ours (the re-ON, else the ON's last attempt, else the ON) — once that ON had its readback grace to take
  *  effect. A reading from before (the fall that called for the re-ON, or a pool not yet importing) makes a pool now
- *  charging read as falling or flat: the push and the shape log fired on the re-ON working. null otherwise. */
+ *  charging read as falling or flat: the push and the shape log fired on the re-ON working. null otherwise.
+ *  (review 4) A re-ON switched nothing on when its check found it not applied, or it never reached the panel (every
+ *  write rate-limited): lastLineReOnApplied false. It is no ON of ours then — the last is the latest re-ON that took
+ *  effect (forceChargeLineReOnAppliedAtMs), else the ON — and the fall that called for it still stands: a night whose
+ *  re-ONs never took is pushed as soon as the check says so, not 25-35 min later (past the 20-min lead on a late re-ON). */
 export function lineTrendReference(
-  s: Pick<NightActuationState, 'forceChargeLinePoolSamples' | 'forceChargeLineReOnAtMs' | 'forceChargeOnLastAttemptMs' | 'forceChargeOnAtMs'>,
+  s: Pick<NightActuationState, 'forceChargeLinePoolSamples' | 'forceChargeLineReOnAtMs' | 'forceChargeOnLastAttemptMs' | 'forceChargeOnAtMs'
+    | 'forceChargeLineReOnSlots' | 'forceChargeLineReOnCheckedAtMs' | 'forceChargeLineReOnNotAppliedSlots' | 'forceChargeLineReOnAppliedAtMs'>,
   nowMs: number,
 ): LinePoolSample | null {
   const ref = linePoolReference(s.forceChargeLinePoolSamples, nowMs);
-  const lastOn = s.forceChargeLineReOnAtMs ?? s.forceChargeOnLastAttemptMs ?? s.forceChargeOnAtMs;
+  const reOn = lastLineReOnApplied(s) !== false ? s.forceChargeLineReOnAtMs : s.forceChargeLineReOnAppliedAtMs;
+  const lastOn = reOn ?? s.forceChargeOnLastAttemptMs ?? s.forceChargeOnAtMs;
   if (ref == null || lastOn == null || ref.atMs < lastOn + FORCE_CHARGE_ON_VERIFY_AFTER_MS) return null;
   return ref;
 }
@@ -1459,6 +1490,9 @@ export interface LineAtRisk {
   closeAtMs: number;
   /** The last re-ON check's slots still reading OFF (forceChargeLineReOnNotAppliedSlots); null when none checked. */
   reOnNotAppliedSlots: number[] | null;
+  /** (review 4) The panel's own stop on the record (forceChargeLinePanelOffAtMs), or null: the push says the re-ONs came
+   *  "after the panel's own stop" only with it on record (a slot switched off in the app reads the same). */
+  panelOffAtMs: number | null;
 }
 
 /**
@@ -1531,6 +1565,7 @@ export function lineAtRiskPushDue(s: NightActuationState, nowMs: number, o: Forc
   return {
     cause, offSlots, onSlots, poolPct: o.poolSocPct, refPct: ref.pct, refAtMs: ref.atMs, thresholdPct, linePct, closeAtMs,
     reOnNotAppliedSlots: notApplied != null ? [...notApplied] : null,
+    panelOffAtMs: s.forceChargeLinePanelOffAtMs ?? null,
   };
 }
 

@@ -635,6 +635,11 @@ export interface NightActuationState {
   /** v1.200.0 (review 2) — the LAST check's slots still reading OFF ([] when it applied); null = none checked.
    *  The line-at-risk push names them. */
   forceChargeLineReOnNotAppliedSlots: number[] | null;
+  /** v1.200.0 (review 4) — the write time (forceChargeLineReOnAtMs) of the latest line re-ON whose readback check found
+   *  a slot that took it (nightForceCharge.lineReOnCheckedStamp), kept across the next re-ON: a later re-ON that did not
+   *  take effect leaves it the last ON of ours that did — the line-at-risk trend and the morning account read it.
+   *  null = none tonight, and every record from before the field. */
+  forceChargeLineReOnAppliedAtMs: number | null;
   /** v1.200.0 (review 2) — when a live readback after the verified ON first showed every slot of ours OFF with a
    *  Core at the panel's stop ceiling (its own stop: 2026-09-23, 2026-10-02), the latest such episode (a second
    *  latch after a re-ON re-stamps it). The morning account says the panel's stop ended the charge. null = never. */
@@ -724,7 +729,7 @@ export function emptyActuationState(): NightActuationState {
     forceChargeLineAskPct: null, forceChargeLinePct: null, forceChargeCeilingSyncedPct: null, forceChargeMode: null,
     forceChargeLineReOns: 0, forceChargeLineReOnAtMs: null,
     forceChargeLineReOnSlots: null, forceChargeLineReOnCheckedAtMs: null,
-    forceChargeLineReOnsNotApplied: 0, forceChargeLineReOnNotAppliedSlots: null,
+    forceChargeLineReOnsNotApplied: 0, forceChargeLineReOnNotAppliedSlots: null, forceChargeLineReOnAppliedAtMs: null,
     forceChargeLinePanelOffAtMs: null, forceChargeLinePoolSamples: null,
     forceChargeLineAtRiskPushedAtMs: null, forceChargeLineDeclinedPushed: [],
     nextOnPeakStartMs: null,
@@ -832,6 +837,7 @@ export function coerceActuationState(raw: unknown): NightActuationState {
     forceChargeLineReOnCheckedAtMs: num(o.forceChargeLineReOnCheckedAtMs),
     forceChargeLineReOnsNotApplied: Math.max(0, Math.floor(num(o.forceChargeLineReOnsNotApplied) ?? 0)),
     forceChargeLineReOnNotAppliedSlots: slotList(o.forceChargeLineReOnNotAppliedSlots),
+    forceChargeLineReOnAppliedAtMs: num(o.forceChargeLineReOnAppliedAtMs),
     forceChargeLinePanelOffAtMs: num(o.forceChargeLinePanelOffAtMs),
     forceChargeLinePoolSamples: coercePoolSamples(o.forceChargeLinePoolSamples),
     forceChargeLineAtRiskPushedAtMs: num(o.forceChargeLineAtRiskPushedAtMs),
