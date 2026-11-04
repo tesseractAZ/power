@@ -51,6 +51,10 @@ import { emptyActuationState, type NightActuationState } from '../src/nightCharg
  * finds it not applied, and the push reaches 169 of the 390 year nights that close under and 2,308 of 2,615 at lines of
  * 70-90% (PIN_REON_INERT); the rest have their last check inside the last 21 minutes. The plant stamps each check through
  * index.ts's own pure stamp (lineReOnCheckedStamp).
+ * (review 5) AN ON NO WRITE OF OURS EXPLAINS IN TIME — a re-ON applied a minute after its check ('reOnLate'), one all-OFF
+ * reading at the check ('reOnGlitch'), Charge Now switched on by a person after the push ('reOnPerson') — is waited out
+ * (lineNightObservations stamps it, lineTrendReference waits): the ON-reading shape is never logged on any of them. And a
+ * re-ON handed back rate-limited ('reOnLimited') is never pushed as the gates inside its retry's spacing (PIN_REVIEW5).
  * Three discriminators show the grid can see the mutants it is meant to kill: a software stop at ⌈L⌉ (design
  * A's hold, F-i), a start timed to ⌈L⌉ without the + 5 (F-iii), and no re-ON after the latch.
  */
@@ -70,8 +74,13 @@ const EV_MAX_KW = 11.52;
  *  keeps reading Charge Now ON, and imports again only once an ON of ours takes effect (none comes: the re-ON keys
  *  on slots reading OFF). 'reOnInert' (review 4) — the latch as measured (the slots read OFF), but a line re-ON the
  *  cloud accepts never takes effect: its slots still read OFF at its readback check (lineReOnCheckDue), a failure
- *  path the add-on is built to handle (its own check, its own push cause), never measured here. */
-type Variant = 'real' | 'hold' | 'askStart' | 'noReOn' | 'onLatch' | 'reOnInert';
+ *  path the add-on is built to handle (its own check, its own push cause), never measured here. (review 5) 'reOnLate' —
+ *  a line re-ON that takes effect 16 min after its write, a minute after its readback check found it not applied (an ON
+ *  readback lagged 14 min on 2026-10-06); 'reOnGlitch' — a re-ON that takes effect, but the readback on its check's tick
+ *  alone shows every slot OFF; 'reOnPerson' — 'reOnInert' with a person who follows the push: Charge Now switched on in
+ *  the app 5 min after a push that names slots reading OFF; 'reOnLimited' — the night's first line re-ON comes back
+ *  rate-limited on every write and is handed back (index.ts: the count returned, no slots), its retry 15 min later. */
+type Variant = 'real' | 'hold' | 'askStart' | 'noReOn' | 'onLatch' | 'reOnInert' | 'reOnLate' | 'reOnGlitch' | 'reOnPerson' | 'reOnLimited';
 interface Knobs {
   p0: number; evFromMin: number | null; evKw: number; standbyKw: number; onDelayMin: number; staleMin: number; floor: boolean;
   /** The plan's predicted window EV (kWh) the tick passes as evDisplacedKwh; 'exact' = the EV that comes. */
@@ -116,6 +125,7 @@ function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Varian
   let onMin = 0;
   let reOns = 0;
   let reOnsFailed = 0;
+  let handedBack = false;
   const readings: number[] = [];
   const tail: number[] = [];
   const evKwh = kn.evFromMin != null ? kn.evKw * Math.min(kn.evFromMin, (W1 - W0) / MIN) / 60 : 0;
@@ -135,9 +145,12 @@ function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Varian
       ? evDisplacedPackKwh({ evKwh: pred, peakEvKw: kn.evKw, rateKw: chargeRateKw, unboundedRateKw: Math.max(1, (17 - load) * LEG), legEff: LEG })
       : null;
     if (onEffectiveMs != null && t >= onEffectiveMs) { chargeNowOn = true; importing = true; onEffectiveMs = null; }
+    // (review 5) 'reOnGlitch': the readback on the re-ON check's tick alone shows every slot OFF.
+    const glitch = variant === 'reOnGlitch' && s.forceChargeLineReOnSlots != null && s.forceChargeLineReOnAtMs != null
+      && t === s.forceChargeLineReOnAtMs + nfc.FORCE_CHARGE_ON_VERIFY_AFTER_MS;
     const o = {
       enabled: gates.cost, lineEnabled: gates.line, gridPresent: true, gridStaLost: false,
-      slotsOn: chargeNowOn ? [1, 2, 3] : [], connectedSlots: [1, 2, 3], vitalsRed: false, socCoherent: true,
+      slotsOn: chargeNowOn && !glitch ? [1, 2, 3] : [], connectedSlots: [1, 2, 3], vitalsRed: false, socCoherent: true,
       slotSocPct: { 1: seen, 2: seen, 3: seen },
       ceilingReadbackPct: panelCeiling, poolSocPct: seen, fullKwh: NAME, chargeRateKw, evDisplacedKwh,
     } as ForceChargeOpts;
@@ -148,7 +161,11 @@ function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Varian
     const a = decideForceCharge(s, t, o);
     if (a.kind === 'none' && pushedAtMs == null) {
       const risk = nfc.lineAtRiskPushDue(s, t, o);
-      if (risk != null) { pushedAtMs = t; pushCause = risk.cause; s = { ...s, forceChargeLineAtRiskPushedAtMs: t }; }
+      if (risk != null) {
+        pushedAtMs = t; pushCause = risk.cause; s = { ...s, forceChargeLineAtRiskPushedAtMs: t };
+        // (review 5) 'reOnPerson': the person switches Charge Now on in the app 5 min after a push naming slots reading OFF.
+        if (variant === 'reOnPerson' && risk.offSlots.length > 0 && !chargeNowOn) onEffectiveMs = t + 5 * MIN;
+      }
     }
     if (a.kind === 'none' && shapeAtMs == null && nfc.lineOnReadingShape(s, t, o) != null) shapeAtMs = t;
     if (a.kind === 'syncCeiling') {
@@ -166,10 +183,17 @@ function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Varian
       s = { ...s, forceChargeOnRetries: s.forceChargeOnRetries + 1, forceChargeOnLastAttemptMs: t };
       onEffectiveMs = t + kn.onDelayMin * MIN;
     } else if (a.kind === 'lineReOn') {
-      if (variant !== 'noReOn') {
+      if (variant === 'reOnLimited' && !handedBack) {
+        // (review 5) index.ts: every write rate-limited — the count handed back, no slots, the stamp moved to the write.
+        handedBack = true;
+        s = { ...s, forceChargeLineReOnAtMs: t, forceChargeLineReOnSlots: null };
+      } else if (variant !== 'noReOn') {
         s = { ...s, forceChargeLineReOns: s.forceChargeLineReOns + 1, forceChargeLineReOnAtMs: t, forceChargeLineReOnSlots: [...a.slots] };
-        // 'reOnInert': the write is accepted and stamped, and the slots keep reading OFF.
-        if (variant !== 'reOnInert') onEffectiveMs = t + kn.onDelayMin * MIN;
+        // 'reOnInert' ('reOnPerson'): the write is accepted and stamped, and the slots keep reading OFF. 'reOnLate': it
+        // takes effect a minute after its readback check.
+        if (variant !== 'reOnInert' && variant !== 'reOnPerson') {
+          onEffectiveMs = t + (variant === 'reOnLate' ? nfc.FORCE_CHARGE_ON_VERIFY_AFTER_MS + MIN : kn.onDelayMin * MIN);
+        }
         reOns += 1;
       }
     } else if (a.kind === 'lineReOnChecked') {
@@ -210,13 +234,14 @@ const KS = [0.9, 1.0, 1.1, 1.25];
  *  `latePushed` — pushes at or inside FORCE_CHARGE_LINE_AT_RISK_LEAD_MS of the close (the helper never makes one).
  *  (review 3) `underPushedEarly` — of the nights under, those whose only push came BEFORE the event that lost the line
  *  ('onLatch': the latch), a once-a-night budget spent on a pool still charging; `shapes` — nights the ON-reading-shape
- *  log fired; `heldPushes` — pushes whose cause is 'reOnHeld'. */
+ *  log fired; `heldPushes` — pushes whose cause is 'reOnHeld'. (review 5) `refusedPushes` — pushes whose cause is
+ *  'reOnRefused' (a handed-back re-ON whose retry the cutoff refuses). */
 function cell(lines: number[], kn: Partial<Knobs>, ks: number[] = KS, variant: Variant = 'real'): {
   under: number; n: number; worst: number; meanOn: number; reOns: number; pushed: number; underPushed: number; latePushed: number;
-  underPushedEarly: number; shapes: number; heldPushes: number;
+  underPushedEarly: number; shapes: number; heldPushes: number; refusedPushes: number;
 } {
   const k2 = { ...BASE, ...kn };
-  let under = 0, n = 0, worst = Infinity, on = 0, reOns = 0, pushed = 0, underPushed = 0, latePushed = 0, underPushedEarly = 0, shapes = 0, heldPushes = 0;
+  let under = 0, n = 0, worst = Infinity, on = 0, reOns = 0, pushed = 0, underPushed = 0, latePushed = 0, underPushedEarly = 0, shapes = 0, heldPushes = 0, refusedPushes = 0;
   for (const L of lines) for (const h of HOUSES) for (const k of ks) {
     const r = night(L, h, k, k2, variant);
     n += 1; on += r.onMin; reOns += r.reOns; worst = Math.min(worst, r.close - L);
@@ -225,13 +250,14 @@ function cell(lines: number[], kn: Partial<Knobs>, ks: number[] = KS, variant: V
       pushed += 1;
       if (r.pushedAtMs >= W1 - nfc.FORCE_CHARGE_LINE_AT_RISK_LEAD_MS) latePushed += 1;
       if (r.pushCause === 'reOnHeld') heldPushes += 1;
+      if (r.pushCause === 'reOnRefused') refusedPushes += 1;
     }
     if (r.close < L - 0.05) {
       under += 1;
       if (r.pushedAtMs != null) { underPushed += 1; if (r.lossAtMs != null && r.pushedAtMs < r.lossAtMs) underPushedEarly += 1; }
     }
   }
-  return { under, n, worst, meanOn: on / n, reOns, pushed, underPushed, latePushed, underPushedEarly, shapes, heldPushes };
+  return { under, n, worst, meanOn: on / n, reOns, pushed, underPushed, latePushed, underPushedEarly, shapes, heldPushes, refusedPushes };
 }
 
 const STRESSES: Array<[string, Partial<Knobs>]> = [
@@ -362,6 +388,30 @@ test('★★★ T7 (review 4) a re-ON the cloud accepts that never takes effect 
   const ex = night(65.95, 3.6, 1.25, { ...BASE, predEvKwh: 20, evFromMin: 90 }, 'reOnInert');
   assert.deepEqual([ex.close, ex.reOns, ex.reOnsFailed, ex.pushCause], [60, 2, 2, 'reOnNotApplied']);
   assert.equal(ex.pushedAtMs, W1 - 22 * MIN);
+});
+
+test('★★★ T7 (review 5) an ON seen on the readback that no ON write of ours explains is waited out — a re-ON applied after its check, a glitch at the check, Charge Now switched on by a person after the push — and a handed-back re-ON\'s retry is never pushed as the gates; pinned exactly', () => {
+  const got: Record<string, { under: number; reached: number; held: number; shapes: number; heldCause: number; refused: number }> = {};
+  for (const variant of ['reOnLate', 'reOnGlitch', 'reOnPerson', 'reOnLimited'] as const) {
+    const t = { under: 0, reached: 0, held: 0, shapes: 0, heldCause: 0, refused: 0 };
+    for (const [, kn] of PREDICTED) {
+      for (const [lines, floor] of [[YEAR_LINES, false], [YEAR_LINES, true], [HIGH_LINES, false], [HIGH_LINES, true]] as const) {
+        const r = cell(lines as number[], { ...kn, floor }, KS, variant);
+        assert.equal(r.latePushed, 0, `${variant}: never inside the lead`);
+        t.under += r.under; t.reached += r.underPushed; t.held += r.pushed - r.underPushed;
+        t.shapes += r.shapes; t.heldCause += r.heldPushes; t.refused += r.refusedPushes;
+      }
+    }
+    got[variant] = t;
+  }
+  // The ON-reading shape is never logged on any of them: each is an ON that works (the round-5 reviewer's emulation logged it
+  // on 3,271 late nights, 101 glitch nights and 2,476 nights a person followed the push). And no handed-back re-ON's push
+  // blames the gates ('reOnHeld': 3,256 of the reviewer's 3,263 limited pushes, 3,142 of them on nights that held).
+  for (const [v, t] of Object.entries(got)) {
+    assert.equal(t.shapes, 0, `${v}: the ON-reading shape logged on ${t.shapes} nights`);
+    assert.equal(t.heldCause, 0, `${v}: ${t.heldCause} 'reOnHeld' pushes`);
+  }
+  assert.deepEqual(got, PIN_REVIEW5);
 });
 
 test('★★★ T7 the line force-charge actually runs: ON to the close on a 50% pool, no OFF before it', () => {
@@ -558,6 +608,27 @@ const PIN_REON_INERT_SUM = { year: { n: 4400, under: 390, reached: 169 }, high: 
 /** …and its pushes on nights that still held (the 36 kWh / 11.52 kW from 180 min cell at lines of 70-90%, as on the latch as
  *  measured). */
 const PIN_REON_INERT_HELD_PUSHES = 6;
+/** (review 5) Summed over every PREDICTED cell (7,480 nights, rounded and floored, year and 70-90% lines): the nights under,
+ *  the under nights the line-at-risk push reached, the pushes on nights that held, the shape logs, the 'reOnHeld' and
+ *  'reOnRefused' pushes. All four are unmeasured on this plant; each pins that the push and the shape log wait out an ON
+ *  that works, wherever it came from.
+ *  - reOnLate: none under. Its 88 pushes on nights that held are a pool flat at ⌈L⌉ beside the EV with Charge Now ON,
+ *    on a reading 15 min or more after the late apply (the measured latch's 7, on a pool the 16-min delay left lower).
+ *    Read past the "not applied" re-ON with no wait (review 4): 2,869 pushes on held nights, 3,271 shape logs.
+ *  - reOnGlitch: none under; the measured latch's 7 pushes (PIN_REAL_PREDICTED_PUSHES) — 99 and 101 shape logs before.
+ *  - reOnPerson: the person's ON 5 min after the push carries 927 of reOnInert's 3,005 nights under (those 927 pushes
+ *    are on nights that then held); 1,550 of the 2,078 left are reached, as reOnInert's (their last check inside the last
+ *    21 min). The shape log fired on 2,476 of the 2,483 pushed nights before.
+ *  - reOnLimited: every night under reached. 356 pushes are 'reOnRefused' — a hand-back 23-35 min before the close, whose
+ *    retry would fall inside the re-ON's 20-min cutoff (236 of those nights still held on their margin) — and none
+ *    'reOnHeld' inside a retry's spacing (3,256 before); the other 92 on held nights are reOnLate's kind (flat at ⌈L⌉
+ *    beside an 11 kW or larger EV). */
+const PIN_REVIEW5 = {
+  reOnLate: { under: 0, reached: 0, held: 88, shapes: 0, heldCause: 0, refused: 0 },
+  reOnGlitch: { under: 0, reached: 0, held: 7, shapes: 0, heldCause: 0, refused: 0 },
+  reOnPerson: { under: 2078, reached: 1550, held: 933, shapes: 0, heldCause: 0, refused: 0 },
+  reOnLimited: { under: 121, reached: 121, held: 328, shapes: 0, heldCause: 0, refused: 356 },
+};
 /** (review 2) …and on the KNOWN late-unpredicted-load cells: the under nights the push reached, in PIN_KNOWN's order. It needs
  *  the pool NOT RISING with at least 20 min left: a load that slows the charge without stopping it (7 kW from 120 min;
  *  an ON 5 min late with a 7 kW EV) still rises, short of the line, and is not pushed — a residual, pinned. */
