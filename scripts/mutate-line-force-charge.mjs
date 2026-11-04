@@ -55,6 +55,14 @@
  * until the window closes" (the rationale, the push, the card, the 21:30 line). T-xix..xxvi.
  * (G) THE GATE: a carried night under its line is a strike. G-i.
  * (R) THE LEDGER: the plan columns written unconditionally. R-i, R-ii.
+ * (A5) THE LINE ARMED WHATEVER THE ASK, CARRIED ONLY WHERE ITS OWN REACHABLE WALK HOLDS: no cut on arming; 'closeUnder'
+ * where the sized night's walk closes under L − 0.05, at the scorer's tolerance; a line within 10 points of full runs as a
+ * 90% line (start 95, ceiling 100) — on ⌈L⌉ + 10 > 100, never at 100; every surface words an armed night by
+ * lineNotHeldOf (closeUnder / aboveFull / nearFull), never "no force-charge"; the H1 reach cap (the window-open pool, the
+ * deliverable and the P50 PV) and the panel's stop only where reachable; the mid-day push keyed on the leg's ask (L4), the
+ * shadow record and its restore; the ON log names the panel's stop (L3); the gate strikes an armed, disclosed row whose
+ * force-charge never switched on and that closed under min(line, 100). A5-i..xxviii (P-viii, P-xi, P-xii, F-iii, T-xv,
+ * T-xvi, T-xvii and G-i re-anchored on the A5 lines).
  *
  *   node scripts/mutate-line-force-charge.mjs [--only <id prefix>]
  *
@@ -75,11 +83,15 @@ const NTF = resolve(REPO, 'server/src/notify.ts');
 const GATE = resolve(REPO, 'server/src/nightChargeGate.ts');
 const IDX = resolve(REPO, 'server/src/index.ts');
 const CARD = resolve(REPO, 'web/src/cards/nightChargeText.ts');
+const CARDX = resolve(REPO, 'web/src/cards/NightChargeCard.tsx');
+const CTX = resolve(REPO, 'server/src/chargeText.ts');
+const MSH = resolve(REPO, 'server/src/middayShadow.ts');
 
 const T_LINE = 'test/lineForceCharge.test.ts';
 const T_CLOSE = 'test/lineForceChargeClose.test.ts';
 const T_GOLDEN = 'test/legacyIdentity.test.ts';
 const T_RISK = 'test/lineForceChargeAtRisk.test.ts';
+const T_YEAR = 'test/lineForceChargeYear.test.ts';
 
 const MUTANTS = [
   /* ── P: the plan ── */
@@ -134,9 +146,10 @@ const MUTANTS = [
   },
   {
     id: 'P-viii. ★★★ a line within 10 points of full is carried (not disclosed)',
-    file: NCA, tests: [T_LINE],
-    find: '  const lineTooHigh = lineAsk + 2 * FORCE_CHARGE_LINE_HEADROOM_PCT > 100;',
-    to: '  const lineTooHigh = false; /* MUTANT */',
+    file: NCA, tests: [T_LINE, T_YEAR],
+    // (A5) re-anchored: the near-full test now decides only whether the plan claims the line.
+    find: '  const lineNearFull = lineAsk + 2 * FORCE_CHARGE_LINE_HEADROOM_PCT > 100;',
+    to: '  const lineNearFull = false; /* MUTANT */',
     why: 'No headroom for the panel ceiling over the line: the claim cannot be met, and is not disclosed.',
   },
   {
@@ -157,8 +170,8 @@ const MUTANTS = [
   {
     id: 'P-xi. ★★★ the headroom edge off by one (an ask of 90 disclosed)',
     file: NCA, tests: [T_LINE],
-    find: '  const lineTooHigh = lineAsk + 2 * FORCE_CHARGE_LINE_HEADROOM_PCT > 100;',
-    to: '  const lineTooHigh = lineAsk + 2 * FORCE_CHARGE_LINE_HEADROOM_PCT >= 100; /* MUTANT */',
+    find: '  const lineNearFull = lineAsk + 2 * FORCE_CHARGE_LINE_HEADROOM_PCT > 100;',
+    to: '  const lineNearFull = lineAsk + 2 * FORCE_CHARGE_LINE_HEADROOM_PCT >= 100; /* MUTANT */',
     why: 'A 89.9% line whose 100% panel ceiling fits is disclosed as unheld instead of carried.',
   },
   {
@@ -169,11 +182,11 @@ const MUTANTS = [
     why: 'The setpoint and the force-charge ask drift apart: a 54.12% line writes toward 54 while the force-charge carries 55.',
   },
   {
-    id: 'P-xii. ★★ the envelope reason always "advisory" (a too-high line with a riding cost force-charge told none rides)',
+    id: 'P-xii. ★★ the envelope reason always "advisory" (an armed near-full or close-under night recorded as nothing armed)',
     file: NCA, tests: [T_LINE],
-    find: "    : backupLeg ? 'backupLeg' : lineTooHigh && lineEligible === true ? 'tooHigh' : 'advisory';",
+    find: "    : backupLeg ? 'backupLeg' : lineEligible !== true ? 'advisory' : lineNearFull ? 'nearFull' : 'closeUnder';",
     to: "    : 'advisory' as CushionEnvelopeReason; /* MUTANT */",
-    why: 'A 92% line on a night charging to ~100% reads "no force-charge runs in advisory mode".',
+    why: 'An armed 92% line, its force-charge running to ~99.6%, is recorded as advisory: the margin NOTE goes, and the push and the card lose why.',
   },
 
   /* ── A: the record ── */
@@ -224,8 +237,9 @@ const MUTANTS = [
   {
     id: 'F-iii. ★★★ the start timed to the target alone (no + H)',
     file: NFC, tests: [T_LINE, T_CLOSE],
-    find: "      kind: 'line', targetPct: t, askPct: ask!, startTargetPct: Math.max(t, ask! + H),",
-    to: "      kind: 'line', targetPct: t, askPct: ask!, startTargetPct: t, /* MUTANT */",
+    // (A5) re-anchored: the start target's ordinary arm (⌈L⌉ + 10 ≤ 100).
+    find: "      kind: 'line', targetPct: t, askPct: ask!, startTargetPct: ask! + 2 * H > 100 ? 100 - H : Math.max(t, ask! + H),",
+    to: "      kind: 'line', targetPct: t, askPct: ask!, startTargetPct: ask! + 2 * H > 100 ? 100 - H : t, /* MUTANT */",
     why: 'An EV 60-90 min out, or a slow pack, arrives short of the line (17/200, 5/200, 5/50 nights).',
   },
   {
@@ -1404,24 +1418,27 @@ const MUTANTS = [
     why: 'The same, at the outcome.',
   },
   {
-    id: 'T-xv. ★★ the push\'s envelope note not worded by its reason',
+    id: 'T-xv. ★★ the push\'s note not worded by what the walk cannot hold (a line above a full pool told it is within 10 points)',
     file: NTF, tests: [T_LINE],
-    find: "  const why = plan.cushionEnvelopeReason === 'tooHigh'\n    ? 'and it is too close",
-    to: "  const why = false /* MUTANT */\n    ? 'and it is too close",
-    why: 'A 92% line on a night charging to ~100% is told no force-charge carries it, in general words.',
+    // (A5) re-anchored on the kind branch.
+    find: "    if (kind === 'aboveFull') return ` NOTE: ${line} is above a full pool, so no charge can hold it — residual risk remains.`;",
+    to: "    if (kind === 'aboveFull') return ` NOTE: ${line} is within 10 points of a full pool, so the force-charge cannot hold it with its usual margin — residual risk remains.`; /* MUTANT */",
+    why: 'A 101.6% line no charge can hold is pushed as one held without its usual margin.',
   },
   {
-    id: 'T-xvi. ★★ the card\'s envelope row not worded by its reason ("not held tonight" under "charging to ~100%")',
+    id: 'T-xvi. ★★ the card\'s tail not worded by what the walk cannot hold (a line above a full pool told it is within 10 points)',
     file: CARD, tests: [T_LINE],
-    find: "    const why = plan.cushionEnvelopeReason === 'tooHigh'\n      ? 'too close",
-    to: "    const why = false /* MUTANT */\n      ? 'too close",
-    why: 'The card contradicts its own title.',
+    // (A5) re-anchored on the kind branch.
+    find: "    : kind === 'aboveFull' ? ' — the line is above a full pool; residual risk remains'",
+    to: "    : kind === 'aboveFull' ? ' — within 10 points of a full pool, not held with its usual margin; residual risk remains' /* MUTANT */",
+    why: 'The card says a line above a full pool is held without its usual margin.',
   },
   {
     id: 'T-xvii. ★★ the rationale says the force-charge "stays on until the window closes" when it is not expected to start',
     file: NCA, tests: [T_LINE],
-    find: "    : expected.mode === 'line' && expected.forceChargeStartMs === null",
-    to: "    : false && expected.mode === 'line' && expected.forceChargeStartMs === null /* MUTANT */",
+    // (A5) re-anchored: the line-mode sentence is its own expression (the NOTE follows it).
+    find: "  const lineModeNote: string | null = expected.mode === 'line' && expected.forceChargeStartMs === null",
+    to: "  const lineModeNote: string | null = false && expected.mode === 'line' && expected.forceChargeStartMs === null /* MUTANT */",
     why: 'A force-charge that never switches on is said to stay on.',
   },
   {
@@ -1493,9 +1510,264 @@ const MUTANTS = [
   {
     id: 'G-i. ★★ the gate exempts carried rows',
     file: GATE, tests: [T_LINE],
-    find: '    if (truthy(r.cushion_shortfall)) return false; // disclosed — physics, not fault',
-    to: '    if (truthy(r.cushion_shortfall) || asNum(r.cushion_line_force_charge_pct) != null) return false; /* MUTANT */',
+    // (A5) re-anchored: the disclosed rows' rule is armedNeverRanUnder now.
+    find: '    if (truthy(r.cushion_shortfall)) return armedNeverRanUnder(r);',
+    to: '    if (asNum(r.cushion_line_force_charge_pct) != null && !truthy(r.cushion_shortfall)) return false; /* MUTANT */ if (truthy(r.cushion_shortfall)) return armedNeverRanUnder(r);',
     why: 'A line night that closed under its line is never a strike: AUTO graduates on unheld cushions.',
+  },
+
+  /* ── (A5) the line armed whatever the ask; carried only where its own reachable walk holds ── */
+  {
+    id: 'A5-i. ★★★ the cut restored: a line within 10 points of full is not armed',
+    file: NCA, tests: [T_LINE, T_YEAR],
+    find: '  const lineArmed = lineQualifies && lineEligible === true;',
+    to: '  const lineArmed = lineQualifies && lineEligible === true && lineAsk + 2 * FORCE_CHARGE_LINE_HEADROOM_PCT <= 100; /* MUTANT */',
+    why: 'More cushion switches the force-charge off: 2026-10-29 at 15 h stores ~43 kWh less than at 14 h (ITEM 5).',
+  },
+  {
+    id: 'A5-ii. ★★★ no closeUnder: a sized night whose own walk closes under its line is carried',
+    file: NCA, tests: [T_LINE, T_YEAR],
+    find: '  const lineCloseUnder = lineArmed && !lineNearFull && !cushionShortfall && !lineWalkHolds(expected.levelPct, cushionLineSocPct);',
+    to: '  const lineCloseUnder = false; /* MUTANT */',
+    why: 'The plan claims a 68.85% line its own walk closes at ~57.3% (ITEM 6).',
+  },
+  {
+    id: 'A5-iii. ★★★ closeUnder also where the sizing fell short (the caps note doubled into the envelope)',
+    file: NCA, tests: [T_LINE, T_YEAR],
+    find: '  const lineCloseUnder = lineArmed && !lineNearFull && !cushionShortfall && !lineWalkHolds(expected.levelPct, cushionLineSocPct);',
+    to: '  const lineCloseUnder = lineArmed && !lineNearFull && !lineWalkHolds(expected.levelPct, cushionLineSocPct); /* MUTANT */',
+    why: 'Hundreds of carried nights already disclosed by their caps note change cause and ledger column (and move plans A5 must not).',
+  },
+  {
+    id: 'A5-iv(a). ★★ closeUnder judged against ⌈L⌉, not the line',
+    file: NCA, tests: [T_LINE, T_YEAR],
+    find: '  const lineCloseUnder = lineArmed && !lineNearFull && !cushionShortfall && !lineWalkHolds(expected.levelPct, cushionLineSocPct);',
+    to: '  const lineCloseUnder = lineArmed && !lineNearFull && !cushionShortfall && !lineWalkHolds(expected.levelPct, lineAsk); /* MUTANT */',
+    why: 'A walk holding the line by less than a point is disclosed as under it.',
+  },
+  {
+    id: 'A5-iv(b). ★★ closeUnder judged against the start target, not the line',
+    file: NCA, tests: [T_LINE, T_YEAR],
+    find: '  const lineCloseUnder = lineArmed && !lineNearFull && !cushionShortfall && !lineWalkHolds(expected.levelPct, cushionLineSocPct);',
+    to: '  const lineCloseUnder = lineArmed && !lineNearFull && !cushionShortfall && !lineWalkHolds(expected.levelPct, expected.startTargetPct ?? cushionLineSocPct); /* MUTANT */',
+    why: 'Every night drawn back under ⌈L⌉ + 5 after the panel\'s stop is disclosed as under its line.',
+  },
+  {
+    id: 'A5-v(a). ★★ the carry tolerance\'s sign flipped',
+    file: NCA, tests: [T_LINE],
+    find: '  return closePct == null || closePct >= linePct - LINE_CARRY_CLOSE_TOLERANCE_PCT;',
+    to: '  return closePct == null || closePct >= linePct + LINE_CARRY_CLOSE_TOLERANCE_PCT; /* MUTANT */',
+    why: 'A walk closing on the line is called under it; the scorer would call it held.',
+  },
+  {
+    id: 'A5-v(b). ★★ the carry tolerance dropped',
+    file: NCA, tests: [T_LINE],
+    find: '  return closePct == null || closePct >= linePct - LINE_CARRY_CLOSE_TOLERANCE_PCT;',
+    to: '  return closePct == null || closePct >= linePct; /* MUTANT */',
+    why: 'The plan and the scorer disagree on a close within half a reading step of the line.',
+  },
+  {
+    id: 'A5-vi. ★★★ the near-full start target max(t, ⌈L⌉ + H) (at or above the 100% ceiling)',
+    file: NFC, tests: [T_LINE, T_CLOSE],
+    find: "      kind: 'line', targetPct: t, askPct: ask!, startTargetPct: ask! + 2 * H > 100 ? 100 - H : Math.max(t, ask! + H),",
+    to: "      kind: 'line', targetPct: t, askPct: ask!, startTargetPct: Math.max(t, ask! + H), /* MUTANT */",
+    why: 'A 98% line starts timed to 103%: the first latch is followed at once by a re-ON, both spent within half an hour.',
+  },
+  {
+    id: 'A5-vii. ★★ the near-full start target min(100, ⌈L⌉ + H)',
+    file: NFC, tests: [T_LINE, T_CLOSE],
+    find: "      kind: 'line', targetPct: t, askPct: ask!, startTargetPct: ask! + 2 * H > 100 ? 100 - H : Math.max(t, ask! + H),",
+    to: "      kind: 'line', targetPct: t, askPct: ask!, startTargetPct: ask! + 2 * H > 100 ? Math.min(100, ask! + H) : Math.max(t, ask! + H), /* MUTANT */",
+    why: 'The re-ON keys on 100: the EV-90 near-full cell closes under on 64 of 120 nights, not 19.',
+  },
+  {
+    id: 'A5-viii. ★★ the near-full arm at ⌈L⌉ + 2H >= 100 (a 90% line under a 98% cost ceiling started to 95)',
+    file: NFC, tests: [T_LINE],
+    find: "      kind: 'line', targetPct: t, askPct: ask!, startTargetPct: ask! + 2 * H > 100 ? 100 - H : Math.max(t, ask! + H),",
+    to: "      kind: 'line', targetPct: t, askPct: ask!, startTargetPct: ask! + 2 * H >= 100 ? 100 - H : Math.max(t, ask! + H), /* MUTANT */",
+    why: 'An ask of 90 under ARB_COST_MAX_SOC_PCT 98 starts to 95, not its cost target 98: the start target falls with no near-full line.',
+  },
+  {
+    id: 'A5-ix. ★★ an armed, disclosed night\'s rationale gets the not-armed sentence',
+    file: NCA, tests: [T_LINE],
+    find: '  const envelopeNote: string | null = lineDisclosed && !lineArmed',
+    to: '  const envelopeNote: string | null = lineDisclosed /* MUTANT */',
+    why: 'A night whose force-charge runs to ~99.6% reads "no force-charge runs in advisory mode".',
+  },
+  {
+    id: 'A5-x. ★★ the push: an armed night falls through to "no force-charge carries it"',
+    file: NTF, tests: [T_LINE],
+    find: '  if (plan.forceChargeLine != null) {\n    const kind = lineNotHeldOf(plan);',
+    to: '  if (plan.forceChargeLine != null && plan.cushionLineSocPct === -1) { /* MUTANT */\n    const kind = lineNotHeldOf(plan);',
+    why: 'The evening push tells the owner no force-charge carries the line on a night it switches on at 23:00.',
+  },
+  {
+    id: 'A5-xi. ★★ the card: an armed, disclosed night shows the not-armed row',
+    file: CARD, tests: [T_LINE],
+    find: '  if (plan.cushionShortfallCause != null && !armed) {',
+    to: '  if (plan.cushionShortfallCause != null) { /* MUTANT */',
+    why: 'The card says "not held tonight" under a title charging to ~99.6%.',
+  },
+  {
+    id: 'A5-xii(a). ★ the 21:30 line: no "Line NOT held"',
+    file: NFC, tests: [T_LINE],
+    find: "  const tail = o.notHeld == null ? ''",
+    to: "  const tail = o.notHeld != null || o.notHeld == null ? '' /* MUTANT */",
+    why: 'The ARMED log line reads as a carried night on a night the plan disclosed.',
+  },
+  {
+    id: 'A5-xii(b). ★ index.ts never passes what the walk cannot hold to the 21:30 line',
+    file: IDX, tests: [T_LINE],
+    find: '      notHeld: notHeld != null ? { kind: notHeld, closePct: plan?.expectedWriteLevelPct ?? null } : null,',
+    to: '      notHeld: null, /* MUTANT */',
+    why: 'The same, at the call.',
+  },
+  {
+    id: 'A5-xiii. ★★ the mid-day push\'s note unchanged ("no force-charge carries it" on an armed leg)',
+    file: CTX, tests: [T_LINE],
+    find: '    + (c.lineAskPct != null\n      ? armedNote(c)',
+    to: '    + (c.lineAskPct === -1 /* MUTANT */\n      ? armedNote(c)',
+    why: 'A mid-day leg whose force-charge runs is told no force-charge carries its line.',
+  },
+  {
+    id: 'A5-xiv(a). ★ the mid-day shadow record drops what the walk cannot hold',
+    file: MSH, tests: [T_LINE],
+    find: '    ...(p != null && lineNotHeldOf(p) != null ? { lineNotHeld: lineNotHeldOf(p)! } : {}),',
+    to: '    /* MUTANT */',
+    why: 'The evening\'s words are chosen without the kind: an armed leg falls back to the generic sentence.',
+  },
+  {
+    id: 'A5-xiv(b). ★ its restore drops it',
+    file: MSH, tests: [T_LINE],
+    find: "    ...(o.lineNotHeld === 'closeUnder' || o.lineNotHeld === 'aboveFull' || o.lineNotHeld === 'nearFull' ? { lineNotHeld: o.lineNotHeld } : {}),",
+    to: '    /* MUTANT */',
+    why: 'After a restart the kind is lost.',
+  },
+  {
+    id: 'A5-xiv(c). ★ its restore keeps any value',
+    file: MSH, tests: [T_LINE],
+    find: "    ...(o.lineNotHeld === 'closeUnder' || o.lineNotHeld === 'aboveFull' || o.lineNotHeld === 'nearFull' ? { lineNotHeld: o.lineNotHeld } : {}),",
+    to: "    ...(typeof o.lineNotHeld === 'string' ? { lineNotHeld: o.lineNotHeld as 'closeUnder' } : {}), /* MUTANT */",
+    why: 'A value this build does not word is carried into the evening\'s notice.',
+  },
+  {
+    id: 'A5-xiv(d). ★ the evening notice is not told the kind',
+    file: MSH, tests: [T_LINE],
+    find: '      ...(c.lineNotHeld != null ? { lineNotHeld: c.lineNotHeld } : {}),',
+    to: '      /* MUTANT */',
+    why: 'The record carries it, the words never see it.',
+  },
+  {
+    id: 'A5-xv. ★ a line above a full pool worded "within 10 points" in the rationale',
+    file: NCA, tests: [T_LINE, T_YEAR],
+    find: "      ? ` NOTE: tonight's ${cushionLineSocPct}% outage line is above a full pool, so no charge can hold it — residual risk remains.`",
+    to: "      ? ` NOTE: tonight's ${cushionLineSocPct}% outage line is within 10 points of a full pool, so the force-charge cannot hold it with its usual margin; the cushion is not assured — residual risk remains.` /* MUTANT */",
+    why: 'A 101.57% line no charge can hold is called held without its usual margin.',
+  },
+  {
+    id: 'A5-xvi. ★★ the disclosure judged on the start target the write is timed to (armedWriteLevelPct), not the walk\'s close',
+    file: NCA, tests: [T_LINE, T_YEAR],
+    find: '  const lineCloseUnder = lineArmed && !lineNearFull && !cushionShortfall && !lineWalkHolds(expected.levelPct, cushionLineSocPct);',
+    to: "  const lineCloseUnder = lineArmed && !lineNearFull && !cushionShortfall && !lineWalkHolds(armedWriteLevelPct({ setpointSocPct, costCeilingSocPct, forceChargeLine }, { cost: inputs.forceChargeEligible === true, line: true }), cushionLineSocPct); /* MUTANT */",
+    why: 'The floor of the walk is always above the line: no night closing under is ever disclosed.',
+  },
+  {
+    id: 'A5-xvii. ★★★ the H1 cap removed (the walk\'s close stated whatever the window can deliver)',
+    file: NCA, tests: [T_LINE, T_YEAR],
+    find: '    const reachKwh = o.startKwh + deliverable + expectedWindowPvKwh(o.window.hours, o.window.fromMs, o.window.windowEndMs, o.legEff);',
+    to: '    const reachKwh = Infinity; /* MUTANT */',
+    why: '2026-10-29 at 14 h states ~98.4% and the panel\'s 100% stop from a pool the window can lift to ~92.8% at most.',
+  },
+  {
+    id: 'A5-xviii. ★★ the cap without the P50 PV in the window',
+    file: NCA, tests: [T_LINE],
+    find: '    const reachKwh = o.startKwh + deliverable + expectedWindowPvKwh(o.window.hours, o.window.fromMs, o.window.windowEndMs, o.legEff);',
+    to: '    const reachKwh = o.startKwh + deliverable; /* MUTANT */',
+    why: 'A sunny mid-day leg\'s close is capped under what its own sun delivers (no year plan: T21c).',
+  },
+  {
+    id: 'A5-xix. ★★ the panel\'s stop named where the window cannot reach the ceiling',
+    file: NCA, tests: [T_LINE],
+    find: '    if (reachKwh < (Math.min(100, panelCeilingPct) / 100) * o.fullKwh - 1e-9) delete out.ceilingStop;',
+    to: '    if (reachKwh < -1) delete out.ceilingStop; /* MUTANT */',
+    why: 'The 21:30 line, the push and the card name a stop at 100% on a night that closes ~92.8%.',
+  },
+  {
+    id: 'A5-xxi. ★★★ the not-held kind keyed on the reason, not the walk\'s close',
+    file: NCA, tests: [T_LINE, T_YEAR],
+    find: "  if (!lineWalkHolds(p.expectedWriteLevelPct ?? null, l)) return 'closeUnder';",
+    to: "  if (p.cushionEnvelopeReason === 'closeUnder') return 'closeUnder'; /* MUTANT */",
+    why: 'A near-full night whose walk closes at ~92.8% under its 93.63% line is told it is held without its usual margin.',
+  },
+  {
+    id: 'A5-xxii. ★★ no NOTE on a carried night whose sizing fell short and whose walk closes under',
+    file: NCA, tests: [T_LINE, T_YEAR],
+    find: "  if (!lineWalkHolds(p.expectedWriteLevelPct ?? null, l)) return 'closeUnder';",
+    to: "  if (!lineWalkHolds(p.expectedWriteLevelPct ?? null, l) && p.cushionEnvelopeReason != null) return 'closeUnder'; /* MUTANT */",
+    why: 'Its caps note says charge limits; nothing says its own walk closes at ~63.9% under a 65.95% line.',
+  },
+  {
+    id: 'A5-xxiii. ★★★ the gate exempts an armed, disclosed row whose force-charge never switched on',
+    file: GATE, tests: [T_LINE],
+    find: '    if (truthy(r.cushion_shortfall)) return armedNeverRanUnder(r);',
+    to: '    if (truthy(r.cushion_shortfall)) return false; /* MUTANT */',
+    why: 'A refused ceiling or Charge Now already on leaves an armed near-full night at 50% and no strike: AUTO graduates on it.',
+  },
+  {
+    id: 'A5-xxiii(b). ★★ …and strikes it though the reserve write never landed (not actuated)',
+    file: GATE, tests: [T_LINE],
+    find: '    if (asNum(r.cushion_line_force_charge_pct) == null || !truthy(r.actuated) || r.force_charge_on_at_ms != null) return false;',
+    to: '    if (asNum(r.cushion_line_force_charge_pct) == null || r.force_charge_on_at_ms != null) return false; /* MUTANT */',
+    why: 'A night cancelled before the apply is a strike.',
+  },
+  {
+    id: 'A5-xxiv. ★★ the gate strikes every armed, disclosed under-close (the never-ON condition dropped)',
+    file: GATE, tests: [T_LINE],
+    find: '    if (asNum(r.cushion_line_force_charge_pct) == null || !truthy(r.actuated) || r.force_charge_on_at_ms != null) return false;',
+    to: '    if (asNum(r.cushion_line_force_charge_pct) == null || !truthy(r.actuated)) return false; /* MUTANT */',
+    why: 'The physics the plan disclosed (a near-full line closing under) holds the gate shut.',
+  },
+  {
+    id: 'A5-xxv. ★ the gate compares against a line above a full pool, uncapped',
+    file: GATE, tests: [T_LINE],
+    find: '    if (line != null && close != null) return close < Math.min(line, 100) - REALIZED_CLOSE_TOLERANCE_PCT;',
+    to: '    if (line != null && close != null) return close < line - REALIZED_CLOSE_TOLERANCE_PCT; /* MUTANT */',
+    why: 'A 101.57% line held at 100 is a strike.',
+  },
+  {
+    id: 'A5-xxv(b). ★ no close reading: never a strike (the stored flag ignored)',
+    file: GATE, tests: [T_LINE],
+    find: '    return realizedBreached(r);\n  };\n  const strikeRows',
+    to: '    return false; /* MUTANT */\n  };\n  const strikeRows',
+    why: 'A row whose close was not read is never a strike: not fail-closed.',
+  },
+  {
+    id: 'A5-xxvi. ★ the line-mode ON log keeps "as the backstop"',
+    file: IDX, tests: [T_LINE],
+    find: 'and ON until the close (no software stop) unless the panel switches it off at its ${onLineMode.panelCeilingPct}% ceiling (switched back on under ${onLineMode.startTargetPct}% before the close, at most ${lineReOnTimesWords(FORCE_CHARGE_LINE_REON_MAX)}).',
+    to: "and ON until the close (no software stop), with the panel's ${onLineMode.panelCeilingPct}% ceiling as the backstop. /* MUTANT */",
+    why: 'The ON log contradicts the 21:30 line on a night whose walk latches at the ceiling.',
+  },
+  {
+    id: 'A5-xxvii. ★★ the mid-day push falls back on the reason, not the leg\'s ask (L4)',
+    file: CTX, tests: [T_LINE],
+    find: "          : l.cushionShortfallCause != null\n            ? ` NOTE: this leg's outage line is above the ${RESERVE_WRITE_MAX_PCT}% the panel accepts as a reserve; its force-charge runs, but the plan does not claim the line — residual risk remains.`",
+    to: "          : l.cushionShortfallCause != null /* MUTANT */\n            ? notCarried('this leg')",
+    why: 'A restored leg whose kind was lost reads "no force-charge carries it" while its force-charge runs.',
+  },
+  {
+    id: 'A5-xxviii. ★ the card\'s line row warns on the cause alone',
+    file: CARDX, tests: [T_LINE],
+    find: "plan.cushionShortfallCause != null || lineNotHeldOfCard(plan) != null ? 'text-warn' : 'text-muted'",
+    to: "plan.cushionShortfallCause != null ? 'text-warn' : 'text-muted' /* MUTANT */",
+    why: 'A carried night\'s "under the line; residual risk remains" is shown muted.',
+  },
+  {
+    id: 'A5-xxix. ★★ the card\'s mirror keys on the reason, not the walk\'s close',
+    file: CARD, tests: [T_LINE, T_YEAR],
+    find: "  if (e != null && e < l - 0.05) return 'closeUnder';",
+    to: "  if (plan.cushionEnvelopeReason === 'closeUnder') return 'closeUnder'; /* MUTANT */",
+    why: 'The card says "within 10 points" where the server says "under the line".',
   },
 
   /* ── R: the ledger ── */
