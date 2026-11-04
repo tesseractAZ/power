@@ -6075,6 +6075,8 @@ function forceChargeArmNote(armed: NightActuationState, plan: NightChargePlan | 
       linePct: armed.forceChargeLinePct ?? mode.askPct, startTargetPct: mode.startTargetPct, panelCeilingPct: mode.panelCeilingPct,
       expectedStartText: startMs != null ? fmtSiteClock(startMs) : null,
       timedByText: fmtSiteClock(endMs - FORCE_CHARGE_MIN_RUN_MS),
+      // v1.200.0 (review 2) — a walk that reaches the panel ceiling: no "as backstop", the re-ON named.
+      ceilingStop: plan?.expectedLineCeilingStop != null,
     });
   }
   if (!forceChargeOn()) return 'Force-charge: off (disabled by options).';

@@ -1047,6 +1047,13 @@ test('★★ T9 the morning summary (review): "ran to the window close" only whe
     linePct: 55.55, startTargetPct: 61, panelCeilingPct: 80, expectedStartText: '04:01', timedByText: '04:40',
   });
   assert.equal(note, 'Force-charge: LINE — tonight\'s 55.6% outage line is above the 50% reserve: on from ~04:01 (timed to 61% by 04:40) to the window close; panel ceiling 80% as backstop.');
+  // (review 2) a walk that reaches the panel ceiling: no backstop, the panel's stop and the re-ON named; index.ts passes it.
+  const stopNote = (nfc as unknown as { forceChargeLineArmNote: (o: unknown) => string }).forceChargeLineArmNote({
+    linePct: 65.95, startTargetPct: 71, panelCeilingPct: 80, expectedStartText: '23:00', timedByText: '04:40', ceilingStop: true,
+  });
+  assert.equal(stopNote, 'Force-charge: LINE — tonight\'s 66% outage line is above the 50% reserve: on from ~23:00 (timed to 71% by 04:40); '
+    + 'expected to reach the panel\'s 80% ceiling, where the panel switches it off; switched back on under 71% before the close (at most twice).');
+  assert.ok(INDEX.includes('      ceilingStop: plan?.expectedLineCeilingStop != null,\n'), 'index.ts passes the plan\'s ceiling stop to the 21:30 line');
 });
 
 /* ══ T10 — the gate ════════════════════════════════════════════════════════════════════════════════ */

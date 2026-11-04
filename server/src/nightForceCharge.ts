@@ -82,7 +82,8 @@
  * main breaker, confirm the backed-up loads stay up and the pack discharges.
  * ★★★ v1.200.0 — THE LINE NIGHT LENGTHENS THE EXPOSURE, AND REACHES PLANTS THAT NEVER HAD IT. On a night
  * whose outage-cushion line is above the 50% reserve (forceChargeModeOf 'line'), Charge Now is ON from its
- * timed start to the window close, in supervised or auto mode, whatever ARB_OBJECTIVE says: a resilience-
+ * timed start to the window close (or the panel's own stop at its ceiling, and again after a re-ON), in
+ * supervised or auto mode, whatever ARB_OBJECTIVE says: a resilience-
  * objective plant gets Charge Now for the first time. Emulated over the year's line shapes (the panel's
  * own OFF at its ceiling modelled) a slot reads Charge Now ON for 74 min on average, 142 min for lines of
  * 70-90%, and 138 min on the year's lines with a 20 kWh EV predicted (the start comes earlier). The off
@@ -115,6 +116,16 @@
  *    under the line; a 7 kW one from 120 min, 5; an ON 5 min late with a 7 kW EV from 90 min, 1. Slow
  *    packs at lines of 70-90% (8 / 35 at 70% of the rate). A cost-dominant night (cost mode, its own
  *    software stop) with a late EV at a line of 70-90% (5 to 15 of 140).
+ *    THE ON-READING LATCH — UNMEASURED on this plant (no per-slot readback has shown a slot that stops
+ *    importing at its ceiling and keeps reading ON; 2026-09-18's slot state is the add-on's record): no
+ *    re-ON keys on a slot reading ON, so per predicted-EV cell 0-65 of 200 year nights close under the
+ *    line (0-72 with floored readings) and 52-140 of 140 at lines of 70-90% (lineForceChargeClose.test.ts
+ *    PIN_ON_LATCH). No write rests on that shape. The real-time cover is the line-at-risk push
+ *    (lineAtRiskPushDue): once a night, at least FORCE_CHARGE_LINE_AT_RISK_LEAD_MS before the close, it
+ *    reaches every one of those nights (and, on the measured latch, also warns on 202 of the 3,740
+ *    predicted-EV nights that still hold); the shape, when seen, is logged once a night (lineOnReadingShape).
+ *    It also reaches most late unpredicted loads (69 of the 73 year nights under with the 11.52 kW EV from
+ *    90 min); a load that only slows the charge leaves the pool rising and is not pushed.
  * The measured capacity scale never reaches this module: the record carries one whole percent (⌈L⌉), a
  * plan output like the setpoint (runwayBasisContracts.test.ts pin 6).
  *
@@ -650,8 +661,16 @@ export function forceChargeLineArmNote(o: {
   expectedStartText: string | null;
   /** The close less FORCE_CHARGE_MIN_RUN_MS, as clock text. */
   timedByText: string;
+  /** v1.200.0 (review 2) — the plan's expected walk reaches the panel ceiling (NightChargePlan.expectedLineCeilingStop):
+   *  the panel switches it off there, so the ceiling is no backstop and the line names the re-ON. */
+  ceilingStop?: boolean;
 }): string {
   const from = o.expectedStartText != null ? `on from ~${o.expectedStartText}` : 'on just in time';
+  if (o.ceilingStop === true) {
+    return `Force-charge: LINE — tonight's ${round1(o.linePct)}% outage line is above the ${RESERVE_WRITE_MAX_PCT}% reserve: `
+      + `${from} (timed to ${round1(o.startTargetPct)}% by ${o.timedByText}); expected to reach the panel's ${o.panelCeilingPct}% ceiling, where the panel `
+      + `switches it off; switched back on under ${round1(o.startTargetPct)}% before the close (at most ${lineReOnTimesWords(FORCE_CHARGE_LINE_REON_MAX)}).`;
+  }
   return `Force-charge: LINE — tonight's ${round1(o.linePct)}% outage line is above the ${RESERVE_WRITE_MAX_PCT}% reserve: `
     + `${from} (timed to ${round1(o.startTargetPct)}% by ${o.timedByText}) to the window close; panel ceiling ${o.panelCeilingPct}% as backstop.`;
 }

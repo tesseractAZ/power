@@ -35,7 +35,7 @@
  * morning account of an early OFF, the envelope note by its reason, a line night not expected to start.
  * T-v(b), T-viii..xviii. (P) also the min-buy hold, the 90/91 edge, the one ask, the reason. P-x..xii.
  * (review 2) a walk that reaches the panel ceiling is worded by the panel's own stop and the re-ON, never "stays on
- * until the window closes" (the rationale, the push, the card). T-xix..xxiv.
+ * until the window closes" (the rationale, the push, the card, the 21:30 line). T-xix..xxvi.
  * (G) THE GATE: a carried night under its line is a strike. G-i.
  * (R) THE LEDGER: the plan columns written unconditionally. R-i, R-ii.
  *
@@ -967,14 +967,14 @@ const MUTANTS = [
     id: 'T-xxi. ★★ the rationale\'s reserve sentence says "stays on until the window closes" on a walk that reaches the ceiling',
     file: NCA, tests: [T_LINE],
     find: "      : expected.mode === 'line' && lineCeilingStop != null",
-    to: "      : false && expected.mode === 'line' && lineCeilingStop != null /* MUTANT */",
+    to: "      : expected.mode === 'line' && lineCeilingStop != null && expected.levelPct === -1 /* MUTANT */",
     why: 'The 2026-10-29 night says Charge Now stays on to 05:00; the app shows it off from ~02:00 and the pool falling.',
   },
   {
     id: 'T-xxii. ★★ the rationale\'s expected sentence says "runs to the window close" on a walk that reaches the ceiling',
     file: NCA, tests: [T_LINE],
     find: '      if (lineCeilingStop != null) {',
-    to: '      if (lineCeilingStop == null && lineCeilingStop != null) { /* MUTANT */',
+    to: '      if (lineCeilingStop != null && level < 0) { /* MUTANT */',
     why: 'Two sentences of one rationale disagree on whether Charge Now stays on.',
   },
   {
@@ -990,6 +990,20 @@ const MUTANTS = [
     find: '    if (stop != null) {\n      return `outage line ${r1(',
     to: '    if (stop != null && stop.ceilingPct < 0) { /* MUTANT */\n      return `outage line ${r1(',
     why: 'The same on the card.',
+  },
+  {
+    id: 'T-xxv. ★ the 21:30 line calls the ceiling a backstop on a walk that reaches it (index.ts never passes the stop)',
+    file: IDX, tests: [T_LINE],
+    find: '      ceilingStop: plan?.expectedLineCeilingStop != null,',
+    to: '      ceilingStop: false, /* MUTANT */',
+    why: 'The armed line in the log says Charge Now runs to the close behind an 80% backstop on a night expected to stop there.',
+  },
+  {
+    id: 'T-xxvi. ★ the 21:30 line ignores the ceiling stop it is given',
+    file: NFC, tests: [T_LINE],
+    find: '  if (o.ceilingStop === true) {',
+    to: '  if (o.ceilingStop === true && o.linePct < 0) { /* MUTANT */',
+    why: 'The same, in the note itself.',
   },
 
   /* ── G: the gate ── */
