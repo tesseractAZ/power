@@ -91,13 +91,15 @@ function maxYmd(a: string, b: string): string { return a >= b ? a : b; }
  *  (the line moves the planned buy and the planner's own need together), cushion_breached
  *  the pool at the close against that line. A pool held at ⌈line⌉ reads at or above the
  *  line. v1.200.0 — so does a line above the 50% reserve envelope, which the 50% write cannot hold: such a
- *  charge plan is CARRIED by the night force-charge, which runs to the window close in line mode
- *  (cushion_line_force_charge_pct records its ask), or DISCLOSED (cushion_shortfall = 1 with
- *  cushion_envelope_shortfall = 1: advisory mode, the backup leg, a line within 10 points of full), and a
- *  disclosed row is exempt like any other. v1.200.0 also kept 3: no scored column's formula or sign
+ *  charge plan ARMS the night force-charge, which runs to the window close in line mode
+ *  (cushion_line_force_charge_pct records its ask), and is CARRIED, or DISCLOSED (cushion_shortfall = 1 with
+ *  cushion_envelope_shortfall = 1: advisory mode, the backup leg (nothing armed); (A5) a line within 10 points of
+ *  full or a walk closing under the line (armed: both columns set)), and a disclosed row is exempt like any other —
+ *  except an ARMED row whose force-charge never switched on (force_charge_on_at_ms NULL) and that closed under its line
+ *  (capped at a full pool): a strike (armedNeverRanUnder below). v1.200.0 also kept 3: no scored column's formula or sign
  *  moved — buy_err_kwh (the buy is unchanged), plan_traj_floor_breached (the SIZED trough against the line,
  *  never capped), cushion_breached (the close against the line), cushion_shortfall (still "the plan
- *  disclosed it cannot hold its line", now with a second cause). A CARRIED night that closes under its
+ *  disclosed it cannot hold its line", now with more causes). A CARRIED night that closes under its
  *  line — a run-time refusal (the ceiling refused, Charge Now already on, the grid unknown, vitals red),
  *  an ON that never took, or a pack slower than the start was timed for — remains a STRIKE, fail-closed;
  *  `lineForceChargeStrikes` counts them so they read apart from the planner's. (v1.194.0 — the rule stated
@@ -522,17 +524,32 @@ export function computeNightChargeReadiness(
     const derived = realizedCushionBreach(r);
     return derived == null ? truthy(r.cushion_breached) : derived === 1;
   };
+  // v1.200.0 (A5, M3) — an ARMED line the plan disclosed (cushion_line_force_charge_pct set beside cushion_shortfall:
+  // 'nearFull', 'closeUnder') whose force-charge never switched on, closing under its line capped at a full pool: a
+  // run-time fault (a refused ceiling, Charge Now already on, the grid unknown, vitals red, an ON that never went), not
+  // the physics the plan disclosed — a strike, fail-closed. With no close reading, the realized verdict as for any row
+  // (the lowest pool after the close where it holds, else the stored flag). The owner's cancel after the apply is not
+  // told apart (the ledger records no cancel: actuation_reverted_at_ms is every early restore's), so such a night is
+  // struck as a carried one is; a cancel before the apply is not actuated. An ON sent that never took is not seen here
+  // (no ON-verified column): the ON-failure push is its run-time word. Any other disclosed row stays exempt.
+  const armedNeverRanUnder = (r: NightLedgerRow): boolean => {
+    if (asNum(r.cushion_line_force_charge_pct) == null || !truthy(r.actuated) || r.force_charge_on_at_ms != null) return false;
+    const line = asNum(r.cushion_line_soc_pct);
+    const close = asNum(r.window_close_soc_pct);
+    if (line != null && close != null) return close < Math.min(line, 100) - REALIZED_CLOSE_TOLERANCE_PCT;
+    return realizedBreached(r);
+  };
   const strikeRows = currentAlgo.filter((r) => {
-    if (truthy(r.cushion_shortfall)) return false; // disclosed — physics, not fault
+    if (truthy(r.cushion_shortfall)) return armedNeverRanUnder(r); // disclosed — physics, not fault (A5: unless armed and never ran)
     const trajStrike = trajBreached(r) && trajGradedOnSizingTrough(r);
     const realizedStrike = truthy(r.actuated) && realizedBreached(r);
     return trajStrike || realizedStrike;
   });
   const strikeWindowStart = siteYmd(nowMs - STRIKE_WINDOW_DAYS * DAY_MS);
   const windowStrikes = strikeRows.filter((r) => String(r.plan_date) >= strikeWindowStart);
-  /** v1.200.0 — in-window strikes on rows whose plan carried its line with the night force-charge
-   *  (cushion_line_force_charge_pct set): diagnostic, so a line night's miss reads apart. Already in
-   *  activeStrikes — never exempted. */
+  /** v1.200.0 — in-window strikes on rows whose plan armed its line with the night force-charge
+   *  (cushion_line_force_charge_pct set: carried, or (A5) disclosed and never switched on): diagnostic, so a line
+   *  night's miss reads apart. Already in activeStrikes — never exempted. */
   const lineForceChargeStrikes = windowStrikes.filter((r) => asNum(r.cushion_line_force_charge_pct) != null).length;
   /** v1.186.0 — in-window trajectory flags set aside as graded on the disclosure trough. */
   // v1.186.0 — a stored flag the sizing columns overrule is set aside too, and counted.
