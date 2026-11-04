@@ -60,7 +60,7 @@ import {
   lineForceChargeEnabled, forceChargeModeOf, forceChargeLineArmNote,
   FORCE_CHARGE_MIN_RUN_MS,
   // v1.200.0 (review) — the ON's write-ahead stamp, the line re-ON's budget.
-  forceChargeOnStamp, FORCE_CHARGE_LINE_REON_MAX, armedForceChargeAnnouncement,
+  forceChargeOnStamp, FORCE_CHARGE_LINE_REON_MAX, armedForceChargeAnnouncement, lineReOnTimesWords,
   EMPTY_LINE_DECLINED_PUSH, lineLatestStartMs, FORCE_CHARGE_LINE_DECLINED_PERSIST_MS,
   // v1.200.0 (review 2) — the line at risk after the start, the re-ON's readback check, the night's observations, a
   // line-ask night's texts whatever its mode, and the declined-start push across restarts.
@@ -226,6 +226,8 @@ import {
   chargeIsWindowBound,
   // R2 — the leg a plan sizes (every live plan is the overnight cost leg).
   OVERNIGHT_WINDOW_SPEC,
+  // v1.200.0 (A5) — what an armed line night's own walk cannot hold, for the 21:30 line.
+  lineNotHeldOf,
   type NightChargePlan,
   type NightChargeInputDeps,
   type NightForecastHour,
@@ -6069,18 +6071,21 @@ function gridInputCapKwFromEnv(): number | null {
 }
 
 /** v1.166.0 — tonight's force-charge decision, stated on the 21:30 ARMED line. v1.200.0 — a LINE night
- *  (forceChargeModeOf on the armed record and the gates now) says so, with its timed start. */
+ *  (forceChargeModeOf on the armed record and the gates now) says so, with its timed start; (A5) and, where the plan's
+ *  own walk cannot hold the line (lineNotHeldOf), "Line NOT held". */
 function forceChargeArmNote(armed: NightActuationState, plan: NightChargePlan | null): string {
   const mode = forceChargeModeOf(armed, forceChargeGatesOn());
   if (mode?.kind === 'line' && armed.windowEndMs != null) {
     const endMs = writeWindowEndMs(armed)!;
     const startMs = plan?.expectedForceChargeStartMs;
+    const notHeld = lineNotHeldOf(plan);
     return forceChargeLineArmNote({
       linePct: armed.forceChargeLinePct ?? mode.askPct, startTargetPct: mode.startTargetPct, panelCeilingPct: mode.panelCeilingPct,
       expectedStartText: startMs != null ? fmtSiteClock(startMs) : null,
       timedByText: fmtSiteClock(endMs - FORCE_CHARGE_MIN_RUN_MS),
       // v1.200.0 (review 2) — a walk that reaches the panel ceiling: no "as backstop", the re-ON named.
       ceilingStop: plan?.expectedLineCeilingStop != null,
+      notHeld: notHeld != null ? { kind: notHeld, closePct: plan?.expectedWriteLevelPct ?? null } : null,
     });
   }
   if (!forceChargeOn()) return 'Force-charge: off (disabled by options).';
@@ -6333,8 +6338,9 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     // readback like an accepted one, re-issued once, then warned about.
     const onLineMode = onMode === 'line' ? forceChargeModeOf(state, { cost: forceChargeOn(legRoleOf(state)), line: true }) : null;
     const onLine = onLineMode?.kind === 'line'
-      // v1.200.0 — a LINE night: on to the window close for the outage line, no software stop.
-      ? `night-charge: FORCE-CHARGE ON for ${state.day} — ${results.join(', ')}; for the ${state.forceChargeLinePct ?? onLineMode.askPct}% outage line: timed to reach ~${onLineMode.startTargetPct}% ${Math.round(FORCE_CHARGE_MIN_RUN_MS / 60_000)} min before the window close (${new Date(state.windowEndMs!).toISOString()}), ${rateNote}, and ON until the close (no software stop), with the panel's ${onLineMode.panelCeilingPct}% ceiling as the backstop. Also OFF on cancel, revert, grid loss or disable. Verifying ON by readback${rejected > 0 ? ` (${rejected} write(s) REJECTED — re-issued once if the slot does not read ON within ${Math.round(FORCE_CHARGE_ON_VERIFY_AFTER_MS / 60_000)} min)` : ''}.`
+      // v1.200.0 — a LINE night: on to the window close for the outage line, no software stop. (A5, L3) The panel's own
+      // OFF at its ceiling is a stop, not a backstop: the line ARMED says the walk reaches it, and the tick re-ONs after it.
+      ? `night-charge: FORCE-CHARGE ON for ${state.day} — ${results.join(', ')}; for the ${state.forceChargeLinePct ?? onLineMode.askPct}% outage line: timed to reach ~${onLineMode.startTargetPct}% ${Math.round(FORCE_CHARGE_MIN_RUN_MS / 60_000)} min before the window close (${new Date(state.windowEndMs!).toISOString()}), ${rateNote}, and ON until the close (no software stop) unless the panel switches it off at its ${onLineMode.panelCeilingPct}% ceiling (switched back on under ${onLineMode.startTargetPct}% before the close, at most ${lineReOnTimesWords(FORCE_CHARGE_LINE_REON_MAX)}). Also OFF on cancel, revert, grid loss or disable. Verifying ON by readback${rejected > 0 ? ` (${rejected} write(s) REJECTED — re-issued once if the slot does not read ON within ${Math.round(FORCE_CHARGE_ON_VERIFY_AFTER_MS / 60_000)} min)` : ''}.`
       : `night-charge: FORCE-CHARGE ON for ${state.day} — ${results.join(', ')}; just in time to reach ${state.forceChargeCeilingPct}% by the window close (${new Date(state.windowEndMs!).toISOString()}), ${rateNote} — stops at the target, with the panel's ${desiredForceChargeCeilingPct(state.forceChargeCeilingPct!)}% ceiling as the backstop. Also OFF on window end, cancel, revert, grid loss or disable. Verifying ON by readback${rejected > 0 ? ` (${rejected} write(s) REJECTED — re-issued once if the slot does not read ON within ${Math.round(FORCE_CHARGE_ON_VERIFY_AFTER_MS / 60_000)} min)` : ''}.`;
     if (rejected > 0) app.log.warn(onLine); else app.log.info(onLine);
     return;

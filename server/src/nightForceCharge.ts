@@ -89,6 +89,12 @@
  * 70-90%, and 138 min on the year's lines with a 20 kWh EV predicted (the start comes earlier). The off
  * switches: NIGHT_CHARGE_MODE advisory, the per-night cancel, or a cushion whose line is at or under 50%.
  * The attended test above is recommended before a resilience plant runs line nights.
+ * (A5) A line within 10 points of a full pool is armed too (the plan discloses it, 'nearFull'): it runs as a 90% line
+ * does, Charge Now reading ON 182 min on average on the near-full lines, 224 with a 20 kWh EV predicted, 335 with a 7 kW
+ * one all window (emulated, lineForceChargeClose.test.ts T18; v1.199.1 armed none on a resilience night). The panel's
+ * own stop at a 100% ceiling has not been observed (only at 80 and 90%): a slot that kept reading ON there would close
+ * every one of the 120 EV-90 near-full nights under the line (all pushed). Reachable only with
+ * ARB_OUTAGE_CUSHION_HOURS at 14 h or more on the fixture year; a house with a heavier islanded load reaches it sooner.
  *
  * ★★★ v1.200.0 — THE OUTAGE LINE ABOVE THE RESERVE ENVELOPE (forceChargeModeOf). A charge plan whose
  * islanded-outage line, asked to the whole percent above it (⌈L⌉), is above the 50% the panel accepts as a
@@ -97,7 +103,8 @@
  * composes the mode from the LIVE gates — the cost force-charge (forceChargeEnabled) and the line
  * (lineForceChargeEnabled: any write mode) — never from one stored target:
  *  - 'cost' — today's force-charge exactly: no line, or a cost stop already at ⌈L⌉ + 2H or above;
- *  - 'line' — the start is timed to reach max(target, ⌈L⌉ + H) at the close − FORCE_CHARGE_MIN_RUN_MS
+ *  - 'line' — the start is timed to reach max(target, ⌈L⌉ + H) — (A5) 95 under a 100 ceiling where ⌈L⌉ + 2H > 100,
+ *    as a 90% line — at the close − FORCE_CHARGE_MIN_RUN_MS
  *    (forceChargeLineStartAtMs), so even a one-point lift starts outside the dead zone; there is NO
  *    software stop — it runs to the window close (or the on-peak guard, grid loss, the gates off, max
  *    run); the panel ceiling is desiredForceChargeCeilingPct(max(target, ⌈L⌉ + 2H)). While Charge Now is ON
@@ -145,6 +152,11 @@
  *    (review 7) The count is to the earliest tick the retry can come (FORCE_CHARGE_TICK_LATE_TOL_MS): the ticks only run
  *    late, which brought a retry on the 15th tick after a 'reOnRefused' push for a stamp a few ms after its tick.
  *    PIN_REVIEW6 is unchanged: the plant's ticks do not drift.
+ *    (A5) A NEAR-FULL LINE (⌈L⌉ 91-100: start target 95, ceiling 100) re-ONs, and is pushed, under 95 — under a line of
+ *    96-100. Emulated (T18, the measured latch, 120 nights a cell): 3 / 19 / 41 near-full nights close under at baseline,
+ *    with a 20 kWh EV predicted and with a 7 kW one all window (6 / 34 / 43 floored), and 30 of 30 at 70% of the rate;
+ *    they fall inside the last 20 minutes or are still rising, and the push reaches none of them. The plan discloses
+ *    every near-full night at 21:30; the morning account names the close. Not changed in A5 (a residual, stated).
  * The measured capacity scale never reaches this module: the record carries one whole percent (⌈L⌉), a
  * plan output like the setpoint (runwayBasisContracts.test.ts pin 6).
  *
@@ -456,8 +468,9 @@ export function desiredForceChargeCeilingPct(costMaxSocPct: number): number {
 }
 
 /** v1.200.0 — H, the headroom of the outage-line force-charge: its start is timed to ⌈L⌉ + H at the close
- *  less FORCE_CHARGE_MIN_RUN_MS, and its panel ceiling is at least ⌈L⌉ + 2H. A line rides only where
- *  ⌈L⌉ + 2H ≤ 100 (nightChargeAdvisor.ts discloses the rest). */
+ *  less FORCE_CHARGE_MIN_RUN_MS, and its panel ceiling is at least ⌈L⌉ + 2H. (A5) A line is armed whatever its
+ *  ask: where ⌈L⌉ + 2H > 100 it runs as a 90% line does (start target 100 − H, panel ceiling 100), and the plan
+ *  discloses it (nightChargeAdvisor.ts cushionEnvelopeReason 'nearFull'). */
 export const FORCE_CHARGE_LINE_HEADROOM_PCT = 5;
 
 /** v1.200.0 (review) — the LINE re-ONs a night may spend (lineReOnDue). The panel switches a slot's Charge
@@ -501,7 +514,9 @@ export type ForceChargeMode =
  *  - the line rides when its gate is on and the record carries a line ask;
  *  - LINE mode, unless the cost stop already reaches ⌈L⌉ + 2H: the target is max(cost, ⌈L⌉) (the ask
  *    alone with the cost gate off — never the cost ceiling), the start is timed to max(target, ⌈L⌉ + H),
- *    and the panel ceiling is desiredForceChargeCeilingPct(max(target, ⌈L⌉ + 2H));
+ *    and the panel ceiling is desiredForceChargeCeilingPct(max(target, ⌈L⌉ + 2H)); (A5) a line within 2H of a
+ *    full pool (⌈L⌉ + 2H > 100) starts to 100 − H under a 100 ceiling, as a 90% line does — a start target at or
+ *    above the ceiling would leave the re-ON (lineReOnDue, under the start target) no band to re-ON from;
  *  - else COST mode: today's force-charge exactly;
  *  - null: neither rides.
  * One stored target for both would let a cost ceiling outlive its own kill switch, and lower the
@@ -519,7 +534,9 @@ export function forceChargeModeOf(
   if (lineOk && !(costOk && forceChargeStopPct(c!) >= ask! + 2 * H)) {
     const t = costOk ? Math.max(c!, ask!) : ask!;
     return {
-      kind: 'line', targetPct: t, askPct: ask!, startTargetPct: Math.max(t, ask! + H),
+      // A5 — a line within 2H of a full pool (or above it: ⌈L⌉ is at most 100) runs as a 90% line does: start target
+      // 100 − H, panel ceiling 100. A start target at the ceiling would leave the re-ON nothing to re-ON from.
+      kind: 'line', targetPct: t, askPct: ask!, startTargetPct: ask! + 2 * H > 100 ? 100 - H : Math.max(t, ask! + H),
       panelCeilingPct: desiredForceChargeCeilingPct(Math.max(t, ask! + 2 * H)),
     };
   }
@@ -683,15 +700,22 @@ export function forceChargeLineArmNote(o: {
   /** v1.200.0 (review 2) — the plan's expected walk reaches the panel ceiling (NightChargePlan.expectedLineCeilingStop):
    *  the panel switches it off there, so the ceiling is no backstop and the line names the re-ON. */
   ceilingStop?: boolean;
+  /** v1.200.0 (A5) — what the plan's own walk cannot hold (nightChargeAdvisor.lineNotHeldOf), and its expected close:
+   *  the force-charge still runs as above, and the line says the outage line is not held. null/omitted ⇒ held. */
+  notHeld?: { kind: 'closeUnder' | 'aboveFull' | 'nearFull'; closePct: number | null } | null;
 }): string {
+  const tail = o.notHeld == null ? ''
+    : o.notHeld.kind === 'aboveFull' ? ' Line NOT held: above a full pool.'
+      : o.notHeld.kind === 'nearFull' ? ` Line NOT held: within ${2 * FORCE_CHARGE_LINE_HEADROOM_PCT} points of a full pool.`
+        : ` Line NOT held: ${o.notHeld.closePct != null ? `~${round1(o.notHeld.closePct)}%` : 'under the line'} expected at the close.`;
   const from = o.expectedStartText != null ? `on from ~${o.expectedStartText}` : 'on just in time';
   if (o.ceilingStop === true) {
     return `Force-charge: LINE — tonight's ${round1(o.linePct)}% outage line is above the ${RESERVE_WRITE_MAX_PCT}% reserve: `
       + `${from} (timed to ${round1(o.startTargetPct)}% by ${o.timedByText}); expected to reach the panel's ${o.panelCeilingPct}% ceiling, where the panel `
-      + `switches it off; switched back on under ${round1(o.startTargetPct)}% before the close (at most ${lineReOnTimesWords(FORCE_CHARGE_LINE_REON_MAX)}).`;
+      + `switches it off; switched back on under ${round1(o.startTargetPct)}% before the close (at most ${lineReOnTimesWords(FORCE_CHARGE_LINE_REON_MAX)}).${tail}`;
   }
   return `Force-charge: LINE — tonight's ${round1(o.linePct)}% outage line is above the ${RESERVE_WRITE_MAX_PCT}% reserve: `
-    + `${from} (timed to ${round1(o.startTargetPct)}% by ${o.timedByText}) to the window close; panel ceiling ${o.panelCeilingPct}% as backstop.`;
+    + `${from} (timed to ${round1(o.startTargetPct)}% by ${o.timedByText}) to the window close; panel ceiling ${o.panelCeilingPct}% as backstop.${tail}`;
 }
 
 function round1(n: number): number { return Math.round(n * 10) / 10; }
