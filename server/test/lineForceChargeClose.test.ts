@@ -275,9 +275,10 @@ const KS = [0.9, 1.0, 1.1, 1.25];
  *  'reOnRefused' (a handed-back re-ON whose retry the cutoff refuses). (review 6) `handBacks` — nights with a hand-back;
  *  `lost` — of them, those with neither its retry nor a push though a tick came between the hand-back and the lead;
  *  `lastTick` — those handed back on the last tick before the re-ON's cutoff (the next tick is at or past it and the push's
- *  lead: no retry, no push); `refusedRetried` — a 'reOnRefused' push followed by the retry it says does not come; `personOn` — nights a person's ON took effect; `personStop` — of them, those the panel stopped at its
- *  ceiling after it; `stopStamped` — of those, the panel's stop on the record after the person's ON; `stopNamed` — the morning
- *  account naming the panel's stop as what ended the charge. */
+ *  lead: no retry, no push); `refusedRetried` — a 'reOnRefused' push followed by the retry it says does not come;
+ *  `personOn` — nights a person's ON took effect; `personStop` — of them, those the panel stopped at its ceiling after it;
+ *  `stopStamped` — of those, the panel's stop on the record after the person's ON; `stopNamed` — the morning account naming
+ *  the panel's stop as what ended the charge. */
 function cell(lines: number[], kn: Partial<Knobs>, ks: number[] = KS, variant: Variant = 'real'): {
   under: number; n: number; worst: number; meanOn: number; reOns: number; pushed: number; underPushed: number; latePushed: number;
   underPushedEarly: number; shapes: number; heldPushes: number; refusedPushes: number;
