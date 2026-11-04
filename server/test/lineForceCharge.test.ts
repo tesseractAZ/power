@@ -29,7 +29,8 @@ import { MEASURED_SCALE } from './fixtures/measuredCushionLineFigures.js';
 import { goldenPlan } from './fixtures/overnightTextCases.js';
 import * as cardText from '../../web/src/cards/nightChargeText.js';
 import { chargeLegStep } from '../src/physics/chargeLeg.js';
-import { costLegSizing, shadowCycleConfig } from '../src/middayShadow.js';
+import { costLegSizing, shadowCycleConfig, summariseLeg, middayShadowAnnounceInput } from '../src/middayShadow.js';
+import { buildMiddayPlanMessage as middayPushOf } from '../src/chargeText.js';
 import { buildApsREvModel, rateAt } from '../src/tariff.js';
 import { pvSurplusFromBand } from '../src/chargeTaper.js';
 
@@ -1632,6 +1633,19 @@ test('★★ T19 the mid-day push and its shadow record: a leg with a line ask i
   const ann = ms.middayShadowAnnounceInput(back, buildApsREvModel())!;
   assert.equal((ann.cost as unknown as Record<string, unknown>).lineAskPct, 69);
   assert.equal((ann.cost as unknown as Record<string, unknown>).lineNotHeld, 'closeUnder');
+  // (A5 final 1) Charge Now rides a leg the line force-charge is armed on whatever its stated level, as armFromPlan's
+  // lineRides does: stated at the 50% reserve (H1's floor, or no start expected), it is still switched on just in time.
+  // With no ask, the cost rule as before: named only where the level clears the reserve.
+  const fcOf = (cost: Record<string, unknown>) => ms.middayShadowAnnounceInput({ ...back, cost: cost as never }, buildApsREvModel())!.cost.forceCharge;
+  const noAsk: Record<string, unknown> = { ...back.cost };
+  delete noAsk.lineAskPct;
+  delete noAsk.lineNotHeld;
+  assert.equal(fcOf({ ...back.cost, levelPct: 50, reservePct: 50 }), true, 'an armed leg stated at the reserve');
+  assert.equal(fcOf({ ...back.cost, levelPct: 57.3, reservePct: 50 }), true);
+  assert.equal(fcOf({ ...noAsk, levelPct: 50, reservePct: 50 }), false, 'no ask, at the reserve: no Charge Now');
+  assert.equal(fcOf({ ...noAsk, levelPct: 57.3, reservePct: 50 }), true, 'no ask, above the reserve: Charge Now');
+  const at50 = buildMiddayPlanMessage(ms.middayShadowAnnounceInput({ ...back, cost: { ...back.cost!, levelPct: 50, reservePct: 50 } }, buildApsREvModel())!).body;
+  assert.ok(at50.includes(' SUPERVISED: at 10:00 AM the backup reserve is held at 50% and Charge Now switches on just in time; both are restored at 3:00 PM'), at50);
 });
 
 test('★★ T22 (H1) the spoken notice of a window-bound line night: its level is the window\'s reach, so never "which ends before it gets there" — except where that reach is under the 50% reserve the level is floored at', () => {
@@ -1687,8 +1701,16 @@ test('★ T19 the source: the line-mode ON log names the panel\'s own stop and t
 const MID_H = 3_600_000;
 const midPhx = (mo: number, d: number, h: number, mi = 0): number => Date.UTC(2026, mo - 1, d, h + 7, mi);
 const MID_MODEL = buildApsREvModel();
-const MID_SIZING = costLegSizing(MID_MODEL, { role: 'cost', kind: 'super_off_peak', startMs: midPhx(10, 15, 10), endMs: midPhx(10, 15, 15) },
-  shadowCycleConfig('cost', 90), { chgMaxSocPcts: [80, 80], backupHold: null });
+const MID_LEG = { role: 'cost', kind: 'super_off_peak', startMs: midPhx(10, 15, 10), endMs: midPhx(10, 15, 15) } as const;
+const MID_SIZING = costLegSizing(MID_MODEL, MID_LEG, shadowCycleConfig('cost', 90), { chgMaxSocPcts: [80, 80], backupHold: null });
+/** (A5 final 1) The 21:30 push the shadow would send for a mid-day leg (summariseLeg → middayShadowAnnounceInput →
+ *  buildMiddayPlanMessage), supervised and armed. */
+const middayLegPush = (p: LinePlan): string => middayPushOf(middayShadowAnnounceInput({
+  version: 1, day: '2026-10-14', computedAtMs: midPhx(10, 14, 21, 30), why: 'midday', mode: 'supervised', backup: null,
+  cost: summariseLeg(MID_LEG as never, { plan: p, windowPvP50Kwh: null, windowLoadP50Kwh: null } as never, { wouldArm: true, disposition: 'would arm' }),
+  refresh: null, note: null,
+} as never, MID_MODEL)!).body;
+const CHARGE_NOW_RIDES = ' and Charge Now switches on just in time; both are restored at ';
 const MID_P50_W = [0, 94, 608, 2647, 4725, 6276, 6635, 6695, 6243, 5274, 3938, 2057, 573, 21];
 const MID_LOAD_W = [2188, 1864, 1646, 2068, 1851, 2158, 2202, 2927, 3228, 4020, 3435, 3738, 3205, 2978];
 const middayLegPlan = (o: { floor: number; capKw: number; socPct: number; pvScale: number; h: number; basis: 'np' | 'm' }): LinePlan => {
@@ -1761,16 +1783,18 @@ test('★★★ T23 the mid-day re-entry hold never holds a leg the line force-c
  *  most carried with the caps note (the window binds: the sizing falls short); none held over its line. The same grid on
  *  b1fd7613 held 830 / 847 armed-qualifying legs, 61 / 61 of them one hour after the line was armed. As on the year, the
  *  stated close and the expected buy are not monotone in the line (a cost target the window cannot reach gives way to the
- *  line walk's capped close): `eFalls` / `buyFalls` count the steps they fall, pinned, not asserted. */
-const PIN_T23: Record<'np' | 'm', { plans: number; armed: number; carried: number; nearFull: number; lineMode: number; reentryNotes: number; kinds: Record<string, number>; eFalls: number; buyFalls: number }> = {
-  np: { plans: 3400, armed: 2808, carried: 1836, nearFull: 972, lineMode: 2412, reentryNotes: 830, kinds: { closeUnder: 1598, aboveFull: 468 }, eFalls: 131, buyFalls: 71 },
-  m: { plans: 3400, armed: 2916, carried: 1764, nearFull: 1152, lineMode: 2460, reentryNotes: 847, kinds: { closeUnder: 1495, aboveFull: 648 }, eFalls: 131, buyFalls: 71 },
+ *  line walk's capped close): `eFalls` / `buyFalls` count the steps they fall, pinned, not asserted. (A5 final 1) Every armed
+ *  leg (`armedPushes`: armFromPlan's lineRides, = `armed`) is pushed with Charge Now; 5d7c7c75 left it out on 136 / 144 of them
+ *  (stated at the 50% reserve). */
+const PIN_T23: Record<'np' | 'm', { plans: number; armed: number; carried: number; nearFull: number; lineMode: number; reentryNotes: number; kinds: Record<string, number>; eFalls: number; buyFalls: number; armedPushes: number }> = {
+  np: { plans: 3400, armed: 2808, carried: 1836, nearFull: 972, lineMode: 2412, reentryNotes: 830, kinds: { closeUnder: 1598, aboveFull: 468 }, eFalls: 131, buyFalls: 71, armedPushes: 2808 },
+  m: { plans: 3400, armed: 2916, carried: 1764, nearFull: 1152, lineMode: 2460, reentryNotes: 847, kinds: { closeUnder: 1495, aboveFull: 648 }, eFalls: 131, buyFalls: 71, armedPushes: 2916 },
 };
 
 for (const basis of ['np', 'm'] as const) {
-  test(`★★★ T23 (${basis === 'np' ? 'nameplate' : '×0.944'}) a mid-day leg grid at 4-20 h (floors 26-40, 4.5-10 kW, two pools, P50 sun ×0, 0.1, 0.3, 1): as the cushion rises the armed target and ceiling never fall, an armed line never disarms, no leg is held over a line above 50, a qualifying leg is armed or disclosed, no carried leg closes under its line undisclosed`, () => {
-    const s = { m1: 0, m2: 0, m3: 0, m4: 0, undisclosedUnder: 0, heldOverLine: 0, carrierRest: 0 };
-    const pin = { plans: 0, armed: 0, carried: 0, nearFull: 0, lineMode: 0, reentryNotes: 0, kinds: {} as Record<string, number>, eFalls: 0, buyFalls: 0 };
+  test(`★★★ T23 (${basis === 'np' ? 'nameplate' : '×0.944'}) a mid-day leg grid at 4-20 h (floors 26-40, 4.5-10 kW, two pools, P50 sun ×0, 0.1, 0.3, 1): as the cushion rises the armed target and ceiling never fall, an armed line never disarms, no leg is held over a line above 50, a qualifying leg is armed or disclosed, no carried leg closes under its line undisclosed, an armed leg's push names Charge Now`, () => {
+    const s = { m1: 0, m2: 0, m3: 0, m4: 0, undisclosedUnder: 0, heldOverLine: 0, carrierRest: 0, pushNoChargeNow: 0 };
+    const pin = { plans: 0, armed: 0, carried: 0, nearFull: 0, lineMode: 0, reentryNotes: 0, kinds: {} as Record<string, number>, eFalls: 0, buyFalls: 0, armedPushes: 0 };
     const ex: string[] = [];
     const gates = { cost: true, line: true };
     for (const floor of [26, 30, 31, 35, 40]) for (const capKw of [4.5, 5, 6, 7, 10]) for (const pvScale of [0, 0.1, 0.3, 1]) for (const socPct of [30, 45]) {
@@ -1795,6 +1819,13 @@ for (const basis of ['np', 'm'] as const) {
         if (r.armed && p.cushionShortfall !== true && lineL != null && E != null && E < lineL - 0.05 - 1e-9) { s.undisclosedUnder += 1; note(`carried ~${E}% under ${lineL}%`); }
         if (lineL != null && p.chargeTonight && p.cushionBasis === 'islanded-outage' && Math.min(100, Math.ceil(lineL - 1e-9)) > 50
           && (p.requiredExtraKwh ?? 0) > 0 && !r.armed && p.cushionShortfallCause == null) { s.carrierRest += 1; note('qualifying, neither armed nor disclosed'); }
+        // (A5 final 1) A leg the actuator arms the line force-charge on (armFromPlan's lineRides, both gates on) is pushed
+        // with Charge Now, also where its stated level is the 50% reserve (H1's floor, or no start expected).
+        if (act.armFromPlan(act.emptyActuationState(), '2026-10-14', p as never, midPhx(10, 14, 21, 30), floor, true, null, true)?.forceChargeLineAskPct != null) {
+          pin.armedPushes += 1;
+          const push = middayLegPush(p);
+          if (!push.includes(CHARGE_NOW_RIDES)) { s.pushNoChargeNow += 1; note(`armed, pushed without Charge Now (level ~${p.expectedWriteLevelPct}%): ${push}`); }
+        }
         if (prev != null && !(prev.line != null && lineL != null && lineL < prev.line - 1e-9)) {
           const fell = (a: number | null, b: number | null) => a != null && (b == null || b < a - 1e-9);
           if (fell(prev.target, r.target)) { s.m1 += 1; note(`target ${prev.target} → ${r.target}`); }
@@ -1807,7 +1838,7 @@ for (const basis of ['np', 'm'] as const) {
         prev = r;
       }
     }
-    assert.deepEqual(s, { m1: 0, m2: 0, m3: 0, m4: 0, undisclosedUnder: 0, heldOverLine: 0, carrierRest: 0 }, ex.join('\n'));
+    assert.deepEqual(s, { m1: 0, m2: 0, m3: 0, m4: 0, undisclosedUnder: 0, heldOverLine: 0, carrierRest: 0, pushNoChargeNow: 0 }, ex.join('\n'));
     assert.deepEqual(pin, PIN_T23[basis]);
   });
 }
