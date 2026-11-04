@@ -1387,7 +1387,9 @@ export function expectedBuyFromPlan(o: {
  * the convention of every window-bound night (the pool may close lower: 206 / 224 bound line plans of the year at
  * 4-20 h reach less than 50%, every one disclosed). A line stated at 50% (its raw value a hair above it, so asked at 51)
  * there reads as held: 2026-11-25 21:30 and 13:00 on nameplate at 11 h (the window reaches ~28% and ~30%), both carried
- * with the caps note — their sizing fell short — so no line-specific NOTE is added; the gate grades the close. The
+ * with the caps note — their sizing fell short — so no line-specific NOTE is added. The caps note discloses them
+ * (cushion_shortfall 1): the gate strikes one only where its armed force-charge never switched on and it closed under
+ * its line (nightChargeGate armedNeverRanUnder); a close under the line after it ran is exempt, as on any disclosed night. The
  * panel's stop (ceilingStop) is stated only where that reach clears the panel
  * ceiling. On a walk that is not bound the cap cannot bind (its close is the open plus a lift within the deliverable
  * plus PV, less the drains).
