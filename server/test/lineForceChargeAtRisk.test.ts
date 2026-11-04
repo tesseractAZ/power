@@ -681,8 +681,8 @@ test('★★★ W1 (review 7) the hand-back hold counts to the EARLIEST tick the
   const SEC = 1000;
   const cutoff = WIN_END - nfc.FORCE_CHARGE_ON_RETRY_CUTOFF_MS;
   assert.deepEqual(afterHandBack(WIN_END - 35 * M - 30 * SEC, 5, 1), ['+15 lineReOn']);
-  // On the cadence the 16th tick is the retry, past the cutoff: none. The push waits for the 15th tick — the last the retry
-  // could have come on — and goes there, 20m30s before the close: still before the lead.
+  // On the cadence the retry would be the 16th tick, past the cutoff: none. The push waits for the 15th tick — the last the
+  // retry could have come on — and goes there, 20m30s before the close: still before the lead.
   assert.deepEqual(afterHandBack(WIN_END - 35 * M - 30 * SEC, 5, 0), ['+15 push reOnRefused']);
   // A stamp later than the tolerance (FORCE_CHARGE_TICK_LATE_TOL_MS) after its tick: no drift brings the 15th tick to it, so
   // the push goes on the first tick (as review 6).
