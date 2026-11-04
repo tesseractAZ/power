@@ -160,17 +160,20 @@ second panel gets its own charge-level ladder and runway, and nothing else.
   that starts as the charge window closes, before you can act. When the reserve plus that cushion
   comes to more than 50 % of the pool, the panel cannot hold it as a reserve. In `supervised` or
   `auto` mode the night's force-charge (the EcoFlow app's Charge Now) then carries the pool to the
-  line and stays on until the window closes, on a resilience setup as well as a cost one. In an
-  emulation over the year's test nights (not a measurement) a battery slot reads Charge Now on for
-  about 74 minutes on average, about two and a half hours for a line of 70-90 %, and longer on a
-  night with a predicted EV, when the force-charge starts earlier. The panel switches a slot off
-  by itself at its force-charge ceiling; if the pool then falls back under the line, the add-on
-  switches it on again. How a battery slot with Charge Now on behaves when the grid fails has not
-  been tested on any plant. Before a home with a line above 50 % runs in a write mode, test it
-  once while someone is present: switch Charge Now on for one slot in the EcoFlow app, open the
-  main breaker, and check that the backed-up circuits stay powered and the pool discharges.
-  `NIGHT_CHARGE_MODE` `advisory`, the per-night cancel, or a cushion whose line is at or under
-  50 % keeps Charge Now off on those nights.
+  line and the add-on leaves it on until the window closes, on a resilience setup as well as a cost
+  one. In an emulation over the year's test nights (not a measurement) a battery slot reads Charge
+  Now on for about 74 minutes on average, about two and a half hours for a line of 70-90 %, and
+  longer on a night with a predicted EV, when the force-charge starts earlier. The panel switches a
+  slot off by itself at its force-charge ceiling; if the pool then falls back under its start target
+  (at least 5 points above the line) before the close, the add-on switches it on again, at most
+  twice a night. If the line is still at risk and the add-on cannot act itself, a push names the
+  slots to switch Charge Now on for in the EcoFlow app, at least 20 minutes before the close. How a
+  battery slot with Charge Now on behaves when the grid fails has not been tested on any plant.
+  Before a home with a line above 50 % runs in a write mode, test it once while someone is present:
+  switch Charge Now on for one slot in the EcoFlow app, open the main breaker, and check that the
+  backed-up circuits stay powered and the pool discharges. `NIGHT_CHARGE_MODE` `advisory`, the
+  per-night cancel, or a cushion whose line is at or under 50 % keeps Charge Now off on those
+  nights.
 
 ## Runway
 

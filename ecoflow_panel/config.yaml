@@ -142,7 +142,10 @@ options:
   # afterwards) and switches force charge ON then OFF per Core slot. A night
   # whose outage line (reserve plus cushion) is above the 50% reserve is
   # force-charged to it in supervised or auto mode, whatever ARB_OBJECTIVE says,
-  # and stays ON until the window closes; ARB_COST_MAX_SOC_PCT 50 does not stop it.
+  # and left ON until the window closes (the panel switches it off at its own
+  # ceiling; the add-on switches it back on, at most twice, if the pool falls
+  # back under its start target, at least the line + 5); ARB_COST_MAX_SOC_PCT 50
+  # does not stop it.
   NIGHT_CHARGE_ADVISOR_ENABLED: true
   NIGHT_CHARGE_MODE: advisory
   ARB_OUTAGE_CUSHION_PCT: 15
