@@ -99,10 +99,13 @@ function maxYmd(a: string, b: string): string { return a >= b ? a : b; }
  *  (capped at a full pool): a strike (armedNeverRanUnder below). v1.200.0 also kept 3: no scored column's formula or sign
  *  moved — buy_err_kwh (the buy is unchanged), plan_traj_floor_breached (the SIZED trough against the line,
  *  never capped), cushion_breached (the close against the line), cushion_shortfall (still "the plan
- *  disclosed it cannot hold its line", now with more causes). A CARRIED night that closes under its
- *  line — a run-time refusal (the ceiling refused, Charge Now already on, the grid unknown, vitals red),
- *  an ON that never took, or a pack slower than the start was timed for — remains a STRIKE, fail-closed;
- *  `lineForceChargeStrikes` counts them so they read apart from the planner's. (v1.194.0 — the rule stated
+ *  disclosed it cannot hold its line", now with more causes). A CARRIED night whose sizing held its line
+ *  (cushion_shortfall 0) that closes under it — a run-time refusal (the ceiling refused, Charge Now already
+ *  on, the grid unknown, vitals red), an ON that never took, or a pack slower than the start was timed
+ *  for — remains a STRIKE, fail-closed; a carried night whose sizing fell short (cushion_shortfall 1, the
+ *  caps note, cushion_envelope_shortfall 0) is exempt as any disclosed row is, unless its armed force-charge
+ *  never switched on (armedNeverRanUnder). `lineForceChargeStrikes` counts the strikes with an ask so they
+ *  read apart from the planner's. (v1.194.0 — the rule stated
  *  as practised; it read "bumped on ANY planner physics/algorithm change", which no change since v1.105.0
  *  followed.)
  *
@@ -615,7 +618,10 @@ export function computeNightChargeReadiness(
     // a policy decision, and until it is made, fail-closed with an honest
     // label is the correct posture.
     underBuyMeasurable: actuatedNights > 0 && underBuyPool.length > 0 ? 1 : 0,
-    strikesMeasurable: currentAlgo.length > 0 && currentAlgo.some((r) => !truthy(r.cushion_shortfall)) ? 1 : 0,
+    // v1.200.0 (A5) — a disclosed row the strike rule still grades counts too: an ARMED, actuated one
+    // (armedNeverRanUnder), so a real 0 beside armed line nights does not read as "cannot count".
+    strikesMeasurable: currentAlgo.length > 0 && currentAlgo.some((r) => !truthy(r.cushion_shortfall)
+      || (asNum(r.cushion_line_force_charge_pct) != null && truthy(r.actuated))) ? 1 : 0,
     trajStrikesSetAside, // v1.186.0 — see the strike rule
     realizedStrikesSetAside, // v1.196.0 — see realizedCushionBreach
     lineForceChargeStrikes, // v1.200.0 — see the strike rule
