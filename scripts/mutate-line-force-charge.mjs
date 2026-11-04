@@ -68,6 +68,7 @@
  * exactly at L − 0.05 holds, in the planner, the scorer and the card (A5-v(c), (d), A5-xxix(b)); strikesMeasurable counts an armed, actuated
  * disclosed row (A5-xxiii(c), (d)); the mid-day push keeps the backup leg's sentence beside an armed leg (A5-xxxii); no
  * not-held or caps sentence on a held armed night or leg (A5-xxxiii); the H1 reach's PV term not over-counted (A5-xxxiv).
+ * (A5 final 1) The mid-day push names Charge Now on an armed leg whatever its stated level, and keeps the cost rule (A5-xxxv).
  *
  *   node scripts/mutate-line-force-charge.mjs [--only <id prefix>]
  *
@@ -1882,6 +1883,20 @@ const MUTANTS = [
     find: '    kwh += chargeLegStep((p50PvW(h) / 1000) * dtH, legEff);',
     to: '    kwh += 2 * chargeLegStep((p50PvW(h) / 1000) * dtH, legEff); /* MUTANT */',
     why: 'On a sunny bound leg the cap never binds: the walk\'s close and the panel\'s stop are stated where the window cannot reach them.',
+  },
+  {
+    id: 'A5-xxxv(a). ★★ the mid-day push leaves out Charge Now on an armed leg stated at the reserve (the line term dropped)',
+    file: MSH, tests: [T_LINE],
+    find: '  const forceCharge = c.lineAskPct != null || (c.levelPct != null && c.reservePct != null && c.levelPct > c.reservePct + 0.05);',
+    to: '  const forceCharge = c.levelPct != null && c.reservePct != null && c.levelPct > c.reservePct + 0.05; /* MUTANT */',
+    why: 'A line leg H1 floors at the 50% reserve is armed and Charge Now switched on at the open, and the push says only that the reserve is held.',
+  },
+  {
+    id: 'A5-xxxv(b). ★ the mid-day push names Charge Now by the line ask alone (the cost rule dropped)',
+    file: MSH, tests: [T_LINE],
+    find: '  const forceCharge = c.lineAskPct != null || (c.levelPct != null && c.reservePct != null && c.levelPct > c.reservePct + 0.05);',
+    to: '  const forceCharge = c.lineAskPct != null; /* MUTANT */',
+    why: 'A cost leg charging to ~90% with Charge Now just in time is pushed as a reserve hold alone.',
   },
 
   /* ── R: the ledger ── */
