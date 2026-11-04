@@ -115,15 +115,18 @@
  *    11.52 kW EV (EV_MAX_LOAD_W's default) arriving 90 min before the close closes 73 of 200 year nights
  *    under the line; a 7 kW one from 120 min, 5; an ON 5 min late with a 7 kW EV from 90 min, 1. Slow
  *    packs at lines of 70-90% (8 / 35 at 70% of the rate). A cost-dominant night (cost mode, its own
- *    software stop) with a late EV at a line of 70-90% (5 to 15 of 140).
+ *    software stop) with a late EV at a line of 70-90% (5 to 15 of 140); the line-at-risk push ends at that
+ *    stop (an OFF of ours), so it reaches 30 of those 89 emulated nights, none after the stop.
  *    THE ON-READING LATCH — UNMEASURED on this plant (no per-slot readback has shown a slot that stops
  *    importing at its ceiling and keeps reading ON; 2026-09-18's slot state is the add-on's record): no
  *    re-ON keys on a slot reading ON, so per predicted-EV cell 0-65 of 200 year nights close under the
  *    line (0-72 with floored readings) and 52-140 of 140 at lines of 70-90% (lineForceChargeClose.test.ts
  *    PIN_ON_LATCH). No write rests on that shape. The real-time cover is the line-at-risk push
  *    (lineAtRiskPushDue): once a night, at least FORCE_CHARGE_LINE_AT_RISK_LEAD_MS before the close, it
- *    reaches every one of those nights (and, on the measured latch, also warns on 202 of the 3,740
- *    predicted-EV nights that still hold); the shape, when seen, is logged once a night (lineOnReadingShape).
+ *    reaches every one of those nights, after the latch on all but one (and, on the measured latch, also
+ *    warns on 2 of the 3,740 predicted-EV nights that still hold — 202 before review 3 judged the trend only
+ *    on readings taken after the last ON of ours took effect, a flat pool only at ⌈L⌉: lineTrendReference);
+ *    the shape, when seen, is logged once a night (lineOnReadingShape), never on the measured latch.
  *    It also reaches most late unpredicted loads (69 of the 73 year nights under with the 11.52 kW EV from
  *    90 min); a load that only slows the charge leaves the pool rising and is not pushed.
  * The measured capacity scale never reaches this module: the record carries one whole percent (⌈L⌉), a

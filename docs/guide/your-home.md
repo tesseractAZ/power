@@ -166,8 +166,10 @@ second panel gets its own charge-level ladder and runway, and nothing else.
   longer on a night with a predicted EV, when the force-charge starts earlier. The panel switches a
   slot off by itself at its force-charge ceiling; if the pool then falls back under its start target
   (at least 5 points above the line) before the close, the add-on switches it on again, at most
-  twice a night. If the line is still at risk and the add-on cannot act itself, a push names the
-  slots to switch Charge Now on for in the EcoFlow app, at least 20 minutes before the close. How a
+  twice a night. If the pool keeps falling toward the line, or sits flat at it, and the add-on cannot
+  act itself, a push names the slots to switch Charge Now on for in the EcoFlow app, at least 20
+  minutes before the close. A load that only slows the charge is not pushed, and on a night whose
+  cost force-charge already stops above the line, nothing is pushed after that stop. How a
   battery slot with Charge Now on behaves when the grid fails has not been tested on any plant.
   Before a home with a line above 50 % runs in a write mode, test it once while someone is present:
   switch Charge Now on for one slot in the EcoFlow app, open the main breaker, and check that the
