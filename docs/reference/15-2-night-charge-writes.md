@@ -454,10 +454,10 @@ arrival = 66%). None did on nameplate (`lineForceCharge.test.ts` T4).
   `lineNightObservations` stamps first, with the panel's own stop, anew after a re-ON or a slot seen ON; `lineTrendReference`
   takes only a reading 15 minutes or more after the last ON or re-ON, past one checked not applied, or a
   slot seen ON again that no ON of ours explains, `forceChargeLineOnSeenAtMs`), and no re-ON due nor a
-  rate-limited one's retry due on a tick before the cutoff (else `reOnRefused`). It names the slots: reading OFF, switch Charge Now on; reading ON with the pool not
+  rate-limited one's retry possible on a tick before the cutoff (else `reOnRefused`). It names the slots: reading OFF, switch Charge Now on; reading ON with the pool not
   rising, off and on again may restart the charge. A cost-dominant night's push names ⌈L⌉ + 5 by its margin over the
   line, and says its cost force-charge is not switched back on. No write rests on the ON-reading shape;
-  when it is seen (slots of ours ON, their Cores under the ceiling, the pool falling against
+  when seen (slots of ours ON, their Cores under the ceiling, the pool falling against
   `lineTrendReference`) one warning is logged a night (`lineOnReadingShape`); never on the measured latch.
 - **The morning account** of a night whose record carries a line ask says it "ran to the window close
   for the 55.6% outage line" only when its OFF was the window's; any other OFF says when and why ("until
