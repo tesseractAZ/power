@@ -255,49 +255,131 @@ test('★★★ S4 FAIL-SAFE — 0 W moves no number and no word (the key says 0
 /** Measured when the change was made (v1.201.0): the expected buy is not monotone in w (a higher write starts the
  *  just-in-time force-charge earlier, from a level that draws less) — 2027-08-09 13:00 at 0.944. */
 const PIN_S5_FALL = { label: '2027-08-09 13:00', from: 570, to: 600, expected: [3.43, 3.27] };
+const STEPS_30 = Array.from({ length: 51 }, (_, i) => i * 30);
+const S075: CushionPoolScale = Object.freeze({ scale: 0.75, basis: 'measured' }) as CushionPoolScale;
+const scaleTag = (s: CushionPoolScale | null): string => (s == null ? 'np' : s.scale === 0.944 ? 'm' : `s${s.scale}`);
 
-test('★★★ S5 MONOTONE — on the year, w = 0…1500 in 30 W steps on both bases: line, setpoint, write, requirement, worst-case buy and cost ceiling never fall as w rises; expected buy, write level and target SoC never fall below the w = 0 plan', () => {
-  const STEPS = Array.from({ length: 51 }, (_, i) => i * 30);
+/**
+ * The I-B2 sweep: every islanded-outage case at w = 0…1500 W in 30 W steps, per scale. HARD, on every step: the
+ * monotone set (line, setpoint, requirement, worst-case buy, cost ceiling) never falls as w rises, nor the write,
+ * no charge night holds, no disclosed shortfall vanishes, and no figure the w = 0 plan lacks appears (a hold that
+ * charges aside). RETURNED: the ≥-w0 set's falls below the w = 0 plan (expected buy, its write level, target SoC
+ * and the rest of the set), as `label|scale|w|field`, for the caller to pin.
+ */
+function sweepW(
+  cases: ReadonlyArray<{ label: string; deps: NightChargeInputDeps }>,
+  scales: ReadonlyArray<CushionPoolScale | null>,
+  o: { line?: boolean; steps?: readonly number[]; deps?: (d: NightChargeInputDeps) => NightChargeInputDeps; only?: (zero: StandbyPlan, top: StandbyPlan) => boolean } = {},
+): { plans: number; underW0: string[]; expectedFalls: number; crossings: number } {
+  const steps = o.steps ?? STEPS_30;
   const atLeast = ['cushionLineSocPct', 'setpointSocPct', 'buyKwh', 'buyKwhDebiased', 'requiredExtraKwh', 'expectedBuyKwh',
     'expectedWriteLevelPct', 'costCeilingSocPct', 'targetSocPct'] as const;
   const monotone = ['cushionLineSocPct', 'setpointSocPct', 'requiredExtraKwh', 'buyKwh', 'costCeilingSocPct'] as const;
-  let expectedFalls = 0;
-  let plans = 0;
-  for (const c of CASES) {
-    for (const scale of [null, S944]) {
-      const zero = yearPlan(c.deps, scale, 0);
+  const out = { plans: 0, underW0: [] as string[], expectedFalls: 0, crossings: 0 };
+  for (const c of cases) {
+    const deps = o.deps ? o.deps(c.deps) : c.deps;
+    for (const scale of scales) {
+      const tag = `${c.label}|${scaleTag(scale)}`;
+      const zero = yearPlan(deps, scale, 0, o.line);
       if (zero.cushionBasis !== 'islanded-outage') continue;
+      if (o.only && !o.only(zero, yearPlan(deps, scale, steps[steps.length - 1], o.line))) continue;
       let prev = zero;
-      for (const w of STEPS.slice(1)) {
-        const p = yearPlan(c.deps, scale, w);
-        plans += 1;
+      for (const w of steps.slice(1)) {
+        const p = yearPlan(deps, scale, w, o.line);
+        out.plans += 1;
         const holdToCharge = !zero.chargeTonight && p.chargeTonight;
         for (const f of atLeast) {
           const a = zero[f] as number | null | undefined, b = p[f] as number | null | undefined;
-          if (a == null) { if (!holdToCharge) assert.equal(b ?? null, null, `${c.label} w ${w}: ${f} appeared`); continue; }
-          assert.ok(b != null && b >= a - 1e-9, `${c.label} ${scale ? 'm' : 'np'} w ${w}: ${f} ${a} → ${b} under the w = 0 plan`);
+          if (a == null) { if (!holdToCharge) assert.equal(b ?? null, null, `${tag} w ${w}: ${f} appeared`); continue; }
+          if (!(b != null && b >= a - 1e-9)) out.underW0.push(`${tag}|${w}|${f}`);
         }
         for (const f of monotone) {
           const a = prev[f] as number | null | undefined, b = p[f] as number | null | undefined;
-          if (a != null) assert.ok(b != null && b >= a - 1e-9, `${c.label} ${scale ? 'm' : 'np'} w ${w}: ${f} fell ${a} → ${b} as w rose`);
+          if (a != null) assert.ok(b != null && b >= a - 1e-9, `${tag} w ${w}: ${f} fell ${a} → ${b} as w rose`);
         }
         const wa = written(prev), wb = written(p);
-        if (prev.chargeTonight && p.chargeTonight && wa != null) assert.ok(wb! >= wa, `${c.label} w ${w}: write ${wa} → ${wb}`);
-        assert.ok(!(prev.chargeTonight && !p.chargeTonight), `${c.label} w ${w}: a charge night became a hold`);
-        assert.ok(!(prev.cushionShortfall && !p.cushionShortfall), `${c.label} w ${w}: a disclosed shortfall vanished`);
-        if (prev.expectedBuyKwh != null && p.expectedBuyKwh != null && p.expectedBuyKwh < prev.expectedBuyKwh - 1e-9) expectedFalls += 1;
+        if (prev.chargeTonight && p.chargeTonight && wa != null) assert.ok(wb! >= wa, `${tag} w ${w}: write ${wa} → ${wb}`);
+        assert.ok(!(prev.chargeTonight && !p.chargeTonight), `${tag} w ${w}: a charge night became a hold (buy ${prev.buyKwh} → ${p.buyKwh}, line ${prev.cushionLineSocPct} → ${p.cushionLineSocPct})`);
+        assert.ok(!(prev.cushionShortfall && !p.cushionShortfall), `${tag} w ${w}: a disclosed shortfall vanished`);
+        if (prev.expectedBuyKwh != null && p.expectedBuyKwh != null && p.expectedBuyKwh < prev.expectedBuyKwh - 1e-9) out.expectedFalls += 1;
+        if (prev.cushionLineSocPct! <= 100 && p.cushionLineSocPct! > 100) out.crossings += 1;
         prev = p;
       }
     }
   }
-  assert.ok(plans > 70_000, `${plans} plans`);
-  assert.ok(expectedFalls > 0, 'the expected buy is not monotone in w: the set it is held in is ≥ the w = 0 plan');
+  return out;
+}
+
+test('★★★ S5 MONOTONE — on the year, w = 0…1500 in 30 W steps on both bases: line, setpoint, write, requirement, worst-case buy and cost ceiling never fall as w rises; expected buy, write level and target SoC never fall below the w = 0 plan', () => {
+  const out = sweepW(CASES, [null, S944]);
+  assert.ok(out.plans > 70_000, `${out.plans} plans`);
+  assert.deepEqual(out.underW0, [], 'nothing under the w = 0 plan (no line force-charge eligibility passed)');
+  assert.ok(out.expectedFalls > 0, 'the expected buy is not monotone in w: the set it is held in is ≥ the w = 0 plan');
   // The example (critique B R2): 3.43 → 3.27 kWh from 570 to 600 W, while the line, setpoint and buy rise.
   const deps = caseOf(PIN_S5_FALL.label).deps;
   const a = yearPlan(deps, S944, PIN_S5_FALL.from), b = yearPlan(deps, S944, PIN_S5_FALL.to);
   assert.deepEqual([a.expectedBuyKwh, b.expectedBuyKwh], PIN_S5_FALL.expected);
   assert.ok(b.cushionLineSocPct! > a.cushionLineSocPct! && b.buyKwh! >= a.buyKwh!);
   assert.ok(b.expectedBuyKwh! >= yearPlan(deps, S944, 0).expectedBuyKwh!, 'never under the w = 0 plan');
+});
+
+/** Measured (v1.201.0 review): where the standby lifts the line past 100% of the pool. */
+const PIN_S5_CLIFF = {
+  // 2027-02-09 21:30 at 12 h on ×0.75: [line, requirement, worst-case buy, target, shortfall] at 560 and 570 W.
+  a: { label: '2027-02-09 21:30', hours: 12, at560: [99.98, 84.67, 91.3, 100, false], at570: [100.15, 99.04, 106.8, 100, true] },
+  // 2027-02-01 21:30 at 47.65 h on ×0.944, a 40 kWh minimum buy: [charge, buy, requirement, written] at 0 and 270 W.
+  b: { label: '2027-02-01 21:30', hours: 47.65, minBuyKwh: 40, at0: [true, 42.04, 38.98, 50], at270: [true, 84.88, 78.71, 50] },
+  // 2027-02-09 21:30 at 14 h on ×0.75, unmeetable at 0 W: v1.200.0's proxy [requirement, buy, target], then full effort.
+  c: { label: '2027-02-09 21:30', hours: 14, proxy: [61.27, 66.06, 94.6], full: [99.04, 106.8, 100] },
+  // (d) [crossings, plans] over 12/20/30 h × three scales, and with eligibility at 20 h.
+  sweep: [2159, 53_975], sweepLine: [1136, 28_400],
+};
+
+test('★★★ S5 THE POOL CLIFF — where the standby lifts the line past 100% of the pool, the requirement and the buy do not fall and a charge night does not hold; with no figure or 0 W, v1.200.0\'s plan', () => {
+  // (a) 10 W more carries the line past the pool: the requirement and the buy rise to the window's full effort.
+  const A = PIN_S5_CLIFF.a;
+  const at = (w: number) => yearPlan({ ...caseOf(A.label).deps, outageCushionHours: A.hours }, S075, w);
+  const [a560, a570] = [at(560), at(570)];
+  assert.deepEqual([a560.cushionLineSocPct, a560.requiredExtraKwh, a560.buyKwh, a560.targetSocPct, a560.cushionShortfall], A.at560);
+  assert.deepEqual([a570.cushionLineSocPct, a570.requiredExtraKwh, a570.buyKwh, a570.targetSocPct, a570.cushionShortfall], A.at570);
+  assert.equal(a570.bindingCap, 'poolHeadroom');
+  // (b) under a 40 kWh minimum buy the 0 W charge night stays a charge night at 270 W, written 50.
+  const Bc = PIN_S5_CLIFF.b;
+  const bt = (w: number | undefined) => yearPlan({ ...caseOf(Bc.label).deps, outageCushionHours: Bc.hours, minBuyKwh: Bc.minBuyKwh } as NightChargeInputDeps, S944, w);
+  const [b0, bAbsent, b270] = [bt(0), bt(undefined), bt(270)];
+  assert.equal(digestWithoutStandby(b0), planDigest(bAbsent));
+  assert.deepEqual([b0.chargeTonight, b0.buyKwh, b0.requiredExtraKwh, written(b0)], Bc.at0);
+  assert.deepEqual([b270.chargeTonight, b270.buyKwh, b270.requiredExtraKwh, written(b270)], Bc.at270);
+  assert.ok(b270.cushionLineSocPct! > 100 && b270.cushionShortfall === true, 'the line is past the pool, and disclosed');
+  assert.doesNotMatch(b270.rationale, /^Hold — |minimum-buy threshold/, 'not the minimum-buy hold');
+  // (c) a line already past the pool at 0 W: no figure, 0 W and a figure that is no reading keep v1.200.0's proxy,
+  // number for number; any figure above 0 W sizes the window's full effort.
+  const C = PIN_S5_CLIFF.c;
+  const ct = (w: unknown) => yearPlan({ ...caseOf(C.label).deps, outageCushionHours: C.hours }, S075, w);
+  const cAbsent = ct(undefined);
+  assert.ok(cAbsent.cushionLineSocPct! > 100 && cAbsent.cushionShortfall === true);
+  assert.deepEqual([cAbsent.requiredExtraKwh, cAbsent.buyKwh, cAbsent.targetSocPct], C.proxy);
+  for (const w of [0, Number.NaN, -1, 1e6]) assert.equal(digestWithoutStandby(ct(w)), planDigest(cAbsent), `${w} W`);
+  for (const w of [1, 270]) {
+    const p = ct(w);
+    assert.deepEqual([p.requiredExtraKwh, p.buyKwh, p.targetSocPct], C.full, `${w} W`);
+  }
+  // (d) the sweep across the cliff, in 60 W steps: the year at 12, 20 and 30 h on ×0.75, ×0.944 and nameplate under a
+  // 40 kWh minimum buy, every case whose line crosses 100% between 0 and 1500 W — the monotone set holds, no charge
+  // night holds, and nothing falls under the w = 0 plan; with eligibility (a write mode, 20 h) the monotone set too.
+  const crossing = (zero: StandbyPlan, top: StandbyPlan) => zero.cushionLineSocPct! <= 100 && top.cushionLineSocPct! > 100;
+  const STEPS_60 = STEPS_30.filter((w) => w % 60 === 0);
+  let plans = 0, crossings = 0;
+  for (const hours of [12, 20, 30]) {
+    const deps = (d: NightChargeInputDeps) => ({ ...d, outageCushionHours: hours, minBuyKwh: 40 }) as NightChargeInputDeps;
+    const out = sweepW(CASES, [S075, S944, null], { deps, only: crossing, steps: STEPS_60 });
+    assert.deepEqual(out.underW0, [], `${hours} h: under the w = 0 plan`);
+    plans += out.plans;
+    crossings += out.crossings;
+  }
+  assert.deepEqual([crossings, plans], PIN_S5_CLIFF.sweep, 'the crossings swept, and the plans');
+  const line = sweepW(CASES, [S075, S944, null], { line: true, steps: STEPS_60, deps: (d) => ({ ...d, outageCushionHours: 20, minBuyKwh: 40 }) as NightChargeInputDeps, only: crossing });
+  assert.deepEqual([line.crossings, line.plans], PIN_S5_CLIFF.sweepLine, 'with eligibility');
 });
 
 /* ══ S6 — the scope ═══════════════════════════════════════════════════════════ */
@@ -440,7 +522,6 @@ const PIN_S8 = {
 /** Measured (v1.201.0): A's carrier on the B year — qualifying plans, carried (eligible), and the rest (neither
  *  carried nor disclosed), at 0.944 and on nameplate. */
 const PIN_S8_CARRIER = { m: { qualifying: 53, carried: 53, rest: 0 }, np: { qualifying: 40, carried: 40, rest: 0 } };
-
 test('★★★ S8 THE YEAR at (0.944, 270) and (nameplate, 270) against v1.200.0: nothing falls, the counts as measured; A\'s carrier holds (rest = 0)', () => {
   for (const [name, scale] of [['m', S944], ['np', null]] as const) {
     const k = { islanded: 0, lineUp: 0, writtenUp: 0, shortfallOn: 0, holdToCharge: 0, chargeToHold: 0, overEnvelope: [0, 0] };

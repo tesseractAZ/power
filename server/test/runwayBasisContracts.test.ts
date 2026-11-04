@@ -488,8 +488,13 @@ test('★★★ SCOPE — source pins: the planner, JIT force-charge and MPC nev
     "const standbyNote = standby != null && standby.basis === 'runway-overhead' && standby.w > 0",
     "? `, ${round1(standby.kwh)} kWh of it the runway's ${Math.round(standby.w)} W standby figure`",
     '...(standby != null ? { cushionStandby: standby } : {}),',
+    "const standbyCounted = standby?.basis === 'runway-overhead' && standby.kwh > 0;",
     '...(standby != null ? { cushionStandby: standby } : {}),',
   ]);
+  // v1.201.0 (review) — the one sizing use of the gate: an unmeetable line is sized at the window's full effort
+  // where the standby is counted (I-B2 across the pool's 100%); the legacy proxy otherwise.
+  assert.equal(count(sizing, 'standbyCounted'), 2, 'defined, and read once');
+  assert.equal(count(sizing, '    requiredExtraKwh = standbyCounted ? hiLift : poolHeadroomLiftKwh;\n'), 1);
 
   // ── (f) EVERY place the scale may appear, across src (code lines; comment lines aside) ───────────
   // Every spelling (SCALE): the plan's field, the ledger helper that returns it and the ledger's

@@ -2124,13 +2124,23 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   // v1.174.0 — only a COST-mode night reaches here with baselineHolds: resilience needs
   // no lift at all, so skip the bisection (it would return ~1e-13, not 0).
   const meetable = baselineHolds || troughAtLift(hiLift).minKwh >= targetFloorKwh - 1e-9;
+  // v1.201.0 (review) — the Cores' standby is in this cushion (a figure above 0 W was counted).
+  const standbyCounted = standby?.basis === 'runway-overhead' && standby.kwh > 0;
   let requiredExtraKwh: number;
   if (baselineHolds) {
     requiredExtraKwh = 0;
   } else if (!meetable) {
     // Even max effort can't hold the line — report the legacy full-pack proxy;
     // cushionShortfall (from the re-simulated trough below) tells the truth.
-    requiredExtraKwh = poolHeadroomLiftKwh;
+    // v1.201.0 (review) — WHERE THE STANDBY IS COUNTED, THE WINDOW'S FULL EFFORT (hiLift). The proxy
+    // (fullKwh − the no-buy pack) is under what the window lifts just below the cliff (the bypass model above):
+    // a standby figure that pushed the line past the pool dropped the requirement and the buy below the plan
+    // without it (2027-02-09 21:30, 12 h at ×0.75: 84.67 → 61.27 kWh from 560 to 570 W), and under a large
+    // minimum buy turned a charge night into a hold (2027-02-01 21:30, 47.65 h, ×0.944, 40 kWh: buy 42.04 at
+    // 0 W, a hold at 270 W). With it every figure the standby moves stays non-decreasing in the figure (I-B2):
+    // the bisected lift is ≤ hiLift, and min(hiLift, chargePowerLiftKwh) is the most this window delivers.
+    // With no figure, or 0 W, the proxy stays: v1.200.0's plan, number for number.
+    requiredExtraKwh = standbyCounted ? hiLift : poolHeadroomLiftKwh;
   } else {
     let lo = 0;
     let hi = hiLift;
