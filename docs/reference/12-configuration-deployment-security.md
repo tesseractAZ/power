@@ -1167,10 +1167,14 @@ whole-house load was modelling an island that cannot happen.
 bounded outage:
 
 ```
-cushionKwh = outageHours × islandedLoadKw × safetyFactor / dischargeEff
+cushionKwh = outageHours × (islandedLoadKw × safetyFactor / dischargeEff + standbyW / 1000)
 ```
 
-tested against the pack at window close. At 1.445 kW, 8 h and a 1.5× factor that is
+tested against the pack at window close. The standby term arrived in v1.201.0: the Cores' own
+standby draw, which `panel_load` does not carry, counted for the cushion's hours as the runway's
+pool overhead figure (270 W at the defaults), neither multiplied by the safety factor nor divided
+by the discharge efficiency (chapter 15 part 1, "The Cores' standby in the cushion"). The
+figures in this section are the v1.125.0 load leg alone. At 1.445 kW, 8 h and a 1.5× factor that is
 ~18.5 kWh — *larger* than the old flat 13.8 kWh band, so this is not a loosening in
 magnitude. What changes is that it is a reachable, physically meaningful statement
 ("we can run the backup circuits for eight hours") instead of an unreachable one ("we
@@ -1179,7 +1183,8 @@ three disarmed mechanisms re-arm.
 
 Two knobs: `ARB_OUTAGE_CUSHION_HOURS` (default 4) and `ARB_ISLANDED_LOAD_SAFETY`
 (default 1.25). The safety factor is **monotone the strict way** — raising it makes the
-requirement harder and buys more. No PV is credited, deliberately: an outage can begin
+requirement harder and buys more. It multiplies the panel load only; the standby term takes
+the runway's overhead options. No PV is credited, deliberately: an outage can begin
 at dusk.
 
 **The load basis is the 7-day mean, not a spot reading.** Panel load swings roughly 3×

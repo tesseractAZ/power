@@ -169,7 +169,7 @@ a surplus hour, so delta stays monotone in PV and the `runwayPvBasisGuard` monot
 `backup_remaining_kwh` / `backup_pool_percent` keep the panel's own figures; the runway hours and
 `projected_low_soc_percent` carry the corrected values.
 
-**Not changed (the change is scoped to the runway and its alarms), with one exception.** The night-charge
+**Not changed (the change is scoped to the runway and its alarms), with two exceptions.** The night-charge
 planner, its cushion, the JIT force-charge, the MPC/dispatch recommendations and
 `RUNWAY_DISCHARGE_EFFICIENCY` itself. The planner reads only the forecast's per-hour PV/load and the
 band's PV percentiles, which do not depend on the basis; `runwayBasisContracts.test.ts` builds every
@@ -182,6 +182,18 @@ No other consumer reads the scale under any spelling: `runwayBasisContracts.test
 line that names the plan's scale, the ledger helper that returns it or the ledger's `cushion_pool_scale`
 columns, and the tracker's file is named only where its tracker is built. Every planner walk stays on
 nameplate kWh per percent (chapter 15 part 1, "The cushion line on the measured capacity").
+The second exception (v1.201.0) is the cushion's STANDBY: an islanded-outage cushion counts the
+Cores' standby draw for its hours, the runway's overhead figure for the Cores the cushion tracker
+counted, which reaches the planner as one number through a second pinned door
+(`cushionStandbyOverheadW` in index.ts: `runwayPoolOverheadW` of that count, evaluated right after
+the scale from the same snapshot, before the first `await`). The planner reads it once
+(`plausibleStandbyW`) and adds it for the cushion's hours, not multiplied by the safety factor and
+not divided by η; its load leg keeps `RUNWAY_DISCHARGE_EFFICIENCY`, and η_m stays the runway's own.
+The contract pins the door character for character, every spelling of the standby (the inputs' and
+the plan's fields, the ledger helper, the `cushion_standby_*` columns), and the callers of
+`runwayPoolOverheadW` (analytics.ts and index.ts only); its forbidden list names the overhead rule,
+both overhead options and η_m. Every planner walk still drains `load/η` with no overhead (chapter
+15 part 1, "The Cores' standby in the cushion").
 
 #### 1.4 Key constants
 
@@ -194,9 +206,9 @@ nameplate kWh per percent (chapter 15 part 1, "The cushion line on the measured 
 | `LOAD_CURVE_MIN_PLAUSIBLE_KW` | 0.05 kW | Degenerate-curve threshold |
 | `RUNWAY_DISCHARGE_EFFICIENCY` | 0.94 (default) | DC→AC discharge efficiency η; `min(1, max(0.8, env ?? 0.94))`, env `RUNWAY_DISCHARGE_EFFICIENCY` |
 | `RUNWAY_CHARGE_EFFICIENCY` | 0.927 (√0.86) | v1.194.0 — the charge leg η_c a surplus hour reaches the cells at; `√DISPATCH_ROUND_TRIP_EFFICIENCY` (environment only, clamped 0.8–1), no option of its own |
-| `RUNWAY_POOL_OVERHEAD_FLOOR_W` | 270 (default, clamp 0–1500) | v1.187.19 — the pool overhead's floor while the panel reports a pool (§1.3a); add-on option, the reference plant's three-Core fit |
-| `RUNWAY_CORE_OVERHEAD_W` | 90 (default, clamp 0–500) | v1.187.19 — the overhead is `max(floor, this × connected Cores)` (§1.3a); add-on option |
-| `RUNWAY_DRAIN_MARGINAL_EFFICIENCY` | 0.94 (default, clamp 0.80–1.0) | v1.187.19 — η_m in `overheadW + load/η_m`; environment only |
+| `RUNWAY_POOL_OVERHEAD_FLOOR_W` | 270 (default, clamp 0–1500) | v1.187.19 — the pool overhead's floor while the panel reports a pool (§1.3a); add-on option, the reference plant's three-Core fit. v1.201.0 — also the outage cushion's standby, for its hours |
+| `RUNWAY_CORE_OVERHEAD_W` | 90 (default, clamp 0–500) | v1.187.19 — the overhead is `max(floor, this × connected Cores)` (§1.3a); add-on option; also the cushion's standby |
+| `RUNWAY_DRAIN_MARGINAL_EFFICIENCY` | 0.94 (default, clamp 0.80–1.0) | v1.187.19 — η_m in `overheadW + load/η_m`; environment only. Not in the outage cushion, whose load leg keeps η: set below 0.94 the runway drains faster than the cushion assumes, above it the runway's `max()` sheds the overhead at high loads |
 | `CAPACITY_SCALE_MIN` / `CAPACITY_SCALE_MAX` | 0.80 / 1.00 | v1.187.19 — the capacity-scale clamp; the minimum is the add-on option `CAPACITY_SCALE_MIN` (clamped 0.5–1; 0.80 while unset or unreadable) |
 | `CAPACITY_INCREASE_HOLD_MS` / `HELD_RATIO_MAX_AGE_MS` | 24 h / 30 d | v1.187.19 — increase hold; validity of a held per-Core ratio |
 | `RUNWAY_EMPTY_CLEAR_SAMPLES` | 3 (default) | Empty-hysteresis latch length; env `RUNWAY_EMPTY_CLEAR_SAMPLES` |
