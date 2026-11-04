@@ -242,14 +242,16 @@ export function capsShortfallShown(plan: CushionNotePlan): boolean {
 /** v1.200.0 (A5) — the server's nightChargeAdvisor.lineNotHeldOf, mirrored: what an ARMED line-mode night's own walk
  *  cannot hold — 'aboveFull' (a line above a full pool), 'closeUnder' (its expected close under the line less the
  *  scorer's 0.05, whatever the reason or cause), 'nearFull' (held, within 10 points of full) — or null. The server's
- *  lineForceChargeYear.test.ts holds the two equal on every plan of the year. */
+ *  lineForceChargeYear.test.ts holds the two equal on every plan of the year, and lineForceCharge.test.ts T20 at the
+ *  edge: a close exactly at L − 0.05 holds (1e-9 of float slack, the server's LINE_CLOSE_EDGE_EPS: in binary 50.35 −
+ *  0.05 is 50.300000000000004). */
 export function lineNotHeldOfCard(plan: CushionNotePlan): 'closeUnder' | 'aboveFull' | 'nearFull' | null {
   if (plan.forceChargeLine == null || plan.expectedForceChargeMode !== 'line') return null;
   const l = plan.cushionLineSocPct;
   if (l == null || !Number.isFinite(l)) return null;
   if (l > 100) return 'aboveFull';
   const e = plan.expectedWriteLevelPct;
-  if (e != null && e < l - 0.05) return 'closeUnder';
+  if (e != null && e < l - 0.05 - 1e-9) return 'closeUnder';
   return plan.cushionEnvelopeReason === 'nearFull' ? 'nearFull' : null;
 }
 
