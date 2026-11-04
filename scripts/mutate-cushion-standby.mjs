@@ -8,17 +8,21 @@
  * additive, not × the safety factor, not ÷ the discharge efficiency, over the configured hours, rounded once
  * more; divided by the measured capacity scale with the load leg, once, inside the one line. Absent ⇒ today's
  * cushion; a figure that is no reading (not finite, negative, above 1500 W, not a number) ⇒ 0 W recorded
- * 'implausible'; legacy-pct and disabled do not move. Mutants S-i..xv.
+ * 'implausible'; legacy-pct and disabled do not move. Where a figure above 0 W is counted, an unmeetable line is
+ * sized at the window's full effort (hiLift), so the requirement and the buy stay non-decreasing in the figure
+ * across the pool's 100% (review); with no figure, 0 W or no reading, v1.200.0's proxy. Mutants S-i..xviii.
  *
  * (A) AGREEMENT. Every reader of the cushion reads the one cushionKwh and the one line: the shortfall, the
- * rationale's clause only where a figure above 0 W applied, the plan field on both plan shapes. Mutants A-i..iii.
+ * rationale's clause only where a figure above 0 W applied, the plan field on both plan shapes; the log line states
+ * the figure, not a plan. Mutants A-i..iv.
  *
  * (B) THE PLUMBING: buildNightChargeInputs forwards the figure. Mutant B-i.
  *
  * (D) THE SECOND DOOR (runwayBasisContracts.test.ts, SCOPE): index.ts cushionStandbyOverheadW, the runway's
  * overhead rule for the Cores the cushion tracker counted, the panel reporting a pool; called once, beside the
- * scale door, from the same snapshot, before the first await; logged on a live leg only; passed once; no
- * other consumer reaches it and nothing launders the runway's overhead to the planner. Mutants D-i..x.
+ * scale door, from the same snapshot, before the first await; logged on a live leg only, on change of the figure
+ * or the Core count it names; passed once; no other consumer reaches it and nothing launders the runway's overhead
+ * to the planner — the rule, the options' constants or their limits.ts getters (review). Mutants D-i..xiv.
  *
  * (R) THE LEDGER: the three columns written on every plan row, kept by the allowlist and added to a deployed
  * ledger. Mutants R-i..iv.
@@ -36,6 +40,7 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const NCA = resolve(REPO, 'server/src/nightChargeAdvisor.ts');
 const IDX = resolve(REPO, 'server/src/index.ts');
 const REC = resolve(REPO, 'server/src/recorder.ts');
+const NFC = resolve(REPO, 'server/src/nightForceCharge.ts');
 
 const T_SB = 'test/cushionStandby.test.ts';
 const T_SCOPE = 'test/runwayBasisContracts.test.ts';
@@ -157,6 +162,27 @@ const MUTANTS = [
     to: "  const cushionKwh = standby?.basis === 'runway-overhead' ? (cushion.kwh + standby.kwh) : cushion.kwh; /* MUTANT */",
     why: 'The row\'s cushion_kwh − cushion_standby_kwh no longer recovers the cushion without it; at a figure whose energy is not a whole hundredth (333.3 W) the lines move: killed by the figures file (cushionStandby.figures.json, set m333.3).',
   },
+  {
+    id: 'S-xvi. ★★★ an unmeetable line keeps the legacy proxy where the standby is counted (the review\'s cliff)',
+    file: NCA, tests: [T_SB, T_SCOPE],
+    find: '    requiredExtraKwh = standbyCounted ? hiLift : poolHeadroomLiftKwh;',
+    to: '    requiredExtraKwh = standbyCounted ? poolHeadroomLiftKwh : poolHeadroomLiftKwh; /* MUTANT */',
+    why: 'A figure that carries the line past the pool drops the requirement and the buy below the plan without it (84.67 → 61.27 kWh for 10 W more), and under a 40 kWh minimum buy turns a charge night into a hold.',
+  },
+  {
+    id: 'S-xvii. ★★★ full effort with no figure counted (the gate always open)',
+    file: NCA, tests: [T_SB],
+    find: "  const standbyCounted = standby?.basis === 'runway-overhead' && standby.kwh > 0;",
+    to: '  const standbyCounted = true; /* MUTANT */',
+    why: 'An unmeetable night with no figure moves off v1.200.0\'s plan (61.27 → 99.04 kWh): I-B0 broken for every caller that passes none.',
+  },
+  {
+    id: 'S-xviii. ★★ full effort at 0 W or on a figure that is no reading',
+    file: NCA, tests: [T_SB],
+    find: "  const standbyCounted = standby?.basis === 'runway-overhead' && standby.kwh > 0;",
+    to: '  const standbyCounted = standby != null; /* MUTANT */',
+    why: 'I-B0: 0 W and a figure that is no reading must move no number; here they move an unmeetable night\'s requirement and buy.',
+  },
 
   /* ── A: agreement ── */
   {
@@ -179,6 +205,13 @@ const MUTANTS = [
     find: "      // v1.201.0 — the Cores' standby the cushion counted, only where a figure was passed (islanded-outage).\n      ...(standby != null ? { cushionStandby: standby } : {}),\n",
     to: '      /* MUTANT */\n',
     why: 'A hold night\'s cushion includes the standby but its plan (and its ledger row) says none was counted.',
+  },
+  {
+    id: 'A-iv. ★★ the log line says the cushion counts the standby (whatever the basis)',
+    file: NCA, tests: [T_SB],
+    find: "  return `night-charge: the Cores' standby figure for the outage cushion is ${Math.round(w)} W (the runway's figure for ${connectedCores} connected Core(s)); an islanded-outage cushion counts it for its hours`;",
+    to: "  return `night-charge: the outage cushion counts the Cores' standby draw, ${Math.round(w)} W (the runway's figure for ${connectedCores} connected Core(s))`; /* MUTANT */",
+    why: 'The door runs before the basis is known: a disabled or legacy-pct cushion would log a count that nothing backs.',
   },
 
   /* ── B: the plumbing ── */
@@ -249,9 +282,9 @@ const MUTANTS = [
   },
   {
     id: 'D-ix. ★★ a shadow leg logs the standby',
-    file: IDX, tests: [T_SCOPE],
-    find: '  if (!shadowLeg && cushionStandbyW !== lastLoggedCushionStandbyW) {',
-    to: '  if (cushionStandbyW !== lastLoggedCushionStandbyW) { /* MUTANT */',
+    file: IDX, tests: [T_SB, T_SCOPE],
+    find: '  if (!shadowLeg && cushionStandbyLogKey !== lastLoggedCushionStandbyKey) {',
+    to: '  if (cushionStandbyLogKey !== lastLoggedCushionStandbyKey) { /* MUTANT */',
     why: 'The shadow leg\'s "no calibration log" rule: its evaluations are not the live plan\'s.',
   },
   {
@@ -260,6 +293,34 @@ const MUTANTS = [
     find: "    // v1.201.0 — the Cores' standby draw the islanded-outage cushion counts (W; the runway's figure).\n    cushionStandbyW,\n",
     to: "    // v1.201.0 — the Cores' standby draw the islanded-outage cushion counts (W; the runway's figure).\n    ...((false as boolean) ? { cushionStandbyW } : {}), /* MUTANT */\n",
     why: 'The add-on keeps the cushion without the standby: the fix ships inert.',
+  },
+  {
+    id: 'D-xi. ★★★ laundering through the options\' getter: a helper the planner calls reads limits.runwayPoolOverheadFloorW',
+    file: IDX, tests: [T_SCOPE],
+    find: '  return islandedLoadKwCache.kw;',
+    to: '  return islandedLoadKwCache.kw + limits.runwayPoolOverheadFloorW / 1000; /* MUTANT */',
+    why: 'The review\'s probe: the standby folded into the islanded load (× k, ÷ η) and counted twice, past a forbidden list that spelled only the constants.',
+  },
+  {
+    id: 'D-xii. ★★★ the planner reads the per-Core option\'s getter in its own body',
+    file: IDX, tests: [T_SCOPE],
+    find: '  const evMaxLoadW = limits.evMaxLoadW;',
+    to: '  const evMaxLoadW = limits.evMaxLoadW + 0 * limits.runwayCoreOverheadW; /* MUTANT */',
+    why: 'A third door to the runway\'s overhead, beside the two the contract pins.',
+  },
+  {
+    id: 'D-xiii. ★★ the force-charge module reads the per-Core option\'s getter',
+    file: NFC, tests: [T_SCOPE],
+    find: '  return limits.forceChargeKwPerCore ?? FORCE_CHARGE_PROVEN_KW_PER_SLOT;',
+    to: '  return (limits.forceChargeKwPerCore ?? FORCE_CHARGE_PROVEN_KW_PER_SLOT) + 0 * limits.runwayCoreOverheadW; /* MUTANT */',
+    why: 'The JIT force-charge never reads the runway\'s basis: limits.ts is imported there, so the getter is one word away.',
+  },
+  {
+    id: 'D-xiv. ★★ the log key drops the Core count',
+    file: IDX, tests: [T_SB, T_SCOPE],
+    find: '  const cushionStandbyLogKey = `${cushionStandbyW}:${cushionPoolScale?.connectedCores ?? 0}`;',
+    to: '  const cushionStandbyLogKey = `${cushionStandbyW}`; /* MUTANT */',
+    why: 'At the defaults the figure is 270 W for 0-3 Cores: a boot on a partial frame names 0 Cores for the life of the process.',
   },
 
   /* ── R: the ledger ── */
