@@ -64,6 +64,10 @@
  * force-charge never switched on and that closed under min(line, 100). A5-i..xxviii (P-viii, P-xi, P-xii, F-iii, T-xv,
  * T-xvi, T-xvii and G-i re-anchored on the A5 lines). The spoken notice of a window-bound line night: its level is the
  * window's reach, so "which ends before it gets there" only where the 50% floor lifts it above that reach. A5-xxx.
+ * (A5 fix) The mid-day re-entry hold never holds a leg the line force-charge is armed on, and says so (A5-xxxi); a close
+ * exactly at L − 0.05 holds, in the planner and the scorer (A5-v(c), (d)); strikesMeasurable counts an armed, actuated
+ * disclosed row (A5-xxiii(c), (d)); the mid-day push keeps the backup leg's sentence beside an armed leg (A5-xxxii); no
+ * not-held or caps sentence on a held armed night or leg (A5-xxxiii); the H1 reach's PV term not over-counted (A5-xxxiv).
  *
  *   node scripts/mutate-line-force-charge.mjs [--only <id prefix>]
  *
@@ -1557,16 +1561,30 @@ const MUTANTS = [
   {
     id: 'A5-v(a). ★★ the carry tolerance\'s sign flipped',
     file: NCA, tests: [T_LINE],
-    find: '  return closePct == null || closePct >= linePct - LINE_CARRY_CLOSE_TOLERANCE_PCT;',
-    to: '  return closePct == null || closePct >= linePct + LINE_CARRY_CLOSE_TOLERANCE_PCT; /* MUTANT */',
+    find: '  return closePct == null || closePct >= linePct - LINE_CARRY_CLOSE_TOLERANCE_PCT - LINE_CLOSE_EDGE_EPS;',
+    to: '  return closePct == null || closePct >= linePct + LINE_CARRY_CLOSE_TOLERANCE_PCT - LINE_CLOSE_EDGE_EPS; /* MUTANT */',
     why: 'A walk closing on the line is called under it; the scorer would call it held.',
   },
   {
     id: 'A5-v(b). ★★ the carry tolerance dropped',
     file: NCA, tests: [T_LINE],
-    find: '  return closePct == null || closePct >= linePct - LINE_CARRY_CLOSE_TOLERANCE_PCT;',
-    to: '  return closePct == null || closePct >= linePct; /* MUTANT */',
+    find: '  return closePct == null || closePct >= linePct - LINE_CARRY_CLOSE_TOLERANCE_PCT - LINE_CLOSE_EDGE_EPS;',
+    to: '  return closePct == null || closePct >= linePct - LINE_CLOSE_EDGE_EPS; /* MUTANT */',
     why: 'The plan and the scorer disagree on a close within half a reading step of the line.',
+  },
+  {
+    id: 'A5-v(c). ★★ the carry edge\'s float slack dropped (a close exactly at L − 0.05 read as under it)',
+    file: NCA, tests: [T_LINE],
+    find: '  return closePct == null || closePct >= linePct - LINE_CARRY_CLOSE_TOLERANCE_PCT - LINE_CLOSE_EDGE_EPS;',
+    to: '  return closePct == null || closePct >= linePct - LINE_CARRY_CLOSE_TOLERANCE_PCT; /* MUTANT */',
+    why: '50.35 − 0.05 is 50.300000000000004: a carried night closing at 50.3 against a 50.35% line is disclosed under it, against the stated rule (128 of 501 edge pairs).',
+  },
+  {
+    id: 'A5-v(d). ★★ the scorer\'s edge slack dropped',
+    file: GATE, tests: [T_LINE],
+    find: '  readingPct >= linePct - REALIZED_CLOSE_TOLERANCE_PCT - LINE_CLOSE_EDGE_EPS;',
+    to: '  readingPct >= linePct - REALIZED_CLOSE_TOLERANCE_PCT; /* MUTANT */',
+    why: 'A 50.3% close against a 50.35% line is a strike, though the rule (at or above L − 0.05) calls it held.',
   },
   {
     id: 'A5-vi. ★★★ the near-full start target max(t, ⌈L⌉ + H) (at or above the 100% ceiling)',
@@ -1732,8 +1750,8 @@ const MUTANTS = [
   {
     id: 'A5-xxv. ★ the gate compares against a line above a full pool, uncapped',
     file: GATE, tests: [T_LINE],
-    find: '    if (line != null && close != null) return close < Math.min(line, 100) - REALIZED_CLOSE_TOLERANCE_PCT;',
-    to: '    if (line != null && close != null) return close < line - REALIZED_CLOSE_TOLERANCE_PCT; /* MUTANT */',
+    find: '    if (line != null && close != null) return !holdsLineAtClose(close, Math.min(line, 100));',
+    to: '    if (line != null && close != null) return !holdsLineAtClose(close, line); /* MUTANT */',
     why: 'A 101.57% line held at 100 is a strike.',
   },
   {
@@ -1793,6 +1811,70 @@ const MUTANTS = [
     find: '      toward: chargeEndsShortOfLevel(plan),\n      deadlineText: supervised.cancelDeadlineText,',
     to: '      toward: chargeEndsShortOfLevel(plan) || plan.expectedDeliverableBound === true, /* MUTANT */\n      deadlineText: supervised.cancelDeadlineText,',
     why: 'The evening\'s spoken notice (the route) says the window ends short of the close it reaches.',
+  },
+  /* (A5 fix) — the review of b1fd7613 */
+  {
+    id: 'A5-xxxi(a). ★★★ the mid-day re-entry hold holds a leg the line force-charge is armed on',
+    file: NCA, tests: [T_LINE],
+    find: '  if (midday && !backupLeg && chargeTonight && !lineArmed) {',
+    to: '  if (midday && !backupLeg && chargeTonight) { /* MUTANT */',
+    why: 'More cushion turns an armed, charging mid-day leg into a hold: nothing written, no force-charge, the pool left at 30% against a 61% line, the hold plan silent on it.',
+  },
+  {
+    id: 'A5-xxxi(b). ★★ the exemption on line mode only (an armed cost-dominant leg held)',
+    file: NCA, tests: [T_LINE],
+    find: '  if (midday && !backupLeg && chargeTonight && !lineArmed) {',
+    to: "  if (midday && !backupLeg && chargeTonight && expected.mode !== 'line') { /* MUTANT */",
+    why: 'A 46% floor: the cost-dominant force-charge armed for a 53.56% line is held at ~70% under the 71% re-entry line.',
+  },
+  {
+    id: 'A5-xxxi(c). ★ the exempt leg\'s rationale silent on the re-entry line',
+    file: NCA, tests: [T_LINE],
+    find: '  const reentryNote = reentryExemptLinePct != null && expected.levelPct != null',
+    to: '  const reentryNote = (false as boolean) && reentryExemptLinePct != null && expected.levelPct != null /* MUTANT */',
+    why: 'The leg charges under the re-entry line and the rationale does not say the grid may carry the house into on-peak.',
+  },
+  {
+    id: 'A5-xxiii(c). ★★ strikesMeasurable reads every disclosed row as unable to strike',
+    file: GATE, tests: [T_LINE],
+    find: '      || (asNum(r.cushion_line_force_charge_pct) != null && truthy(r.actuated))) ? 1 : 0,',
+    to: '      || (false as boolean)) ? 1 : 0, /* MUTANT */',
+    why: 'An armed, never-ON row under its line is a strike beside strikesMeasurable 0 ("cannot count"); a real 0 reads as unmeasured.',
+  },
+  {
+    id: 'A5-xxiii(d). ★ strikesMeasurable counts an armed row that never actuated',
+    file: GATE, tests: [T_LINE],
+    find: '      || (asNum(r.cushion_line_force_charge_pct) != null && truthy(r.actuated))) ? 1 : 0,',
+    to: '      || asNum(r.cushion_line_force_charge_pct) != null) ? 1 : 0, /* MUTANT */',
+    why: 'A ledger of armed nights whose reserve write never landed (the strike rule cannot grade them) reads as measured.',
+  },
+  {
+    id: 'A5-xxxii. ★★ the mid-day push drops the backup leg\'s disclosure beside an armed cost leg',
+    file: CTX, tests: [T_LINE],
+    find: "      ? armedNote(c) + (i.backup?.cushionShortfallCause != null ? notCarried('the backup leg') : '')",
+    to: '      ? armedNote(c) /* MUTANT */',
+    why: 'The backup leg\'s outage line, which its reserve-only write cannot hold, goes unsaid whenever the cost leg is armed.',
+  },
+  {
+    id: 'A5-xxxiii(a). ★★ the evening push says "not held" on every carried night whose walk holds',
+    file: NTF, tests: [T_LINE],
+    find: "the plan does not claim the line — residual risk remains.`;\n    }\n    return '';\n  }",
+    to: "the plan does not claim the line — residual risk remains.`;\n    }\n    return ' NOTE: the outage line is not held — residual risk remains.'; /* MUTANT */\n  }",
+    why: 'A night the force-charge carries to ~77% is pushed as not held: the push contradicts the rationale and the card.',
+  },
+  {
+    id: 'A5-xxxiii(b). ★★ the mid-day push gives a held armed leg the caps sentence',
+    file: CTX, tests: [T_LINE],
+    find: "the plan does not claim the line — residual risk remains.`\n            : '';",
+    to: "the plan does not claim the line — residual risk remains.`\n            : ' NOTE: charge/pool limits prevent fully meeting the cushion — residual risk remains.'; /* MUTANT */",
+    why: 'A leg whose sizing and walk both hold its line is told the cushion is not met.',
+  },
+  {
+    id: 'A5-xxxiv. ★★ the H1 reach over-counts the window\'s P50 PV',
+    file: NCA, tests: [T_LINE],
+    find: '    kwh += chargeLegStep((p50PvW(h) / 1000) * dtH, legEff);',
+    to: '    kwh += 2 * chargeLegStep((p50PvW(h) / 1000) * dtH, legEff); /* MUTANT */',
+    why: 'On a sunny bound leg the cap never binds: the walk\'s close and the panel\'s stop are stated where the window cannot reach them.',
   },
 
   /* ── R: the ledger ── */
