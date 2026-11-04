@@ -77,7 +77,8 @@ const planAt = (deps: Deps, basis: Basis, h: number, elig: boolean | undefined):
   ...(elig !== undefined ? { lineForceChargeEligible: elig } : {}),
 } as never)) as Plan;
 
-const holds = (e: number | null | undefined, l: number): boolean => e == null || e >= l - TOL;
+/** At or above the line less the tolerance, the edge included (nightChargeAdvisor LINE_CLOSE_EDGE_EPS: float). */
+const holds = (e: number | null | undefined, l: number): boolean => e == null || e >= l - TOL - EPS;
 const UNDER_NOTE = /NOTE: on the median load the pool is expected to close at ~[\d.]+%, under tonight's [\d.]+% outage line, so the cushion is not fully held — residual risk remains\./;
 const ABOVE_NOTE = /NOTE: tonight's [\d.]+% outage line is above a full pool, so no charge can hold it — residual risk remains\./;
 const MARGIN_NOTE = /NOTE: tonight's [\d.]+% outage line is within 10 points of a full pool, so the force-charge cannot hold it with its usual margin; the cushion is not assured — residual risk remains\./;
@@ -95,6 +96,8 @@ interface Sweep {
   armed: number; carried: number; nearFull: number; closeUnder: number;
   kinds: { closeUnder: number; aboveFull: number; nearFull: number };
   eFalls: number; eFallsNonBoundGt5: number; eFallMaxNonBound: number; buyFalls: number; closeUnderVanish: number;
+  /** The largest step falls of the stated close (after any walk) and of the expected buy, and where (label basis h → h + 1). */
+  eFallMax: { d: number; at: string }; buyFallMax: { d: number; at: string };
   meanBuyQual: Record<number, number | null>;
   /** T19 — plans lineNotHeldOf and the card's lineNotHeldOfCard were checked on, and those either disagreed with the walk. */
   parity: { checked: number; mismatch: number };
@@ -112,7 +115,8 @@ function sweep(basis: Basis, depsOf: (d: Deps) => Deps): Sweep {
   const s: Sweep = {
     m1: 0, m2: 0, m3: 0, m4: 0, undisclosedUnder: 0, carrierRest: 0, reachOver: 0, stopUnreached: 0, underFloor: 0, textMissing: 0, noForceCharge: 0,
     armed: 0, carried: 0, nearFull: 0, closeUnder: 0, kinds: { closeUnder: 0, aboveFull: 0, nearFull: 0 },
-    eFalls: 0, eFallsNonBoundGt5: 0, eFallMaxNonBound: 0, buyFalls: 0, closeUnderVanish: 0, meanBuyQual: {}, parity: { checked: 0, mismatch: 0 },
+    eFalls: 0, eFallsNonBoundGt5: 0, eFallMaxNonBound: 0, buyFalls: 0, closeUnderVanish: 0, eFallMax: { d: 0, at: '' }, buyFallMax: { d: 0, at: '' },
+    meanBuyQual: {}, parity: { checked: 0, mismatch: 0 },
     spoken: { boundLine: 0, endsShort: 0, mismatch: 0 }, ex: [],
   };
   const buySum: Record<number, number> = {};
@@ -188,13 +192,19 @@ function sweep(basis: Basis, depsOf: (d: Deps) => Deps): Sweep {
         if (prev.E != null && E != null && L != null && !r.sf && E < Math.min(prev.E, L) - TOL) { s.m4 += 1; note(`${where}: ~${prev.E} → ~${E}% under ${L}%, undisclosed`); }
         if (fell(prev.E, E)) {
           s.eFalls += 1;
+          const dAll = Math.round((prev.E! - (E ?? 0)) * 10) / 10;
+          if (dAll > s.eFallMax.d) s.eFallMax = { d: dAll, at: `${c.label} ${basis} ${h - 1} → ${h} h` };
           if (!prev.bound) {
             const d = prev.E! - (E ?? 0);
             if (d > 5) s.eFallsNonBoundGt5 += 1;
             s.eFallMaxNonBound = Math.max(s.eFallMaxNonBound, Math.round(d * 10) / 10);
           }
         }
-        if (fell(prev.buy, r.buy)) s.buyFalls += 1;
+        if (fell(prev.buy, r.buy)) {
+          s.buyFalls += 1;
+          const dBuy = Math.round((prev.buy! - (r.buy ?? 0)) * 100) / 100;
+          if (dBuy > s.buyFallMax.d) s.buyFallMax = { d: dBuy, at: `${c.label} ${basis} ${h - 1} → ${h} h` };
+        }
         if (prev.reason === 'closeUnder' && !r.sf) s.closeUnderVanish += 1;
       }
       prev = r;
@@ -211,7 +221,7 @@ const ZERO = (s: Sweep) => ({
 const PINNED = (s: Sweep) => ({
   armed: s.armed, carried: s.carried, nearFull: s.nearFull, closeUnder: s.closeUnder, kinds: s.kinds,
   eFalls: s.eFalls, eFallsNonBoundGt5: s.eFallsNonBoundGt5, eFallMaxNonBound: s.eFallMaxNonBound, buyFalls: s.buyFalls,
-  closeUnderVanish: s.closeUnderVanish, meanBuyQual: s.meanBuyQual,
+  closeUnderVanish: s.closeUnderVanish, eFallMax: s.eFallMax, buyFallMax: s.buyFallMax, meanBuyQual: s.meanBuyQual,
 });
 const ALL_ZERO = { m1: 0, m2: 0, m3: 0, m4: 0, undisclosedUnder: 0, carrierRest: 0, reachOver: 0, stopUnreached: 0, underFloor: 0, textMissing: 0, noForceCharge: 0 };
 
@@ -221,18 +231,24 @@ const ALL_ZERO = { m1: 0, m2: 0, m3: 0, m4: 0, undisclosedUnder: 0, carrierRest:
  *  their walk, and carried nights whose sizing fell short); `eFalls` — h steps whose expected close falls (any amount),
  *  of them `eFallsNonBoundGt5` by more than 5 points after a walk that was not deliverable-bound, the largest such fall
  *  `eFallMaxNonBound` (2027-08-09 21:30, 13 → 14 h on nameplate, 71.8 → 52.9%; 12 → 13 h at 0.944, 77.2 → 57.3%, both
- *  now 'closeUnder'); `buyFalls` — steps whose expected buy falls; `closeUnderVanish` — a 'closeUnder' disclosure gone at
+ *  now 'closeUnder'); `eFallMax` — the largest fall after any walk: after a window-bound one, whose stated level was a
+ *  cost target the window could not reach, to the line walk's close capped at its reach and floored at the 50% reserve
+ *  (2026-11-13 13:00 on nameplate, 15 → 16 h, 90 → 50%, the buy unchanged at 7.2 kWh; 2027-05-28 21:30 at 0.944, 19 → 20 h,
+ *  93.8 → 50%, 14.81 kWh both; 13:00 the same); `buyFalls` — steps whose expected buy falls, the largest `buyFallMax`;
+ *  `closeUnderVanish` — a 'closeUnder' disclosure gone at
  *  the next hour (its walk rose above the rising line); `meanBuyQual` — the mean expected buy per armed or disclosed plan,
  *  per hour (not monotone: the set grows with h). */
 const PIN_A5: Record<Basis, ReturnType<typeof PINNED>> = {
   np: {
     armed: 5262, carried: 4819, nearFull: 418, closeUnder: 25, kinds: { closeUnder: 777, aboveFull: 95, nearFull: 175 },
     eFalls: 384, eFallsNonBoundGt5: 29, eFallMaxNonBound: 18.9, buyFalls: 136, closeUnderVanish: 6,
+    eFallMax: { d: 40, at: '2026-11-13 13:00 np 15 → 16 h' }, buyFallMax: { d: 9.25, at: '2026-10-13 13:00 np 10 → 11 h' },
     meanBuyQual: { 4: null, 5: 40.35, 6: 29.96, 7: 32.29, 8: 28.89, 9: 30.44, 10: 32.1, 11: 32.09, 12: 32.44, 13: 33.09, 14: 33.23, 15: 34.07, 16: 35.18, 17: 35.87, 18: 36.18, 19: 36.99, 20: 37.66 },
   },
   m: {
     armed: 5664, carried: 5030, nearFull: 602, closeUnder: 32, kinds: { closeUnder: 895, aboveFull: 194, nearFull: 209 },
     eFalls: 395, eFallsNonBoundGt5: 18, eFallMaxNonBound: 19.9, buyFalls: 138, closeUnderVanish: 4,
+    eFallMax: { d: 43.8, at: '2027-05-28 21:30 m 19 → 20 h' }, buyFallMax: { d: 9.24, at: '2027-01-27 21:30 m 16 → 17 h' },
     meanBuyQual: { 4: null, 5: 31.64, 6: 29.19, 7: 30.54, 8: 29.55, 9: 31.86, 10: 32.22, 11: 32.41, 12: 32.38, 13: 33.21, 14: 33.76, 15: 34.86, 16: 35.96, 17: 36.2, 18: 37.14, 19: 37.69, 20: 38.04 },
   },
 };

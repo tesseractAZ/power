@@ -29,6 +29,9 @@ import { MEASURED_SCALE } from './fixtures/measuredCushionLineFigures.js';
 import { goldenPlan } from './fixtures/overnightTextCases.js';
 import * as cardText from '../../web/src/cards/nightChargeText.js';
 import { chargeLegStep } from '../src/physics/chargeLeg.js';
+import { costLegSizing, shadowCycleConfig } from '../src/middayShadow.js';
+import { buildApsREvModel, rateAt } from '../src/tariff.js';
+import { pvSurplusFromBand } from '../src/chargeTaper.js';
 
 /**
  * v1.200.0 — AN OUTAGE-CUSHION LINE ABOVE THE PANEL'S 50% RESERVE IS CARRIED BY THE NIGHT FORCE-CHARGE TO
@@ -1356,6 +1359,26 @@ test('★ T20 the carry tolerance is the scorer\'s; lineWalkHolds at its edge', 
     assert.equal(n.lineWalkHolds(null, l), true, 'no P50 basis: the walk\'s floor is the start target, above the line');
   }
   assert.equal(n.lineWalkHolds(68.9, 68.85), true);
+  // (A5 fix) The edge in decimal literals — a round1 close against a round2 line, as the planner compares them. In binary
+  // 50.35 − 0.05 is 50.300000000000004: a close exactly at L − 0.05 read as under it on 128 of these 501 pairs.
+  for (const [e, l] of [[50.3, 50.35], [50.4, 50.45], [50.8, 50.85], [50.9, 50.95], [51.3, 51.35], [50.04, 50.09]] as const) {
+    assert.equal(n.lineWalkHolds(e, l), true, `${e} at ${l} − 0.05`);
+    assert.equal(lineNotHeldOf({ forceChargeLine: { askPct: Math.ceil(l), linePct: l }, expectedForceChargeMode: 'line', expectedWriteLevelPct: e, cushionLineSocPct: l }), null, `${e} / ${l}`);
+  }
+  const edge = Array.from({ length: 501 }, (_, i) => (500 + i) / 10).map((e) => [e, Math.round((e + 0.05) * 100) / 100] as const);
+  assert.deepEqual(edge.filter(([e, l]) => !n.lineWalkHolds(e, l)), [], 'every close exactly at its line less 0.05 holds');
+  assert.deepEqual(edge.filter(([e, l]) => n.lineWalkHolds(e, Math.round((l + 0.01) * 100) / 100)), [], 'and 0.01 under it does not');
+  // …and the scorer at the same edge: the realized close verdict, its no-reading branch, and the armed-never-ran strike.
+  const { realizedCushionBreach } = await import('../src/nightChargeGate.js');
+  const closeRow = (close: number | null, low: number | null, line: number) => ({
+    reserve_floor_pct: 30, cushion_pct: 15, cushion_line_soc_pct: line, actual_min_soc_pct: low, window_kind: 'overnight', window_close_soc_pct: close,
+  });
+  for (const [e, l] of [[50.3, 50.35], [50.8, 50.85], [51.3, 51.35]] as const) {
+    assert.equal(realizedCushionBreach(closeRow(e, 40, l) as never), 0, `a ${e}% close at ${l} − 0.05: held`);
+    assert.equal(realizedCushionBreach(closeRow(e - 0.1, 40, l) as never), 1, `${e - 0.1}: under`);
+    assert.equal(realizedCushionBreach(closeRow(null, e, l) as never), 0, `no reading; a ${e}% low after the close: held`);
+  }
+  assert.deepEqual(edge.filter(([e, l]) => realizedCushionBreach(closeRow(e, 40, l) as never) !== 0), [], 'the scorer agrees on all 501');
 });
 
 test('★★★ T21 (H1) the stated close is what the window can reach: capped at the window-open pool plus the deliverable (and the P50 sun), never under the reserve; the panel\'s stop named only where reachable', () => {
@@ -1397,7 +1420,7 @@ test('★★★ T21 (H1) the stated close is what the window can reach: capped a
   // deliverable but within the open plus the deliverable and the window's P50 PV keeps its close.
   const D0 = Date.UTC(2026, 9, 21, 17); // 10:00 MST
   const sunHours = Array.from({ length: 8 }, (_, i) => ({ ts: D0 + i * H, pvP10W: 1500, pvP50W: 3500, loadP90W: 2500, loadP50W: 1200, evP90W: 0 }));
-  const ebuy = (deliverableKwh: number) => (nca as unknown as { expectedBuyFromPlan: (o: unknown) => { buyKwh: number | null; levelPct: number | null; deliverableBound?: boolean; mode?: string } }).expectedBuyFromPlan({
+  const ebuy = (deliverableKwh: number) => (nca as unknown as { expectedBuyFromPlan: (o: unknown) => { buyKwh: number | null; levelPct: number | null; deliverableBound?: boolean; mode?: string; ceilingStop?: true } }).expectedBuyFromPlan({
     setpointSocPct: 56, costCeilingSocPct: null, forceChargeEligible: false, forceChargeLine: { askPct: 66, linePct: 65.4 }, lineForceChargeEligible: true,
     tickPoolKwh: 92.16, startKwh: 0.55 * 92.16, deliverableKwh, fullKwh: 92.16, legEff: 0.927,
     window: { hours: sunHours, fromMs: D0, windowEndMs: D0 + 5 * H, dischargeEff: 0.94, chargeCapKw: 17.8, envelopeKw: 17, acceptKw: null },
@@ -1417,6 +1440,18 @@ test('★★★ T21 (H1) the stated close is what the window can reach: capped a
   assert.equal(bound.deliverableBound, true);
   assert.equal(bound.levelPct, free.levelPct, 'the sun in the window reaches the walk\'s close: not capped');
   assert.ok(0.55 * 92.16 + d < closeKwh - 0.5, 'without the sun the reach would be under the close');
+  // (A5 fix) …and the other side: a deliverable under `lo`, where even the sun leaves the reach under the walk's close. The
+  // close is capped at exactly the open plus the deliverable plus the window's P50 PV (no more sun than the window has),
+  // and the panel's stop the free walk reaches is not stated.
+  assert.equal(free.ceilingStop, true, 'the free walk reaches the 80% ceiling');
+  assert.ok(lo > 2, `room under lo (${lo.toFixed(2)})`);
+  for (const dl of [0, 0.5, 1, lo - 1]) {
+    const capped = ebuy(dl);
+    assert.equal(capped.deliverableBound, true, `${dl}`);
+    assert.equal(capped.levelPct, r1(((0.55 * 92.16 + dl + pvKwh) / 92.16) * 100), `deliverable ${dl.toFixed(2)}: the reach`);
+    assert.ok(capped.levelPct! < free.levelPct!, `${dl}`);
+    assert.equal(capped.ceilingStop, undefined, `deliverable ${dl.toFixed(2)}: no stop the window cannot reach`);
+  }
   // (d) 2026-11-27 21:30, nameplate, 17 h: a one-hour window; the pool opens at ~42.7% and the window delivers 7.2 kWh:
   // the reach is under the 50% reserve, so the stated close is the reserve, under the 50.09% line — 'closeUnder'.
   const dd = yearPlanAt('2026-11-27 21:30', 17, 'np');
@@ -1489,7 +1524,20 @@ test('★★ T19 the worked nights on every surface: one level (title, clause, s
   assert.equal(lineNotHeldOf(held), null);
   assert.equal(ct.lineNotHeldOfCard(held), null);
   assert.doesNotMatch(ct.outageLineRow(held)!, /residual risk/);
-  const plain = (nfc as unknown as { forceChargeLineArmNote: (o: unknown) => string }).forceChargeLineArmNote({
+  // (A5 fix) …and its evening push carries no not-held NOTE (or any residual-risk sentence): the force-charge carries it.
+  const heldPush = buildNightChargeMessage(held, 'charge', armedSupervised(held, liveCost('2027-08-09 21:30')) as never).body;
+  assert.ok(heldPush.includes('for tonight\'s 64.8% outage line') && heldPush.includes('~77.2% expected at the close'), heldPush);
+  assert.doesNotMatch(heldPush, /NOTE: (on the median load|tonight's [\d.]+% outage line is)|not held|residual risk/, heldPush);
+  assert.doesNotMatch(held.rationale, /NOTE: (on the median load|tonight's [\d.]+% outage line is)|not held|residual risk/, held.rationale);
+  // A carried night whose walk holds but whose sizing fell short (2026-10-29 21:30 on nameplate at 14 h, ~92.8% over its
+  // 89.39% line): the caps note alone — one residual-risk sentence, no line NOTE.
+  const capped = yearPlanAt('2026-10-29 21:30', 14, 'np');
+  assert.deepEqual([capped.cushionShortfall, capped.cushionShortfallCause ?? null, lineNotHeldOf(capped)], [true, null, null]);
+  const cappedPush = buildNightChargeMessage(capped, 'charge', armedSupervised(capped, liveCost('2026-10-29 21:30')) as never).body;
+  assert.equal((cappedPush.match(/residual risk/g) ?? []).length, 1, cappedPush);
+  assert.ok(cappedPush.includes('NOTE: charge/pool limits prevent fully meeting the cushion — residual risk remains.'), cappedPush);
+  assert.doesNotMatch(cappedPush, /NOTE: (on the median load|tonight's [\d.]+% outage line is)|not held/, cappedPush);
+  const plain =(nfc as unknown as { forceChargeLineArmNote: (o: unknown) => string }).forceChargeLineArmNote({
     linePct: 64.79, startTargetPct: 70, panelCeilingPct: 80, expectedStartText: '23:00', timedByText: '04:40', ceilingStop: true, notHeld: null,
   });
   assert.doesNotMatch(plain, /NOT held/);
@@ -1540,6 +1588,24 @@ test('★★ T19 the mid-day push and its shadow record: a leg with a line ask i
   const lost = body({ lineAskPct: 93 });
   assert.ok(lost.includes(" NOTE: this leg's outage line is above the 50% the panel accepts as a reserve; its force-charge runs, but the plan does not claim the line — residual risk remains."), lost);
   assert.doesNotMatch(lost, /no force-charge carries it/);
+  // (A5 fix) A carried leg whose walk holds and whose sizing held (no cause, no kind, no shortfall): no NOTE at all.
+  const heldLeg = body({ cushionShortfallCause: undefined, cushionShortfall: false, lineAskPct: 66 });
+  assert.doesNotMatch(heldLeg, /NOTE|residual risk/, heldLeg);
+  // …and beside it a backup leg that discloses its own line (its reserve write cannot hold it, nothing armed there): the
+  // backup leg's sentence, whatever this leg's — held, or with a kind.
+  const backup = { windowStartMs: phx(10, 14, 23), windowEndMs: phx(10, 15, 5), reservePct: 50, expectedKwh: 12.4, buyKwh: 20.1,
+    cushionShortfall: true, cushionShortfallCause: 'envelope' as const };
+  const withBackup = (c: Record<string, unknown>) => buildMiddayPlanMessage({ ...input(c), backup, backupApplyAtMs: phx(10, 14, 22, 55) } as never).body;
+  const backupNote = ' NOTE: the outage line is above the 50% the panel accepts as a reserve and no force-charge carries it on the backup leg — residual risk remains.';
+  const heldBeside = withBackup({ cushionShortfallCause: undefined, cushionShortfall: false, lineAskPct: 66 });
+  assert.ok(heldBeside.includes(backupNote), heldBeside);
+  assert.equal((heldBeside.match(/NOTE/g) ?? []).length, 1, heldBeside);
+  assert.doesNotMatch(heldBeside, /no force-charge carries it on this leg/);
+  const kindBeside = withBackup({ lineAskPct: 93, lineNotHeld: 'closeUnder' });
+  assert.ok(kindBeside.includes(words.closeUnder) && kindBeside.includes(backupNote), kindBeside);
+  assert.doesNotMatch(kindBeside, /no force-charge carries it on this leg/);
+  // With no ask on this leg, as before: the backup leg's sentence (v1.200.0's words).
+  assert.ok(withBackup({ cushionShortfallCause: undefined, cushionShortfall: false }).includes(backupNote));
   // The shadow record carries the kind beside the ask, and its restore keeps only the three values.
   const ms = await import('../src/middayShadow.js');
   const p = yearPlanAt('2027-08-09 21:30', 13, 'm');
@@ -1607,6 +1673,132 @@ test('★ T19 the source: the line-mode ON log names the panel\'s own stop and t
   assert.ok(arm.includes('      notHeld: notHeld != null ? { kind: notHeld, closePct: plan?.expectedWriteLevelPct ?? null } : null,\n'), arm);
 });
 
+/* ══ T23 — the mid-day re-entry hold never holds a leg the line force-charge is armed on ══════════════════════ */
+
+/** The mid-day cost leg of middayShadow.test.ts (2026-10-15, the 10:00–15:00 super off-peak window, planned at 21:30 the
+ *  evening before), its reserve floor, charge rate, pool and P50 sun varied: a leg that can bind on its window. */
+const MID_H = 3_600_000;
+const midPhx = (mo: number, d: number, h: number, mi = 0): number => Date.UTC(2026, mo - 1, d, h + 7, mi);
+const MID_MODEL = buildApsREvModel();
+const MID_SIZING = costLegSizing(MID_MODEL, { role: 'cost', kind: 'super_off_peak', startMs: midPhx(10, 15, 10), endMs: midPhx(10, 15, 15) },
+  shadowCycleConfig('cost', 90), { chgMaxSocPcts: [80, 80], backupHold: null });
+const MID_P50_W = [0, 94, 608, 2647, 4725, 6276, 6635, 6695, 6243, 5274, 3938, 2057, 573, 21];
+const MID_LOAD_W = [2188, 1864, 1646, 2068, 1851, 2158, 2202, 2927, 3228, 4020, 3435, 3738, 3205, 2978];
+const middayLegPlan = (o: { floor: number; capKw: number; socPct: number; pvScale: number; h: number; basis: 'np' | 'm' }): LinePlan => {
+  const now = midPhx(10, 14, 21, 30);
+  const hourOf = (ts: number): number => (new Date(ts).getUTCHours() + 17) % 24;
+  const loadW = (hh: number): number => (hh >= 5 && hh <= 18 ? MID_LOAD_W[hh - 5] : (hh >= 21 ? 2.8 : hh < 5 ? 2.2 : hh < 17 ? 2.6 : 3.4) * 1000);
+  const pvW = (hh: number): number => o.pvScale * (hh >= 5 && hh <= 18 ? MID_P50_W[hh - 5] : 0);
+  const hours: Array<{ ts: number; pvP10W: number; loadP90W: number; embeddedEvW: number; loadP50W: number; pvP50W: number }> = [];
+  for (let ts = Math.floor(now / MID_H) * MID_H; ts < midPhx(10, 15, 23); ts += MID_H) {
+    const hh = hourOf(ts);
+    hours.push({ ts, pvP10W: pvW(hh) * 0.8, loadP90W: loadW(hh) * 1.35, embeddedEvW: 0, loadP50W: loadW(hh), pvP50W: pvW(hh) });
+  }
+  const winEnd = MID_SIZING.spec.window!.endMs;
+  const loads = new Map(hours.map((x) => [x.ts, x.loadP50W]));
+  const surplus = pvSurplusFromBand({
+    hours: hours.map((x) => ({ ts: x.ts, p50W: x.pvP50W, p90W: x.pvP50W * 1.3 })),
+    loadAt: (ts: number) => loads.get(ts), fromMs: winEnd, toMs: MID_SIZING.surplusEndMs ?? winEnd + 14 * MID_H,
+  });
+  return L(computeNightChargePlan(buildNightChargeInputs({
+    nowMs: now, fullKwh: 92.16, socNowPct: o.socPct, reserveFloorPct: o.floor, cushionPct: 15, socCoherent: true,
+    islandedLoadKw: 2.62, outageCushionHours: o.h, islandedLoadSafety: 1.25, objectiveMode: 'cost', costMaxSocPct: 90,
+    legEff: 0.927, dischargeEff: 0.94, chargeCapKw: o.capKw, gridInputCapKw: 17, periodIdAt: (ts: number) => rateAt(MID_MODEL, ts).periodId,
+    cheapPeriodId: 'overnight', windowScanHours: 30, bandHours: hours, dayRollups: [], realizedDailyErrHalfFrac: 0.1,
+    nextRechargeMs: MID_SIZING.nextRechargeMs, ev: { p90SessionKwh: null, chargeStartMs: null, sessionCount: 0 }, evMaxLoadW: 11520,
+    confidenceTier: 'forecast', forecastPresent: true, calScoredDays: 30, minCalScoredDays: 14, bandCoverageFrac: 0.85,
+    morningPvSurplusP90Kwh: surplus.p90Kwh, morningPvSurplusP50Kwh: surplus.p50Kwh, longGapAhead: false, prePeakPvSurplusP10Kwh: null,
+    minBuyKwh: 1, buyDebiasFactor: 1, buyDebiasBasis: 'default', buyDebiasSamples: 0,
+    forceChargeEligible: true, lineForceChargeEligible: true, windowSpec: MID_SIZING.spec,
+    ...(o.basis === 'm' ? { cushionPoolScale: S944 } : {}),
+  } as never)));
+};
+const REENTRY_NOTE = /The re-entry hold does not apply: the force-charge for the outage line is armed, so the leg charges although ~[\d.]+% is under the [\d.]+% re-entry line \(the [\d.]+% reserve \+ 25\); after the restore the panel may hold the pool while the house buys from the grid into on-peak\./;
+
+test('★★★ T23 the mid-day re-entry hold never holds a leg the line force-charge is armed on: more cushion never disarms it (a 31% floor, a 5 kW window: armed at 7 h, held from 8 h)', () => {
+  const leg = (h: number) => middayLegPlan({ floor: 31, capKw: 5, socPct: 30, pvScale: 0, h, basis: 'np' });
+  // 7 h: the line asks 58, cost-dominant (the 70% taper ceiling at ⌈L⌉ + 10 or above): toward ~70%.
+  const h7 = leg(7);
+  assert.deepEqual([h7.chargeTonight, h7.forceChargeLine, h7.expectedForceChargeMode ?? null, h7.expectedWriteLevelPct], [true, { askPct: 58, linePct: 57.46 }, null, 70]);
+  // 8 h: ⌈L⌉ + 10 = 72 over the 70% ceiling, so line mode; the window-bound walk is capped at its reach, ~55.1% — under the
+  // 56% re-entry line (31 + 25). The hold would write nothing and run no force-charge against a 61.24% line: it does not apply.
+  for (const h of [8, 12, 16, 20]) {
+    const p = leg(h);
+    const where = `${h} h`;
+    assert.equal(p.chargeTonight, true, where);
+    assert.equal(p.forceChargeLine?.askPct, Math.min(100, Math.ceil(p.cushionLineSocPct! - 1e-9)), where);
+    assert.equal(p.expectedForceChargeMode, 'line', where);
+    assert.equal(p.expectedWriteLevelPct, 55.1, where);
+    assert.equal('middayReentryHold' in p, false, where);
+    assert.equal(lineNotHeldOf(p), p.cushionLineSocPct! > 100 ? 'aboveFull' : 'closeUnder', where);
+    assert.match(p.rationale, REENTRY_NOTE, where);
+    assert.ok(p.rationale.includes('~55.1% is under the 56% re-entry line (the 31% reserve + 25)'), where);
+    assert.doesNotMatch(p.rationale, /^Hold/, where);
+  }
+  const h8 = leg(8);
+  assert.deepEqual([h8.forceChargeLine, h8.cushionShortfall, h8.cushionShortfallCause ?? null], [{ askPct: 62, linePct: 61.24 }, true, null], 'carried with the caps note');
+  assert.ok(h8.rationale.includes("NOTE: on the median load the pool is expected to close at ~55.1%, under tonight's 61.24% outage line"), h8.rationale);
+  // A 46% floor (the re-entry line 71, over the 70% taper ceiling): with no line above 50 (1 h) nothing is armed and the leg
+  // holds as before; at 2 h the line asks 54 and the cost-dominant force-charge is armed for it — the cost mode too is
+  // never held: it charges toward ~70%, under the 71% re-entry line, and says so.
+  const h1 = middayLegPlan({ floor: 46, capKw: 5, socPct: 30, pvScale: 0, h: 1, basis: 'np' });
+  assert.deepEqual([h1.chargeTonight, h1.forceChargeLine ?? null, h1.middayReentryHold], [false, null, { arrivalPct: 70, linePct: 71 }]);
+  assert.match(h1.rationale, /^Hold — the mid-day charge's write takes the pool only to ~70%, under the 71% re-entry line \(the 46% reserve \+ 25\)/);
+  const h2 = middayLegPlan({ floor: 46, capKw: 5, socPct: 30, pvScale: 0, h: 2, basis: 'np' });
+  assert.deepEqual([h2.chargeTonight, h2.forceChargeLine, h2.expectedForceChargeMode ?? null, h2.expectedWriteLevelPct, 'middayReentryHold' in h2],
+    [true, { askPct: 54, linePct: 53.56 }, null, 70, false]);
+  assert.ok(h2.rationale.includes('~70% is under the 71% re-entry line (the 46% reserve + 25)'), h2.rationale);
+});
+
+/** Measured on the landed change (the planner over the grid below): a qualifying leg is ARMED at every hour (none held),
+ *  most carried with the caps note (the window binds: the sizing falls short); none held over its line. The same grid on
+ *  b1fd7613 held 830 / 847 armed-qualifying legs, 61 / 61 of them one hour after the line was armed. */
+const PIN_T23: Record<'np' | 'm', { plans: number; armed: number; carried: number; nearFull: number; lineMode: number; reentryNotes: number; kinds: Record<string, number> }> = {
+  np: { plans: 3400, armed: 2808, carried: 1836, nearFull: 972, lineMode: 2412, reentryNotes: 830, kinds: { closeUnder: 1598, aboveFull: 468 } },
+  m: { plans: 3400, armed: 2916, carried: 1764, nearFull: 1152, lineMode: 2460, reentryNotes: 847, kinds: { closeUnder: 1495, aboveFull: 648 } },
+};
+
+for (const basis of ['np', 'm'] as const) {
+  test(`★★★ T23 (${basis === 'np' ? 'nameplate' : '×0.944'}) a mid-day leg grid at 4-20 h (floors 26-40, 4.5-10 kW, two pools, P50 sun ×0, 0.1, 0.3, 1): as the cushion rises the armed target and ceiling never fall, an armed line never disarms, no leg is held over a line above 50, no carried leg closes under its line undisclosed`, () => {
+    const s = { m1: 0, m2: 0, m3: 0, m4: 0, undisclosedUnder: 0, heldOverLine: 0 };
+    const pin = { plans: 0, armed: 0, carried: 0, nearFull: 0, lineMode: 0, reentryNotes: 0, kinds: {} as Record<string, number> };
+    const ex: string[] = [];
+    const gates = { cost: true, line: true };
+    for (const floor of [26, 30, 31, 35, 40]) for (const capKw of [4.5, 5, 6, 7, 10]) for (const pvScale of [0, 0.1, 0.3, 1]) for (const socPct of [30, 45]) {
+      let prev: { line: number | null; armed: boolean; E: number | null; target: number | null; ceil: number | null } | null = null;
+      for (let h = 4; h <= 20; h++) {
+        const p = middayLegPlan({ floor, capKw, socPct, pvScale, h, basis });
+        const where = `floor ${floor}, ${capKw} kW, sun ×${pvScale}, pool ${socPct}%, ${h} h`;
+        const note = (m: string) => { if (ex.length < 12) ex.push(`${where}: ${m}`); };
+        const lineL = p.cushionLineSocPct ?? null;
+        const E = p.expectedWriteLevelPct ?? null;
+        const mode = nfc.forceChargeModeOf({ forceChargeCeilingPct: act.armedForceChargeCeilingPct(p), forceChargeLineAskPct: p.forceChargeLine?.askPct ?? null } as never, gates);
+        const r = { line: lineL, armed: p.forceChargeLine != null, E,
+          target: p.chargeTonight ? nfc.armedWriteLevelPct(p as never, gates) : null, ceil: p.chargeTonight && mode != null ? mode.panelCeilingPct : null };
+        pin.plans += 1;
+        if (r.armed) { pin.armed += 1; if (p.cushionShortfallCause == null) pin.carried += 1; }
+        if (p.cushionEnvelopeReason === 'nearFull') pin.nearFull += 1;
+        if (p.expectedForceChargeMode === 'line') pin.lineMode += 1;
+        if (REENTRY_NOTE.test(p.rationale)) pin.reentryNotes += 1;
+        const k = lineNotHeldOf(p);
+        if (k != null) pin.kinds[k] = (pin.kinds[k] ?? 0) + 1;
+        if (p.middayReentryHold != null && lineL != null && Math.min(100, Math.ceil(lineL - 1e-9)) > 50) { s.heldOverLine += 1; note(`held over a ${lineL}% line`); }
+        if (r.armed && p.cushionShortfall !== true && lineL != null && E != null && E < lineL - 0.05 - 1e-9) { s.undisclosedUnder += 1; note(`carried ~${E}% under ${lineL}%`); }
+        if (prev != null && !(prev.line != null && lineL != null && lineL < prev.line - 1e-9)) {
+          const fell = (a: number | null, b: number | null) => a != null && (b == null || b < a - 1e-9);
+          if (fell(prev.target, r.target)) { s.m1 += 1; note(`target ${prev.target} → ${r.target}`); }
+          if (fell(prev.ceil, r.ceil)) { s.m2 += 1; note(`ceiling ${prev.ceil} → ${r.ceil}`); }
+          if (prev.armed && !r.armed) { s.m3 += 1; note('disarmed'); }
+          if (prev.E != null && E != null && lineL != null && p.cushionShortfall !== true && E < Math.min(prev.E, lineL) - 0.05) { s.m4 += 1; note(`~${prev.E} → ~${E}% under ${lineL}%`); }
+        }
+        prev = r;
+      }
+    }
+    assert.deepEqual(s, { m1: 0, m2: 0, m3: 0, m4: 0, undisclosedUnder: 0, heldOverLine: 0 }, ex.join('\n'));
+    assert.deepEqual(pin, PIN_T23[basis]);
+  });
+}
+
 /* ══ T10b — the gate: an armed line the plan disclosed whose force-charge never switched on is a strike ═══════════ */
 
 test('★★★ T10b the gate (A5, M3): an ARMED, disclosed, actuated row whose force-charge never switched on and that closed under min(its line, 100) is a strike; one that ran, a line above a full pool held at 100, and a disclosure with nothing armed stay exempt', async () => {
@@ -1627,6 +1819,18 @@ test('★★★ T10b the gate (A5, M3): an ARMED, disclosed, actuated row whose 
   const a = run({});
   assert.equal(a.activeStrikes, 1);
   assert.equal(a.lineForceChargeStrikes, 1);
+  // (A5 fix) …and the detector says it can count: an armed, actuated disclosed row is graded (strikesMeasurable 1), so a 0
+  // beside such rows is a real zero — one that ran, and one that held its line, are checked and cleared.
+  assert.equal(a.strikesMeasurable, 1, 'a strike beside "cannot count"');
+  const ranAndHeld = computeNightChargeReadiness([row({ force_charge_on_at_ms: NOW - 3 * 86_400_000 + 3 * 3_600_000 }),
+    row({ plan_date: phoenixYmd(NOW - 4 * 86_400_000), window_close_soc_pct: 95 })] as never, NOW).metrics;
+  assert.deepEqual([ranAndHeld.activeStrikes, ranAndHeld.strikesMeasurable], [0, 1], 'checked and cleared, not unmeasured');
+  // A disclosed row with nothing armed, or armed and never actuated, cannot strike: still 0 (nightChargeGate.test.ts).
+  assert.equal(run({ cushion_line_force_charge_pct: null }).strikesMeasurable, 0);
+  assert.equal(run({ actuated: 0 }).strikesMeasurable, 0);
+  // At the scorer's edge in decimal literals (a 50.35% line closing at 50.3): clean, as the rule states.
+  assert.equal(run({ cushion_line_soc_pct: 50.35, cushion_line_force_charge_pct: 51, window_close_soc_pct: 50.3 }).activeStrikes, 0);
+  assert.equal(run({ cushion_line_soc_pct: 50.35, cushion_line_force_charge_pct: 51, window_close_soc_pct: 50.2 }).activeStrikes, 1);
   // (b) the same night whose force-charge ran (and still closed under): the disclosure stands — exempt.
   assert.equal(run({ force_charge_on_at_ms: NOW - 3 * 86_400_000 + 3 * 3_600_000 }).activeStrikes, 0);
   // (c) a line above a full pool, never ON, the pool at 100 at the close: held as far as a pool can be — exempt; at 99.9, a strike.
