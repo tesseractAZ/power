@@ -1777,7 +1777,7 @@ const MUTANTS = [
     id: 'A5-xxx(a). ★★ a bound line walk spoken as ending short of its capped close',
     file: NCA, tests: [T_LINE, T_YEAR],
     find: "  if (plan.expectedForceChargeMode !== 'line') return true;\n  const e = plan.expectedWriteLevelPct;",
-    to: "  if (plan.expectedForceChargeMode !== 'line' || true) return true; /* MUTANT */\n  const e = plan.expectedWriteLevelPct;",
+    to: "  if (plan.expectedForceChargeMode !== 'line' || plan.expectedDeliverableBound === true) return true; /* MUTANT */\n  const e = plan.expectedWriteLevelPct;",
     why: 'The spoken notice says "toward 93 percent, which ends before it gets there" of the ~92.8% the window reaches as it closes.',
   },
   {
