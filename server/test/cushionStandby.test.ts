@@ -323,6 +323,67 @@ test('★★★ S5 MONOTONE — on the year, w = 0…1500 in 30 W steps on both 
   assert.ok(b.expectedBuyKwh! >= yearPlan(deps, S944, 0).expectedBuyKwh!, 'never under the w = 0 plan');
 });
 
+/** Measured (v1.201.0 review), with lineForceChargeEligible true (a write mode; index.ts passes it on every live
+ *  leg): the ≥-w0 set's falls on the S5 sweep — the expected write level of the carried 2027-01-04 line nights at
+ *  0.944 from 1050 W (78.4% at 0 W; 78.3% at 1050 W, 77.5% at 1500 W). And with the year's 4 h cases at 8 h and
+ *  16 h at 270 W: the plans whose expected buy or write level falls below the 0 W plan, and the carried lines the
+ *  standby takes over 1.200.0's ⌈L⌉ + 2H ≤ 100 limit (dropped, disclosed 'tooHigh'). */
+const PIN_S5_LINE = {
+  labels: ['2027-01-04 21:30', '2027-01-04 13:00'], fromW: 1050, levels: [78.4, 78.3, 77.5],
+  hours: { 8: { m: [11, 0], np: [7, 0] }, 16: { m: [51, 31], np: [53, 23] } } as Record<number, Record<'m' | 'np', [number, number]>>,
+  example8: { label: '2027-04-13 21:30', expectedBuyKwh: [40.8, 38.77], expectedWriteLevelPct: [74.4, 70.3] },
+  example16: { label: '2026-10-26 21:30', expectedBuyKwh: [56.29, 9.18], expectedWriteLevelPct: [96.5, 50] },
+};
+
+test('★★★ S5 LINE NIGHTS — with line force-charge eligibility (a write mode) the monotone set holds as w rises; the expected buy and its write level are ≥ the w = 0 plan except on carried line nights, as measured', () => {
+  const out = sweepW(CASES, [null, S944], { line: true });
+  assert.ok(out.plans > 70_000, `${out.plans} plans`);
+  const pinned = PIN_S5_LINE.labels.flatMap((l) => STEPS_30.filter((w) => w >= PIN_S5_LINE.fromW).map((w) => `${l}|m|${w}|expectedWriteLevelPct`));
+  assert.deepEqual(out.underW0, pinned, 'the ≥-w0 set under the w = 0 plan: the carried 2027-01-04 nights at 0.944 alone');
+  const deps = caseOf(PIN_S5_LINE.labels[0]).deps;
+  const [z, a, b] = [0, PIN_S5_LINE.fromW, 1500].map((w) => yearPlan(deps, S944, w, true) as StandbyPlan & { forceChargeLine?: unknown });
+  assert.deepEqual([z, a, b].map((p) => p.expectedWriteLevelPct), PIN_S5_LINE.levels);
+  assert.ok([z, a, b].every((p) => p.forceChargeLine != null), 'carried by the line force-charge at every figure');
+  assert.ok(b.cushionLineSocPct! > z.cushionLineSocPct! && written(b)! >= written(z)! && b.buyKwh! >= z.buyKwh!, 'the line, write and buy rise');
+
+  // Longer cushions at 270 W on the 4 h cases: the run-to-close walk is not monotone in the ask, and above an ask of
+  // 90 the plan discloses the line instead of carrying it. The sizing figures and the written reserve still never fall.
+  for (const [H, byScale] of Object.entries(PIN_S5_LINE.hours)) {
+    for (const [name, scale] of [['m', S944], ['np', null]] as const) {
+      let fell = 0, dropped = 0;
+      for (const c of CASES) {
+        if ((c.deps.outageCushionHours ?? 4) !== 4) continue;
+        const d = { ...c.deps, outageCushionHours: Number(H) };
+        const b0 = yearPlan(d, scale, undefined, true) as StandbyPlan & { forceChargeLine?: unknown; cushionEnvelopeReason?: unknown };
+        if (b0.cushionBasis !== 'islanded-outage') continue;
+        const p = yearPlan(d, scale, 270, true) as StandbyPlan & { forceChargeLine?: unknown; cushionEnvelopeReason?: unknown };
+        for (const f of ['cushionLineSocPct', 'setpointSocPct', 'requiredExtraKwh', 'buyKwh', 'costCeilingSocPct'] as const) {
+          const x = b0[f] as number | null | undefined, y = p[f] as number | null | undefined;
+          if (x != null) assert.ok(y != null && y >= x - 1e-9, `${c.label} ${H} h ${name}: ${f} fell ${x} → ${y}`);
+        }
+        if (b0.chargeTonight) assert.ok(p.chargeTonight && written(p)! >= written(b0)!, `${c.label} ${H} h ${name}: the write`);
+        if ((['expectedBuyKwh', 'expectedWriteLevelPct'] as const).some((f) => b0[f] != null && !(p[f] != null && p[f]! >= b0[f]! - 1e-9))) fell += 1;
+        if (b0.forceChargeLine != null && p.forceChargeLine == null) {
+          dropped += 1;
+          assert.equal(p.cushionEnvelopeReason, 'tooHigh', `${c.label} ${H} h ${name}: a dropped line is disclosed`);
+          assert.equal(p.cushionShortfall, true);
+        }
+      }
+      assert.deepEqual([fell, dropped], byScale[name], `${H} h ${name}: [under the 0 W plan, carried lines dropped]`);
+    }
+  }
+  const e8 = caseOf(PIN_S5_LINE.example8.label).deps;
+  const [x8, y8] = [undefined, 270].map((w) => yearPlan({ ...e8, outageCushionHours: 8 }, S944, w, true) as StandbyPlan & { forceChargeLine?: unknown });
+  assert.deepEqual([x8.expectedBuyKwh, y8.expectedBuyKwh], PIN_S5_LINE.example8.expectedBuyKwh);
+  assert.deepEqual([x8.expectedWriteLevelPct, y8.expectedWriteLevelPct], PIN_S5_LINE.example8.expectedWriteLevelPct);
+  assert.ok(x8.forceChargeLine != null && y8.forceChargeLine != null, 'carried at both figures');
+  const e16 = caseOf(PIN_S5_LINE.example16.label).deps;
+  const [x16, y16] = [undefined, 270].map((w) => yearPlan({ ...e16, outageCushionHours: 16 }, null, w, true) as StandbyPlan & { forceChargeLine?: unknown; cushionEnvelopeReason?: unknown });
+  assert.deepEqual([x16.expectedBuyKwh, y16.expectedBuyKwh], PIN_S5_LINE.example16.expectedBuyKwh);
+  assert.deepEqual([x16.expectedWriteLevelPct, y16.expectedWriteLevelPct], PIN_S5_LINE.example16.expectedWriteLevelPct);
+  assert.deepEqual([x16.forceChargeLine != null, y16.forceChargeLine != null, y16.cushionEnvelopeReason], [true, false, 'tooHigh']);
+});
+
 /** Measured (v1.201.0 review): where the standby lifts the line past 100% of the pool. */
 const PIN_S5_CLIFF = {
   // 2027-02-09 21:30 at 12 h on ×0.75: [line, requirement, worst-case buy, target, shortfall] at 560 and 570 W.
@@ -416,6 +477,46 @@ test('★★★ S6 SCOPE — the cost formula is untouched: a cost target above 
   assert.equal(p.cushionKwh, 21.01);
   assert.equal(p.cushionLineSocPct, 34.15);
   assert.ok(p.requiredExtraKwh! > base.requiredExtraKwh!);
+});
+
+/** Measured (v1.201.0 review): the year's cost charge nights at 270 W against v1.200.0 at the same scale — those whose
+ *  cost ceiling is at or above the new line's whole-percent ask, ⌈line⌉ (nothing moves), and those whose ceiling sits
+ *  between the new line and ⌈line⌉ (the write rises to ⌈line⌉: the setpoint is max(target, ⌈line⌉)). */
+const PIN_S6_COST = {
+  m: { atOrAboveAsk: 414, between: ['2027-03-21 21:30', '2027-03-21 +1 01:30'] },
+  np: { atOrAboveAsk: 417, between: ['2027-08-09 13:00'] },
+  example: { label: '2027-08-09 13:00', costCeilingSocPct: 49.2, line: [46.71, 49.05], written: [49, 50], buyKwh: [20.28, 20.28] },
+};
+
+test('★★★ S6 SCOPE — on the year, a cost night whose cost ceiling is at or above ⌈the new line⌉ writes and buys what it did; one between the line and ⌈line⌉ writes ⌈line⌉', () => {
+  for (const [name, scale] of [['m', S944], ['np', null]] as const) {
+    let atOrAbove = 0;
+    const between: string[] = [];
+    for (const c of CASES) {
+      const b = yearPlan(c.deps, scale);
+      if (b.cushionBasis !== 'islanded-outage' || !b.chargeTonight || b.objective !== 'cost_arbitrage') continue;
+      const p = yearPlan(c.deps, scale, 270);
+      assert.equal(p.chargeTonight, true, `${c.label} ${name}`);
+      if (p.costCeilingSocPct == null) continue;
+      const ask = askOf((p.cushionLineSocPct! / 100) * c.deps.fullKwh, c.deps.fullKwh);
+      if (p.costCeilingSocPct >= ask) {
+        atOrAbove += 1;
+        assert.deepEqual([written(p), p.buyKwh], [written(b), b.buyKwh], `${c.label} ${name}: the cost target writes and buys what it did`);
+      } else if (p.costCeilingSocPct > p.cushionLineSocPct!) {
+        between.push(c.label);
+        assert.equal(written(p), Math.min(RESERVE_WRITE_MAX_PCT, ask), `${c.label} ${name}: ⌈line⌉`);
+        assert.ok(written(p)! >= written(b)! && p.buyKwh! >= b.buyKwh!, `${c.label} ${name}`);
+      }
+    }
+    assert.equal(atOrAbove, PIN_S6_COST[name].atOrAboveAsk, `${name}: cost ceilings at or above ⌈line⌉`);
+    assert.deepEqual(between, PIN_S6_COST[name].between, `${name}: cost ceilings between the line and ⌈line⌉`);
+  }
+  const E = PIN_S6_COST.example;
+  const [b, p] = [undefined, 270].map((w) => yearPlan(caseOf(E.label).deps, null, w));
+  assert.deepEqual([b.costCeilingSocPct, p.costCeilingSocPct], [E.costCeilingSocPct, E.costCeilingSocPct]);
+  assert.deepEqual([b.cushionLineSocPct, p.cushionLineSocPct], E.line);
+  assert.deepEqual([written(b), written(p)], E.written);
+  assert.deepEqual([b.buyKwh, p.buyKwh], E.buyKwh);
 });
 
 test('★★★ S6 (I-B3, the tripwire) — the standby is divided by the scale with the load leg, once: line = floor + 100 · cushion ÷ (pool · s) on every islanded row', () => {
@@ -522,6 +623,20 @@ const PIN_S8 = {
 /** Measured (v1.201.0): A's carrier on the B year — qualifying plans, carried (eligible), and the rest (neither
  *  carried nor disclosed), at 0.944 and on nameplate. */
 const PIN_S8_CARRIER = { m: { qualifying: 53, carried: 53, rest: 0 }, np: { qualifying: 40, carried: 40, rest: 0 } };
+/** Measured (v1.201.0 review): the same year in the states the add-on runs — lineForceChargeEligible true (a write
+ *  mode) and false (advisory) — against v1.200.0 in the same state: writes raised, shortfalls disclosed (the
+ *  envelope's included), holds that charge, charges that hold, and the plans the line force-charge carries. */
+const PIN_S8_LIVE = {
+  on: {
+    m: { writtenUp: 156, shortfallOn: 5, holdToCharge: 3, chargeToHold: 0, carried: [37, 53], carryDropped: 0 },
+    np: { writtenUp: 162, shortfallOn: 5, holdToCharge: 3, chargeToHold: 0, carried: [22, 40], carryDropped: 0 },
+  },
+  off: {
+    m: { writtenUp: 156, shortfallOn: 15, holdToCharge: 3, chargeToHold: 0, carried: [0, 0], carryDropped: 0 },
+    np: { writtenUp: 162, shortfallOn: 18, holdToCharge: 3, chargeToHold: 0, carried: [0, 0], carryDropped: 0 },
+  },
+};
+
 test('★★★ S8 THE YEAR at (0.944, 270) and (nameplate, 270) against v1.200.0: nothing falls, the counts as measured; A\'s carrier holds (rest = 0)', () => {
   for (const [name, scale] of [['m', S944], ['np', null]] as const) {
     const k = { islanded: 0, lineUp: 0, writtenUp: 0, shortfallOn: 0, holdToCharge: 0, chargeToHold: 0, overEnvelope: [0, 0] };
@@ -564,6 +679,33 @@ test('★★★ S8 THE YEAR at (0.944, 270) and (nameplate, 270) against v1.200.
     assert.deepEqual(k, PIN_S8[name], `${name}: the year's counts`);
     assert.equal(carrier.rest, 0, `${name}: an over-envelope line neither carried nor disclosed`);
     assert.deepEqual(carrier, PIN_S8_CARRIER[name], `${name}: the carrier's counts`);
+  }
+});
+
+test('★★★ S8 THE YEAR in a write mode and in advisory mode (eligibility true / false): nothing falls either, the counts as measured', () => {
+  for (const [state, line] of [['on', true], ['off', false]] as const) {
+    for (const [name, scale] of [['m', S944], ['np', null]] as const) {
+      const k = { writtenUp: 0, shortfallOn: 0, holdToCharge: 0, chargeToHold: 0, carried: [0, 0], carryDropped: 0 };
+      for (const c of CASES) {
+        const b = yearPlan(c.deps, scale, undefined, line) as StandbyPlan & { forceChargeLine?: unknown };
+        const p = yearPlan(c.deps, scale, 270, line) as StandbyPlan & { forceChargeLine?: unknown };
+        if (b.cushionBasis !== 'islanded-outage') continue;
+        for (const f of ['cushionLineSocPct', 'setpointSocPct', 'requiredExtraKwh', 'buyKwh', 'buyKwhDebiased', 'costCeilingSocPct', 'expectedBuyKwh', 'expectedWriteLevelPct', 'targetSocPct'] as const) {
+          const x = b[f] as number | null | undefined, y = p[f] as number | null | undefined;
+          if (x == null) continue;
+          assert.ok(y != null && y >= x - 1e-9, `${c.label} ${state} ${name}: ${f} fell ${x} → ${y}`);
+        }
+        if (b.chargeTonight && p.chargeTonight && written(p)! > written(b)!) k.writtenUp += 1;
+        if (!b.cushionShortfall && p.cushionShortfall) k.shortfallOn += 1;
+        assert.ok(!(b.cushionShortfall && !p.cushionShortfall), `${c.label} ${state} ${name}: a shortfall vanished`);
+        if (!b.chargeTonight && p.chargeTonight) k.holdToCharge += 1;
+        if (b.chargeTonight && !p.chargeTonight) k.chargeToHold += 1;
+        if (b.forceChargeLine != null) k.carried[0] += 1;
+        if (p.forceChargeLine != null) k.carried[1] += 1;
+        if (b.forceChargeLine != null && p.forceChargeLine == null) k.carryDropped += 1;
+      }
+      assert.deepEqual(k, PIN_S8_LIVE[state][name], `${state} ${name}: the year's counts`);
+    }
   }
 });
 
