@@ -4080,8 +4080,9 @@ async function recomputeNightChargePlan(
     // v1.187.22 — the gate the force-charge itself runs on, so the expected buy reads the level
     // the armed write drives to (armedWriteLevelPct). R2 — the leg's own (forceChargeOn(role)).
     forceChargeEligible: forceChargeOn(legRole),
-    // v1.200.0 — the outage-line force-charge's gate, per leg: a line above the 50% reserve is then carried
-    // (forceChargeLine) or disclosed (cushionShortfall, cause 'envelope'). Never absent on a live plan.
+    // v1.200.0 — the outage-line force-charge's gate, per leg: a line above the 50% reserve is then armed
+    // (forceChargeLine; (A5) carried, or disclosed beside it) or, the gate off, disclosed (cushionShortfall, cause
+    // 'envelope'). Never absent on a live plan.
     lineForceChargeEligible: lineForceChargeOn(legRole),
     // R2 — the leg: the overnight window (resolved above) for every live plan, its role the caller's.
     // R4 — a shadow leg's own spec (its pinned window, taper line and backup hold).

@@ -1377,8 +1377,11 @@ export function expectedBuyFromPlan(o: {
  * reach: 2026-10-29 21:30 at 15 h on nameplate walked to ~98.4% and its 100% ceiling, from a 30% pool the window can
  * lift by 57.92 kWh at most (~92.8%). There the stated close is capped at the window-open pack plus that deliverable
  * plus the window's P50 PV (all of it into the pack: an upper bound), never above 100, and floored at the reserve —
- * the convention of every window-bound night (the pool may close lower). The panel's stop (ceilingStop) is stated only where that reach clears the panel ceiling. On a walk that is
- * not bound the cap cannot bind (its close is the open plus a lift within the deliverable plus PV, less the drains).
+ * the convention of every window-bound night (the pool may close lower: 206 / 224 bound line plans of the year at
+ * 4-20 h reach less than 50%, every one disclosed; a line in (50, 50.05] there would read as held — none on the year,
+ * and the gate grades its close). The panel's stop (ceilingStop) is stated only where that reach clears the panel
+ * ceiling. On a walk that is not bound the cap cannot bind (its close is the open plus a lift within the deliverable
+ * plus PV, less the drains).
  */
 function expectedLineBuy(
   o: Parameters<typeof expectedBuyFromPlan>[0],
