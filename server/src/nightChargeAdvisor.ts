@@ -4729,10 +4729,12 @@ export function cushionScaleLogText(s: (CushionPoolScale & { connectedCores?: nu
   return `night-charge: the outage-cushion line counts the cushion on the packs' measured capacity, ×${s.scale.toFixed(3)} of nameplate (${s.basis}${cores})`;
 }
 
-/** v1.201.0 — the log line for the Cores' standby the outage cushion counts (index.ts logs it on change, live
- *  legs only): the figure, and the connected Cores it is the runway's figure for. PURE. */
+/** v1.201.0 — the log line for the Cores' standby figure the outage cushion takes (index.ts logs it on change of
+ *  the figure or the Core count, live legs only): the figure the door evaluated, the connected Cores it is the
+ *  runway's figure for, and the rule. It states no plan: the door runs before the cushion's basis is known, and a
+ *  legacy-pct or disabled cushion counts nothing (the plan's cushionStandby says what one did). PURE. */
 export function cushionStandbyLogText(w: number, connectedCores: number): string {
-  return `night-charge: the outage cushion counts the Cores' standby draw, ${Math.round(w)} W (the runway's figure for ${connectedCores} connected Core(s))`;
+  return `night-charge: the Cores' standby figure for the outage cushion is ${Math.round(w)} W (the runway's figure for ${connectedCores} connected Core(s)); an islanded-outage cushion counts it for its hours`;
 }
 
 export function plannerSizingNeedBuyKwh(opts: {

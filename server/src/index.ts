@@ -3075,8 +3075,8 @@ let lastLoggedBuyDebiasKey: string | null = null;
 let lastLoggedCostLoadKey: string | null = null;
 // v1.199.0 — the cushion line's capacity basis: last logged value (log on change only).
 let lastLoggedCushionScaleKey: string | null = null;
-// v1.201.0 — the Cores' standby the outage cushion counts: last logged value (log on change only).
-let lastLoggedCushionStandbyW: number | null = null;
+// v1.201.0 — the Cores' standby figure for the outage cushion: last logged figure and Core count (log on change only).
+let lastLoggedCushionStandbyKey: string | null = null;
 /**
  * v1.125.0 — the ISLANDED load, kW: the SHP2's own circuit sum.
  *
@@ -3773,10 +3773,13 @@ async function recomputeNightChargePlan(
   }
   // v1.201.0 — THE CORES' STANDBY IN THE OUTAGE CUSHION: the runway's pool overhead figure for the Cores the
   // tracker above counted, the panel reporting a pool (fullWh > 0 here). The second door through the SCOPE
-  // contract: the same snapshot, before the first await. Logged on change, live legs only.
+  // contract: the same snapshot, before the first await. Logged on change of the figure OR the Core count it
+  // names (at the defaults the figure is 270 W for 0-3 Cores), live legs only, as the figure the door evaluated:
+  // whether tonight's cushion counts it is the plan's (cushionStandby), not this line's.
   const cushionStandbyW = cushionStandbyOverheadW(cushionPoolScale, fullWh > 0);
-  if (!shadowLeg && cushionStandbyW !== lastLoggedCushionStandbyW) {
-    lastLoggedCushionStandbyW = cushionStandbyW;
+  const cushionStandbyLogKey = `${cushionStandbyW}:${cushionPoolScale?.connectedCores ?? 0}`;
+  if (!shadowLeg && cushionStandbyLogKey !== lastLoggedCushionStandbyKey) {
+    lastLoggedCushionStandbyKey = cushionStandbyLogKey;
     app.log.info(cushionStandbyLogText(cushionStandbyW, cushionPoolScale?.connectedCores ?? 0));
   }
 

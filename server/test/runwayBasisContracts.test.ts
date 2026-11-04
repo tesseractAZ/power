@@ -372,7 +372,10 @@ test('★★★ SCOPE — source pins: the planner, JIT force-charge and MPC nev
   assert.ok(plan.indexOf(CALL) < plan.indexOf(CALL_B) && plan.indexOf(CALL_B) < plan.indexOf('await '), 'beside the scale, before the first await');
   assert.ok(plan.indexOf('  const fullKwh = fullWh / 1000;\n') < plan.indexOf(CALL_B));
   assert.ok(plan.includes(`      app.log.info(cushionScaleLogText(cushionPoolScale));\n    }\n  }\n${'  // '}`), 'the scale\'s log block closes before the second door');
-  assert.ok(plan.includes(`${CALL_B}  if (!shadowLeg && cushionStandbyW !== lastLoggedCushionStandbyW) {\n`), 'a shadow leg never logs the standby');
+  // Logged on change of the figure or the Core count it names (one key), a shadow leg never.
+  const LOG_B = "  const cushionStandbyLogKey = `${cushionStandbyW}:${cushionPoolScale?.connectedCores ?? 0}`;\n"
+    + '  if (!shadowLeg && cushionStandbyLogKey !== lastLoggedCushionStandbyKey) {\n';
+  assert.ok(plan.includes(`${CALL_B}${LOG_B}`), 'a shadow leg never logs the standby');
   const PASS_B = "    // v1.201.0 — the Cores' standby draw the islanded-outage cushion counts (W; the runway's figure).\n    cushionStandbyW,\n";
   assert.equal(count(plan, PASS_B), 1, 'passed as the input');
   assert.equal(count(plan, '\n    cushionStandbyW,\n'), 1, 'one deps line');
@@ -524,6 +527,7 @@ test('★★★ SCOPE — source pins: the planner, JIT force-charge and MPC nev
       'app.log.info(cushionScaleLogText(cushionPoolScale));',
       // v1.201.0 — the second door's call reads the first door's result (its Core count), and so does its log.
       'const cushionStandbyW = cushionStandbyOverheadW(cushionPoolScale, fullWh > 0);',
+      'const cushionStandbyLogKey = `${cushionStandbyW}:${cushionPoolScale?.connectedCores ?? 0}`;',
       'app.log.info(cushionStandbyLogText(cushionStandbyW, cushionPoolScale?.connectedCores ?? 0));',
       'cushionPoolScale,', // deps
       '...cushionPoolScaleLedgerColumns(plan),', // recordNightPlanRow: written, never read back
@@ -570,8 +574,9 @@ test('★★★ SCOPE — source pins: the planner, JIT force-charge and MPC nev
       'cushionStandbyLedgerColumns, cushionStandbyLogText,', // the import
       'function cushionStandbyOverheadW(poolScale: { connectedCores: number } | null, poolReported: boolean): number {', // THE second door
       'const cushionStandbyW = cushionStandbyOverheadW(cushionPoolScale, fullWh > 0);',
-      'if (!shadowLeg && cushionStandbyW !== lastLoggedCushionStandbyW) {',
-      'lastLoggedCushionStandbyW = cushionStandbyW;',
+      'const cushionStandbyLogKey = `${cushionStandbyW}:${cushionPoolScale?.connectedCores ?? 0}`;',
+      'if (!shadowLeg && cushionStandbyLogKey !== lastLoggedCushionStandbyKey) {',
+      'lastLoggedCushionStandbyKey = cushionStandbyLogKey;',
       'app.log.info(cushionStandbyLogText(cushionStandbyW, cushionPoolScale?.connectedCores ?? 0));',
       'cushionStandbyW,', // deps
       '...cushionStandbyLedgerColumns(plan),', // recordNightPlanRow: written, never read back

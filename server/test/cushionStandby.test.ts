@@ -692,10 +692,47 @@ test('★★ S10 LEDGER — three columns, from the plan\'s field: the figure, i
   assert.ok(Math.abs(p.cushionKwh! - (cols(p).cushion_standby_kwh as number) - plan().cushionKwh!) <= 0.005);
 });
 
-test('★★ the log line (live legs, on change): the figure and the Cores it is the runway\'s figure for', () => {
+test('★★ the log line (live legs, on change): the figure the door evaluated and the Cores it is the runway\'s figure for — no claim that tonight\'s cushion counts it', () => {
   const text = (nca as unknown as { cushionStandbyLogText: (w: number, n: number) => string }).cushionStandbyLogText;
-  assert.equal(text(270, 3), "night-charge: the outage cushion counts the Cores' standby draw, 270 W (the runway's figure for 3 connected Core(s))");
-  assert.equal(text(180.5, 0), "night-charge: the outage cushion counts the Cores' standby draw, 181 W (the runway's figure for 0 connected Core(s))");
+  assert.equal(text(270, 3), "night-charge: the Cores' standby figure for the outage cushion is 270 W (the runway's figure for 3 connected Core(s)); an islanded-outage cushion counts it for its hours");
+  assert.equal(text(180.5, 0), "night-charge: the Cores' standby figure for the outage cushion is 181 W (the runway's figure for 0 connected Core(s)); an islanded-outage cushion counts it for its hours");
+});
+
+/** index.ts's door, its call, the on-change key and the log block, as written there, evaluated against `analytics`
+ *  with a recording log: one closure per process (the module-level last-logged key). */
+function logProbe(analytics: { runwayPoolOverheadW: (n: number, r: boolean) => number }) {
+  const index = readFileSync(resolve(SRC, 'index.ts'), 'utf8');
+  const start = index.indexOf('function cushionStandbyOverheadW(');
+  const door = index.slice(start, index.indexOf('\n}\n', start) + 2);
+  const decl = index.split('\n').filter((l) => /^let lastLoggedCushionStandby\w*/.test(l));
+  assert.equal(decl.length, 1, 'one module-level last-logged key');
+  const lines = index.split('\n');
+  const from = lines.findIndex((l) => /^\s+const cushionStandbyW = /.test(l));
+  const to = lines.findIndex((l, i) => i > from && /^ {2}\}$/.test(l));
+  assert.ok(from > 0 && to > from && to - from <= 6, `the call and its log block (${from}..${to})`);
+  const block = lines.slice(from, to + 1).join('\n');
+  const ts = `function __make(runwayPoolOverheadW, cushionStandbyLogText, app) {\n${decl[0]}\n${door}\nreturn (cushionPoolScale, fullWh, shadowLeg) => {\n${block}\nreturn cushionStandbyW;\n};\n}`;
+  const js = transformSync(ts, { loader: 'ts' }).code;
+  const logged: string[] = [];
+  const make = new Function(`${js}\nreturn __make;`)() as (...a: unknown[]) => (s: unknown, f: number, shadow: boolean) => number;
+  const leg = make(analytics.runwayPoolOverheadW, nca.cushionStandbyLogText, { log: { info: (m: string) => logged.push(m) } });
+  return { leg, logged };
+}
+
+test('★★ the log line is keyed on the figure AND the Core count it names: a Core that connects, drops or returns re-logs at 270 W; a shadow leg never logs', async () => {
+  const sc = (n: number | null) => (n == null ? null : { scale: 0.944, basis: 'measured', connectedCores: n });
+  const { leg, logged } = logProbe({ runwayPoolOverheadW });
+  // At the defaults (a 270 W floor, 90 W per Core) the figure is 270 W for 0-3 Cores: a boot on a partial frame
+  // (0 Cores listed), then the Cores, one dropping and returning; a repeated reading does not re-log.
+  for (const n of [0, 1, 3, 3, 2, 3]) assert.equal(leg(sc(n), 92_160, false), 270);
+  assert.deepEqual(logged.map((m) => m.match(/for (\d) connected/)?.[1]), ['0', '1', '3', '2', '3']);
+  assert.ok(logged.every((m) => m.includes(' is 270 W (')), 'the figure');
+  leg(sc(1), 92_160, true);
+  leg(null, 92_160, true);
+  assert.equal(logged.length, 5, 'a shadow leg never logs');
+  // A tracker that threw counts no Core: the runway's floor, named for 0 Cores.
+  leg(null, 92_160, false);
+  assert.equal(logged.at(-1), "night-charge: the Cores' standby figure for the outage cushion is 270 W (the runway's figure for 0 connected Core(s)); an islanded-outage cushion counts it for its hours");
 });
 
 /* ══ S11 — the plumbing ═══════════════════════════════════════════════════════ */
