@@ -691,6 +691,58 @@ export function lineLatestStartMs(
   );
 }
 
+/** v1.200.0 (Fix9) — why no force-charge can START on a record any more (forceChargeStartClosed). */
+export type ForceChargeStartClosed = 'started' | 'cancelled' | 'reverted' | 'foreign' | 'noWindow' | 'over' | 'late' | 'gatedOff';
+
+/**
+ * v1.200.0 (Fix9) — PURE. Why decideForceCharge can no longer START a force-charge on this record, whatever a later
+ * reading shows — the reserve write verified by then included — or null while a start can still come. Its checks before
+ * a start (step 4) that no later tick of the record undoes, each stamp one-way: a force-charge of ours already switched
+ * on (at most once a night), the night cancelled, the reserve's restore sent, the reserve set outside the add-on, no
+ * window, the close (writeWindowEndMs: the window close, or an hour before on-peak if that is sooner) passed ('over') or
+ * within FORCE_CHARGE_MIN_RUN_MS ('late': "not worth starting"); and last, no mode riding the record under the live
+ * gates (forceChargeModeOf: the line gate off is NIGHT_CHARGE_MODE advisory, which only an option change and a restart
+ * undo). The line-night words that say the force-charge "waits on" a reading of the target (index.ts: the reserve-apply
+ * failure and the two proofs that the write never landed; notify.buildNightChargeApplyFailure) are keyed on it: a
+ * cancelled night, or one at or past its close less 20 min, says no force-charge for the line starts, and why — never
+ * that it waits (the round-7 reviewer's probes: cancelled, late, two hours after the close).
+ */
+export function forceChargeStartClosed(
+  s: Pick<NightActuationState, 'forceChargeOnAtMs' | 'cancelled' | 'revertedAtMs' | 'foreignSettledAtMs' | 'windowStartMs' | 'windowEndMs'
+    | 'nextOnPeakStartMs' | 'forceChargeCeilingPct' | 'forceChargeLineAskPct'>,
+  nowMs: number, gates: ForceChargeGates,
+): ForceChargeStartClosed | null {
+  if (s.forceChargeOnAtMs != null) return 'started';
+  if (s.cancelled) return 'cancelled';
+  if (s.revertedAtMs != null) return 'reverted';
+  if (s.foreignSettledAtMs != null) return 'foreign';
+  if (s.windowStartMs == null || s.windowEndMs == null) return 'noWindow';
+  const endMs = writeWindowEndMs(s)!;
+  if (nowMs >= endMs) return 'over';
+  if (nowMs >= endMs - FORCE_CHARGE_MIN_RUN_MS) return 'late';
+  if (forceChargeModeOf(s, gates) == null) return 'gatedOff';
+  return null;
+}
+
+/** v1.200.0 (Fix9) — each closed start's reason, in words (lineStartClosedWords). */
+export const FORCE_CHARGE_START_CLOSED_WHY: Readonly<Record<Exclude<ForceChargeStartClosed, 'started' | 'gatedOff'>, string>> = Object.freeze({
+  cancelled: 'the night was cancelled',
+  reverted: "the reserve's restore was sent",
+  foreign: 'the reserve was set outside the add-on',
+  noWindow: 'the night has no charge window',
+  over: 'the window has closed',
+  late: `${Math.round(FORCE_CHARGE_MIN_RUN_MS / 60_000)} min or less of the window is left`,
+});
+
+/** v1.200.0 (Fix9) — PURE. A line night's words for a start that can no longer come (forceChargeStartClosed), `line` naming the
+ *  line ("the 55.6% outage line", or "the line"): true in every outcome — each reason holds for the rest of the record, and
+ *  'gatedOff' says while the options keep it off. */
+export function lineStartClosedWords(line: string, why: ForceChargeStartClosed): string {
+  if (why === 'started') return `the force-charge for ${line} was switched on earlier and does not start again`;
+  if (why === 'gatedOff') return `no force-charge for ${line} starts while the options keep it off`;
+  return `no force-charge for ${line} starts: ${FORCE_CHARGE_START_CLOSED_WHY[why]}`;
+}
+
 /**
  * v1.200.0 (review) — PURE. What the evening push says the armed night's force-charge does (index.ts's
  * supervised context): from the stamp the morning push reads back (forceChargeRides) and the mode the
@@ -1525,20 +1577,39 @@ export function linePoolReference(samples: ReadonlyArray<LinePoolSample> | null 
  *  lineNightObservations) is waited out the same way: a re-ON read past as not applied whose slots then read ON (a late
  *  apply, one all-OFF reading at its check), or Charge Now switched on in the app after the push, is a pool beginning to
  *  charge — judged against the fall before it, the push and the shape log fired on it (the close plant: 3,271 shape logs
- *  on 7,480 nights with a re-ON applied a minute after its check, 2,476 with a person following the push). */
+ *  on 7,480 nights with a re-ON applied a minute after its check, 2,476 with a person following the push).
+ *  (Fix9) …and so is the ON VERIFIED LATE (onVerifiedLateAtMs): its readback first read it on FORCE_CHARGE_ON_VERIFY_AFTER_MS or
+ *  more after its last attempt (unmeasured; round 7's night: re-issued at +15, warned at +30, its slots ON from +40). The slots
+ *  read OFF are on the record only after the verify (lineNightObservations), so no ON is seen for it: judged against the pool
+ *  from before the slots read ON, the tick after the verify pushed 'onNotRising' on a pool beginning to charge, and spent the
+ *  once-a-night push. The verify's own reading is the ON seen; it writes nothing. */
 export function lineTrendReference(
   s: Pick<NightActuationState, 'forceChargeLinePoolSamples' | 'forceChargeLineReOnAtMs' | 'forceChargeOnLastAttemptMs' | 'forceChargeOnAtMs'
     | 'forceChargeLineReOnSlots' | 'forceChargeLineReOnCheckedAtMs' | 'forceChargeLineReOnNotAppliedSlots' | 'forceChargeLineReOnAppliedAtMs'
-    | 'forceChargeLineOnSeenAtMs'>,
+    | 'forceChargeLineOnSeenAtMs' | 'forceChargeOnVerifiedAtMs'>,
   nowMs: number,
 ): LinePoolSample | null {
   const ref = linePoolReference(s.forceChargeLinePoolSamples, nowMs);
   const reOn = lastLineReOnApplied(s) !== false ? s.forceChargeLineReOnAtMs : s.forceChargeLineReOnAppliedAtMs;
   const ownOn = reOn ?? s.forceChargeOnLastAttemptMs ?? s.forceChargeOnAtMs;
-  const seen = s.forceChargeLineOnSeenAtMs;
+  // (Fix9) An ON verified late is an ON seen at its verify (onVerifiedLateAtMs); the later of the two is the one waited out.
+  const lateOn = onVerifiedLateAtMs(s);
+  const seenOn = s.forceChargeLineOnSeenAtMs;
+  const seen = seenOn != null && (lateOn == null || seenOn > lateOn) ? seenOn : lateOn;
   const lastOn = ownOn != null && seen != null && seen > ownOn ? seen : ownOn;
   if (ref == null || lastOn == null || ref.atMs < lastOn + FORCE_CHARGE_ON_VERIFY_AFTER_MS) return null;
   return ref;
+}
+
+/** v1.200.0 (Fix9) — PURE. When the ON was verified, where its readback first read it on FORCE_CHARGE_ON_VERIFY_AFTER_MS or more
+ *  after its last attempt (the re-issue, else the ON): an ON applied late, past the grace an ON write of ours is given — the reading
+ *  that saw it is the ON seen, as lineNightObservations stamps one (lineTrendReference). null otherwise. */
+export function onVerifiedLateAtMs(
+  s: Pick<NightActuationState, 'forceChargeOnVerifiedAtMs' | 'forceChargeOnLastAttemptMs' | 'forceChargeOnAtMs'>,
+): number | null {
+  const at = s.forceChargeOnVerifiedAtMs;
+  const attempt = s.forceChargeOnLastAttemptMs ?? s.forceChargeOnAtMs;
+  return at != null && attempt != null && at - attempt >= FORCE_CHARGE_ON_VERIFY_AFTER_MS ? at : null;
 }
 
 /** The slots a force-charge of ours covers: the record's, or all of them when the list is gone (decideForceCharge). */

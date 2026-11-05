@@ -66,6 +66,8 @@ import {
   // line-ask night's texts whatever its mode, and the declined-start push across restarts.
   lineDeclinedPushTick, type LineDeclinedPushMem, lineAtRiskPushDue, lineOnReadingShape, lineNightObservations,
   forceChargeLineNightPct, forceChargeOnFailureNight, lineLogPct, type ForceChargeOpts,
+  // v1.200.0 (Fix9) — a line night's force-charge "waits on" a reading of the target only while a start can still come.
+  forceChargeStartClosed, lineStartClosedWords,
   // v1.200.0 (review 4) — what a line re-ON's readback check stamps, the re-ON that took effect included.
   lineReOnCheckedStamp,
   // v1.200.0 (review 6) — the force-charge tick's cadence, which the line-at-risk push's hand-back hold counts.
@@ -6803,9 +6805,12 @@ async function runNightActuationTickInner(): Promise<void> {
   if (attemptProvedUnlanded(state, currentReservePct, nowMs)) {
     persistNightActuation({ ...state, attemptUnlandedAtMs: nowMs });
     // v1.200.0 (Fix8 review 2) — on a night whose record carries a line ask, in words true in every outcome: a later reading of the
-    // target still adopts the attempt (attemptAdoptable reads no stamp) and the force-charge for the line then starts — "has NOT
-    // landed", never "never landed". A night with no line ask keeps v1.199.1's line, word for word.
-    if (lineLogPct(state) != null) app.log.info(`night-charge: the ${state.day} write attempt has NOT landed — after its apply window the panel still reads the ${state.attemptBaselinePct}% it read before the attempt: nothing of ours holds the reserve, and the force-charge for the ${lineLogPct(state)}% outage line waits on a reading of the target.`);
+    // target still adopts the attempt (attemptAdoptable reads no stamp) — "has NOT landed", never "never landed". (Fix9) The
+    // force-charge for the line waits on that reading only while a start can still come (forceChargeStartClosed: the checks
+    // decideForceCharge makes before one); a cancelled night, or one at or past its close less 20 min (this proof has no upper time
+    // bound), says no force-charge for the line starts, and why. A night with no line ask keeps v1.199.1's line, word for word.
+    const attemptStartClosed = forceChargeStartClosed(state, nowMs, forceChargeGatesOn(legRoleOf(state)));
+    if (lineLogPct(state) != null) app.log.info(`night-charge: the ${state.day} write attempt has NOT landed — after its apply window the panel still reads the ${state.attemptBaselinePct}% it read before the attempt: nothing of ours holds the reserve, and ${attemptStartClosed == null ? `the force-charge for the ${lineLogPct(state)}% outage line waits on a reading of the target` : lineStartClosedWords(`the ${lineLogPct(state)}% outage line`, attemptStartClosed)}.`);
     else app.log.info(`night-charge: the ${state.day} write attempt never landed — after its apply window the panel still reads the ${state.attemptBaselinePct}% it read before the attempt; nothing of ours holds the reserve.`);
     state = nightActuationMem;
     if (state.day == null) return;
@@ -6816,9 +6821,12 @@ async function runNightActuationTickInner(): Promise<void> {
   if (applyProvedUnlanded(state, currentReservePct, nowMs)) {
     persistNightActuation({ ...state, applyUnlandedAtMs: nowMs });
     // v1.200.0 (Fix8 review 2) — on a night whose record carries a line ask, in words true in every outcome: a later reading of the
-    // target still verifies the write (applyVerified; the apply-failure push asks for the reserve set by hand) and the force-charge
-    // for the line then starts — "has NOT taken effect", never "never took effect". A night with no line ask keeps v1.199.1's line.
-    if (lineLogPct(state) != null) app.log.info(`night-charge: the ${state.day} write has NOT taken effect — after its re-issues the panel still reads the ${state.attemptBaselinePct}% it read before the write; until a reading of the target verifies it (a late apply, or the reserve set in the EcoFlow app), its restore is a no-op, nothing of ours holds the reserve, and the force-charge for the ${lineLogPct(state)}% outage line waits on it.`);
+    // target still verifies the write (applyVerified; the apply-failure push asks for the reserve set by hand) — "has NOT taken
+    // effect", never "never took effect". (Fix9) The force-charge for the line waits on it only while a start can still come
+    // (forceChargeStartClosed); otherwise — a cancelled night (its restore goes on this tick), one at or past its close less 20 min —
+    // no force-charge for the line starts, and why. A night with no line ask keeps v1.199.1's line.
+    const applyStartClosed = forceChargeStartClosed(state, nowMs, forceChargeGatesOn(legRoleOf(state)));
+    if (lineLogPct(state) != null) app.log.info(`night-charge: the ${state.day} write has NOT taken effect — after its re-issues the panel still reads the ${state.attemptBaselinePct}% it read before the write; ${applyStartClosed == null ? `until a reading of the target verifies it (a late apply, or the reserve set in the EcoFlow app), its restore is a no-op, nothing of ours holds the reserve, and the force-charge for the ${lineLogPct(state)}% outage line waits on it` : `nothing of ours holds the reserve, and ${lineStartClosedWords(`the ${lineLogPct(state)}% outage line`, applyStartClosed)}`}.`);
     else app.log.info(`night-charge: the ${state.day} write never took effect — after its re-issues the panel still reads the ${state.attemptBaselinePct}% it read before the write; its restore is a no-op and nothing of ours holds the reserve.`);
     state = nightActuationMem;
     if (state.day == null) return;
@@ -7012,14 +7020,20 @@ async function runNightActuationTickInner(): Promise<void> {
     const expectedKwh = armedExpectedBuyKwh(state.day);
     // v1.200.0 (Fix8 review 2) — on a night whose record carries a line ask (keyed as its push is: forceChargeLineNightPct), in
     // words true in every outcome: the apply ladder still verifies a reading of the target after this (a late apply, or the
-    // reserve set in the app as the push asks), and the force-charge for the line then starts — "has NOT taken effect", never
-    // "NEVER TOOK EFFECT" nor "forfeited". A night with no line ask keeps v1.199.1's line, word for word.
-    if (lineLogPct(state) != null) app.log.error(`night-charge: write has NOT taken effect — the cloud ACK'd backupReserveSoc ${state.targetPct}% but the device still reads ${currentReservePct ?? 'unknown'}% after ${state.applyRetries} retries. Tonight's charge (${buyFiguresLogText(expectedKwh, state.buyKwh)}) has not taken effect: until the panel reads ${state.targetPct}% (a late apply, or the reserve set in the EcoFlow app, is still verified) the force-charge for the ${lineLogPct(state)}% outage line waits on it; ledger corrected to actuated:0.`);
+    // reserve set in the app as the push asks) — "has NOT taken effect", never "NEVER TOOK EFFECT" nor "forfeited". (Fix9) The
+    // force-charge for the line waits on it only while a start can still come (forceChargeStartClosed, keyed as the push is): with
+    // its re-issues stopping at the write end less 5 min, applyFailed also falls inside the start's last 20 min, or past the close.
+    // A night with no line ask keeps v1.199.1's line, word for word.
+    const lineStartClosed = forceChargeStartClosed(state, nowMs, forceChargeGatesOn(legRoleOf(state)));
+    if (lineLogPct(state) != null) app.log.error(`night-charge: write has NOT taken effect — the cloud ACK'd backupReserveSoc ${state.targetPct}% but the device still reads ${currentReservePct ?? 'unknown'}% after ${state.applyRetries} retries. Tonight's charge (${buyFiguresLogText(expectedKwh, state.buyKwh)}) has not taken effect${lineStartClosed == null ? `: until the panel reads ${state.targetPct}% (a late apply, or the reserve set in the EcoFlow app, is still verified) the force-charge for the ${lineLogPct(state)}% outage line waits on it` : `, and ${lineStartClosedWords(`the ${lineLogPct(state)}% outage line`, lineStartClosed)}`}; ledger corrected to actuated:0.`);
     else app.log.error(`night-charge: write NEVER TOOK EFFECT — the cloud ACK'd backupReserveSoc ${state.targetPct}% but the device still reads ${currentReservePct ?? 'unknown'}% after ${state.applyRetries} retries. Tonight's charge (${buyFiguresLogText(expectedKwh, state.buyKwh)}) is forfeited; ledger corrected to actuated:0.`);
     try {
       await sendNotification(loadNotifyConfig(), buildNightChargeApplyFailure({
         day: state.day, currentReservePct, targetPct: state.targetPct, applyRetries: state.applyRetries, expectedKwh,
         linePct: forceChargeLineNightPct(state),
+        // v1.200.0 (Fix9) — whether a start can still come, and until when (decideForceCharge's last: the close less 20 min).
+        startClosed: lineStartClosed,
+        startByText: state.windowEndMs != null ? fmtSiteClock(writeWindowEndMs(state)! - FORCE_CHARGE_MIN_RUN_MS) : null,
       }));
     } catch (e: any) {
       app.log.warn(`night-charge: apply-failure notify failed (${e?.message ?? e})`);

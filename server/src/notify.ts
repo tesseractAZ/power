@@ -15,6 +15,7 @@ import {
 import {
   forceChargeStopPct, partialForceChargeOnFailureSlots, forceChargeFailedSlotsText, FORCE_CHARGE_LINE_REON_MAX, lineReOnTimesWords,
   lineAboveReserveWords, lineBesidePct, type ForceChargeNightOutcome, type ForceChargeSlotCore, type LineAtRisk,
+  lineStartClosedWords, type ForceChargeStartClosed,
 } from './nightForceCharge.js';
 import { isNoChargeKwh, revertRetryText, RESERVE_WRITE_MAX_PCT, type NightChargeMode, type RevertResendOnReport, type RestoreSummaryKind } from './nightChargeActuator.js';
 // R5 — the day-aware formatter's clocks (chargeText.ts), shared with the mid-day texts.
@@ -958,6 +959,11 @@ export function buildNightChargeApplyFailure(o: {
    *  the force-charge that carries it rides only a VERIFIED reserve write, so until the panel reads the target the
    *  pool keeps its normal reserve, under the line. null/omitted ⇒ a night with no line: v1.199.1's words, word for word. */
   linePct?: number | null;
+  /** v1.200.0 (Fix9) — on a line night, why no force-charge can start any more (nightForceCharge.forceChargeStartClosed, as
+   *  index.ts keys its log line), or null/omitted while one still can. */
+  startClosed?: ForceChargeStartClosed | null;
+  /** v1.200.0 (Fix9) — the last start decideForceCharge makes (the close less FORCE_CHARGE_MIN_RUN_MS), as clock text. */
+  startByText?: string | null;
 }): NotifyMessage {
   const expected = armedExpectedPhrase(o.expectedKwh);
   const planned = isNoChargeKwh(o.expectedKwh)
@@ -966,14 +972,22 @@ export function buildNightChargeApplyFailure(o: {
   const line = o.linePct != null && Number.isFinite(o.linePct) ? round1(o.linePct) : null;
   // v1.200.0 (review 2) — a line night is the outage cushion, not a buy: never "no action needed". What holds it
   // tonight: the reserve set by hand to the night's target — decideActuation verifies a reading of the target
-  // even after the apply failed, and the force-charge then starts for the line as it would have. (Fix8 review 1) So a
-  // late apply is verified too: "has not taken effect", until the panel reads the target — never "will not happen".
+  // even after the apply failed, and the force-charge then starts for the line as it would have — (Fix9) while a start can
+  // still come: once the panel reads it before the close less 20 min (startByText), decideForceCharge's last start. (Fix8
+  // review 1) So a late apply is verified too: "has not taken effect", until the panel reads the target — never "will not happen".
+  // (Fix9) Where no start can come any more (startClosed: 20 min or less to the close or past it, a cancelled night whose prior
+  // cannot be restored), the force-charge never waits on this write, and nothing set in the app would start it: it says so.
+  const closed = line != null && o.startClosed != null ? lineStartClosedWords('the line', o.startClosed) : null;
   const tail = line == null
     ? `Tonight's planned ${planned} will not happen; the pool stays on its normal floor. `
       + 'No action needed tonight — the grid is available as backup — but if this repeats, check the SHP2 cloud link.'
+    : closed != null
+    ? `Tonight's planned ${planned} has not taken effect: until the panel reads ${o.targetPct ?? RESERVE_WRITE_MAX_PCT}%, `
+      + `it keeps its normal reserve, under tonight's ${line}% outage line. ${closed.charAt(0).toUpperCase()}${closed.slice(1)}. `
+      + 'If this repeats, check the SHP2 cloud link.'
     : `Tonight's planned ${planned} has not taken effect: until the panel reads ${o.targetPct ?? RESERVE_WRITE_MAX_PCT}%, `
       + `it keeps its normal reserve, under tonight's ${line}% outage line, and the force-charge for the line waits on this write. `
-      + `To hold the line tonight, set the backup reserve to ${o.targetPct ?? RESERVE_WRITE_MAX_PCT}% in the EcoFlow app: once the panel reads it, `
+      + `To hold the line tonight, set the backup reserve to ${o.targetPct ?? RESERVE_WRITE_MAX_PCT}% in the EcoFlow app: once the panel reads it${o.startByText != null ? ` before ~${o.startByText}` : ''}, `
       + 'the add-on starts the force-charge for the line as planned. If this repeats, check the SHP2 cloud link.';
   return {
     severity: 'warning',
