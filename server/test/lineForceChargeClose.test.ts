@@ -114,9 +114,11 @@ type LineState = NightActuationState & {
  *  found every slot not applied. (review 6) `handBackAtMs` / `retryAtMs` — 'reOnLimited': the hand-back's tick and its
  *  retry's; `personOnAtMs` / `personStopAtMs` — 'reOnPerson': the person's ON taking effect, and the panel's stop at its
  *  ceiling after it; `panelOffAtMs` — the panel's stop on the record at the close; `stopNamed` — the morning account (the
- *  real builders, the record closed by the window) names the panel's stop as what ended the charge. */
+ *  real builders, the record closed by the window) names the panel's stop as what ended the charge. (review 8)
+ *  `pushRetryPossible` — the push's reOnRetryPossible (its 'reOnRefused' words: "it may try once more", or not). */
 function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Variant): {
   close: number; onMin: number; reOns: number; reOnsFailed: number; pushedAtMs: number | null; shapeAtMs: number | null; lossAtMs: number | null; pushCause: string | null;
+  pushRetryPossible: boolean;
   handBackAtMs: number | null; retryAtMs: number | null; personOnAtMs: number | null; personStopAtMs: number | null; panelOffAtMs: number | null; stopNamed: boolean;
   onWrites: number;
 } {
@@ -894,7 +896,9 @@ const PIN_REVIEW5 = {
  *  - (review 8) with the full tick of margin and the push on the hand-back's own tick: 429 'reOnRefused' (431 off the minute),
  *    every one on that tick — +18 (17) handed back on the last tick before the cutoff, which had neither (`lastTick`, now 0),
  *    and +25 (20) whose retry's tick falls within a tick of the cutoff, pushed and then retried (`refusedRetried`), all on
- *    nights that held (held 428 → 471, 426 → 463).
+ *    nights that held (held 428 → 471, 426 → 463). Of the 429 (431), 374 (380) are worded "its next try would come after
+ *    ~<cutoff>" (`refusedSure`: the stamp + 15 min at or past the cutoff, so no tick brings the retry) and 55 (51) "it may try
+ *    once more", the 25 (20) retried among them; none so worded is followed by the retry (`sureRetried`).
  *  - reOnPerson: of the 2,476 nights a person's ON took effect, 3 reach the panel's ceiling before the close; each stop is on
  *    the record and named by the morning account. (Its re-ONs never take effect, so the recorded stop stays before them and
  *    the re-ON's own rule stamped these 3 at eed0363a too; the round-6 reviewer's night — the stop re-stamped after a re-ON
@@ -902,15 +906,15 @@ const PIN_REVIEW5 = {
 const PIN_REVIEW6: Record<string, Record<string, number>> = {
   'reOnLimited, stamped 2 s after its tick': {
     under: 146, reached: 146, held: 471, shapes: 0, heldCause: 0, refused: 429, handBacks: 3278, lost: 0, lastTick: 0, refusedRetried: 25,
-    personOn: 0, personStop: 0, stopStamped: 0, stopNamed: 0,
+    refusedSure: 374, sureRetried: 0, personOn: 0, personStop: 0, stopStamped: 0, stopNamed: 0,
   },
   'reOnLimited, ticks 30 s off the minute, stamped 2 s after': {
     under: 155, reached: 155, held: 463, shapes: 0, heldCause: 0, refused: 431, handBacks: 3292, lost: 0, lastTick: 0, refusedRetried: 20,
-    personOn: 0, personStop: 0, stopStamped: 0, stopNamed: 0,
+    refusedSure: 380, sureRetried: 0, personOn: 0, personStop: 0, stopStamped: 0, stopNamed: 0,
   },
   reOnPerson: {
     under: 2078, reached: 1550, held: 933, shapes: 0, heldCause: 0, refused: 0, handBacks: 0, lost: 0, lastTick: 0, refusedRetried: 0,
-    personOn: 2476, personStop: 3, stopStamped: 3, stopNamed: 3,
+    refusedSure: 0, sureRetried: 0, personOn: 2476, personStop: 3, stopStamped: 3, stopNamed: 3,
   },
 };
 /** (review 2) …and on the KNOWN late-unpredicted-load cells: the under nights the push reached, in PIN_KNOWN's order. It needs

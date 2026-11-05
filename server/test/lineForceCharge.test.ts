@@ -1860,10 +1860,10 @@ for (const basis of ['np', 'm'] as const) {
 /** (Fix7, A5 final 2) The same grid with the pool at 90% and 95% at 21:30: an armed leg the sun carries expects to draw nothing
  *  and takes the reserve-hold shape ("no charge is expected"). Measured on the landed change: `armed` legs (armFromPlan's
  *  lineRides), `rides` pushed "Charge Now switches on just in time", `held` pushed in the hold shape and naming Charge Now armed
- *  for the line. 31e87ca4 pushed every one of the `held` with no Charge Now (the A5 final-2 finding). */
+ *  for the line. Before this change every one of the `held` was pushed with no Charge Now (the A5 final-2 finding). */
 const PIN_T23_HELD: Record<'np' | 'm', { armed: number; rides: number; held: number }> = {
-  np: { armed: -1, rides: -1, held: -1 },
-  m: { armed: -1, rides: -1, held: -1 },
+  np: { armed: 2738, rides: 2623, held: 115 },
+  m: { armed: 2838, rides: 2733, held: 105 },
 };
 const CHARGE_NOW_ARMED_HELD = /^SUPERVISED: at 10:00 AM the backup reserve is held at 50%, and Charge Now is armed for the (\d+)% outage line \(not expected to start\); both are restored at 3:00 PM/;
 

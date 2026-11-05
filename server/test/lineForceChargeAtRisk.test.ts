@@ -331,7 +331,7 @@ test('★★★ W1 lineAtRiskPushDue — every way the line is lost after the st
   assert.deepEqual(decideForceCharge(risky(), T, onReading()), { kind: 'none' });
   assert.deepEqual(due(risky(), T, onReading()), {
     cause: 'onNotRising', offSlots: [], onSlots: [1, 2, 3], poolPct: 58, refPct: 62, refAtMs: T - 15 * M,
-    thresholdPct: 61, linePct: 55.55, closeAtMs: WIN_END, reOnNotAppliedSlots: null, panelOffAtMs: null,
+    thresholdPct: 61, linePct: 55.55, closeAtMs: WIN_END, reOnNotAppliedSlots: null, panelOffAtMs: null, reOnRetryPossible: false,
   });
   // (b) The OFF-reading latch with the re-ON budget spent.
   const spent = risky({ forceChargeLineReOns: 2, forceChargeLineReOnAtMs: T - H, forceChargeLineReOnSlots: [1, 2, 3], forceChargeLineReOnCheckedAtMs: T - 44 * M, forceChargeLineReOnNotAppliedSlots: [] });
@@ -798,10 +798,12 @@ const seeded = (seed: number, max: number): ((k: number) => number) => {
  *  cause. With no tick lost, neither on none (31e87ca4: 6 in the first band — the awaited tick running late onto the cutoff —
  *  and 10,769 hand-backs on the last tick before it, with no tick left for the push); push-then-retry 11,135 (31e87ca4: 3),
  *  all in the first band, a hand-back whose retry's tick falls within a tick of the cutoff: one tick-wide band of hand-back
- *  times, pushed for at once. With a tick lost, neither on 5, each the lost tick the one awaited (31e87ca4: 2,486). */
+ *  times, pushed for at once. With a tick lost, neither on 5, each the lost tick the one awaited (31e87ca4: 2,486). `sure` —
+ *  the pushes worded "its next try would come after ~<cutoff>" (the stamp + 15 min at or past it): every one of the last
+ *  band's 21,556, none in the bands 15 min or more out; none of them followed by the retry (asserted). */
 const PIN_HANDBACK_CADENCE = {
-  noSkip: { runs: 43156, neither: 0, push: 25997, retry: 6024, both: 11135, bothCauses: { reOnRefused: 11135 } as Record<string, number> },
-  oneSkip: { runs: 86400, neither: 5, push: 24236, retry: 7009, both: 55150, bothCauses: { reOnRefused: 55150 } as Record<string, number> },
+  noSkip: { runs: 43156, neither: 0, push: 25997, retry: 6024, both: 11135, bothCauses: { reOnRefused: 11135 } as Record<string, number>, sure: 21556 },
+  oneSkip: { runs: 86400, neither: 5, push: 24236, retry: 7009, both: 55150, bothCauses: { reOnRefused: 55150 } as Record<string, number>, sure: 0 },
 };
 
 test('★★★ W1 (review 8) the hand-back hold keeps a FULL TICK of margin: swept at sub-second spacing near the cutoff, drift 0-5 ms a tick, reads 0-500 ms late (later ticks sometimes less late than the judging one), stamps 0 ms to 5 s late — never neither; with a tick lost to the in-flight lock, neither only where that tick is the one awaited', () => {
