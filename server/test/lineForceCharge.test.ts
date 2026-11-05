@@ -2288,7 +2288,9 @@ test('★★★ T24 (Fix8 review 2) the line-night failure LOG lines say only wh
   const attemptNight = night({ appliedAtMs: null, applyVerifiedAtMs: null, applyAttemptedAtMs: WIN_START, attemptBaselinePct: 30 });
   assert.equal(act.applyProvedUnlanded(attemptNight, 30, WIN_START + 40 * M), false);
   assert.equal(act.attemptProvedUnlanded(attemptNight, 30, WIN_START + 40 * M), true, 'proved on a tick of the window');
-  assert.equal(act.attemptAdoptable(attemptNight, 50), true, 'a later reading of the target adopts it');
+  const stamped = { ...attemptNight, attemptUnlandedAtMs: WIN_START + 40 * M } as LineState;
+  assert.equal(act.attemptAdoptable(stamped, 50), true, 'a later reading of the target adopts it');
+  assert.equal(act.decideActuation(stamped, WIN_START + 41 * M, tick(50)).kind, 'adopt', '…after the stamp');
   // Why: both are still read after the failure — the ON's verify reads onVerified before its failure guard (index.ts logs "after the
   // warning — it applied late"), and the apply ladder verifies a reading of the target after applyFailed.
   assert.ok(INDEX.includes("${state.forceChargeOnFailedAtMs != null ? ' (after the warning — it applied late)' : ''}"));

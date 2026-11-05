@@ -6802,7 +6802,11 @@ async function runNightActuationTickInner(): Promise<void> {
   // reading can make it outstanding again.
   if (attemptProvedUnlanded(state, currentReservePct, nowMs)) {
     persistNightActuation({ ...state, attemptUnlandedAtMs: nowMs });
-    app.log.info(`night-charge: the ${state.day} write attempt never landed — after its apply window the panel still reads the ${state.attemptBaselinePct}% it read before the attempt; nothing of ours holds the reserve.`);
+    // v1.200.0 (Fix8 review 2) — on a night whose record carries a line ask, in words true in every outcome: a later reading of the
+    // target still adopts the attempt (attemptAdoptable reads no stamp) and the force-charge for the line then starts — "has NOT
+    // landed", never "never landed". A night with no line ask keeps v1.199.1's line, word for word.
+    if (lineLogPct(state) != null) app.log.info(`night-charge: the ${state.day} write attempt has NOT landed — after its apply window the panel still reads the ${state.attemptBaselinePct}% it read before the attempt: nothing of ours holds the reserve, and the force-charge for the ${lineLogPct(state)}% outage line waits on a reading of the target.`);
+    else app.log.info(`night-charge: the ${state.day} write attempt never landed — after its apply window the panel still reads the ${state.attemptBaselinePct}% it read before the attempt; nothing of ours holds the reserve.`);
     state = nightActuationMem;
     if (state.day == null) return;
   }
@@ -6811,7 +6815,11 @@ async function runNightActuationTickInner(): Promise<void> {
   // the reserve unless a later reading verifies the write.
   if (applyProvedUnlanded(state, currentReservePct, nowMs)) {
     persistNightActuation({ ...state, applyUnlandedAtMs: nowMs });
-    app.log.info(`night-charge: the ${state.day} write never took effect — after its re-issues the panel still reads the ${state.attemptBaselinePct}% it read before the write; its restore is a no-op and nothing of ours holds the reserve.`);
+    // v1.200.0 (Fix8 review 2) — on a night whose record carries a line ask, in words true in every outcome: a later reading of the
+    // target still verifies the write (applyVerified; the apply-failure push asks for the reserve set by hand) and the force-charge
+    // for the line then starts — "has NOT taken effect", never "never took effect". A night with no line ask keeps v1.199.1's line.
+    if (lineLogPct(state) != null) app.log.info(`night-charge: the ${state.day} write has NOT taken effect — after its re-issues the panel still reads the ${state.attemptBaselinePct}% it read before the write; until a reading of the target verifies it (a late apply, or the reserve set in the EcoFlow app), its restore is a no-op, nothing of ours holds the reserve, and the force-charge for the ${lineLogPct(state)}% outage line waits on it.`);
+    else app.log.info(`night-charge: the ${state.day} write never took effect — after its re-issues the panel still reads the ${state.attemptBaselinePct}% it read before the write; its restore is a no-op and nothing of ours holds the reserve.`);
     state = nightActuationMem;
     if (state.day == null) return;
   }
