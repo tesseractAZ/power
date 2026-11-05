@@ -1060,18 +1060,22 @@ test('★★ T9 (review) a line night NOT expected to start (the pool stays at o
   assert.doesNotMatch(push.body, /on until the window closes/);
 });
 
-test('★★ T9 the ON failure on a line night (review): all slots ⇒ only the 50% reserve holds the pool, and what would hold the line; some ⇒ the others still charge — never "no action needed"', () => {
+test('★★ T9 the ON failure on a line night (review): all slots ⇒ unless it applies late, the add-on adds nothing above the 50% reserve, and what would hold the line; some ⇒ the pool may close short — never "no action needed"', () => {
   const fail = (slots: number[], line: number | null) => buildNightForceChargeOnFailure({ day: '2026-09-16', slots, ourSlots: [1, 2, 3], retries: 1, noRetry: false, ceilingPct: line == null ? 90 : null, lineLinePct: line } as never);
   const all = fail([1, 2, 3], 55.55);
-  assert.equal(all.title, 'Night-charge: the outage-line force-charge did not take effect');
-  // (Fix8) The pool at the failure is not known to the push (it may read above the line): what holds it, and that it MAY close under.
-  assert.ok(all.body.includes("Tonight's force-charge for the 55.6% outage line will not happen: without it only the 50% reserve holds the pool, and it may close the window under the line."), all.body);
-  assert.doesNotMatch(all.body, /will close the window near/);
+  // (Fix8 review 1) The ON is still watched after the warning, and a late apply is verified (verifyForceChargeOn reads onVerified
+  // before its failure guard; the morning then says it ran): "has not taken effect", never "did not" or "will not happen".
+  assert.equal(all.title, 'Night-charge: the outage-line force-charge has not taken effect');
+  // (Fix8) The pool at the failure is not known to the push (it may read above the line): that it MAY close under. (Fix8 review 1)
+  // And no floor that holds nothing islanded (the pool drains through the reserve in an outage): the add-on adds nothing above it.
+  assert.ok(all.body.includes("Tonight's force-charge for the 55.6% outage line has not taken effect: unless it applies late, the add-on adds nothing above the 50% reserve, and the pool may close the window under the line."), all.body);
+  assert.doesNotMatch(all.body, /will close the window near|will not happen|only the 50% reserve holds/);
   assert.ok(all.body.includes('To hold the line tonight, switch Charge Now on for slot(s) 1, 2, 3 in the EcoFlow app (the add-on switches it off at the window close); if this repeats, check the SHP2 cloud link.'), all.body);
   assert.doesNotMatch(all.body, /No action needed/);
   const some = fail([2], 55.55);
-  assert.ok(some.body.includes("Tonight's force-charge for the 55.6% outage line will not happen on those slot(s); the other slot(s) still charge, so the pool may close the window short of the line."), some.body);
-  assert.doesNotMatch(some.body, /near the 50% reserve|No action needed/, 'two slots keep charging: never "near 50%"');
+  // (Fix8 review 1) The other slots read ON or at the panel's ceiling (switched off by the panel: not charging): never "still charge".
+  assert.ok(some.body.includes("Tonight's force-charge for the 55.6% outage line has not taken effect on those slot(s), so the pool may close the window short of the line."), some.body);
+  assert.doesNotMatch(some.body, /near the 50% reserve|No action needed|still charge|will not happen/, 'never "near 50%", never "still charge"');
   assert.ok(some.body.includes('switch Charge Now on for slot(s) 2 in the EcoFlow app'), some.body);
   // A cost night's warning is today's, word for word.
   const cost = fail([2], null);
@@ -1083,7 +1087,9 @@ test('★★ T9 the declined start (L3; review): every all-night blocker is one;
   const declined = (notify as unknown as { buildLineForceChargeDeclinedStart: (o: unknown) => { title: string; body: string } })
     .buildLineForceChargeDeclinedStart({ day: '2026-09-16', linePct: 55.55, why: 'grid presence is unknown', latestStartText: '04:24' });
   // (Fix8) True in every outcome: the pool may already read above the line, or a person's Charge Now may lift it.
-  assert.equal(declined.body, "Night-charge: the force-charge for tonight's 55.6% outage line cannot start yet — grid presence is unknown. If it has not started by ~04:24, the pool may close under the line; if it never starts, only the 50% reserve holds it.");
+  // (Fix8 review 1) …and with the grid absent (a declined cause) the pool drains through the reserve: never "only the 50% reserve
+  // holds it" — the add-on adds nothing above it, true islanded, under a person's Charge Now, and on the grid.
+  assert.equal(declined.body, "Night-charge: the force-charge for tonight's 55.6% outage line cannot start yet — grid presence is unknown. If it has not started by ~04:24, the pool may close under the line; if it never starts, the add-on adds nothing above the 50% reserve.");
   // Which declines are blockers: the non-pool ones — and (review 17) no ceiling readback, no slot connected.
   const cls = nfc.forceChargeBlockerClass;
   for (const s of [night(), night({ applyVerifiedAtMs: WIN_START + M })]) {
@@ -2086,12 +2092,19 @@ const lineRelationErrors = (text: string, o: { line: number; named: number; noNu
   each(/the pool reads ([\d.]+)%, under tonight's ([\d.]+)% outage line/, (m) => (num(m[1]) < num(m[2]) ? null : `${m[1]}% "under" ${m[2]}%`));
   each(/the pool reads ([\d.]+)%, under the ([\d.]+)% start target and (?:falling toward tonight's ([\d.]+)% outage line|not rising; tonight's outage line is ([\d.]+)%)/,
     (m) => (num(m[1]) < num(m[2]) && num(m[1]) >= num(m[3] ?? m[4]) ? null : `${m[1]}% under ${m[2]}% and toward/at ${m[3] ?? m[4]}%`));
+  // (Fix8 review 1) The margin is the difference of the two numbers the text NAMES (the threshold and the line, each to one
+  // decimal), so the text adds up by its own numbers: 61 − 55.6 = 5.4, never 5.5 off the raw 55.55.
   each(/the pool reads ([\d.]+)%, under ([\d.]+)%, ([\d.]+) points above tonight's ([\d.]+)% outage line/,
-    (m) => (num(m[1]) < num(m[2]) && num(m[3]) === r1(num(m[2]) - o.line) && num(m[3]) > 0 && num(m[2]) > num(m[4]) ? null : `margin ${m[0]}`));
+    (m) => (num(m[1]) < num(m[2]) && num(m[3]) === r1(num(m[2]) - num(m[4])) && num(m[3]) > 0 && num(m[2]) > num(m[4]) ? null : `margin ${m[0]}`));
   each(/the pool read ([\d.]+)% at the close, under the ([\d.]+)% outage line/, (m) => (num(m[1]) < num(m[2]) ? null : `${m[1]}% "under" ${m[2]}%`));
   each(/timed to ([\d.]+)% by [^;]*; expected to reach the panel's ([\d.]+)% ceiling/, (m) => (num(m[1]) < num(m[2]) ? null : `start target ${m[1]}% at or above the ${m[2]}% ceiling`));
   // A forecast the builder cannot know (the pool at the failure, a person's Charge Now): never stated as certain.
   each(/will close the window near|is expected to close under the line|close the window near the 50% reserve, under the line/, () => 'a definite close the builder cannot know');
+  // (Fix8 review 1) A write the code still verifies late (the ON, the reserve, a re-ON: each is read again after its warning) is
+  // never said not to happen, nor not to have taken effect for good; and the reserve is no floor while islanded (the pool drains
+  // through it in an outage, the case the line is for): never "only the 50% reserve holds".
+  each(/will not happen|did not take effect/, () => 'a final outcome a late apply contradicts');
+  each(/only the 50% reserve holds|only the reserve holds/, () => 'a floor that holds nothing islanded');
   return e;
 };
 
@@ -2164,11 +2177,11 @@ test('★★★ T24 (Fix8) the line texts at their edges: every text on the line
     // 8. The line at risk: whole-percent pool readings (the panel's) under the threshold, falling and flat; and 9. the morning
     // account's close; 10. the reserve-apply failure.
     const costDominant = !near; // a cost-dominant night needs its cost stop at ⌈L⌉ + 10 ≤ 100
-    for (const [cause, T] of [['reOnSpent', S], ...(costDominant ? [['costMode', ask + 5]] : [])] as Array<[string, number]>) {
+    for (const [cause, T] of [['reOnSpent', S], ['reOnNotApplied', S], ...(costDominant ? [['costMode', ask + 5]] : [])] as Array<[string, number]>) {
       for (const P of [T - 1, Math.ceil(line - 0.05), Math.floor(line - 0.05 - 1e-9), Math.floor(line) - 3]) {
         if (!(P < T) || P < 0) continue;
         for (const refPct of [P + 1, P]) {
-          const risk = { cause, offSlots: [1, 2, 3], onSlots: [], poolPct: P, refPct, thresholdPct: T, linePct: line, reOnNotAppliedSlots: null, panelOffAtMs: null, reOnRetryPossible: false };
+          const risk = { cause, offSlots: [1, 2, 3], onSlots: [], poolPct: P, refPct, thresholdPct: T, linePct: line, reOnNotAppliedSlots: cause === 'reOnNotApplied' ? [1, 2, 3] : null, panelOffAtMs: null, reOnRetryPossible: false };
           add(notify.buildLineForceChargeAtRisk({ day: '2026-09-16', risk: risk as never, closeText: '5:00 AM', reOnCutoffText: '4:40 AM' }).body, { line, named: r1(line), where: where(`at risk ${cause} ${P}`) });
         }
       }
