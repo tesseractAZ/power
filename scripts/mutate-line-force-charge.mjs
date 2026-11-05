@@ -83,7 +83,8 @@
  * the ON failure with no floor the islanded pool drains through (F8r1-iii, F8r1-iv(a)); "has not taken effect" wherever a late
  * apply is still verified (F8r1-iv); the shape logged once a night on the record (F8r1-v; W1-xxi re-anchored there).
  * (Fix8 review 2) …and in every line push's title ("the reserve write has not taken effect", "cannot start yet": F8r2-i), in
- * the line-night ON-failure and apply-failure log lines (F8r2-ii), and the morning's re-ON count as the checks read it (F8r2-iii).
+ * the line-night ON-failure and apply-failure log lines and the two proofs that the reserve write never landed (F8r2-ii), and the
+ * morning's re-ON count as the checks read it (F8r2-iii).
  *
  *   node scripts/mutate-line-force-charge.mjs [--only <id prefix>]
  *
@@ -2404,6 +2405,20 @@ const MUTANTS = [
     find: ") has not taken effect: until the panel reads ${state.targetPct}% (a late apply, or the reserve set in the EcoFlow app, is still verified) the force-charge",
     to: ") is forfeited: until the panel reads ${state.targetPct}% (a late apply, or the reserve set in the EcoFlow app, is still verified) the force-charge /* MUTANT */",
     why: 'The same, in the line branch\'s own words.',
+  },
+  {
+    id: 'F8r2-ii(e). ★★ index.ts: a line night\'s write proved unlanded logged as never taking effect',
+    file: IDX, tests: [T_LINE],
+    find: "    if (lineLogPct(state) != null) app.log.info(`night-charge: the ${state.day} write has NOT taken effect",
+    to: "    if (lineLogPct({ forceChargeLineAskPct: null, forceChargeLinePct: null }) != null /* MUTANT */) app.log.info(`night-charge: the ${state.day} write has NOT taken effect",
+    why: '"never took effect" on the tick after applyFailed, then the reserve set by hand (as the push asks) is verified and the force-charge starts.',
+  },
+  {
+    id: 'F8r2-ii(f). ★★ index.ts: a line night\'s attempt proved unlanded logged as never landing',
+    file: IDX, tests: [T_LINE],
+    find: "    if (lineLogPct(state) != null) app.log.info(`night-charge: the ${state.day} write attempt has NOT landed",
+    to: "    if (lineLogPct({ forceChargeLineAskPct: null, forceChargeLinePct: null }) != null /* MUTANT */) app.log.info(`night-charge: the ${state.day} write attempt has NOT landed",
+    why: '"never landed", then a late landing is adopted ("the apply succeeded but its confirmation was lost").',
   },
   {
     id: 'F8r2-iii(a). ★★ the morning account says the re-ONs its checks found not applied did not take effect (the defect)',
