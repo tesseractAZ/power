@@ -37,7 +37,9 @@ import { buildNightChargeApplyFailure, buildNightChargeMorningSummary, buildNigh
  *       FORCE_CHARGE_TICK_MS (index.ts's cadence), so a hand-back stamped after its writes gets its retry or the push.
  *       (review 7 counted to the earliest tick the retry can come, with a 1-s tolerance.) (review 8) The hold keeps a FULL
  *       TICK of margin before the cutoff and the push is judged on the hand-back's own tick: never neither while a tick reads
- *       before the cutoff after each hold; a 'reOnRefused' push may be followed by the retry, and its words say it may.
+ *       before the cutoff after each hold; a 'reOnRefused' push may be followed by the retry, and its words say it may —
+ *       or, where no tick can bring it (its spacing ends at or past the cutoff), that its next try comes after the cutoff,
+ *       and then none does (reOnRetryPossible).
  *  W2 — a line re-ON is readback-checked FORCE_CHARGE_ON_VERIFY_AFTER_MS after it, like the first ON. (review 4) The check
  *       keeps the latest re-ON that took effect (lineReOnCheckedStamp), across the next re-ON and a restart.
  *  W3 — the morning account of a line-ask night: under the line said so; an unread close said so; the panel's
