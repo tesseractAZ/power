@@ -154,12 +154,14 @@
  *    design now, every doubt goes to the push: it is held only while the retry's tick lands a full tick before the re-ON's
  *    cutoff, it is judged on the hand-back's own tick too (index.ts), and its words are true in every outcome — the add-on
  *    may try once more, or, where no tick can bring the retry (its spacing ends at or past the cutoff), its next try would
- *    come after the cutoff (reOnRetryPossible). Neither then needs the tick after a hold to be lost (the in-flight lock held
- *    past it) or a whole tick late; a push may be followed by the retry. In the plant (stamps 2 s late): 429 'reOnRefused'
+ *    come after the cutoff (reOnRetryPossible). Neither then needs the tick after a hold not to run before the cutoff: lost
+ *    (the in-flight lock held past it, or an add-on restart: index.ts runs no tick at boot, so the first comes a tick after
+ *    the start) or a whole tick late; a push may be followed by the retry. In the plant (stamps 2 s late): 429 'reOnRefused'
  *    pushes, 18 of them on the last tick before the cutoff (none there before), 374 worded as no tick bringing the retry
  *    (none then retried), 25 of the other 55 then retried (PIN_REVIEW6). Swept at sub-second phases with drift, late reads
  *    and stamp lags (lineForceChargeAtRisk.test.ts PIN_HANDBACK_CADENCE): neither on none of 43,156 hand-backs, and on 5 of
- *    86,400 with a tick lost, each the tick the last hold awaited.
+ *    86,400 with a tick lost, each the tick the last hold awaited; with a restart after a hold, on 248 of 25,920, each one
+ *    whose first tick after the start reads at or past the cutoff (PIN_HANDBACK_RESTART, Fix7 review 1: a residual, stated).
  *    (A5) A NEAR-FULL LINE (⌈L⌉ 91-100: start target 95, ceiling 100) re-ONs, and is pushed, under 95 — under a line of
  *    96-100. Emulated (T18, the measured latch, 120 nights a cell): 3 / 19 / 41 near-full nights close under at baseline,
  *    with a 20 kWh EV predicted and with a 7 kW one all window (6 / 34 / 43 floored), and 30 of 30 at 70% of the rate;
@@ -1659,9 +1661,10 @@ export function lineAtRiskPushDue(s: NightActuationState, nowMs: number, o: Forc
   // retryAtMs + one tick + that tick's drift and read lateness (the awaited tick, read less late than this one, falls just
   // short). So the push is held only while retryAtMs lands a FULL FORCE_CHARGE_TICK_MS before the re-ON's cutoff: every hold
   // then leaves two ticks of its cadence before the cutoff, and the next tick — which judges again — reads before the cutoff
-  // unless it is lost (the in-flight lock held past it) or reads a whole tick late. Only then is there neither the retry nor
-  // the push. The push is once a night, so one sent while the retry's tick falls within a tick of the cutoff may still be
-  // followed by the retry: its words say the add-on may try once more (reOnRetryPossible), and where no tick can bring it
+  // unless it is lost (the in-flight lock held past it, or an add-on restart: index.ts runs no tick at boot, so the first
+  // comes a tick after the start) or reads a whole tick late. Only then is there neither the retry nor the push. The push
+  // is once a night, so one sent while the retry's tick falls within a tick of the cutoff may still be followed by the
+  // retry: its words say the add-on may try once more (reOnRetryPossible), and where no tick can bring it
   // (the stamp + 15 min at or past the cutoff) that it does not. index.ts also judges the push on the hand-back's own tick,
   // so one on the last tick before the cutoff is pushed there. The count is anchored on the force step's own nowMs, not the
   // tick's start: with a tick of margin and the hold judged again on every tick, that read's lateness decides no outcome.
