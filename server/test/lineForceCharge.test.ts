@@ -1633,6 +1633,10 @@ test('★★ T19 the mid-day push and its shadow record: a leg with a line ask i
   const ann = ms.middayShadowAnnounceInput(back, buildApsREvModel())!;
   assert.equal((ann.cost as unknown as Record<string, unknown>).lineAskPct, 69);
   assert.equal((ann.cost as unknown as Record<string, unknown>).lineNotHeld, 'closeUnder');
+  // (Fix7 review 1) …and the line itself beside the ask (the record's cushionLineSocPct: the plan's forceChargeLine.linePct),
+  // the number the hold shape names; with no ask, none.
+  assert.equal(p.forceChargeLine?.linePct, 68.85);
+  assert.equal((ann.cost as unknown as Record<string, unknown>).linePct, 68.85);
   // (A5 final 1) Charge Now rides a leg the line force-charge is armed on whatever its stated level, as armFromPlan's
   // lineRides does: stated at the 50% reserve (H1's floor, or no start expected), it is still switched on just in time.
   // With no ask, the cost rule as before: named only where the level clears the reserve.
@@ -1644,6 +1648,7 @@ test('★★ T19 the mid-day push and its shadow record: a leg with a line ask i
   assert.equal(fcOf({ ...back.cost, levelPct: 57.3, reservePct: 50 }), true);
   assert.equal(fcOf({ ...noAsk, levelPct: 50, reservePct: 50 }), false, 'no ask, at the reserve: no Charge Now');
   assert.equal(fcOf({ ...noAsk, levelPct: 57.3, reservePct: 50 }), true, 'no ask, above the reserve: Charge Now');
+  assert.equal('linePct' in ms.middayShadowAnnounceInput({ ...back, cost: noAsk as never }, buildApsREvModel())!.cost, false, 'no ask: no line');
   const at50 = buildMiddayPlanMessage(ms.middayShadowAnnounceInput({ ...back, cost: { ...back.cost!, levelPct: 50, reservePct: 50 } }, buildApsREvModel())!).body;
   assert.ok(at50.includes(' SUPERVISED: at 10:00 AM the backup reserve is held at 50% and Charge Now switches on just in time; both are restored at 3:00 PM'), at50);
   // (Fix7, A5 final 2) …and a leg that expects to draw nothing (the reserve-hold shape): the line force-charge is armed on it all
@@ -1651,9 +1656,15 @@ test('★★ T19 the mid-day push and its shadow record: a leg with a line ask i
   // armed and not expected to start, as the overnight held line clause does. With no ask, that shape byte for byte as before.
   const heldBody = (c: Record<string, unknown>) => body({ levelPct: 50, reservePct: 50, expectedKwh: 0.02, buyKwh: 1.3, cushionShortfall: false,
     cushionShortfallCause: undefined, ...c });
-  const armedHeld = heldBody({ lineAskPct: 62 });
+  const armedHeld = heldBody({ lineAskPct: 62, linePct: 61.24 });
   assert.ok(armedHeld.includes(': holding the backup reserve at 50% as a floor; no charge is expected.'), armedHeld);
-  assert.ok(armedHeld.includes(' SUPERVISED: at 10:00 AM the backup reserve is held at 50%, and Charge Now is armed for the 62% outage line (not expected to start); both are restored at 3:00 PM, before the 4–7pm on-peak. Cancel from the charge card before 10:00 AM tomorrow.'), armedHeld);
+  assert.ok(armedHeld.includes(' SUPERVISED: at 10:00 AM the backup reserve is held at 50%, and Charge Now is armed for the 61.2% outage line (not expected to start); both are restored at 3:00 PM, before the 4–7pm on-peak. Cancel from the charge card before 10:00 AM tomorrow.'), armedHeld);
+  // (Fix7 review 1) The line is named as the overnight held clause names it (round1(L)), never the ask ⌈L⌉: 60.03% is "60%",
+  // not 61. With the line lost (a record without it), the line unnumbered — the ask is never named as the line.
+  assert.ok(heldBody({ lineAskPct: 61, linePct: 60.03 }).includes(', and Charge Now is armed for the 60% outage line (not expected to start); both'));
+  const lineLost = heldBody({ lineAskPct: 62 });
+  assert.ok(lineLost.includes(' SUPERVISED: at 10:00 AM the backup reserve is held at 50%, and Charge Now is armed for the outage line (not expected to start); both are restored at 3:00 PM'), lineLost);
+  assert.doesNotMatch(lineLost, /62%/);
   const noAskHeld = heldBody({ forceCharge: false });
   assert.ok(noAskHeld.includes(' SUPERVISED: at 10:00 AM the backup reserve is held at 50%; it is restored at 3:00 PM, before the 4–7pm on-peak. Cancel from the charge card before 10:00 AM tomorrow.'), noAskHeld);
   assert.doesNotMatch(noAskHeld, /Charge Now/);
@@ -1860,16 +1871,18 @@ for (const basis of ['np', 'm'] as const) {
 /** (Fix7, A5 final 2) The same grid with the pool at 90% and 95% at 21:30: an armed leg the sun carries expects to draw nothing
  *  and takes the reserve-hold shape ("no charge is expected"). Measured on the landed change: `armed` legs (armFromPlan's
  *  lineRides), `rides` pushed "Charge Now switches on just in time", `held` pushed in the hold shape and naming Charge Now armed
- *  for the line. Before this change every one of the `held` was pushed with no Charge Now (the A5 final-2 finding). */
-const PIN_T23_HELD: Record<'np' | 'm', { armed: number; rides: number; held: number }> = {
-  np: { armed: 2738, rides: 2623, held: 115 },
-  m: { armed: 2838, rides: 2733, held: 105 },
+ *  for the line. Before this change every one of the `held` was pushed with no Charge Now (the A5 final-2 finding).
+ *  (Fix7 review 1) The line it names is the plan's own, round1(L), as the overnight held clause and the rationale name it:
+ *  `notAsk` of the `held` name a number other than the ask ⌈L⌉ — every one, so naming the ask fails them all (141349c7 did). */
+const PIN_T23_HELD: Record<'np' | 'm', { armed: number; rides: number; held: number; notAsk: number }> = {
+  np: { armed: 2738, rides: 2623, held: 115, notAsk: 115 },
+  m: { armed: 2838, rides: 2733, held: 105, notAsk: 105 },
 };
-const CHARGE_NOW_ARMED_HELD = /^SUPERVISED: at 10:00 AM the backup reserve is held at 50%, and Charge Now is armed for the (\d+)% outage line \(not expected to start\); both are restored at 3:00 PM/;
+const CHARGE_NOW_ARMED_HELD = /^SUPERVISED: at 10:00 AM the backup reserve is held at 50%, and Charge Now is armed for the ([\d.]+)% outage line \(not expected to start\); both are restored at 3:00 PM/;
 
 test('★★★ T23 (Fix7) the mid-day grid with the pool at 90% and 95%: every armed leg\'s push names Charge Now, in the charging shape and in the reserve-hold one (armed for the line, not expected to start)', () => {
   for (const basis of ['np', 'm'] as const) {
-    const got = { armed: 0, rides: 0, held: 0 };
+    const got = { armed: 0, rides: 0, held: 0, notAsk: 0 };
     const ex: string[] = [];
     for (const socPct of [90, 95]) for (const floor of [26, 30, 31, 35, 40]) for (const capKw of [4.5, 5, 6, 7, 10]) for (const pvScale of [0, 0.1, 0.3, 1]) {
       for (let h = 4; h <= 20; h++) {
@@ -1882,14 +1895,23 @@ test('★★★ T23 (Fix7) the mid-day grid with the pool at 90% and 95%: every 
         const heldShape = push.includes('as a floor; no charge is expected.');
         const m = CHARGE_NOW_ARMED_HELD.exec(tail);
         if (!heldShape && push.includes(CHARGE_NOW_RIDES)) got.rides += 1;
-        else if (heldShape && m != null && Number(m[1]) === rec.forceChargeLineAskPct) got.held += 1;
-        else if (ex.length < 8) ex.push(`${basis} pool ${socPct}%, floor ${floor}, ${capKw} kW, sun ×${pvScale}, ${h} h (ask ${rec.forceChargeLineAskPct}): ${push}`);
+        else if (heldShape && m != null && Number(m[1]) === Math.round(p.forceChargeLine!.linePct * 10) / 10) {
+          got.held += 1;
+          if (Number(m[1]) !== rec.forceChargeLineAskPct) got.notAsk += 1;
+        } else if (ex.length < 8) ex.push(`${basis} pool ${socPct}%, floor ${floor}, ${capKw} kW, sun ×${pvScale}, ${h} h (line ${p.forceChargeLine?.linePct}, ask ${rec.forceChargeLineAskPct}): ${push}`);
       }
     }
     assert.deepEqual(ex, [], 'an armed leg pushed with no Charge Now');
     assert.equal(got.rides + got.held, got.armed);
     assert.deepEqual(got, PIN_T23_HELD[basis], basis);
   }
+  // (Fix7 review 1) The CHANGELOG's example: the pool at 90% at 21:30, a 26% floor, 6 kW, the P50 sun, 9 h on nameplate — the
+  // 60.03% line, ask 61. The push names the line as the rationale does (60%, the overnight clause's round1), not the ask.
+  const ex9 = middayLegPlan({ floor: 26, capKw: 6, socPct: 90, pvScale: 1, h: 9, basis: 'np' });
+  assert.deepEqual(ex9.forceChargeLine, { askPct: 61, linePct: 60.03 });
+  assert.ok(ex9.rationale.includes('60.03% outage line'), ex9.rationale);
+  const ex9Push = middayLegPush(ex9);
+  assert.ok(ex9Push.includes(' SUPERVISED: at 10:00 AM the backup reserve is held at 50%, and Charge Now is armed for the 60% outage line (not expected to start); both are restored at 3:00 PM'), ex9Push);
 });
 
 /* ══ T10b — the gate: an armed line the plan disclosed whose force-charge never switched on is a strike ═══════════ */

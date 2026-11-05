@@ -759,9 +759,13 @@ interface Cadence { push: { k: number; atMs: number; cause: string; retryPossibl
  *  `skip(k)` finds the in-flight lock still held (the tick before ran past 60 s) and does nothing. On tick 0 the re-ON is
  *  decided (decideForceCharge), every write refused by the add-on's own cooldown: the count returned, no slots, the stamp
  *  `lagMs` after the read (Date.now() after the writes) — and the push judged on that same tick, as index.ts does. The push
- *  keeps its wording's key (reOnRetryPossible: "it may try once more", or "its next try would come after ~<cutoff>"). */
+ *  keeps its wording's key (reOnRetryPossible: "it may try once more", or "its next try would come after ~<cutoff>").
+ *  (Fix7 review 1) `restart`: the add-on stops `stopMs` after tick `after` fires (after its read) and starts again `downMs`
+ *  later; the record survives (persisted), and its new setInterval fires FORCE_CHARGE_TICK_MS after the start (index.ts runs
+ *  no tick at boot), then on its own cadence. */
 const cadence = (f0: number, lagMs: number, drift: (k: number) => number = () => 0, late: (k: number) => number = () => 0,
-  skip: (k: number) => boolean = () => false): Cadence => {
+  skip: (k: number) => boolean = () => false, restart: { after: number; stopMs: number; downMs: number } | null = null): Cadence => {
+  if (restart != null) assert.ok(restart.stopMs > late(restart.after) + (restart.after === 0 ? lagMs : 0), 'the restart comes after its tick');
   const reads: Cadence['reads'] = [];
   let push: Cadence['push'] = null;
   let retry: Cadence['retry'] = null;
@@ -776,7 +780,7 @@ const cadence = (f0: number, lagMs: number, drift: (k: number) => number = () =>
   if (p0 != null) { push = { k: 0, atMs: t0, cause: p0.cause, retryPossible: p0.reOnRetryPossible }; s = { ...s, forceChargeLineAtRiskPushedAtMs: t0 } as S; }
   let fire = f0;
   for (let k = 1; fire < WIN_END - 15 * M; k++) {
-    fire += M + drift(k);
+    fire = restart != null && k === restart.after + 1 ? fire + restart.stopMs + restart.downMs + nfc.FORCE_CHARGE_TICK_MS : fire + M + drift(k);
     if (skip(k)) continue;
     const t = fire + late(k);
     reads.push({ k, atMs: t });
@@ -892,6 +896,64 @@ test('★★★ W1 (review 8) the hand-back hold keeps a FULL TICK of margin: sw
   // (review 8) Each push's words true in its outcome: none that says no tick can bring the retry is followed by it.
   assert.deepEqual(falseWords.slice(0, 10), [], `${falseWords.length} pushes whose words the retry then contradicted`);
   assert.deepEqual({ noSkip, oneSkip }, PIN_HANDBACK_CADENCE);
+});
+
+/** (Fix7 review 1) An add-on RESTART after the last hold (an option change, an update, a host restart): index.ts starts the
+ *  actuation tick with setInterval alone, so the first tick after a start comes a tick after it. A restart that stops after a
+ *  hold and starts again within a tick of the cutoff leaves neither the retry nor the push. A residual of the restart, counted
+ *  and pinned, not closed (an immediate tick at boot would change behaviour outside this hold). Measured on 141349c7's code
+ *  (words-only fix): per down time, the runs with neither (248 of 25,920, none down 5 s); every one explained (asserted). */
+const PIN_HANDBACK_RESTART = {
+  runs: 25920, neither: { 5000: 0, 15000: 27, 30000: 69, 45000: 152 } as Record<number, number>, push: 7511, retry: 8380, both: 9781,
+};
+
+test('★★★ W1 (Fix7 review 1) an add-on restart after the last hold: the first tick after a start comes a minute after it, so a restart that starts again within a tick of the cutoff leaves neither the retry nor the push — counted, each explained by the restart; and the tick after a hold read a whole minute late, likewise', () => {
+  // The verifier's probe: tick 0 17m15s before the re-ON's cutoff, the stamp 2 s late, the ticks drifting 1 ms, read 50 ms late.
+  const f0 = CUTOFF - 17 * M - 15_000;
+  const drift = (): number => 1;
+  const late50 = (): number => 50;
+  const base = cadence(f0, 2_000, drift, late50);
+  assert.deepEqual([outcomeOf(base), base.retry?.k, base.retry!.atMs - CUTOFF], ['retry', 16, -74_934]);
+  assert.equal(base.reads.at(-2)!.atMs - CUTOFF, -134_935, 'the last hold, tick 15: two ticks of its cadence before the cutoff');
+  // A restart 30 s after tick 15 fired: down 5 s, the first tick after the start reads 39.9 s before the cutoff — the retry;
+  // down 45 s (back 60 s before the cutoff), it reads 65 ms past it — neither.
+  const down5 = cadence(f0, 2_000, drift, late50, () => false, { after: 15, stopMs: 30_000, downMs: 5_000 });
+  assert.deepEqual([outcomeOf(down5), down5.retry?.k, down5.retry!.atMs - CUTOFF], ['retry', 16, -39_935]);
+  const down45 = cadence(f0, 2_000, drift, late50, () => false, { after: 15, stopMs: 30_000, downMs: 45_000 });
+  assert.deepEqual([outcomeOf(down45), down45.reads.find((r) => r.k === 16)!.atMs - CUTOFF], ['neither', 65]);
+  // The tick after the last hold read a whole minute late (its earlier steps ran 90 s; the next tick finds the lock held):
+  // neither. Read 50 s late, it is still before the cutoff: the retry.
+  const slow = (ms: number) => cadence(f0, 2_000, drift, (k) => (k === 16 ? ms : 50), (k) => k === 17);
+  assert.equal(outcomeOf(slow(90_000)), 'neither');
+  assert.deepEqual([outcomeOf(slow(50_000)), slow(50_000).retry?.k], ['retry', 16]);
+  // The sweep: hand-backs every 500 ms from 18 to 15 min before the re-ON's cutoff (the holds whose last one falls 2-5 min
+  // before it), the stamp 5 ms or 2 s late, drift 0-5 ms and reads 0-500 ms late (seeded), a restart after each of ticks 13-15
+  // (the ticks before the retry's spacing ends), stopping 1 s, 30 s or 55 s after that tick fired, down 5, 15, 30 or 45 s.
+  const got = { runs: 0, neither: { 5000: 0, 15000: 0, 30000: 0, 45000: 0 } as Record<number, number>, push: 0, retry: 0, both: 0 };
+  const bad: string[] = [];
+  for (let f = CUTOFF - 18 * M; f < CUTOFF - 15 * M; f += 500) {
+    for (const lag of [5, 2_000]) for (const after of [13, 14, 15]) for (const stopMs of [1_000, 30_000, 55_000]) for (const downMs of [5_000, 15_000, 30_000, 45_000]) {
+      const dr = seeded(f + lag + after, 5);
+      const lt = seeded(f * 3 + lag + after, 500);
+      const c = cadence(f, lag, dr, lt, () => false, { after, stopMs, downMs });
+      const o = outcomeOf(c);
+      got.runs += 1;
+      if (o === 'neither') {
+        got.neither[downMs] += 1;
+        // Explained: the last read before the cutoff is a hold made before the restart, two ticks of its cadence before the
+        // cutoff, and the first tick after the start reads at or past it.
+        const lastHold = c.reads.filter((r) => r.atMs < CUTOFF).at(-1)!;
+        const firstBack = c.reads.find((r) => r.k === after + 1);
+        if (!(lastHold.k === after && lastHold.atMs + 2 * nfc.FORCE_CHARGE_TICK_MS < CUTOFF && (firstBack == null || firstBack.atMs >= CUTOFF))) {
+          bad.push(`${(CUTOFF - f) / 1000}s, lag ${lag}, restart after +${after} (+${stopMs / 1000}s, down ${downMs / 1000}s): last hold +${lastHold.k} at cutoff − ${CUTOFF - lastHold.atMs} ms`);
+        }
+      } else got[o] += 1;
+      if (o === 'both' && c.push!.cause !== 'reOnRefused') bad.push(`push then retry as ${c.push!.cause}`);
+      if (c.push?.cause === 'reOnRefused' && !c.push.retryPossible && c.retry != null) bad.push(`${(CUTOFF - f) / 1000}s: "next try would come after", then the retry`);
+    }
+  }
+  assert.deepEqual(bad.slice(0, 10), [], `${bad.length} runs not explained by the restart`);
+  assert.deepEqual(got, PIN_HANDBACK_RESTART);
 });
 
 test('★★★ W1 (review 8) the margin is a full tick, and the hand-back\'s own tick is judged: a hand-back on the last tick before the cutoff is pushed on that tick; no tolerance constant is left', () => {
