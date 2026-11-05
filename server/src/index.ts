@@ -65,7 +65,7 @@ import {
   // v1.200.0 (review 2) — the line at risk after the start, the re-ON's readback check, the night's observations, a
   // line-ask night's texts whatever its mode, and the declined-start push across restarts.
   lineDeclinedPushTick, type LineDeclinedPushMem, lineAtRiskPushDue, lineOnReadingShape, lineNightObservations,
-  forceChargeLineNightPct, forceChargeOnFailureNight, type ForceChargeOpts,
+  forceChargeLineNightPct, forceChargeOnFailureNight, lineLogPct, type ForceChargeOpts,
   // v1.200.0 (review 4) — what a line re-ON's readback check stamps, the re-ON that took effect included.
   lineReOnCheckedStamp,
   // v1.200.0 (review 6) — the force-charge tick's cadence, which the line-at-risk push's hand-back hold counts.
@@ -6209,6 +6209,8 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
   // cannot (nightForceCharge.lineAtRiskPushDue): once a night, stamped on the record BEFORE the push goes. (review 8) Judged
   // on a tick that decides nothing, and on a line re-ON's own tick when every write came back rate-limited (handed back):
   // one on the last tick before the re-ON's cutoff has no later tick for it (the next is past the cutoff and the lead).
+  // (Fix8) And after the line ceiling lowering while ON. Not judged: a tick lost (the in-flight lock, a restart, a throw), the
+  // panel missing from the device list (no reading: it could not be due), the re-ON refused by the write block, an OFF.
   const pushLineAtRiskIfDue = (): void => {
     const risk = lineAtRiskPushDue(nightActuationMem, nowMs, fcOpts);
     if (risk != null) {
@@ -6217,7 +6219,7 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
       const why = risk.cause === 'reOnRefused'
         ? `its last re-ON was refused by its own write cooldown and ${risk.reOnRetryPossible ? `it may try once more before ${reOnCutoffText}` : `its next try would come after ${reOnCutoffText}, the re-ON's cutoff`} (reOnRefused)`
         : `the add-on cannot act (${risk.cause})`;
-      app.log.warn(`night-charge: the ${state.day} outage line (${risk.linePct}%) is AT RISK — the pool reads ${risk.poolPct}% (${risk.refPct}% at ${fmtSiteClock(risk.refAtMs)}), under its ${risk.thresholdPct}% at-risk threshold and ${risk.poolPct < risk.refPct ? 'falling' : 'flat'}; ${why}; slot(s) reading OFF: ${risk.offSlots.join(',') || 'none'}, reading ON: ${risk.onSlots.join(',') || 'none'}. Pushed once tonight.`);
+      app.log.warn(`night-charge: the ${state.day} outage line (${lineLogPct(state)}%) is AT RISK — the pool reads ${risk.poolPct}% (${risk.refPct}% at ${fmtSiteClock(risk.refAtMs)}), under its ${risk.thresholdPct}% at-risk threshold and ${risk.poolPct < risk.refPct ? 'falling' : 'flat'}; ${why}; slot(s) reading OFF: ${risk.offSlots.join(',') || 'none'}, reading ON: ${risk.onSlots.join(',') || 'none'}. Pushed once tonight.`);
       void sendNotification(loadNotifyConfig(), buildLineForceChargeAtRisk({
         day: state.day, risk,
         closeText: fmtSiteClock(risk.closeAtMs),
@@ -6259,7 +6261,7 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
         day: state.day, linePct: declinedLinePct, why: action.why,
         latestStartText: latestAt != null ? fmtSiteClock(latestAt) : 'the window close',
       })).catch((e: any) => app.log.debug(`night-charge: line force-charge declined-start notify failed (${e?.message ?? e})`));
-      app.log.warn(`night-charge: the force-charge for ${state.day}'s ${declinedLinePct}% outage line cannot start yet — ${action.why}; held ${Math.round(FORCE_CHARGE_LINE_DECLINED_PERSIST_MS / 60_000)} min, pushed once tonight for this cause.`);
+      app.log.warn(`night-charge: the force-charge for ${state.day}'s ${lineLogPct(state)}% outage line cannot start yet — ${action.why}; held ${Math.round(FORCE_CHARGE_LINE_DECLINED_PERSIST_MS / 60_000)} min, pushed once tonight for this cause.`);
     }
     pushLineAtRiskIfDue();
     // v1.200.0 (review 2) — the ON-READING SHAPE (unmeasured on this plant): logged once a night when seen, whatever
@@ -6273,8 +6275,12 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
   }
 
   if (action.kind === 'syncCeiling') {
+    // v1.200.0 (review) — while ON it is the line mode lowering a cost ceiling (lineCeilingLoweringDue). (Fix8) The line-at-risk
+    // push is judged on this tick too, after the lowering (or its refusal): the lowering writes the ceiling only, so this tick's slot
+    // and pool readings stand, and a hand-back's hold judged here is not skipped as on a lost tick.
+    const whileOn = state.forceChargeOnAtMs != null;
     const blocked = multiPanelWriteBlock();
-    if (blocked) { app.log.warn(`night-charge: force-charge ceiling sync refused — ${blocked}`); return; }
+    if (blocked) { app.log.warn(`night-charge: force-charge ceiling sync refused — ${blocked}`); if (whileOn) pushLineAtRiskIfDue(); return; }
     const retry = state.forceChargeCeilingAttemptedAtMs != null;
     persistNightActuation({
       ...nightActuationMem,
@@ -6286,9 +6292,8 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
       forceChargeCeilingSyncedPct: action.pct,
     });
     const rc = await setForceChargeCeiling({ sn: shp2.sn, pct: action.pct, source: { ua: 'night-force-charge' } });
-    // v1.200.0 (review) — while ON it is the line mode lowering a cost ceiling (lineCeilingLoweringDue).
-    const whileOn = state.forceChargeOnAtMs != null;
-    app.log.info(`night-charge: force-charge ceiling → ${action.pct}% (panel's own was ${action.prior ?? '?'}%, restored after the night)${retry && !whileOn ? ' — retry' : ''}: ${rc.outcome === 'success' ? 'ACK' : `${rc.code}: ${rc.message}`}.${whileOn ? ` Lowered while ON: the cost force-charge is off, so tonight runs for the ${state.forceChargeLinePct ?? state.forceChargeLineAskPct ?? '?'}% outage line under its own ceiling.` : ' Force-charge waits for it to read back.'}`);
+    app.log.info(`night-charge: force-charge ceiling → ${action.pct}% (panel's own was ${action.prior ?? '?'}%, restored after the night)${retry && !whileOn ? ' — retry' : ''}: ${rc.outcome === 'success' ? 'ACK' : `${rc.code}: ${rc.message}`}.${whileOn ? ` Lowered while ON: the cost force-charge is off, so tonight runs for the ${lineLogPct(state) ?? '?'}% outage line under its own ceiling.` : ' Force-charge waits for it to read back.'}`);
+    if (whileOn) pushLineAtRiskIfDue();
     return;
   }
 
@@ -6353,7 +6358,7 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     const onLine = onLineMode?.kind === 'line'
       // v1.200.0 — a LINE night: on to the window close for the outage line, no software stop. (A5, L3) The panel's own
       // OFF at its ceiling is a stop, not a backstop: the line ARMED says the walk reaches it, and the tick re-ONs after it.
-      ? `night-charge: FORCE-CHARGE ON for ${state.day} — ${results.join(', ')}; for the ${state.forceChargeLinePct ?? onLineMode.askPct}% outage line: timed to reach ~${onLineMode.startTargetPct}% ${Math.round(FORCE_CHARGE_MIN_RUN_MS / 60_000)} min before the window close (${new Date(state.windowEndMs!).toISOString()}), ${rateNote}, and ON until the close (no software stop) unless the panel switches it off at its ${onLineMode.panelCeilingPct}% ceiling (switched back on under ${onLineMode.startTargetPct}% before the close, at most ${lineReOnTimesWords(FORCE_CHARGE_LINE_REON_MAX)}). Also OFF on cancel, revert, grid loss or disable. Verifying ON by readback${rejected > 0 ? ` (${rejected} write(s) REJECTED — re-issued once if the slot does not read ON within ${Math.round(FORCE_CHARGE_ON_VERIFY_AFTER_MS / 60_000)} min)` : ''}.`
+      ? `night-charge: FORCE-CHARGE ON for ${state.day} — ${results.join(', ')}; for the ${lineLogPct(state) ?? onLineMode.askPct}% outage line: timed to reach ~${onLineMode.startTargetPct}% ${Math.round(FORCE_CHARGE_MIN_RUN_MS / 60_000)} min before the window close (${new Date(state.windowEndMs!).toISOString()}), ${rateNote}, and ON until the close (no software stop) unless the panel switches it off at its ${onLineMode.panelCeilingPct}% ceiling (switched back on under ${onLineMode.startTargetPct}% before the close, at most ${lineReOnTimesWords(FORCE_CHARGE_LINE_REON_MAX)}). Also OFF on cancel, revert, grid loss or disable. Verifying ON by readback${rejected > 0 ? ` (${rejected} write(s) REJECTED — re-issued once if the slot does not read ON within ${Math.round(FORCE_CHARGE_ON_VERIFY_AFTER_MS / 60_000)} min)` : ''}.`
       : `night-charge: FORCE-CHARGE ON for ${state.day} — ${results.join(', ')}; just in time to reach ${state.forceChargeCeilingPct}% by the window close (${new Date(state.windowEndMs!).toISOString()}), ${rateNote} — stops at the target, with the panel's ${desiredForceChargeCeilingPct(state.forceChargeCeilingPct!)}% ceiling as the backstop. Also OFF on window end, cancel, revert, grid loss or disable. Verifying ON by readback${rejected > 0 ? ` (${rejected} write(s) REJECTED — re-issued once if the slot does not read ON within ${Math.round(FORCE_CHARGE_ON_VERIFY_AFTER_MS / 60_000)} min)` : ''}.`;
     if (rejected > 0) app.log.warn(onLine); else app.log.info(onLine);
     return;
@@ -6440,7 +6445,7 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
       ...(allLimited ? { forceChargeLineReOns: Math.max(0, nightActuationMem.forceChargeLineReOns - 1), forceChargeLineReOnSlots: null } : {}),
     });
     if (allLimited) results.push('all rate-limited — re-ON not counted');
-    app.log.warn(`night-charge: LINE force-charge re-ON for ${state.day} — slot(s) ${action.slots.join(',')} read FORCE_CHARGE_OFF (the panel switches a slot off at its ${state.forceChargeCeilingSyncedPct ?? '?'}% ceiling) and the pool reads ${socNowPct ?? '?'}%, back under the start target for the ${state.forceChargeLinePct ?? state.forceChargeLineAskPct ?? '?'}% outage line; switching them back ON (${state.forceChargeLineReOns + 1}/${FORCE_CHARGE_LINE_REON_MAX}): ${results.join(', ')}.`);
+    app.log.warn(`night-charge: LINE force-charge re-ON for ${state.day} — slot(s) ${action.slots.join(',')} read FORCE_CHARGE_OFF (the panel switches a slot off at its ${state.forceChargeCeilingSyncedPct ?? '?'}% ceiling) and the pool reads ${socNowPct ?? '?'}%, back under the start target for the ${lineLogPct(state) ?? '?'}% outage line; switching them back ON (${state.forceChargeLineReOns + 1}/${FORCE_CHARGE_LINE_REON_MAX}): ${results.join(', ')}.`);
     // (review 8) A re-ON handed back is judged for the line-at-risk push on this, its own tick (after the stamp above).
     if (allLimited) pushLineAtRiskIfDue();
     return;
