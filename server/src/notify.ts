@@ -14,7 +14,7 @@ import {
 } from './nightChargeAdvisor.js';
 import {
   forceChargeStopPct, partialForceChargeOnFailureSlots, forceChargeFailedSlotsText, FORCE_CHARGE_LINE_REON_MAX, lineReOnTimesWords,
-  type ForceChargeNightOutcome, type ForceChargeSlotCore, type LineAtRisk,
+  lineAboveReserveWords, lineBesidePct, type ForceChargeNightOutcome, type ForceChargeSlotCore, type LineAtRisk,
 } from './nightForceCharge.js';
 import { isNoChargeKwh, revertRetryText, RESERVE_WRITE_MAX_PCT, type NightChargeMode, type RevertResendOnReport, type RestoreSummaryKind } from './nightChargeActuator.js';
 // R5 — the day-aware formatter's clocks (chargeText.ts), shared with the mid-day texts.
@@ -605,7 +605,8 @@ export function buildNightChargeMessage(
   // v1.200.0 — a LINE night: the force-charge runs to the window close for the outage line, and the level
   // it names is the title's (chargeLevelPct: the expected close). No software stop is promised.
   const lineClause = (l: { linePct: number; panelCeilingPct: number }): string => {
-    const why = `for tonight's ${round1(l.linePct)}% outage line (above the ${RESERVE_WRITE_MAX_PCT}% the panel holds as a reserve)`;
+    // (Fix8) The line beside the reserve (and the note's full pool) as lineBesidePct names it; a line stated at the reserve unnumbered.
+    const why = `${lineAboveReserveWords(l.linePct, "for tonight's ", ' outage line')} (above the ${RESERVE_WRITE_MAX_PCT}% the panel holds as a reserve)`;
     const lineStartMs = plan.expectedForceChargeStartMs;
     if (held || lineStartMs === null) {
       // v1.200.0 (review) — armed, never switched on: nothing "on until the window closes".
@@ -1012,7 +1013,9 @@ export function buildNightForceChargeOnFailure(o: {
     : `, and compare ${named.differing === 1 ? "that Core's" : "those Cores'"} work mode and backup reserve with the other Cores' in the EcoFlow app`;
   const head = `The night-charge for ${o.day ?? '—'} switched force-charge ("Charge Now") ON, but the Smart Home Panel 2 `
     + `still reads slot(s) ${named.text} OFF after ${o.retries} re-issue(s)${o.noRetry ? ' (too close to the window end to re-issue)' : ''}. `;
-  const line = o.lineLinePct != null && Number.isFinite(o.lineLinePct) ? round1(o.lineLinePct) : null;
+  const line = o.lineLinePct != null && Number.isFinite(o.lineLinePct) ? lineBesidePct(o.lineLinePct, RESERVE_WRITE_MAX_PCT) : null;
+  // (Fix8) Only where the line, as named, is above the reserve can the pool close under it: a line stated at 50.00 the reserve holds.
+  const underReach = line != null && line > RESERVE_WRITE_MAX_PCT;
   // v1.200.0 (review) — a LINE night is the outage cushion, not a buy: say what the failure does to the line
   // (all slots: the pool closes near the 50% reserve; some: the others still charge, so it may fall short), and
   // what would hold it tonight — never "no action needed". The add-on's close OFF goes to these slots too.
@@ -1020,10 +1023,11 @@ export function buildNightForceChargeOnFailure(o: {
     ? `Tonight's buy above the ${RESERVE_WRITE_MAX_PCT}% reserve${toward} will not happen${partial ? ' on those slot(s)' : ''}; `
       + `the reserve charge is unaffected. No action needed tonight — but if this repeats, check the SHP2 cloud link${compare}.`
     : (partial
-      ? `Tonight's force-charge for the ${line}% outage line will not happen on those slot(s); the other slot(s) still charge, `
-        + `so the pool may close the window short of the line. `
-      : `Tonight's force-charge for the ${line}% outage line will not happen: without it the pool will close the window near `
-        + `the ${RESERVE_WRITE_MAX_PCT}% reserve, under the line. `)
+      ? `Tonight's force-charge for the ${line}% outage line will not happen on those slot(s); the other slot(s) still charge`
+        + `${underReach ? ', so the pool may close the window short of the line' : ''}. `
+      // (Fix8) The pool at the failure is not known here (it may read above the line): never "will close … under the line".
+      : `Tonight's force-charge for the ${line}% outage line will not happen: without it only the ${RESERVE_WRITE_MAX_PCT}% reserve `
+        + `holds the pool${underReach ? ', and it may close the window under the line' : ''}. `)
       + `The reserve charge is unaffected. To hold the line tonight, switch Charge Now on for slot(s) ${named.text} in the EcoFlow app `
       + `(the add-on switches it off at the window close); if this repeats, check the SHP2 cloud link${compare}.`;
   return {
@@ -1046,13 +1050,18 @@ export function buildNightForceChargeOnFailure(o: {
 export function buildLineForceChargeDeclinedStart(o: {
   day: string | null; linePct: number; why: string; latestStartText: string;
 }): NotifyMessage {
+  const line = lineBesidePct(o.linePct, RESERVE_WRITE_MAX_PCT);
   return {
     severity: 'warning',
     dedupId: 'night_charge_line_force_charge_declined',
     title: 'Night-charge: the force-charge for the outage line cannot start',
-    body: `Night-charge: the force-charge for tonight's ${round1(o.linePct)}% outage line cannot start yet — ${o.why}. `
-      + `If it has not started by ~${o.latestStartText}, the pool is expected to close under the line; `
-      + `if it never starts, near the ${RESERVE_WRITE_MAX_PCT}% reserve.`,
+    // (Fix8) In words true in every outcome: the pool may already read above the line, or a person's Charge Now may be lifting it
+    // (a declined cause) — never "is expected to close under the line", never "near the 50% reserve"; a line stated at 50.00 (the
+    // reserve holds it) is not said to close under it.
+    body: `Night-charge: the force-charge for tonight's ${line}% outage line cannot start yet — ${o.why}. `
+      + (line > RESERVE_WRITE_MAX_PCT
+        ? `If it has not started by ~${o.latestStartText}, the pool may close under the line; if it never starts, only the ${RESERVE_WRITE_MAX_PCT}% reserve holds it.`
+        : `If it never starts, only the ${RESERVE_WRITE_MAX_PCT}% reserve holds the pool.`),
   };
 }
 
@@ -1086,7 +1095,8 @@ export function buildLineForceChargeAtRisk(o: {
   // is named by its margin over the line.
   const costMode = r.cause === 'costMode';
   const margin = `under ${round1(r.thresholdPct)}%, ${round1(r.thresholdPct - r.linePct)} points above tonight's ${line}% outage line,`;
-  const where = r.poolPct < r.linePct - 0.05
+  // (Fix8) Under the line also where the readings, as named, show it under (a 50.05% line, the pool at 50: "50.1%" beside "50%").
+  const where = r.poolPct < r.linePct - 0.05 || round1(r.poolPct) < line
     ? `under tonight's ${line}% outage line and ${falling ? 'falling' : 'not rising'}`
     : costMode
       ? `${margin} and ${falling ? 'falling toward it' : 'not rising'}`
@@ -1150,7 +1160,10 @@ function sizingShortfall(plan: Pick<NightChargePlan, 'cushionShortfall' | 'cushi
  *  fell short too (cause null, beside the caps note). Never "no force-charge" on an armed night. '' otherwise. PURE. */
 function envelopeShortfallNote(plan: Pick<NightChargePlan, 'cushionShortfallCause' | 'cushionLineSocPct' | 'cushionEnvelopeReason'
   | 'expectedWriteLevelPct' | 'forceChargeLine' | 'expectedForceChargeMode'>): string {
-  const line = plan.cushionLineSocPct != null && Number.isFinite(plan.cushionLineSocPct) ? `tonight's ${round1(plan.cushionLineSocPct)}% outage line` : "tonight's outage line";
+  // (Fix8) Beside the 50% reserve and a full pool as lineBesidePct names it (a 100.03% line is "100.03%" above a full pool, a 50.03%
+  // one "50.03%" above the reserve); a line stated at the reserve unnumbered.
+  const line = plan.cushionLineSocPct != null && Number.isFinite(plan.cushionLineSocPct)
+    ? lineAboveReserveWords(plan.cushionLineSocPct, "tonight's ", ' outage line') : "tonight's outage line";
   if (plan.forceChargeLine != null) {
     const kind = lineNotHeldOf(plan);
     if (kind === 'closeUnder') {

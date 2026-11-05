@@ -265,34 +265,43 @@ export function lineNotHeldOfCard(plan: CushionNotePlan): 'closeUnder' | 'aboveF
 export function outageLineRow(plan: CushionNotePlan, maxPct: number | null = null): string | null {
   const r1 = (n: number): number => Math.round(n * 10) / 10;
   const max = maxPct ?? 50;
+  // (Fix8) The server's lineAboveReserveWords (nightForceCharge.ts), mirrored: the line beside the reserve maximum and a full pool,
+  // round1 or two decimals where one reads as either ("outage line 50.03% is above the 50% reserve", never "50%"); a line stated at
+  // the reserve, unnumbered.
+  const lineText = (l: number | null | undefined): string => {
+    if (l == null || !Number.isFinite(l)) return '';
+    const r = r1(l);
+    const n = (r === max || r === 100) && l !== max && l !== 100 ? Math.round(l * 100) / 100 : r;
+    return n > max ? `${n}% ` : '';
+  };
   const armed = plan.forceChargeLine != null;
   if (plan.cushionShortfallCause != null && !armed) {
     const l = plan.cushionLineSocPct;
     const why = plan.cushionEnvelopeReason === 'backupLeg' ? 'not held tonight (the backup leg writes the reserve only)'
       : plan.cushionEnvelopeReason === 'advisory' ? 'not held tonight (advisory mode)' : 'not held tonight';
-    return `outage line ${l != null && Number.isFinite(l) ? `${r1(l)}% ` : ''}is above the ${max}% the panel accepts as a reserve — ${why}; residual risk remains`;
+    return `outage line ${lineText(l)}is above the ${max}% the panel accepts as a reserve — ${why}; residual risk remains`;
   }
   // A5 — an ARMED night: the force-charge's row (what it does), then what its walk cannot hold. Never "not held tonight".
   const kind = lineNotHeldOfCard(plan);
   const notHeld = kind === 'closeUnder' ? ' — under the line; residual risk remains'
     : kind === 'aboveFull' ? ' — the line is above a full pool; residual risk remains'
       : kind === 'nearFull' ? ' — within 10 points of a full pool, not held with its usual margin; residual risk remains' : '';
-  const row = outageLineArmedRow(plan, max, r1);
+  const row = outageLineArmedRow(plan, max, r1, lineText);
   if (row == null && armed && plan.cushionShortfallCause != null) {
     // Never silent on a disclosed night, whatever the walk's mode (a plan this build does not make).
     const l = plan.cushionLineSocPct;
-    return `outage line ${l != null && Number.isFinite(l) ? `${r1(l)}% ` : ''}is above the ${max}% the panel accepts as a reserve — its force-charge runs, but the line is not claimed; residual risk remains`;
+    return `outage line ${lineText(l)}is above the ${max}% the panel accepts as a reserve — its force-charge runs, but the line is not claimed; residual risk remains`;
   }
   return row == null ? null : `${row}${notHeld}`;
 }
 
 /** v1.200.0 — the armed line force-charge's own row (outageLineRow): line mode only. */
-function outageLineArmedRow(plan: CushionNotePlan, max: number, r1: (n: number) => number): string | null {
+function outageLineArmedRow(plan: CushionNotePlan, max: number, r1: (n: number) => number, lineText: (l: number) => string): string | null {
   if (plan.expectedForceChargeMode === 'line' && plan.forceChargeLine != null) {
     // v1.200.0 (review) — armed but not expected to start (the pool stays at or above the panel ceiling):
     // never "stays on to the window close" for a force-charge that does not switch on.
     if (plan.expectedForceChargeStartMs === null) {
-      return `outage line ${r1(plan.forceChargeLine.linePct)}% is above the ${max}% reserve — the panel's force-charge is armed for it, not expected to start (the pool stays at or above its ceiling)`;
+      return `outage line ${lineText(plan.forceChargeLine.linePct)}is above the ${max}% reserve — the panel's force-charge is armed for it, not expected to start (the pool stays at or above its ceiling)`;
     }
     const lvl = plan.expectedWriteLevelPct;
     const tail = lvl != null && Number.isFinite(lvl) && plan.expectedForceChargeStartMs != null ? `, ~${r1(lvl)}% expected at the close` : '';
@@ -300,11 +309,11 @@ function outageLineArmedRow(plan: CushionNotePlan, max: number, r1: (n: number) 
     // add-on switches it back on under the start target before the close. Never "stays on to the window close".
     const stop = plan.expectedLineCeilingStop;
     if (stop != null) {
-      return `outage line ${r1(plan.forceChargeLine.linePct)}% is above the ${max}% reserve — the panel's force-charge runs until the panel `
+      return `outage line ${lineText(plan.forceChargeLine.linePct)}is above the ${max}% reserve — the panel's force-charge runs until the panel `
         + `switches it off at its ${stop.ceilingPct}% ceiling, and the add-on switches it back on under ${stop.startTargetPct}% before the close `
         + `(at most ${LINE_REON_TIMES_TEXT})${tail}`;
     }
-    return `outage line ${r1(plan.forceChargeLine.linePct)}% is above the ${max}% reserve — the panel's force-charge stays on to the window close${tail}`;
+    return `outage line ${lineText(plan.forceChargeLine.linePct)}is above the ${max}% reserve — the panel's force-charge stays on to the window close${tail}`;
   }
   return null;
 }
