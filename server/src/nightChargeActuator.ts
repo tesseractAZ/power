@@ -661,6 +661,9 @@ export interface NightActuationState {
   /** v1.200.0 (review 2) — when the line-at-risk push went (nightForceCharge.lineAtRiskPushDue), stamped
    *  WRITE-AHEAD: once a night, and a restart never repeats it. */
   forceChargeLineAtRiskPushedAtMs: number | null;
+  /** v1.200.0 (Fix8 review 1) — when the ON-reading shape was logged (nightForceCharge.lineOnReadingShape), stamped
+   *  WRITE-AHEAD: once a night across restarts, as the pushes are (it was module memory, and a restart logged it again). */
+  forceChargeLineShapeLoggedAtMs: number | null;
   /** v1.200.0 (review 2) — the blocker classes whose declined-start push went tonight (lineDeclinedPushStep),
    *  stamped WRITE-AHEAD: the push is once a night per class across restarts (it was module memory, and a
    *  crash-looping add-on under red vitals pushed once per restart). [] on older records. */
@@ -741,7 +744,7 @@ export function emptyActuationState(): NightActuationState {
     forceChargeLineReOnSlots: null, forceChargeLineReOnCheckedAtMs: null,
     forceChargeLineReOnsNotApplied: 0, forceChargeLineReOnNotAppliedSlots: null, forceChargeLineReOnAppliedAtMs: null,
     forceChargeLinePanelOffAtMs: null, forceChargeLineOffSlots: null, forceChargeLineOnSeenAtMs: null, forceChargeLinePoolSamples: null,
-    forceChargeLineAtRiskPushedAtMs: null, forceChargeLineDeclinedPushed: [],
+    forceChargeLineAtRiskPushedAtMs: null, forceChargeLineShapeLoggedAtMs: null, forceChargeLineDeclinedPushed: [],
     nextOnPeakStartMs: null,
     foreignReservePct: null, foreignSeenAtMs: null, foreignSettledAtMs: null,
     revertDeadlinePagedAtMs: null, revertDeadlineOnPeakPagedAtMs: null,
@@ -853,6 +856,7 @@ export function coerceActuationState(raw: unknown): NightActuationState {
     forceChargeLineOnSeenAtMs: num(o.forceChargeLineOnSeenAtMs),
     forceChargeLinePoolSamples: coercePoolSamples(o.forceChargeLinePoolSamples),
     forceChargeLineAtRiskPushedAtMs: num(o.forceChargeLineAtRiskPushedAtMs),
+    forceChargeLineShapeLoggedAtMs: num(o.forceChargeLineShapeLoggedAtMs),
     forceChargeLineDeclinedPushed: Array.isArray(o.forceChargeLineDeclinedPushed)
       ? [...new Set(o.forceChargeLineDeclinedPushed.filter((c): c is string => typeof c === 'string' && c.length > 0 && c.length <= 64))]
       : [],

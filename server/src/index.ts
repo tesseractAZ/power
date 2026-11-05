@@ -6061,9 +6061,6 @@ let forceChargeWhyLogged: { day: string | null; reasons: Set<string> } = { day: 
  *  classes pushed tonight (nightForceCharge.lineDeclinedPushTick). (review 2) The pushed classes are also on the
  *  night's record, stamped before each push: this memory is re-seeded from it after a restart. */
 let lineDeclinedPush: LineDeclinedPushMem = { day: null, st: EMPTY_LINE_DECLINED_PUSH };
-/** v1.200.0 (review 2) — the night the ON-reading shape was logged for (nightForceCharge.lineOnReadingShape): one
- *  warning line a night, so its first real occurrence on this plant is on record. */
-let lineOnShapeLoggedDay: string | null = null;
 
 /** The shared grid-input envelope (ARB_GRID_INPUT_CAP_KW; see the planner's note on why
  *  17 kW): ≤0 or unparseable ⇒ null (contention not modelled). One reader for the planner
@@ -6209,8 +6206,13 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
   // cannot (nightForceCharge.lineAtRiskPushDue): once a night, stamped on the record BEFORE the push goes. (review 8) Judged
   // on a tick that decides nothing, and on a line re-ON's own tick when every write came back rate-limited (handed back):
   // one on the last tick before the re-ON's cutoff has no later tick for it (the next is past the cutoff and the lead).
-  // (Fix8) And after the line ceiling lowering while ON. Not judged: a tick lost (the in-flight lock, a restart, a throw), the
-  // panel missing from the device list (no reading: it could not be due), the re-ON refused by the write block, an OFF.
+  // (Fix8) And after the line ceiling lowering while ON (and its refusal). (Fix8 review 1) And on a re-ON's readback check (it
+  // writes nothing: the tick's readings stand), where a 'reOnNotApplied' push first becomes due — the unchecked re-ON barred the
+  // trend until then; and on a re-ON the write block refuses (a re-ON due holds the push; the shape log is judged there).
+  // Each through judgeLineNight, with the ON-reading shape. Not judged where neither can be due: before the verified ON (the
+  // ON, its re-issue, its failure), on a re-ON that reached the panel (the last ON of ours: no trend reference yet), at or
+  // after an OFF of ours; nor on the ON's verify (judged from the next tick), a tick lost (the in-flight lock, a restart, a
+  // throw), or with the panel missing from the device list (no reading).
   const pushLineAtRiskIfDue = (): void => {
     const risk = lineAtRiskPushDue(nightActuationMem, nowMs, fcOpts);
     if (risk != null) {
@@ -6227,6 +6229,17 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
       })).catch((e: any) => app.log.debug(`night-charge: line-at-risk notify failed (${e?.message ?? e})`));
     }
   };
+  // v1.200.0 (review 2) — the ON-READING SHAPE (unmeasured on this plant): logged once a night when seen, whatever the push
+  // conditions, so its first real occurrence is on record (nightForceCharge.lineOnReadingShape). (Fix8 review 1) Stamped on
+  // the record BEFORE the line is logged (forceChargeLineShapeLoggedAtMs): a restart never logs it again (it was module memory).
+  const logLineOnReadingShapeIfSeen = (): void => {
+    const shape = lineOnReadingShape(nightActuationMem, nowMs, fcOpts);
+    if (shape == null) return;
+    persistNightActuation({ ...nightActuationMem, forceChargeLineShapeLoggedAtMs: nowMs });
+    app.log.warn(`night-charge: ${state.day} — slot(s) ${shape.slots.join(',')} read FORCE_CHARGE_ON with their Cores under the panel's ${shape.stopCeilingPct}% stop ceiling, yet the pool fell from ${shape.refPct}% (${fmtSiteClock(shape.refAtMs)}) to ${shape.poolPct}%: a slot reading ON that does not import (never measured on this plant), or a load taking the grid cap. Logged once a night.`);
+  };
+  // (Fix8 review 1) The push and the shape, judged together on every tick kind that judges either (listed above).
+  const judgeLineNight = (): void => { pushLineAtRiskIfDue(); logLineOnReadingShapeIfSeen(); };
   const action = decideForceCharge(state, nowMs, fcOpts);
   if (action.kind === 'none') {
     // v1.166.0 — "chose not to" must never read like "broke". While a night is live
@@ -6263,24 +6276,18 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
       })).catch((e: any) => app.log.debug(`night-charge: line force-charge declined-start notify failed (${e?.message ?? e})`));
       app.log.warn(`night-charge: the force-charge for ${state.day}'s ${lineLogPct(state)}% outage line cannot start yet — ${action.why}; held ${Math.round(FORCE_CHARGE_LINE_DECLINED_PERSIST_MS / 60_000)} min, pushed once tonight for this cause.`);
     }
-    pushLineAtRiskIfDue();
-    // v1.200.0 (review 2) — the ON-READING SHAPE (unmeasured on this plant): logged once a night when seen, whatever
-    // the push conditions, so its first real occurrence is on record (nightForceCharge.lineOnReadingShape).
-    const shape = lineOnReadingShape(nightActuationMem, nowMs, fcOpts);
-    if (shape != null && lineOnShapeLoggedDay !== state.day) {
-      lineOnShapeLoggedDay = state.day;
-      app.log.warn(`night-charge: ${state.day} — slot(s) ${shape.slots.join(',')} read FORCE_CHARGE_ON with their Cores under the panel's ${shape.stopCeilingPct}% stop ceiling, yet the pool fell from ${shape.refPct}% (${fmtSiteClock(shape.refAtMs)}) to ${shape.poolPct}%: a slot reading ON that does not import (never measured on this plant), or a load taking the grid cap. Logged once a night.`);
-    }
+    judgeLineNight();
     return;
   }
 
   if (action.kind === 'syncCeiling') {
     // v1.200.0 (review) — while ON it is the line mode lowering a cost ceiling (lineCeilingLoweringDue). (Fix8) The line-at-risk
     // push is judged on this tick too, after the lowering (or its refusal): the lowering writes the ceiling only, so this tick's slot
-    // and pool readings stand, and a hand-back's hold judged here is not skipped as on a lost tick.
+    // and pool readings stand, and a hand-back's hold judged here is not skipped as on a lost tick. (Fix8 review 1) The shape too
+    // (judgeLineNight): a lowering the write block refuses is due again on every tick while the block lasts.
     const whileOn = state.forceChargeOnAtMs != null;
     const blocked = multiPanelWriteBlock();
-    if (blocked) { app.log.warn(`night-charge: force-charge ceiling sync refused — ${blocked}`); if (whileOn) pushLineAtRiskIfDue(); return; }
+    if (blocked) { app.log.warn(`night-charge: force-charge ceiling sync refused — ${blocked}`); if (whileOn) judgeLineNight(); return; }
     const retry = state.forceChargeCeilingAttemptedAtMs != null;
     persistNightActuation({
       ...nightActuationMem,
@@ -6293,7 +6300,7 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     });
     const rc = await setForceChargeCeiling({ sn: shp2.sn, pct: action.pct, source: { ua: 'night-force-charge' } });
     app.log.info(`night-charge: force-charge ceiling → ${action.pct}% (panel's own was ${action.prior ?? '?'}%, restored after the night)${retry && !whileOn ? ' — retry' : ''}: ${rc.outcome === 'success' ? 'ACK' : `${rc.code}: ${rc.message}`}.${whileOn ? ` Lowered while ON: the cost force-charge is off, so tonight runs for the ${lineLogPct(state) ?? '?'}% outage line under its own ceiling.` : ' Force-charge waits for it to read back.'}`);
-    if (whileOn) pushLineAtRiskIfDue();
+    if (whileOn) judgeLineNight();
     return;
   }
 
@@ -6407,13 +6414,17 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     // the slots still reading OFF did not take it. Recorded for the line-at-risk push and the morning account; the
     // budget's next re-ON (if any is left) is the retry. Writes nothing. (review 4) The stamp is the pure
     // lineReOnCheckedStamp's: a re-ON that took effect is kept as the latest that did (forceChargeLineReOnAppliedAtMs).
+    // (Fix8 review 1) "has NOT taken effect": a late apply is still seen (lineNightObservations).
     const failedReOn = action.notApplied.length > 0;
     persistNightActuation({ ...nightActuationMem, ...lineReOnCheckedStamp(nightActuationMem, nowMs, action) });
     if (failedReOn) {
-      app.log.warn(`night-charge: LINE force-charge re-ON for ${state.day} did NOT take effect — slot(s) ${action.notApplied.join(',')} of ${action.slots.join(',')} still read FORCE_CHARGE_OFF ${Math.round((nowMs - (state.forceChargeLineReOnAtMs ?? nowMs)) / 60_000)}m after it, their Cores under the panel's ceiling (re-ON ${state.forceChargeLineReOns}/${FORCE_CHARGE_LINE_REON_MAX}).`);
+      app.log.warn(`night-charge: LINE force-charge re-ON for ${state.day} has NOT taken effect — slot(s) ${action.notApplied.join(',')} of ${action.slots.join(',')} still read FORCE_CHARGE_OFF ${Math.round((nowMs - (state.forceChargeLineReOnAtMs ?? nowMs)) / 60_000)}m after it, their Cores under the panel's ceiling (re-ON ${state.forceChargeLineReOns}/${FORCE_CHARGE_LINE_REON_MAX}).`);
     } else {
       app.log.info(`night-charge: LINE force-charge re-ON VERIFIED by device readback for ${state.day} — slot(s) ${action.slots.join(',')} took it.`);
     }
+    // (Fix8 review 1) Judged on the check's own tick, after its stamp: a 'reOnNotApplied' push first becomes due here, and on the
+    // last tick before the push's lead it has no later tick (the round-7 reviewer's night: the check 20m30s before the close).
+    judgeLineNight();
     return;
   }
 
@@ -6424,7 +6435,9 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     // never reached the panel and is handed back. (review 2) And the slots it switches, for its readback check
     // (lineReOnCheckDue) — none on a re-ON handed back (it never reached the panel: nothing to check).
     const blocked = multiPanelWriteBlock();
-    if (blocked) { app.log.warn(`night-charge: line force-charge re-ON refused — ${blocked}`); return; }
+    // (Fix8 review 1) Judged (judgeLineNight) when the write block refuses it: the re-ON due holds the push, and the shape log is
+    // judged on every tick while the block lasts.
+    if (blocked) { app.log.warn(`night-charge: line force-charge re-ON refused — ${blocked}`); judgeLineNight(); return; }
     persistNightActuation({
       ...nightActuationMem,
       forceChargeLineReOns: nightActuationMem.forceChargeLineReOns + 1,
@@ -6447,7 +6460,7 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     if (allLimited) results.push('all rate-limited — re-ON not counted');
     app.log.warn(`night-charge: LINE force-charge re-ON for ${state.day} — slot(s) ${action.slots.join(',')} read FORCE_CHARGE_OFF (the panel switches a slot off at its ${state.forceChargeCeilingSyncedPct ?? '?'}% ceiling) and the pool reads ${socNowPct ?? '?'}%, back under the start target for the ${lineLogPct(state) ?? '?'}% outage line; switching them back ON (${state.forceChargeLineReOns + 1}/${FORCE_CHARGE_LINE_REON_MAX}): ${results.join(', ')}.`);
     // (review 8) A re-ON handed back is judged for the line-at-risk push on this, its own tick (after the stamp above).
-    if (allLimited) pushLineAtRiskIfDue();
+    if (allLimited) judgeLineNight();
     return;
   }
 

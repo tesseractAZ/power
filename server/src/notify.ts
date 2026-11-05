@@ -950,8 +950,8 @@ export function buildNightChargeApplyFailure(o: {
   applyRetries: number;
   expectedKwh: number | null;
   /** v1.200.0 (review 2) — the outage line the armed record carries (nightForceCharge.forceChargeLineNightPct):
-   *  the force-charge that carries it rides only a VERIFIED reserve write, so a write that never took leaves the
-   *  pool on its floor, under the line. null/omitted ⇒ a night with no line: v1.199.1's words, word for word. */
+   *  the force-charge that carries it rides only a VERIFIED reserve write, so until the panel reads the target the
+   *  pool keeps its normal reserve, under the line. null/omitted ⇒ a night with no line: v1.199.1's words, word for word. */
   linePct?: number | null;
 }): NotifyMessage {
   const expected = armedExpectedPhrase(o.expectedKwh);
@@ -961,12 +961,13 @@ export function buildNightChargeApplyFailure(o: {
   const line = o.linePct != null && Number.isFinite(o.linePct) ? round1(o.linePct) : null;
   // v1.200.0 (review 2) — a line night is the outage cushion, not a buy: never "no action needed". What holds it
   // tonight: the reserve set by hand to the night's target — decideActuation verifies a reading of the target
-  // even after the apply failed, and the force-charge then starts for the line as it would have.
+  // even after the apply failed, and the force-charge then starts for the line as it would have. (Fix8 review 1) So a
+  // late apply is verified too: "has not taken effect", until the panel reads the target — never "will not happen".
   const tail = line == null
     ? `Tonight's planned ${planned} will not happen; the pool stays on its normal floor. `
       + 'No action needed tonight — the grid is available as backup — but if this repeats, check the SHP2 cloud link.'
-    : `Tonight's planned ${planned} will not happen: the pool stays on its normal floor, under tonight's ${line}% outage line, `
-      + 'and the force-charge for the line waits on this write. '
+    : `Tonight's planned ${planned} has not taken effect: until the panel reads ${o.targetPct ?? RESERVE_WRITE_MAX_PCT}%, `
+      + `it keeps its normal reserve, under tonight's ${line}% outage line, and the force-charge for the line waits on this write. `
       + `To hold the line tonight, set the backup reserve to ${o.targetPct ?? RESERVE_WRITE_MAX_PCT}% in the EcoFlow app: once the panel reads it, `
       + 'the add-on starts the force-charge for the line as planned. If this repeats, check the SHP2 cloud link.';
   return {
@@ -1002,7 +1003,7 @@ export function buildNightForceChargeOnFailure(o: {
    *  null/omitted ⇒ the slot numbers alone, as before. */
   cores?: ReadonlyArray<ForceChargeSlotCore> | null;
   /** v1.200.0 — on a LINE night: the outage line the force-charge was to carry (the record's
-   *  forceChargeLinePct). The warning then says the pool will close near the reserve, under it. */
+   *  forceChargeLinePct). The warning then says, in words true in every outcome, what the failure leaves the line. */
   lineLinePct?: number | null;
 }): NotifyMessage {
   const partial = partialForceChargeOnFailureSlots({ forceChargeSlots: o.ourSlots, forceChargeOnFailedSlots: o.slots }) != null;
@@ -1016,24 +1017,27 @@ export function buildNightForceChargeOnFailure(o: {
   const line = o.lineLinePct != null && Number.isFinite(o.lineLinePct) ? lineBesidePct(o.lineLinePct, RESERVE_WRITE_MAX_PCT) : null;
   // (Fix8) Only where the line, as named, is above the reserve can the pool close under it: a line stated at 50.00 the reserve holds.
   const underReach = line != null && line > RESERVE_WRITE_MAX_PCT;
-  // v1.200.0 (review) — a LINE night is the outage cushion, not a buy: say what the failure does to the line
-  // (all slots: the pool closes near the 50% reserve; some: the others still charge, so it may fall short), and
+  // v1.200.0 (review) — a LINE night is the outage cushion, not a buy: say what the failure does to the line, and
   // what would hold it tonight — never "no action needed". The add-on's close OFF goes to these slots too.
+  // (Fix8 review 1) In words true in every outcome: the ON is still watched after this warning and a late apply is verified
+  // (verifyForceChargeOn reads onVerified before its failure guard), so "has not taken effect", never "will not happen"; the
+  // reserve is no floor islanded (the pool drains through it in an outage), so the add-on "adds nothing above" it, never "only
+  // the reserve holds the pool"; and the other slots read ON or at the panel's ceiling (switched off by it), never "still charge".
   const lost = line == null
     ? `Tonight's buy above the ${RESERVE_WRITE_MAX_PCT}% reserve${toward} will not happen${partial ? ' on those slot(s)' : ''}; `
       + `the reserve charge is unaffected. No action needed tonight — but if this repeats, check the SHP2 cloud link${compare}.`
     : (partial
-      ? `Tonight's force-charge for the ${line}% outage line will not happen on those slot(s); the other slot(s) still charge`
+      ? `Tonight's force-charge for the ${line}% outage line has not taken effect on those slot(s)`
         + `${underReach ? ', so the pool may close the window short of the line' : ''}. `
       // (Fix8) The pool at the failure is not known here (it may read above the line): never "will close … under the line".
-      : `Tonight's force-charge for the ${line}% outage line will not happen: without it only the ${RESERVE_WRITE_MAX_PCT}% reserve `
-        + `holds the pool${underReach ? ', and it may close the window under the line' : ''}. `)
+      : `Tonight's force-charge for the ${line}% outage line has not taken effect: unless it applies late, the add-on adds nothing `
+        + `above the ${RESERVE_WRITE_MAX_PCT}% reserve${underReach ? ', and the pool may close the window under the line' : ''}. `)
       + `The reserve charge is unaffected. To hold the line tonight, switch Charge Now on for slot(s) ${named.text} in the EcoFlow app `
       + `(the add-on switches it off at the window close); if this repeats, check the SHP2 cloud link${compare}.`;
   return {
     severity: 'warning',
     dedupId: 'night_charge_force_charge_on_failure',
-    title: line == null ? 'Night-charge: force-charge did not take effect' : 'Night-charge: the outage-line force-charge did not take effect',
+    title: line == null ? 'Night-charge: force-charge did not take effect' : 'Night-charge: the outage-line force-charge has not taken effect',
     body: head + lost,
   };
 }
@@ -1044,8 +1048,8 @@ export function buildNightForceChargeOnFailure(o: {
  * the grid unknown or absent, vitals red, no slot readback, no slot connected, an incoherent SoC), once per
  * blocker class a night, once it has held (nightForceCharge.lineDeclinedPushStep) — while there is still
  * time to act. `latestStartText` is the LATEST start that still reaches the line at the rate now
- * (nightForceCharge.lineLatestStartMs), as clock text; a later start closes lower, and none at all near the
- * 50% reserve. PURE.
+ * (nightForceCharge.lineLatestStartMs), as clock text; a later start closes lower, and with none the add-on adds
+ * nothing above the 50% reserve. PURE.
  */
 export function buildLineForceChargeDeclinedStart(o: {
   day: string | null; linePct: number; why: string; latestStartText: string;
@@ -1057,11 +1061,12 @@ export function buildLineForceChargeDeclinedStart(o: {
     title: 'Night-charge: the force-charge for the outage line cannot start',
     // (Fix8) In words true in every outcome: the pool may already read above the line, or a person's Charge Now may be lifting it
     // (a declined cause) — never "is expected to close under the line", never "near the 50% reserve"; a line stated at 50.00 (the
-    // reserve holds it) is not said to close under it.
+    // reserve holds it) is not said to close under it. (Fix8 review 1) Nor "only the 50% reserve holds it": with the grid absent (a
+    // declined cause) the pool drains through the reserve, and a person's Charge Now lifts it — the add-on adds nothing above it.
     body: `Night-charge: the force-charge for tonight's ${line}% outage line cannot start yet — ${o.why}. `
       + (line > RESERVE_WRITE_MAX_PCT
-        ? `If it has not started by ~${o.latestStartText}, the pool may close under the line; if it never starts, only the ${RESERVE_WRITE_MAX_PCT}% reserve holds it.`
-        : `If it never starts, only the ${RESERVE_WRITE_MAX_PCT}% reserve holds the pool.`),
+        ? `If it has not started by ~${o.latestStartText}, the pool may close under the line; if it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.`
+        : `If it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.`),
   };
 }
 
@@ -1094,7 +1099,9 @@ export function buildLineForceChargeAtRisk(o: {
   // (review 3) A COST-DOMINANT night has no start target (its start is timed to its cost target): its threshold (⌈L⌉ + 5)
   // is named by its margin over the line.
   const costMode = r.cause === 'costMode';
-  const margin = `under ${round1(r.thresholdPct)}%, ${round1(r.thresholdPct - r.linePct)} points above tonight's ${line}% outage line,`;
+  // (Fix8 review 1) The margin is the difference of the numbers as NAMED (each to one decimal), so they add up: a 55.55% line named
+  // 55.6% under a 61% threshold is 5.4 points, never round1(61 − 55.55) = 5.5.
+  const margin = `under ${round1(r.thresholdPct)}%, ${round1(round1(r.thresholdPct) - line)} points above tonight's ${line}% outage line,`;
   // (Fix8) Under the line also where the readings, as named, show it under (a 50.05% line, the pool at 50: "50.1%" beside "50%").
   const where = r.poolPct < r.linePct - 0.05 || round1(r.poolPct) < line
     ? `under tonight's ${line}% outage line and ${falling ? 'falling' : 'not rising'}`
@@ -1107,9 +1114,10 @@ export function buildLineForceChargeAtRisk(o: {
     ? "Tonight's force-charge is the cost plan's, with its own stop: the add-on does not switch Charge Now back on for the line. "
     : r.cause === 'reOnSpent'
     ? `The add-on has switched Charge Now back on ${FORCE_CHARGE_LINE_REON_MAX} times tonight${r.panelOffAtMs != null ? " after the panel's own stop" : ''}, the most it does in a night. `
+    // (Fix8 review 1) "has not taken effect": a re-ON its check found not applied may still apply late (lineNightObservations).
     : r.cause === 'reOnNotApplied'
       ? `The add-on switched Charge Now back on for slot(s) ${(r.reOnNotAppliedSlots != null && r.reOnNotAppliedSlots.length > 0 ? r.reOnNotAppliedSlots : r.offSlots).join(', ')} `
-        + 'and it did not take effect; it does not try again tonight. '
+        + 'and it has not taken effect; it does not try again tonight. '
       : r.cause === 'reOnHeld'
         ? 'The add-on cannot switch Charge Now back on now (it needs the grid known present, healthy host vitals and a live panel reading). '
         : r.cause === 'reOnRefused'

@@ -135,16 +135,19 @@
  *    reaches every one of those nights, after the latch on all but one (and, on the measured latch, also
  *    warns on 2 of the 3,740 predicted-EV nights that still hold — 202 before review 3 judged the trend only
  *    on readings taken after the last ON of ours took effect, a flat pool only at ⌈L⌉: lineTrendReference);
- *    the shape, when seen, is logged once a night (lineOnReadingShape), never on the measured latch.
+ *    the shape, when seen, is logged once a night (lineOnReadingShape; on the record, across restarts), never on the measured latch.
  *    It also reaches most late unpredicted loads (69 of the 73 year nights under with the 11.52 kW EV from
  *    90 min); a load that only slows the charge leaves the pool rising and is not pushed.
  *    A RE-ON THE CLOUD ACCEPTS THAT NEVER TAKES EFFECT — UNMEASURED too (its readback check finds the slots still
- *    OFF): the trend reads past it (lineTrendReference, review 4), so the push goes the minute after that check.
- *    Emulated (variant reOnInert) it reaches 169 of the 390 predicted-EV year nights that close under and 2,308 of
- *    2,615 at lines of 70-90%; the rest have their last check inside the last 21 min, too late for the lead.
+ *    OFF): the trend reads past it (lineTrendReference, review 4), so the push goes on that check's own tick (Fix8 review 1:
+ *    index.ts judges it there). Emulated (variant reOnInert) it reaches 174 of the 390 predicted-EV year nights that close
+ *    under and 2,335 of 2,615 at lines of 70-90%; of the rest, 471 have their last check at or inside the push's lead, and
+ *    25 have it on the last tick before the re-ON's cutoff with a re-ON left: that re-ON, due, holds the push, waits a tick
+ *    (the check took this one) and meets the cutoff (a residual, stated).
  *    (review 5) An ON no write of ours explains in time — a re-ON applied a minute after its check, one all-OFF reading
  *    at the check, Charge Now switched on by a person after the push — is waited out (forceChargeLineOnSeenAtMs):
- *    emulated, the shape is logged on none of them, and a re-ON handed back rate-limited is never pushed as its gates.
+ *    emulated, the shape is logged on none of them, and a re-ON handed back rate-limited is never pushed as its gates inside
+ *    its retry's spacing.
  *    (review 6) Nor is one lost: the push's hold counts the ticks (FORCE_CHARGE_TICK_MS). With each re-ON stamped 2 s after
  *    its tick, as index.ts stamps it, the retry is the 16th tick, and 30 hand-backs had neither it nor the push (25 of the
  *    146 nights under never reached); now every one of the 146 is (PIN_REVIEW6). And a person's ON the panel then stops at
@@ -159,7 +162,7 @@
  *    throws, or an add-on restart: index.ts runs no tick at boot, so the first comes a tick after the start), a whole tick
  *    late, without a fresh, coherent panel reading (the panel missing from the device list, or stale: a lost tick for the
  *    hold, run for run), with the add-on's writes blocked (two panels, none pinned: every re-ON due is refused before its
- *    stamp, unjudged — neither, while the block lasts: PIN_HANDBACK_AFTER, 6,071 of 86,400 hand-backs with the block from
+ *    stamp, and holds the push — neither, while the block lasts: PIN_HANDBACK_AFTER, 6,071 of 86,400 hand-backs with the block from
  *    one of their first 18 ticks), or — the tick the retry is due — spent on the line ceiling lowering, after which (Fix8)
  *    the push is judged but the re-ON waits a tick, as after a lost one. A push may be followed by the retry. In the plant
  *    (stamps 2 s late): 429 'reOnRefused' pushes, 18 of them on the last tick before the cutoff (none there before), 374
@@ -1701,9 +1704,9 @@ export function lineAtRiskPushDue(s: NightActuationState, nowMs: number, o: Forc
   // unless it is lost (the in-flight lock held past it, a throw, or an add-on restart: index.ts runs no tick at boot, so the
   // first comes a tick after the start) or reads a whole tick late. Neither the retry nor the push then needs that tick to
   // bring neither (an OFF of ours ends both): lost, late, with no fresh, coherent reading (no slots, no pool: it cannot be
-  // due, and the retry is not), with the add-on's writes blocked (two panels, none pinned: every re-ON due is refused
-  // unjudged, index.ts), or — the retry's own tick — spent on the line ceiling lowering (Fix8: judged after it, but the
-  // retry due there waits a tick). The push
+  // due, and the retry is not), with the add-on's writes blocked (two panels, none pinned: every re-ON due is refused before
+  // its stamp, and holds the push, index.ts), or — the retry's own tick — spent on the line ceiling lowering (Fix8: judged
+  // after it, but the retry due there waits a tick, and holds the push). The push
   // is once a night, so one sent while the retry's tick falls within a tick of the cutoff may still be followed by the
   // retry: its words say the add-on may try once more (reOnRetryPossible), and where no tick can bring it
   // (the stamp + 15 min at or past the cutoff) that it does not. index.ts also judges the push on the hand-back's own tick,
@@ -1758,13 +1761,15 @@ export interface LineOnReadingShape { slots: number[]; poolPct: number; refPct: 
  * against a reading at least FORCE_CHARGE_LINE_TREND_MS older. It is what a slot that keeps reading ON at its
  * ceiling and stops importing would look like once the house draws it down — never measured on this plant (a
  * late load taking the grid cap reads the same). index.ts logs it once a night whatever the push conditions, so
- * its first real occurrence is on record. null otherwise.
+ * its first real occurrence is on record. null otherwise. (Fix8 review 1) Once a night ACROSS RESTARTS: null once logged
+ * (forceChargeLineShapeLoggedAtMs, stamped write-ahead by index.ts), and judged on every tick the push is (judgeLineNight).
  * (review 3) The reference is lineTrendReference's — never one from before the last ON of ours had its readback grace:
  * on the MEASURED path a re-ON switches the slots back on after the pool fell, and the next tick read them ON, their
  * Cores under the stop, the pool below the pre-re-ON reading — the re-ON working, logged as the unmeasured latch on every
  * emulated night with a re-ON (3,278 of 7,480 predicted-EV nights). The close plant pins 0 on that latch.
  */
 export function lineOnReadingShape(s: NightActuationState, nowMs: number, o: ForceChargeOpts): LineOnReadingShape | null {
+  if (s.forceChargeLineShapeLoggedAtMs != null) return null;
   if (forceChargeLineNightPct(s) == null) return null;
   if (s.forceChargeOnAtMs == null || s.forceChargeOnVerifiedAtMs == null || s.forceChargeOffAtMs != null) return null;
   if (o.slotsOn == null || !o.socCoherent || o.poolSocPct == null || !Number.isFinite(o.poolSocPct)) return null;
