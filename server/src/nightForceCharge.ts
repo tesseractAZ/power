@@ -154,14 +154,14 @@
  *    design now, every doubt goes to the push: it is held only while the retry's tick lands a full tick before the re-ON's
  *    cutoff, it is judged on the hand-back's own tick too (index.ts), and its words are true in every outcome — the add-on
  *    may try once more, or, where no tick can bring the retry (its spacing ends at or past the cutoff), its next try would
- *    come after the cutoff (reOnRetryPossible). Neither then needs the tick after a hold to bring neither before the cutoff,
- *    the force-charge still on (an OFF ends both): lost (the in-flight lock held past it, a tick that throws, or an add-on
- *    restart: index.ts runs no tick at boot, so the first comes a tick after the start), a whole tick late, without a fresh,
- *    coherent panel reading (the panel missing from the device list, or stale: a lost tick for the hold, run for run), or —
- *    the tick the retry is due — spent on the line ceiling lowering, after which (Fix8) the push is judged but the re-ON waits
- *    a tick, as after a lost one. And while the add-on's writes are blocked (two panels, none pinned) every re-ON due is
- *    refused before its stamp and the push is not judged on it: neither, while the block lasts (PIN_HANDBACK_AFTER: 6,071 of
- *    86,400 hand-backs with the block from one of their first 18 ticks). A push may be followed by the retry. In the plant
+ *    come after the cutoff (reOnRetryPossible). Neither then needs the tick after a hold to bring neither before the cutoff
+ *    (an OFF of ours ends both; a line no longer at risk is not pushed): lost (the in-flight lock held past it, a tick that
+ *    throws, or an add-on restart: index.ts runs no tick at boot, so the first comes a tick after the start), a whole tick
+ *    late, without a fresh, coherent panel reading (the panel missing from the device list, or stale: a lost tick for the
+ *    hold, run for run), with the add-on's writes blocked (two panels, none pinned: every re-ON due is refused before its
+ *    stamp, unjudged — neither, while the block lasts: PIN_HANDBACK_AFTER, 6,071 of 86,400 hand-backs with the block from
+ *    one of their first 18 ticks), or — the tick the retry is due — spent on the line ceiling lowering, after which (Fix8)
+ *    the push is judged but the re-ON waits a tick, as after a lost one. A push may be followed by the retry. In the plant
  *    (stamps 2 s late): 429 'reOnRefused' pushes, 18 of them on the last tick before the cutoff (none there before), 374
  *    worded as no tick bringing the retry (none then retried), 25 of the other 55 then retried (PIN_REVIEW6). Swept at
  *    sub-second phases with drift, late reads and stamp lags (lineForceChargeAtRisk.test.ts PIN_HANDBACK_CADENCE): neither on
@@ -1699,10 +1699,11 @@ export function lineAtRiskPushDue(s: NightActuationState, nowMs: number, o: Forc
   // short). So the push is held only while retryAtMs lands a FULL FORCE_CHARGE_TICK_MS before the re-ON's cutoff: every hold
   // then leaves two ticks of its cadence before the cutoff, and the next tick — which judges again — reads before the cutoff
   // unless it is lost (the in-flight lock held past it, a throw, or an add-on restart: index.ts runs no tick at boot, so the
-  // first comes a tick after the start), reads a whole tick late, or has no fresh, coherent reading (no slots, no pool: it
-  // cannot be due, and the retry is not); (Fix8) a tick spent on the line ceiling lowering is judged after it, but the retry
-  // due there waits a tick. Only then, the force-charge still on, is there neither the retry nor the push — and while the
-  // add-on's writes are blocked (two panels, none pinned), where every re-ON due is refused unjudged (index.ts). The push
+  // first comes a tick after the start) or reads a whole tick late. Neither the retry nor the push then needs that tick to
+  // bring neither (an OFF of ours ends both): lost, late, with no fresh, coherent reading (no slots, no pool: it cannot be
+  // due, and the retry is not), with the add-on's writes blocked (two panels, none pinned: every re-ON due is refused
+  // unjudged, index.ts), or — the retry's own tick — spent on the line ceiling lowering (Fix8: judged after it, but the
+  // retry due there waits a tick). The push
   // is once a night, so one sent while the retry's tick falls within a tick of the cutoff may still be followed by the
   // retry: its words say the add-on may try once more (reOnRetryPossible), and where no tick can bring it
   // (the stamp + 15 min at or past the cutoff) that it does not. index.ts also judges the push on the hand-back's own tick,

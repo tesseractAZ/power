@@ -1123,7 +1123,7 @@ test('★★★ W1 (Fix8) one tick after a hand-back of every kind the push is n
   assert.deepEqual({ lost, lower, unjudged, blocked }, PIN_HANDBACK_AFTER);
   // The header states the write block's count from this pin.
   const header = NFC_SRC.slice(0, NFC_SRC.indexOf('★★★ SAFETY RAILS')).replace(/\n\s*\*\s*/g, ' ');
-  const stated = `neither, while the block lasts (PIN_HANDBACK_AFTER: ${blocked.neither.toLocaleString('en-US')} of ${blocked.runs.toLocaleString('en-US')} hand-backs`;
+  const stated = `neither, while the block lasts: PIN_HANDBACK_AFTER, ${blocked.neither.toLocaleString('en-US')} of ${blocked.runs.toLocaleString('en-US')} hand-backs`;
   assert.ok(header.includes(stated), `nightForceCharge.ts's header states: ${stated}`);
   // An OFF ends both: after it neither the retry nor the push can come (a cancel on the tick after a hold).
   const hb = { ...reOnDueAt(CUTOFF - 16 * M), forceChargeLineReOnAtMs: CUTOFF - 16 * M, forceChargeLineReOnSlots: null } as S;

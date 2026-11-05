@@ -423,13 +423,13 @@ fixture (nameplate, 0.944), 10 and 15 of them closing near 50 (`lineForceCharge.
   one too, pushes when its start is held for a reason other than the clock or the pool. The causes
   (`forceChargeBlockerClass`) are the ceiling refused or not read back, Charge Now already on, the grid
   unknown or absent, red vitals, no slot readback, no battery slot connected, and an incoherent SoC.
-  Each cause pushes once a night, once it has held for 10 minutes unbroken (`lineDeclinedPushTick`), so a
-  passing stale reading neither pushes nor spends the push; the causes pushed are recorded before the push goes (`forceChargeLineDeclinedPushed`),
-  so a restart does not repeat them. The push quotes the latest start that still reaches the line at
-  the rate then (`lineLatestStartMs`: ⌈L⌉ by the close with the 15-minute buffer, never inside the last
-  20 minutes): "If it has not started by ~04:24, the pool is expected to close under the line; if it
-  never starts, near the 50% reserve." An ON that never took on any slot says the pool will close near
-  the 50% reserve, under the line; one that failed on some slots says the others still charge, so the
+  Each cause pushes once a night, after holding 10 minutes unbroken (`lineDeclinedPushTick`), so a
+  passing stale reading neither pushes nor spends the push; each cause pushed is recorded before it goes (`forceChargeLineDeclinedPushed`),
+  so a restart does not repeat it. The push quotes the latest start that still reaches the line at
+  the rate then (`lineLatestStartMs`: ⌈L⌉ by the close with its 15-minute buffer, never in the last
+  20 minutes): "If it has not started by ~04:24, the pool may close under the line; if it never starts,
+  only the 50% reserve holds it." An ON that never took on any slot says only the reserve holds the pool,
+  which may close under the line; one that failed on some slots says the others still charge, so the
   pool may close short of it (`forceChargeOnFailureNight`, keyed on the record's line ask, not the
   stamped mode). Both say what would hold the line tonight (Charge Now switched on for those slots in the
   EcoFlow app; the add-on switches it off at the close), never "no action needed". A reserve write that
@@ -446,7 +446,7 @@ fixture (nameplate, 0.944), 10 and 15 of them closing near 50 (`lineForceCharge.
   `lineNightObservations` stamps first, with the panel's own stop, anew after a re-ON or a slot seen ON; `lineTrendReference`
   takes only a reading 15 minutes or more after the last ON or re-ON, past one checked not applied, or a
   slot seen ON again that no ON of ours explains, `forceChargeLineOnSeenAtMs`), and no re-ON due nor a
-  rate-limited one's retry due a full tick before the cutoff (else `reOnRefused`, judged on its own tick too; "may try once more" only where a tick can). Above a 95% line the re-ON and the push key on 95, under the line; emulated, the push reaches none of the
+  rate-limited one's retry due a full tick before the cutoff (else `reOnRefused`, judged on its own tick and after a ceiling lowering; "may try once more" only where a tick can). Above a 95% line the re-ON and the push key on 95, under the line; emulated, the push reaches none of the
   near-full nights that close under (`lineForceChargeClose.test.ts`). It names the slots: reading OFF, switch Charge Now on; reading ON, the pool not
   rising, off and on again may restart the charge. A cost-dominant night's push names ⌈L⌉ + 5 by its margin over the
   line and says its cost force-charge is not switched back on. No write rests on the ON-reading shape;
