@@ -73,6 +73,8 @@
  * (A5 final 1) The mid-day push names Charge Now on an armed leg whatever its stated level, and keeps the cost rule (A5-xxxv).
  * (A5 final 2) …in the reserve-hold shape too: armed for the line, not expected to start; no ask byte for byte (A5-xxxvi).
  * (Fix7 review 1) …naming the plan's line round1(L), never its ask ⌈L⌉; a record without the line, unnumbered (A5-xxxvi(c)-(g)).
+ * (Fix7 review 2) The overnight log's line-mode whys name the record's line round1(L), never the ask, and never "stays on to
+ * the close" (A5-xxxvii(a)-(e)).
  *
  *   node scripts/mutate-line-force-charge.mjs [--only <id prefix>]
  *
@@ -1995,6 +1997,43 @@ const MUTANTS = [
     find: '      ...(c.lineAskPct != null && c.cushionLineSocPct != null ? { linePct: c.cushionLineSocPct } : {}),',
     to: '      ...(c.lineAskPct != null ? { linePct: c.lineAskPct } : {}), /* MUTANT */',
     why: 'The 141349c7 defect by the wiring: the push names ⌈L⌉ as the line.',
+  },
+  /* (Fix7 review 2) The overnight log's line-mode whys ("NOT starting", once a night) name the record's line round1(L) too,
+   * never the ask ⌈L⌉, and the hold-off never says the force-charge "stays on to the close". */
+  {
+    id: 'A5-xxxvii(a). ★★ the overnight hold-off log names the ask ⌈L⌉ as the outage line',
+    file: NFC, tests: [T_LINE],
+    find: '      return { kind: \'none\', why: `just in time — holding off so the pool reaches ~${mode.startTargetPct}% ${Math.round(FORCE_CHARGE_MIN_RUN_MS / 60_000)} min before the window closes, for the ${linePct}% outage line at the close` };',
+    to: '      return { kind: \'none\', why: `just in time — holding off so the pool reaches ~${mode.startTargetPct}% ${Math.round(FORCE_CHARGE_MIN_RUN_MS / 60_000)} min before the window closes, for the ${mode.askPct}% outage line at the close` }; /* MUTANT */',
+    why: 'The a07ebb42 defect: a 60.03% line night logs "for the 61% outage line" while the rationale, the pushes and the morning give 60%.',
+  },
+  {
+    id: 'A5-xxxvii(b). ★★ the overnight "already at the ceiling" log names the ask ⌈L⌉ as the outage line',
+    file: NFC, tests: [T_LINE],
+    find: '      return { kind: \'none\', why: `the pool already reads the ${mode.panelCeilingPct}% panel ceiling — above tonight\'s ${linePct}% outage line` };',
+    to: '      return { kind: \'none\', why: `the pool already reads the ${mode.panelCeilingPct}% panel ceiling — above tonight\'s ${mode.askPct}% outage line` }; /* MUTANT */',
+    why: 'The same misstatement on the other line-mode why: "above tonight\'s 61% outage line" on a 60.03% line.',
+  },
+  {
+    id: 'A5-xxxvii(c). ★★ the overnight log names the line to the whole percent',
+    file: NFC, tests: [T_LINE],
+    find: '    const linePct = round1(forceChargeLineNightPct(s) ?? mode.askPct);',
+    to: '    const linePct = Math.round(forceChargeLineNightPct(s) ?? mode.askPct); /* MUTANT */',
+    why: 'A 55.55% line is logged as "56%", while every other surface gives round1 (55.6%).',
+  },
+  {
+    id: 'A5-xxxvii(d). ★ the overnight log reads the line alone (a record without it names 0%)',
+    file: NFC, tests: [T_LINE],
+    find: '    const linePct = round1(forceChargeLineNightPct(s) ?? mode.askPct);',
+    to: '    const linePct = round1(s.forceChargeLinePct!); /* MUTANT */',
+    why: 'A record whose line is unknown logs "the 0% outage line"; forceChargeLineNightPct names its ask.',
+  },
+  {
+    id: 'A5-xxxvii(e). ★★ the overnight hold-off log says the force-charge "stays on to the close"',
+    file: NFC, tests: [T_LINE],
+    find: '      return { kind: \'none\', why: `just in time — holding off so the pool reaches ~${mode.startTargetPct}% ${Math.round(FORCE_CHARGE_MIN_RUN_MS / 60_000)} min before the window closes, for the ${linePct}% outage line at the close` };',
+    to: '      return { kind: \'none\', why: `just in time — holding off so the pool reaches ~${mode.startTargetPct}% ${Math.round(FORCE_CHARGE_MIN_RUN_MS / 60_000)} min before the window closes, then stays on to the close for the ${linePct}% outage line` }; /* MUTANT */',
+    why: 'The log promises the force-charge stays on to the close; the panel switches each slot off at its ceiling (the measured shape).',
   },
 
   /* ── R: the ledger ── */
