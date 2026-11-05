@@ -917,7 +917,7 @@ const MUTANTS = [
     id: 'W1-li. ★★★ a handed-back re-ON with no retry left pushed as the gates',
     file: NFC, tests: [T_RISK, T_CLOSE],
     find: "        : handedBack ? 'reOnRefused' : 'reOnHeld';",
-    to: "        : 'reOnHeld'; /* MUTANT */",
+    to: "        : 'reOnHeld' as LineAtRiskCause; /* MUTANT (typed: the cause is compared to 'reOnRefused' below) */",
     why: 'The push says "it needs the grid known present, healthy host vitals and a live panel reading" when all three hold.',
   },
   {
