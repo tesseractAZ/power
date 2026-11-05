@@ -830,7 +830,7 @@ const ceilingWhyHolds = (w: string, linePct: number, c: number): string | null =
   if (m == null) return `unparsed: ${w}`;
   if (Number(m[1]) !== c) return `names the ${m[1]}% ceiling, not ${c}%`;
   const n = Number(m[3] ?? m[4]);
-  const shown = r1(linePct) === c && linePct !== c ? Math.round(linePct * 100) / 100 : r1(linePct);
+  const shown = r1(linePct) === c ? Math.round(linePct * 100) / 100 : r1(linePct);
   if (n !== shown) return `names the line ${n}%, not ${shown}%`;
   if (m[2] === 'above') return linePct < c && n < c ? null : `"above" with the line ${linePct} and the ceiling ${c}`;
   if (m[2] === 'at') return linePct === c && n === c ? null : `"at" with the line ${linePct} and the ceiling ${c}`;
@@ -2057,7 +2057,7 @@ const MATRIX: Array<[number, number]> = [[50, 51], ...[50.03, 50.05, 55.55, 79.9
   .map((l): [number, number] => [l, Math.min(100, Math.ceil(l - 1e-9))])];
 /** How a text names the line beside the whole-percent levels it orders it against (nfc.lineBesidePct): round1, as every surface
  *  names it, or two decimals where one would read as one of those levels and the line is not that level. */
-const beside = (l: number, ...levels: number[]): number => (levels.includes(r1(l)) && !levels.includes(l) ? Math.round(l * 100) / 100 : r1(l));
+const beside = (l: number, ...levels: number[]): number => (levels.includes(r1(l)) ? Math.round(l * 100) / 100 : r1(l));
 /** Every order relation a line text states, checked against the numbers it names. `named` — the number the text must give the
  *  line (null: the text orders the line against the reserve without a number, where `noNumber` allows it). */
 const lineRelationErrors = (text: string, o: { line: number; named: number; noNumber?: boolean; where: string }): string[] => {
@@ -2125,7 +2125,7 @@ test('★★★ T24 (Fix8) the line texts at their edges: every text on the line
       if (!/^Force-charge: LINE — tonight's (?:[\d.]+% )?outage line is above the 50% reserve: /.test(t)) errs.push(`${where('21:30')}: ${t}`);
     }
     // 3. The line's number on the add-on's own log lines (index.ts: the ON, the re-ON, the ceiling lowering, the at-risk and the
-    // declined-start lines): lineLogPct, round1 of the record's line, its ask where the line is unknown.
+    // declined-start lines): lineLogPct, round1 of the record's line, its ask where the line is unknown (read at the source below).
     const logPct = (nfc as unknown as { lineLogPct?: (s: unknown) => number | null }).lineLogPct;
     if (logPct?.(s) !== r1(line)) errs.push(`${where('log')}: ${logPct?.(s)}`);
     if (logPct?.(night({ forceChargeLineAskPct: ask, forceChargeLinePct: null })) !== ask) errs.push(`${where('log, no line')}: the ask`);
@@ -2185,6 +2185,15 @@ test('★★★ T24 (Fix8) the line texts at their edges: every text on the line
     add(mid, { line, named: r1(line), where: where('mid-day') });
   }
   assert.deepEqual(errs.slice(0, 12), [], `${errs.length} false or misnamed`);
+  // The add-on's own log lines name the line by lineLogPct (index.ts), never the record's raw two decimals.
+  for (const needle of [
+    '; for the ${lineLogPct(state) ?? onLineMode.askPct}% outage line: timed to reach',
+    "back under the start target for the ${lineLogPct(state) ?? '?'}% outage line; switching them back ON",
+    "so tonight runs for the ${lineLogPct(state) ?? '?'}% outage line under its own ceiling.",
+    'outage line (${lineLogPct(state)}%) is AT RISK',
+    "'s ${lineLogPct(state)}% outage line cannot start yet",
+  ]) assert.ok(INDEX.includes(needle), needle);
+  assert.doesNotMatch(INDEX, /\$\{state\.forceChargeLinePct \?\?|\(\$\{risk\.linePct\}%\)|\$\{declinedLinePct\}% outage line/);
 });
 
 /** (Fix8) The rationale names the line by the plan's own two decimals (cushionLineSocPct). Over the year where the edges fall

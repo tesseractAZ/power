@@ -743,11 +743,11 @@ function round1(n: number): number { return Math.round(n * 10) / 10; }
 
 /** v1.200.0 (Fix8) — PURE. The outage line's number in a text that orders it against whole-percent levels (the 50% reserve, the
  *  panel's ceiling, a full pool): round1(L), as every surface names it, or to two decimals where one decimal would read as one of
- *  those levels and the line is not that level — a 50.03% line beside the 50% reserve is "50.03%", never "50%"; a 99.96% line
- *  beside a 100% ceiling "99.96%". A line exactly at a level reads as it. */
+ *  those levels — a 50.03% line beside the 50% reserve is "50.03%", never "50%"; a 99.96% line beside a 100% ceiling "99.96%". A
+ *  line exactly at a level reads as it (its two decimals are the level). */
 export function lineBesidePct(linePct: number, ...levelsPct: number[]): number {
   const r = round1(linePct);
-  return levelsPct.includes(r) && !levelsPct.includes(linePct) ? Math.round(linePct * 100) / 100 : r;
+  return levelsPct.includes(r) ? Math.round(linePct * 100) / 100 : r;
 }
 
 /** v1.200.0 (Fix8) — PURE. "<lead>N%<tail>" for a text saying the outage line is above the 50% reserve: N by lineBesidePct

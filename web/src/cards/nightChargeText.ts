@@ -271,7 +271,7 @@ export function outageLineRow(plan: CushionNotePlan, maxPct: number | null = nul
   const lineText = (l: number | null | undefined): string => {
     if (l == null || !Number.isFinite(l)) return '';
     const r = r1(l);
-    const n = (r === max || r === 100) && l !== max && l !== 100 ? Math.round(l * 100) / 100 : r;
+    const n = r === max || r === 100 ? Math.round(l * 100) / 100 : r;
     return n > max ? `${n}% ` : '';
   };
   const armed = plan.forceChargeLine != null;
