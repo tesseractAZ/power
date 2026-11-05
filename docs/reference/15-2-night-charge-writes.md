@@ -456,7 +456,7 @@ fixture (nameplate, 0.944), 10 and 15 of them closing near 50 (`lineForceCharge.
   for the 55.6% outage line" only when its OFF was the window's; any other OFF says when and why ("until
   3:30am (switched off: the force-charge was disabled by the options)"), and the panel's own stop that
   ended it "until the panel's own stop switched Charge Now off at 3:10am". It names the re-ONs ("after
-  the panel's own stop" only with that stop on record) and those not applied. The stop ended the charge
+  the panel's own stop" only with it on record) and those a check found off. The stop ended the charge
   unless a re-ON after it took (`forceChargeLineReOnAppliedAtMs`) or a slot read ON again; when the last
   re-ON took on no slot and none read ON after it, it says Charge Now "read off" before the close. The close reading follows whatever ended it, "under the 55.6% outage line"
   when under, and "the pool was not read at the close" with no fresh reading. A night with no line ask
