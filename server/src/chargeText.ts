@@ -199,7 +199,7 @@ export interface MiddayCostText {
   toward: boolean;
   /** Charge Now rides the leg: switched on just in time to reach `levelPct`, or (v1.200.0, A5) for the outage line the
    *  leg's force-charge is armed for (`lineAskPct`), whatever the stated level. (A5 final 2) A leg expected to draw nothing
-   *  (the reserve-hold shape) names it by `lineAskPct` alone: armed for the line, not expected to start. */
+   *  (the reserve-hold shape) names it by `lineAskPct` alone: armed for the line (`linePct`), not expected to start. */
   forceCharge: boolean;
   /** The plan calls for a charge (its worst case reaches the minimum buy). */
   charges: boolean;
@@ -214,6 +214,9 @@ export interface MiddayCostText {
    *  what its own walk cannot hold (nightChargeAdvisor.lineNotHeldOf). Absent ⇒ nothing armed / held. */
   lineAskPct?: number;
   lineNotHeld?: LineNotHeld;
+  /** v1.200.0 (Fix7 review 1) — beside `lineAskPct`: the outage line itself (the plan's forceChargeLine.linePct, its
+   *  cushionLineSocPct), the number the words give the line, round1 as the overnight clause gives it — never the ask ⌈L⌉. */
+  linePct?: number;
 }
 
 /** The overnight outage-backup leg as the evening announces it (reserve only). */
@@ -363,8 +366,10 @@ export function buildMiddayPlanMessage(i: MiddayAnnounceInput): NotifyMessage {
     // v1.200.0 (A5 final 2) — a leg the line force-charge is armed on (lineAskPct) is armed here too (armFromPlan's
     // lineRides, whatever the expected draw), and the actuator switches Charge Now on if the sun falls short: named, armed and
     // not expected to start, as the overnight held line clause says it (notify.buildNightChargeMessage). No ask: as before.
+    // (Fix7 review 1) The line's number is the line's (linePct, round1), as that clause and the rationale give it, not the
+    // ask ⌈L⌉ (up to a point higher); a record without it names the line unnumbered.
     const armedLine = c.lineAskPct != null
-      ? `, and Charge Now is armed for the ${Math.round(c.lineAskPct * 10) / 10}% outage line (not expected to start); both are restored at ${restore}`
+      ? `, and Charge Now is armed for the ${c.linePct != null ? `${Math.round(c.linePct * 10) / 10}% ` : ''}outage line (not expected to start); both are restored at ${restore}`
       : `; it is restored at ${restore}`;
     const tail = supervised
       ? ` SUPERVISED: at ${phxClock(i.costApplyAtMs)} the backup reserve is held at ${reserve}${armedLine}.${cancel}`

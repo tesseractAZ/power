@@ -935,6 +935,8 @@ export function middayShadowAnnounceInput(rec: MiddayShadowRecord, model: Tariff
       ...(c.cushionShortfallCause != null ? { cushionShortfallCause: c.cushionShortfallCause } : {}),
       ...(c.lineAskPct != null ? { lineAskPct: c.lineAskPct } : {}),
       ...(c.lineNotHeld != null ? { lineNotHeld: c.lineNotHeld } : {}),
+      // (Fix7 review 1) The line beside its ask: the plan's forceChargeLine.linePct is its cushionLineSocPct.
+      ...(c.lineAskPct != null && c.cushionLineSocPct != null ? { linePct: c.cushionLineSocPct } : {}),
     },
     backup: backupNamed && b != null ? {
       windowStartMs: b.windowStartMs, windowEndMs: b.windowEndMs, reservePct: b.reservePct,
