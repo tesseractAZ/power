@@ -58,6 +58,7 @@ import { buildNightChargeApplyFailure, buildNightChargeMorningSummary, buildNigh
 const HERE = dirname(fileURLToPath(import.meta.url));
 const INDEX = readFileSync(resolve(HERE, '../src/index.ts'), 'utf8');
 const TICK = INDEX.slice(INDEX.indexOf('async function runForceChargeTick('), INDEX.indexOf('async function escalateForceChargeStuck('));
+const NFC_SRC = readFileSync(resolve(HERE, '../src/nightForceCharge.ts'), 'utf8');
 /** The pushes and the morning account of a COST night (no line ask) as v1.199.1 wrote them (captured before
  *  this change from the same builders and inputs): word for word. */
 const COST_TEXTS = JSON.parse(readFileSync(resolve(HERE, 'fixtures/lineNightCostTexts.v1199.json'), 'utf8')) as Record<string, string>;
@@ -902,9 +903,16 @@ test('★★★ W1 (review 8) the hand-back hold keeps a FULL TICK of margin: sw
  *  actuation tick with setInterval alone, so the first tick after a start comes a tick after it. A restart that stops after a
  *  hold and starts again within a tick of the cutoff leaves neither the retry nor the push. A residual of the restart, counted
  *  and pinned, not closed (an immediate tick at boot would change behaviour outside this hold). Measured on 141349c7's code
- *  (words-only fix): per down time, the runs with neither (248 of 25,920, none down 5 s); every one explained (asserted). */
+ *  (words-only fix): per down time, the runs with neither (248, none down 5 s); every one explained (asserted).
+ *  (Fix7 review 2) `stood`: where the night stood when the add-on stopped, after tick `after` (the retry run, else the push
+ *  made, else a hold). Under the full-tick margin a
+ *  hand-back 15-17 min before the cutoff is pushed on its own tick 0, so its restart comes after the push (or after the retry):
+ *  only the 17-18 min band holds through ticks 13-15. The residual's rate is over the restarts that came after a hold —
+ *  248 of 7,800 (152 of 1,950 down 45 s), not of the 25,920 swept — and nightForceCharge.ts's header states it so (asserted). */
 const PIN_HANDBACK_RESTART = {
   runs: 25920, neither: { 5000: 0, 15000: 27, 30000: 69, 45000: 152 } as Record<number, number>, push: 7511, retry: 8380, both: 9781,
+  stood: { afterHold: 7800, afterPush: 15624, afterRetry: 2496 },
+  afterHoldByDown: { 5000: 1950, 15000: 1950, 30000: 1950, 45000: 1950 } as Record<number, number>,
 };
 
 test('★★★ W1 (Fix7 review 1) an add-on restart after the last hold: the first tick after a start comes a minute after it, so a restart that starts again within a tick of the cutoff leaves neither the retry nor the push — counted, each explained by the restart; and the tick after a hold read a whole minute late, likewise', () => {
@@ -926,10 +934,16 @@ test('★★★ W1 (Fix7 review 1) an add-on restart after the last hold: the fi
   const slow = (ms: number) => cadence(f0, 2_000, drift, (k) => (k === 16 ? ms : 50), (k) => k === 17);
   assert.equal(outcomeOf(slow(90_000)), 'neither');
   assert.deepEqual([outcomeOf(slow(50_000)), slow(50_000).retry?.k], ['retry', 16]);
-  // The sweep: hand-backs every 500 ms from 18 to 15 min before the re-ON's cutoff (the holds whose last one falls 2-5 min
-  // before it), the stamp 5 ms or 2 s late, drift 0-5 ms and reads 0-500 ms late (seeded), a restart after each of ticks 13-15
-  // (the ticks before the retry's spacing ends), stopping 1 s, 30 s or 55 s after that tick fired, down 5, 15, 30 or 45 s.
-  const got = { runs: 0, neither: { 5000: 0, 15000: 0, 30000: 0, 45000: 0 } as Record<number, number>, push: 0, retry: 0, both: 0 };
+  // The sweep: hand-backs every 500 ms from 18 to 15 min before the re-ON's cutoff, the stamp 5 ms or 2 s late, drift 0-5 ms
+  // and reads 0-500 ms late (seeded), a restart after each of ticks 13-15 (the ticks before the retry's spacing ends), stopping
+  // 1 s, 30 s or 55 s after that tick fired, down 5, 15, 30 or 45 s. (Fix7 review 2) Not every restart comes after a hold: a
+  // hand-back 15-17 min out is pushed on its own tick 0 (its retry's tick lands under a full tick before the cutoff), so only
+  // the 17-18 min band is still holding at ticks 13-15 — `stood`, where the night stood when the add-on stopped.
+  const got = {
+    runs: 0, neither: { 5000: 0, 15000: 0, 30000: 0, 45000: 0 } as Record<number, number>, push: 0, retry: 0, both: 0,
+    stood: { afterHold: 0, afterPush: 0, afterRetry: 0 },
+    afterHoldByDown: { 5000: 0, 15000: 0, 30000: 0, 45000: 0 } as Record<number, number>,
+  };
   const bad: string[] = [];
   for (let f = CUTOFF - 18 * M; f < CUTOFF - 15 * M; f += 500) {
     for (const lag of [5, 2_000]) for (const after of [13, 14, 15]) for (const stopMs of [1_000, 30_000, 55_000]) for (const downMs of [5_000, 15_000, 30_000, 45_000]) {
@@ -938,6 +952,10 @@ test('★★★ W1 (Fix7 review 1) an add-on restart after the last hold: the fi
       const c = cadence(f, lag, dr, lt, () => false, { after, stopMs, downMs });
       const o = outcomeOf(c);
       got.runs += 1;
+      const stood = c.retry != null && c.retry.k <= after ? 'afterRetry' : c.push != null && c.push.k <= after ? 'afterPush' : 'afterHold';
+      got.stood[stood] += 1;
+      if (stood === 'afterHold') got.afterHoldByDown[downMs] += 1;
+      if (o === 'neither' && stood !== 'afterHold') bad.push(`${(CUTOFF - f) / 1000}s: neither on a restart ${stood}`);
       if (o === 'neither') {
         got.neither[downMs] += 1;
         // Explained: the last read before the cutoff is a hold made before the restart, two ticks of its cadence before the
@@ -954,6 +972,12 @@ test('★★★ W1 (Fix7 review 1) an add-on restart after the last hold: the fi
   }
   assert.deepEqual(bad.slice(0, 10), [], `${bad.length} runs not explained by the restart`);
   assert.deepEqual(got, PIN_HANDBACK_RESTART);
+  // (Fix7 review 2) The header states the residual over the restarts that came after a hold, from this pin.
+  const n = (x: number): string => x.toLocaleString('en-US');
+  const neither = Object.values(got.neither).reduce((a, b) => a + b, 0);
+  const header = NFC_SRC.slice(0, NFC_SRC.indexOf('★★★ SAFETY RAILS')).replace(/\n\s*\*\s*/g, ' ');
+  const stated = `with a restart after a hold, on ${n(neither)} of the ${n(got.stood.afterHold)} restarts that came after one (${n(got.runs)} swept; ${n(got.neither[45_000])} of ${n(got.afterHoldByDown[45_000])} down 45 s)`;
+  assert.ok(header.includes(stated), `nightForceCharge.ts's header states: ${stated}`);
 });
 
 test('★★★ W1 (review 8) the margin is a full tick, and the hand-back\'s own tick is judged: a hand-back on the last tick before the cutoff is pushed on that tick; no tolerance constant is left', () => {

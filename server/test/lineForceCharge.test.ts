@@ -805,7 +805,20 @@ test('★★ T6 the why-texts (L8) and the ON-step texts in line mode', () => {
     'disabled (NIGHT_CHARGE_MODE advisory; or, with no outage line above the reserve tonight, ARB_OBJECTIVE not cost or ARB_COST_MAX_SOC_PCT at or below the 50% reserve)');
   assert.equal(why(night({ forceChargeLineAskPct: null }), fo({ enabled: true })),
     'no force-charge target tonight (no cost ceiling and no outage line above the 50% reserve) — reserve-only night');
-  assert.match(why(night(), fo({ poolSocPct: 50 })), /just in time — holding off so the pool reaches ~61% 20 min before the window closes, then stays on to the close for the 56% outage line/);
+  // (Fix7 review 2) Both line-mode whys (the add-on log's "NOT starting", once a night) name the record's line round1(L), as
+  // every other surface does (forceChargeLineNightPct): never the ask ⌈L⌉, up to a point above it. And the hold-off never says
+  // the force-charge "stays on to the close": the panel switches each slot off at its ceiling (the measured shape).
+  assert.equal(why(night(), fo({ poolSocPct: 50 })),
+    'just in time — holding off so the pool reaches ~61% 20 min before the window closes, for the 55.6% outage line at the close');
+  assert.equal(why(night(), fo({ poolSocPct: 80 })), 'the pool already reads the 80% panel ceiling — above tonight\'s 55.6% outage line');
+  // The verifier's night (the CHANGELOG's example line): the ask 61, the line 60.03 — "60%", never "61%".
+  const ex = night({ forceChargeLineAskPct: 61, forceChargeLinePct: 60.03 });
+  assert.equal(why(ex, fo({ poolSocPct: 50 })),
+    'just in time — holding off so the pool reaches ~66% 20 min before the window closes, for the 60% outage line at the close');
+  assert.equal(why(ex, fo({ poolSocPct: 80 })), 'the pool already reads the 80% panel ceiling — above tonight\'s 60% outage line');
+  // A record without the line names its ask, as forceChargeLineNightPct does on every surface.
+  assert.match(why(night({ forceChargeLinePct: null }), fo({ poolSocPct: 50 })), /, for the 56% outage line at the close$/);
+  for (const s of [night(), ex]) assert.doesNotMatch(why(s, fo({ poolSocPct: 50 })), /stays on/);
 });
 
 /* ══ T8 — the morning refresh never lowers or drops the line ═══════════════════════════════════════ */
