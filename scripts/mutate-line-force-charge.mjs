@@ -78,6 +78,10 @@
  * (Fix8) The "already at the ceiling" why words the line's actual order (F8-i); every line text names the line beside the
  * levels it orders it against so the order shows, says only what holds in every outcome, and the log lines name round1(L)
  * (F8-ii); the line-at-risk push is judged after the line ceiling lowering (F8-iii).
+ * (Fix8 review 1) The push and the ON-reading shape judged together (judgeLineNight) on the re-ON's readback check and a re-ON
+ * the write block refuses too (F8r1-i); the cost-dominant margin from the numbers as named (F8r1-ii); the declined start and
+ * the ON failure with no floor the islanded pool drains through (F8r1-iii, F8r1-iv(a)); "has not taken effect" wherever a late
+ * apply is still verified (F8r1-iv); the shape logged once a night on the record (F8r1-v; W1-xxi re-anchored there).
  *
  *   node scripts/mutate-line-force-charge.mjs [--only <id prefix>]
  *
@@ -703,11 +707,12 @@ const MUTANTS = [
     why: 'No trail, no panel stop: the at-risk push never fires and the morning names no stop.',
   },
   {
-    id: 'W1-xxi. ★★ index.ts: the ON-reading shape logged every tick',
-    file: IDX, tests: [T_RISK],
-    find: '    if (shape != null && lineOnShapeLoggedDay !== state.day) {',
-    to: '    if (shape != null) { /* MUTANT */',
-    why: 'A warning line a minute; the first occurrence is lost in the flood.',
+    // (Fix8 review 1) Re-anchored: the once-a-night guard is the record's stamp now (lineOnReadingShape), not module memory.
+    id: 'W1-xxi. ★★ the ON-reading shape logged every tick',
+    file: NFC, tests: [T_RISK],
+    find: '  if (s.forceChargeLineShapeLoggedAtMs != null) return null;\n  if (forceChargeLineNightPct(s) == null) return null;\n  if (s.forceChargeOnAtMs == null || s.forceChargeOnVerifiedAtMs == null',
+    to: '  /* MUTANT */\n  if (forceChargeLineNightPct(s) == null) return null;\n  if (s.forceChargeOnAtMs == null || s.forceChargeOnVerifiedAtMs == null',
+    why: 'A warning line a minute; the first occurrence is lost in the flood (and a restart logs it again).',
   },
   {
     id: 'W1-xxii. ★★ the ON-reading shape logged on a flat pool',
@@ -1051,7 +1056,7 @@ const MUTANTS = [
   {
     id: 'W1-lxxii. ★★★ index.ts: the hand-back\'s own tick not judged for the push',
     file: IDX, tests: [T_RISK],
-    find: '    if (allLimited) pushLineAtRiskIfDue();',
+    find: '    if (allLimited) judgeLineNight();',
     to: '    /* MUTANT */',
     why: 'The last-tick residual returns: a hand-back on the last tick before the cutoff has no later tick before the lead — neither the retry nor the push (18 nights in the plant).',
   },
@@ -2178,7 +2183,7 @@ const MUTANTS = [
   {
     id: 'F8-ii(o). ★★★ the ON failure says the pool WILL close near the reserve, under the line (the defect)',
     file: NTF, tests: [T_LINE, T_RISK],
-    find: "      : `Tonight's force-charge for the ${line}% outage line will not happen: without it only the ${RESERVE_WRITE_MAX_PCT}% reserve `\n        + `holds the pool${underReach ? ', and it may close the window under the line' : ''}. `)",
+    find: "      : `Tonight's force-charge for the ${line}% outage line has not taken effect: unless it applies late, the add-on adds nothing `\n        + `above the ${RESERVE_WRITE_MAX_PCT}% reserve${underReach ? ', and the pool may close the window under the line' : ''}. `)",
     to: "      : `Tonight's force-charge for the ${line}% outage line will not happen: without it the pool will close the window near `\n        + `the ${RESERVE_WRITE_MAX_PCT}% reserve, under the line. `) /* MUTANT */",
     why: 'The 89d8dece words: false wherever the pool reads above the line at the failure (an ON timed from a pool between the line and the start target).',
   },
@@ -2192,7 +2197,7 @@ const MUTANTS = [
   {
     id: 'F8-ii(q). ★★★ the declined start says the pool is expected to close under the line, near the reserve (the defect)',
     file: NTF, tests: [T_LINE],
-    find: "        ? `If it has not started by ~${o.latestStartText}, the pool may close under the line; if it never starts, only the ${RESERVE_WRITE_MAX_PCT}% reserve holds it.`",
+    find: "        ? `If it has not started by ~${o.latestStartText}, the pool may close under the line; if it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.`",
     to: "        ? `If it has not started by ~${o.latestStartText}, the pool is expected to close under the line; if it never starts, near the ${RESERVE_WRITE_MAX_PCT}% reserve.` /* MUTANT */",
     why: 'The 89d8dece words: false with the pool above the line, or a person\'s Charge Now lifting it (a declined cause).',
   },
@@ -2242,18 +2247,112 @@ const MUTANTS = [
   {
     id: 'F8-iii(a). ★★ the push not judged after the line ceiling lowering',
     file: IDX, tests: [T_RISK],
-    find: "Force-charge waits for it to read back.'}`);\n    if (whileOn) pushLineAtRiskIfDue();\n",
+    find: "Force-charge waits for it to read back.'}`);\n    if (whileOn) judgeLineNight();\n",
     to: "Force-charge waits for it to read back.'}`); /* MUTANT */\n",
     why: 'A hold followed by the lowering skips the judgement like a lost tick (round 6\'s residual): 2 of 86,400 hand-backs pushed a tick later or not before the retry.',
   },
   {
     id: 'F8-iii(b). ★ the push not judged when the write block refuses the lowering',
     file: IDX, tests: [T_RISK],
-    find: "if (blocked) { app.log.warn(`night-charge: force-charge ceiling sync refused — ${blocked}`); if (whileOn) pushLineAtRiskIfDue(); return; }",
+    find: "if (blocked) { app.log.warn(`night-charge: force-charge ceiling sync refused — ${blocked}`); if (whileOn) judgeLineNight(); return; }",
     to: "if (blocked) { app.log.warn(`night-charge: force-charge ceiling sync refused — ${blocked}`); return; } /* MUTANT */",
     why: 'A refused lowering skips the judgement like a lost tick.',
   },
 
+  /* (Fix8 review 1) The push and the shape judged together (judgeLineNight) on every tick kind that can make either first due,
+     the re-ON's check among them; the shape once a night on the record; the margin from the named numbers; the line-night
+     failure words true in every outcome (a late apply is verified; the reserve is no floor islanded). */
+  {
+    id: 'F8r1-i(a). ★★★ index.ts: the re-ON\'s readback check not judged (the defect)',
+    file: IDX, tests: [T_RISK],
+    find: "    // last tick before the push's lead it has no later tick (the round-7 reviewer's night: the check 20m30s before the close).\n    judgeLineNight();\n",
+    to: "    // last tick before the push's lead it has no later tick (the round-7 reviewer's night: the check 20m30s before the close). /* MUTANT */\n",
+    why: 'A second re-ON not applied whose check lands on the last tick before the lead is never pushed (32 emulated nights under).',
+  },
+  {
+    id: 'F8r1-i(b). ★ index.ts: the re-ON the write block refuses not judged (the shape log waits out the block)',
+    file: IDX, tests: [T_RISK],
+    find: "if (blocked) { app.log.warn(`night-charge: line force-charge re-ON refused — ${blocked}`); judgeLineNight(); return; }",
+    to: "if (blocked) { app.log.warn(`night-charge: line force-charge re-ON refused — ${blocked}`); return; } /* MUTANT */",
+    why: 'While two panels block the writes, the ON-reading shape seen beside a re-ON due is never logged.',
+  },
+  {
+    id: 'F8r1-i(c). ★★ index.ts: a tick that decides nothing judges the push only, not the shape',
+    file: IDX, tests: [T_RISK],
+    find: "pushed once tonight for this cause.`);\n    }\n    judgeLineNight();\n    return;",
+    to: "pushed once tonight for this cause.`);\n    }\n    pushLineAtRiskIfDue(); /* MUTANT */\n    return;",
+    why: 'The ON-reading shape is logged only on the busy ticks: its first real occurrence goes unrecorded.',
+  },
+  {
+    id: 'F8r1-ii. ★★ the cost-dominant margin from the raw line (the defect)',
+    file: NTF, tests: [T_RISK, T_LINE],
+    find: '  const margin = `under ${round1(r.thresholdPct)}%, ${round1(round1(r.thresholdPct) - line)} points above tonight\'s ${line}% outage line,`;',
+    to: '  const margin = `under ${round1(r.thresholdPct)}%, ${round1(r.thresholdPct - r.linePct)} points above tonight\'s ${line}% outage line,`; /* MUTANT */',
+    why: '"under 61%, 5.5 points above tonight\'s 55.6% outage line": 61 − 55.6 is 5.4 by the push\'s own numbers.',
+  },
+  {
+    id: 'F8r1-iii(a). ★★★ the declined start says only the 50% reserve holds the pool (the defect)',
+    file: NTF, tests: [T_LINE],
+    find: "        ? `If it has not started by ~${o.latestStartText}, the pool may close under the line; if it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.`",
+    to: "        ? `If it has not started by ~${o.latestStartText}, the pool may close under the line; if it never starts, only the ${RESERVE_WRITE_MAX_PCT}% reserve holds it.` /* MUTANT */",
+    why: 'With the grid absent (a declined cause) the pool drains through the reserve: it holds nothing islanded.',
+  },
+  {
+    id: 'F8r1-iii(b). ★★ the declined start of a line stated at the reserve says only the reserve holds the pool',
+    file: NTF, tests: [T_LINE],
+    find: "        : `If it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.`),",
+    to: "        : `If it never starts, only the ${RESERVE_WRITE_MAX_PCT}% reserve holds the pool.`), /* MUTANT */",
+    why: 'A 50.00% line\'s declined start names a floor the islanded pool drains through.',
+  },
+  {
+    id: 'F8r1-iv(a). ★★★ the ON failure says the force-charge will not happen and only the reserve holds the pool (the defect)',
+    file: NTF, tests: [T_LINE, T_RISK],
+    find: "      : `Tonight's force-charge for the ${line}% outage line has not taken effect: unless it applies late, the add-on adds nothing `\n        + `above the ${RESERVE_WRITE_MAX_PCT}% reserve${underReach ? ', and the pool may close the window under the line' : ''}. `)",
+    to: "      : `Tonight's force-charge for the ${line}% outage line will not happen: without it only the ${RESERVE_WRITE_MAX_PCT}% reserve `\n        + `holds the pool${underReach ? ', and it may close the window under the line' : ''}. `) /* MUTANT */",
+    why: 'The 4ace3a1e words: a late apply is still verified (and the morning says it ran), and the reserve holds nothing islanded.',
+  },
+  {
+    id: 'F8r1-iv(b). ★★ the partial ON failure says it will not happen there, and the other slots still charge',
+    file: NTF, tests: [T_LINE],
+    find: "      ? `Tonight's force-charge for the ${line}% outage line has not taken effect on those slot(s)`\n        + `${underReach ? ', so the pool may close the window short of the line' : ''}. `",
+    to: "      ? `Tonight's force-charge for the ${line}% outage line will not happen on those slot(s); the other slot(s) still charge`\n        + `${underReach ? ', so the pool may close the window short of the line' : ''}. ` /* MUTANT */",
+    why: 'A late apply contradicts "will not happen"; a slot at the panel\'s ceiling, switched off by it, does not charge.',
+  },
+  {
+    id: 'F8r1-iv(c). ★ the line ON failure\'s title says it did not take effect',
+    file: NTF, tests: [T_LINE],
+    find: "'Night-charge: the outage-line force-charge has not taken effect',",
+    to: "'Night-charge: the outage-line force-charge did not take effect', /* MUTANT */",
+    why: 'The title of a warning a late apply contradicts.',
+  },
+  {
+    id: 'F8r1-iv(d). ★★ the line apply failure says the charge will not happen (a late apply is verified)',
+    file: NTF, tests: [T_RISK, T_LINE],
+    find: "    : `Tonight's planned ${planned} has not taken effect: until the panel reads ${o.targetPct ?? RESERVE_WRITE_MAX_PCT}%, `\n      + `it keeps its normal reserve, under tonight's ${line}% outage line, and the force-charge for the line waits on this write. `",
+    to: "    : `Tonight's planned ${planned} will not happen: the pool stays on its normal floor, under tonight's ${line}% outage line, `\n      + 'and the force-charge for the line waits on this write. ' /* MUTANT */",
+    why: 'The 4ace3a1e words: the apply ladder still verifies a late reading of the target, and the force-charge then starts.',
+  },
+  {
+    id: 'F8r1-iv(e). ★★ the at-risk push says a re-ON its check found not applied did not take effect',
+    file: NTF, tests: [T_RISK, T_LINE],
+    find: "        + 'and it has not taken effect; it does not try again tonight. '",
+    to: "        + 'and it did not take effect; it does not try again tonight. ' /* MUTANT */",
+    why: 'A re-ON applied a minute after its check (the push now goes on the check\'s own tick) is told it did not take effect.',
+  },
+  {
+    id: 'F8r1-v(a). ★★ index.ts: the shape logged without its stamp on the record',
+    file: IDX, tests: [T_RISK],
+    find: '    persistNightActuation({ ...nightActuationMem, forceChargeLineShapeLoggedAtMs: nowMs });',
+    to: '    /* MUTANT */',
+    why: '"Logged once a night." logged on every tick the shape is seen.',
+  },
+  {
+    id: 'F8r1-v(b). ★★ the shape\'s stamp not kept across a restart',
+    file: ACT, tests: [T_RISK],
+    find: '    forceChargeLineShapeLoggedAtMs: num(o.forceChargeLineShapeLoggedAtMs),',
+    to: '    forceChargeLineShapeLoggedAtMs: null, /* MUTANT */',
+    why: 'A restart logs "Logged once a night." a second time (the round-7 reviewer\'s P1).',
+  },
   /* ── R: the ledger ── */
   {
     id: 'R-i. ★★ the plan columns written only when the plan carries a line',
