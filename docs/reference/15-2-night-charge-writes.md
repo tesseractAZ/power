@@ -385,9 +385,8 @@ fixture (nameplate, 0.944), 10 and 15 of them closing near 50 (`lineForceCharge.
   write-ahead (`forceChargeLineReOns`). Each re-ON is read back 15 minutes after it, as the ON is
   (`lineReOnCheckDue`): slots still reading OFF, their Cores under the ceiling, are
   counted not applied (`forceChargeLineReOnsNotApplied`), and the budget's next re-ON is the retry. A
-  slot an operator switched off in the app reads the same and is switched back on within that budget;
-  the off switches of a line night are `NIGHT_CHARGE_MODE: advisory` and the per-night cancel. The
-  expected walk models the same latch and re-ON, and states the close it reaches.
+  slot an operator switched off in the app reads the same and is switched back on within that budget
+  (the off switches: "The exposure" below). The expected walk models the same latch and re-ON, and states the close it reaches.
 - **The panel ceiling** is `desiredForceChargeCeilingPct(max(target, ⌈L⌉ + 10))`: 80 for any ask up to
   70, then ask + 10, at most 100. The value written is kept (`forceChargeCeilingSyncedPct`) for the ON verify's
   at-the-ceiling exemption and the settings-drift own-write list. The ON stamps the mode's
@@ -428,13 +427,14 @@ fixture (nameplate, 0.944), 10 and 15 of them closing near 50 (`lineForceCharge.
   so a restart does not repeat it. The push quotes the latest start that still reaches the line at
   the rate then (`lineLatestStartMs`: ⌈L⌉ by the close with its 15-minute buffer, never in the last
   20 minutes): "If it has not started by ~04:24, the pool may close under the line; if it never starts,
-  only the 50% reserve holds it." An ON that never took on any slot says only the reserve holds the pool,
-  which may close under the line; one that failed on some slots says the others still charge, so the
-  pool may close short of it (`forceChargeOnFailureNight`, keyed on the record's line ask, not the
-  stamped mode). Both say what would hold the line tonight (Charge Now switched on for those slots in the
-  EcoFlow app; the add-on switches it off at the close), never "no action needed". A reserve write that
-  never reads back on such a night says the pool stays on its floor, under the line, and to set the
-  reserve to 50% in the app: once the panel reads it, the force-charge starts as planned.
+  the add-on adds nothing above the 50% reserve." An ON that never took on any slot says that, unless it
+  applies late, the add-on adds nothing above the reserve and the pool may close under the line; one
+  that failed on some slots, that the pool may close short of it
+  (`forceChargeOnFailureNight`, keyed on the record's line ask, not the stamped mode). Both say what
+  would hold the line tonight (Charge Now on for those slots in the EcoFlow app; the add-on switches it
+  off at the close), never "no action needed". A reserve write that never reads back on such a night
+  says that until the panel reads 50% it keeps its own reserve, under the line, and to set 50% in the
+  app: then the force-charge starts as planned.
 - **The line at risk** (`lineAtRiskPushDue`). After the verified ON the re-ON is the only in-night
   remedy, so a line lost another way (a re-ON not applied or spent, its gates holding, a late load taking
   the grid cap, the ON-reading latch below) pushes once a night, stamped before it goes
@@ -473,8 +473,8 @@ fixture (nameplate, 0.944), 10 and 15 of them closing near 50 (`lineForceCharge.
   to the window close or the panel's own stop, whatever `ARB_OBJECTIVE` says. A resilience-objective
   plant therefore gets Charge Now for the first time. Emulated over the year's line shapes
   (`lineForceChargeClose.test.ts`), a slot reads Charge Now ON for 74 minutes on
-  average, 142 minutes for lines of 70-90%, and 138 minutes on the year's lines with a 20 kWh EV
-  predicted (the start comes earlier), the panel's own OFF counted. A line within 10 points of full: 182 minutes (224 and 335 with a
+  average, 142 for lines of 70-90%, and 138 on the year's lines with a 20 kWh EV
+  predicted (an earlier start), the panel's own OFF counted. A line within 10 points of full: 182 minutes (224 and 335 with a
   predicted EV); the panel's own stop at 100% is unmeasured. How a slot with Charge Now ON behaves
   when the grid fails is not established (the force-charge module header). The off switches are
   `NIGHT_CHARGE_MODE: advisory`, the per-night cancel, or a cushion whose line is at or under 50%. Before
@@ -492,7 +492,7 @@ fixture (nameplate, 0.944), 10 and 15 of them closing near 50 (`lineForceCharge.
   rests on the re-ON; without it up to 65 of 200 year nights close under (36 kWh predicted, an 11.52 kW
   EV arriving 90 minutes out). The cost is the overshoot: the close sits about 13 points above ⌈L⌉ on
   average: overnight energy stored, not lost.
-- **What it does not carry** (pinned exactly, never claimed carried). The start is timed on the live
+- **What it does not carry** (pinned exactly). The start is timed on the live
   rate, so an **unpredicted** load that takes the grid cap after the start leaves the pack short. Of
   the year's 200 nights, rounded readings first and floored second:
   - an 11.52 kW EV (`EV_MAX_LOAD_W`'s default) from 90 minutes before the close: 73 and 82 close under;
@@ -513,8 +513,9 @@ fixture (nameplate, 0.944), 10 and 15 of them closing near 50 (`lineForceCharge.
   close under (0-72 floored) and 52-140 of 140 at lines of 70-90% (variant `onLatch`, `PIN_ON_LATCH`).
   The line-at-risk push reaches every one of them at least 20 minutes before the close, after the latch
   on all but one; on the measured latch it goes on 2 (5 floored) of the 3,740 predicted-EV nights, none
-  under. With re-ONs accepted but never applied (unmeasured, `reOnInert`) it reaches 169 of 390 year nights
-  under, 2,308 of 2,615 at 70-90% (the rest checked in the last 21 minutes). A late apply, a glitch at the check or a person's ON logs no
+  under. With re-ONs accepted but never applied (unmeasured, `reOnInert`) it reaches 174 of 390 year nights
+  under, 2,335 of 2,615 at 70-90% (the rest checked at or inside the lead, or 25 a tick before the re-ON's
+  cutoff with a re-ON left, which holds the push). A late apply, a glitch at the check or a person's ON logs no
   shape (`PIN_REVIEW5`). Of the unpredicted
   11.52 kW EV from 90 minutes it reaches 69 of 73 (70 of 82); a load that only slows the charge (7 kW from 120 minutes, an ON 5 minutes late) leaves the pool
   rising, not pushed.
