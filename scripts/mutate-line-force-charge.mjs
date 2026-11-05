@@ -85,6 +85,9 @@
  * (Fix8 review 2) …and in every line push's title ("the reserve write has not taken effect", "cannot start yet": F8r2-i), in
  * the line-night ON-failure and apply-failure log lines and the two proofs that the reserve write never landed (F8r2-ii), and the
  * morning's re-ON count as the checks read it (F8r2-iii).
+ * (Fix9) A line night's force-charge "waits on" a reading of the target only while a start can still come (forceChargeStartClosed,
+ * the checks decideForceCharge makes before one): the three log lines and the apply-failure push, which names the last start
+ * (F9-i); an ON verified late is waited out like an ON seen (onVerifiedLateAtMs, F9-ii). W5-ix re-anchored.
  *
  *   node scripts/mutate-line-force-charge.mjs [--only <id prefix>]
  *
@@ -1138,8 +1141,9 @@ const MUTANTS = [
   {
     id: 'W5-ix. ★★★ index.ts: the reserve-apply failure is built without the line',
     file: IDX, tests: [T_RISK],
-    find: '        linePct: forceChargeLineNightPct(state),\n      }));',
-    to: '      })); /* MUTANT */',
+    // (Fix9) re-anchored: the push's start fields follow the line.
+    find: '        linePct: forceChargeLineNightPct(state),\n        // v1.200.0 (Fix9)',
+    to: '        /* MUTANT */\n        // v1.200.0 (Fix9)',
     why: 'The same, at the wiring.',
   },
 
@@ -2402,8 +2406,9 @@ const MUTANTS = [
   {
     id: 'F8r2-ii(d). ★★ index.ts: the line apply failure\'s log says the charge is forfeited',
     file: IDX, tests: [T_LINE],
-    find: ") has not taken effect: until the panel reads ${state.targetPct}% (a late apply, or the reserve set in the EcoFlow app, is still verified) the force-charge",
-    to: ") is forfeited: until the panel reads ${state.targetPct}% (a late apply, or the reserve set in the EcoFlow app, is still verified) the force-charge /* MUTANT */",
+    // (Fix9) re-anchored: the waits-on arm keyed on the start (forceChargeStartClosed).
+    find: ") has not taken effect${lineStartClosed == null ? `: until the panel reads ${state.targetPct}% (a late apply,",
+    to: ") is forfeited /* MUTANT */${lineStartClosed == null ? `: until the panel reads ${state.targetPct}% (a late apply,",
     why: 'The same, in the line branch\'s own words.',
   },
   {
@@ -2433,6 +2438,211 @@ const MUTANTS = [
     find: "` (slot(s) still off at the readback check after ${reOnsNotApplied} of them)`",
     to: "` (slot(s) still off at the readback check after ${reOns} of them)` /* MUTANT */",
     why: 'Two re-ONs, one that took: "after 2 of them".',
+  },
+  /* ── (Fix9) a line night's force-charge waits on a reading of the target only while a start can still come; an ON
+     verified late is waited out like an ON seen ── */
+  {
+    id: 'F9-i(a). ★★ forceChargeStartClosed: a force-charge already on not closed',
+    file: NFC, tests: [T_LINE],
+    find: "  const stamped: ForceChargeStartClosed | null = s.forceChargeOnAtMs != null ? 'started'\n",
+    to: "  const stamped: ForceChargeStartClosed | null = false as boolean ? 'started' /* MUTANT */\n",
+    why: 'decideForceCharge starts at most once a night: a record with an ON of ours is told it waits.',
+  },
+  {
+    id: 'F9-i(b). ★★★ forceChargeStartClosed: a cancelled night not closed (the defect)',
+    file: NFC, tests: [T_LINE],
+    find: "    : s.cancelled ? 'cancelled'\n",
+    to: "    : false as boolean ? 'cancelled' /* MUTANT */\n",
+    why: 'The round-7 reviewer\'s probe: a cancelled line night logs that the force-charge waits on a reading of the target, then reverts; decideForceCharge answers "the night was cancelled" every tick.',
+  },
+  {
+    id: 'F9-i(c). ★★ forceChargeStartClosed: the restore sent not closed',
+    file: NFC, tests: [T_LINE],
+    find: "      : s.revertedAtMs != null ? 'reverted'\n",
+    to: "      : false as boolean ? 'reverted' /* MUTANT */\n",
+    why: 'After the restore decideForceCharge never starts: "waits on" a reading it never acts on.',
+  },
+  {
+    id: 'F9-i(d). ★ forceChargeStartClosed: the reserve set outside the add-on not closed',
+    file: NFC, tests: [T_LINE],
+    find: "        : s.foreignSettledAtMs != null ? 'foreign'\n",
+    to: "        : false as boolean ? 'foreign' /* MUTANT */\n",
+    why: 'The same, on a reserve that is someone else\'s.',
+  },
+  {
+    id: 'F9-i(e). ★ forceChargeStartClosed: no window read as past the close',
+    file: NFC, tests: [T_LINE],
+    find: "          : s.windowStartMs == null || s.windowEndMs == null ? 'noWindow'\n",
+    to: "          : false as boolean ? 'noWindow' /* MUTANT */\n",
+    why: 'A record with no window is said to have closed it.',
+  },
+  {
+    id: 'F9-i(f). ★★ forceChargeStartClosed: past the close read as within it',
+    file: NFC, tests: [T_LINE],
+    find: "  if (nowMs >= closeMs) return 'over';\n",
+    to: '  /* MUTANT */\n',
+    why: 'The attempt proved unlanded two hours after the close says 20 min or less of the window is left.',
+  },
+  {
+    id: 'F9-i(g). ★★★ forceChargeStartClosed: the last 20 min not closed (the defect)',
+    file: NFC, tests: [T_LINE],
+    find: "  if (nowMs >= closeMs - FORCE_CHARGE_MIN_RUN_MS) return 'late';\n",
+    to: '  /* MUTANT */\n',
+    why: 'The round-7 reviewer\'s probe: applyFailed at the write end less 4 min logs and pushes that the force-charge waits on the write (and "once the panel reads it, the add-on starts the force-charge for the line as planned"); decideForceCharge answers "not worth starting".',
+  },
+  {
+    id: 'F9-i(h). ★ forceChargeStartClosed: the close less 20 min itself still open',
+    file: NFC, tests: [T_LINE],
+    find: "  if (nowMs >= closeMs - FORCE_CHARGE_MIN_RUN_MS) return 'late';\n",
+    to: "  if (nowMs > closeMs - FORCE_CHARGE_MIN_RUN_MS) return 'late'; /* MUTANT */\n",
+    why: 'decideForceCharge declines a start at the close less 20 min itself.',
+  },
+  {
+    id: 'F9-i(i). ★★ forceChargeStartClosed: the window close, not the on-peak guard',
+    file: NFC, tests: [T_LINE],
+    find: '  const closeMs = writeWindowEndMs(s)!;',
+    to: '  const closeMs = s.windowEndMs!; /* MUTANT */',
+    why: 'With on-peak 30 min after the close, the writes end 30 min early: a start no longer possible is said to wait.',
+  },
+  {
+    id: 'F9-i(j). ★★ forceChargeStartClosed: the options switching it off not closed',
+    file: NFC, tests: [T_LINE],
+    find: "  return forceChargeModeOf(s, gates) == null ? 'gatedOff' : null;\n",
+    to: '  return null; /* MUTANT */\n',
+    why: 'NIGHT_CHARGE_MODE advisory: decideForceCharge answers "disabled" every tick, and the log says the force-charge waits.',
+  },
+  {
+    id: 'F9-i(k). ★★ forceChargeStartClosed: the line gate alone (a cost-dominant night\'s cost force-charge ignored)',
+    file: NFC, tests: [T_LINE],
+    find: "  return forceChargeModeOf(s, gates) == null ? 'gatedOff' : null;\n",
+    to: "  return !gates.line ? 'gatedOff' : null; /* MUTANT */\n",
+    why: 'A cost-dominant night whose cost force-charge still carries the line is told none starts.',
+  },
+  {
+    id: 'F9-i(l). ★ the late words say "under 20 min" (false at the close less 20 min itself)',
+    file: NFC, tests: [T_LINE],
+    find: '  late: `${Math.round(FORCE_CHARGE_MIN_RUN_MS / 60_000)} min or less of the window is left`,',
+    to: '  late: `under ${Math.round(FORCE_CHARGE_MIN_RUN_MS / 60_000)} min of window left — not worth starting`, /* MUTANT */',
+    why: 'Closed from the close less 20 min on: at that instant 20 min are left, not under.',
+  },
+  {
+    id: 'F9-i(m). ★ the options\' words lost (no reason named)',
+    file: NFC, tests: [T_LINE],
+    find: "  if (why === 'gatedOff') return `no force-charge for ${line} starts while the options keep it off`;\n",
+    to: '  /* MUTANT */\n',
+    why: '"no force-charge for the line starts: undefined".',
+  },
+  {
+    id: 'F9-i(n). ★ the started words lost',
+    file: NFC, tests: [T_LINE],
+    find: "  if (why === 'started') return `the force-charge for ${line} was switched on earlier and does not start again`;\n",
+    to: '  /* MUTANT */\n',
+    why: 'The same, for a force-charge already on.',
+  },
+  {
+    id: 'F9-i(o). ★★★ index.ts: the attempt proved unlanded waits on a reading whatever the start (the defect)',
+    file: IDX, tests: [T_LINE],
+    find: '    const attemptStartClosed = forceChargeStartClosed(state, nowMs, forceChargeGatesOn(legRoleOf(state)));',
+    to: '    const attemptStartClosed = forceChargeStartClosed(state, nowMs, forceChargeGatesOn(legRoleOf(state))) && null; /* MUTANT */',
+    why: 'The round-7 reviewer\'s probes: cancelled, and two hours after the close.',
+  },
+  {
+    id: 'F9-i(p). ★★★ index.ts: the write proved unlanded waits on a reading whatever the start (the defect)',
+    file: IDX, tests: [T_LINE],
+    find: '    const applyStartClosed = forceChargeStartClosed(state, nowMs, forceChargeGatesOn(legRoleOf(state)));',
+    to: '    const applyStartClosed = forceChargeStartClosed(state, nowMs, forceChargeGatesOn(legRoleOf(state))) && null; /* MUTANT */',
+    why: 'A cancelled night after applyFailed (its restore on the same tick).',
+  },
+  {
+    id: 'F9-i(q). ★★★ index.ts: the apply failure waits on the write whatever the start (the defect)',
+    file: IDX, tests: [T_LINE],
+    find: '    const lineStartClosed = forceChargeStartClosed(state, nowMs, forceChargeGatesOn(legRoleOf(state)));',
+    to: '    const lineStartClosed = forceChargeStartClosed(state, nowMs, forceChargeGatesOn(legRoleOf(state))) && null; /* MUTANT */',
+    why: 'applyFailed at the write end less 4 min: the log and the push say the force-charge waits on the write.',
+  },
+  {
+    id: 'F9-i(r). ★★ index.ts: the key read with both gates on (the options ignored)',
+    file: IDX, tests: [T_LINE],
+    find: '    const lineStartClosed = forceChargeStartClosed(state, nowMs, forceChargeGatesOn(legRoleOf(state)));',
+    to: '    const lineStartClosed = forceChargeStartClosed(state, nowMs, { cost: true, line: true }); /* MUTANT */',
+    why: 'NIGHT_CHARGE_MODE advisory: told the force-charge waits on the write.',
+  },
+  {
+    id: 'F9-i(s). ★★ index.ts: the apply failure\'s closed arm still waits',
+    file: IDX, tests: [T_LINE],
+    find: " : `, and ${lineStartClosedWords(`the ${lineLogPct(state)}% outage line`, lineStartClosed)}`}; ledger corrected to actuated:0.`);",
+    to: " : `: the force-charge for the ${lineLogPct(state)}% outage line waits on it (${lineStartClosed})`}; ledger corrected to actuated:0.`); /* MUTANT */",
+    why: 'The closed arm in the open arm\'s words.',
+  },
+  {
+    id: 'F9-i(t). ★★★ index.ts: the apply-failure push not told the start is closed',
+    file: IDX, tests: [T_LINE],
+    find: '        startClosed: lineStartClosed,\n',
+    to: '        startClosed: null, /* MUTANT */\n',
+    why: 'The push asks for the reserve set in the app, "once the panel reads it, the add-on starts the force-charge for the line as planned", 4 min before the close.',
+  },
+  {
+    id: 'F9-i(u). ★★ index.ts: the push\'s last start named at the close, not 20 min before it',
+    file: IDX, tests: [T_LINE],
+    find: '        startByText: state.windowEndMs != null ? fmtSiteClock(writeWindowEndMs(state)! - FORCE_CHARGE_MIN_RUN_MS) : null,\n',
+    to: '        startByText: state.windowEndMs != null ? fmtSiteClock(writeWindowEndMs(state)!) : null, /* MUTANT */\n',
+    why: 'A reserve set by hand in the last 20 min starts nothing.',
+  },
+  {
+    id: 'F9-i(v). ★★★ the apply-failure push waits on the write whatever the start (the defect)',
+    file: NTF, tests: [T_LINE],
+    find: "  const closed = line != null && o.startClosed != null ? lineStartClosedWords('the line', o.startClosed) : null;",
+    to: "  const closed = line != null && o.startClosed != null ? null : null; /* MUTANT */",
+    why: 'The push named in the round-7 verify (medium on its own): "once the panel reads it, the add-on starts the force-charge for the line as planned" where none can start.',
+  },
+  {
+    id: 'F9-i(w). ★★ the apply-failure push names no time a reserve set in the app must beat',
+    file: NTF, tests: [T_LINE],
+    find: "once the panel reads it${o.startByText != null ? ` before ~${o.startByText}` : ''}, `",
+    to: "once the panel reads it, ` /* MUTANT */",
+    why: 'A person who sets the reserve in the last 20 min is promised a start decideForceCharge declines.',
+  },
+  {
+    id: 'F9-ii(a). ★★★ the trend reads past an ON verified late (round 7\'s carried issue (b))',
+    file: NFC, tests: [T_RISK],
+    find: '  const lateOn = onVerifiedLateAtMs(s);',
+    to: '  const lateOn = null as number | null; /* MUTANT */',
+    why: 'Slots ON from +40, +45 or +60 after the failure warning: \'onNotRising\' on the tick after the verify (pool 50 against the 50 read before the slots read ON), and the night\'s one push spent.',
+  },
+  {
+    id: 'F9-ii(b). ★ an ON verified exactly at its grace not late',
+    file: NFC, tests: [T_RISK],
+    find: '  return at != null && attempt != null && at - attempt >= FORCE_CHARGE_ON_VERIFY_AFTER_MS ? at : null;',
+    to: '  return at != null && attempt != null && at - attempt > FORCE_CHARGE_ON_VERIFY_AFTER_MS ? at : null; /* MUTANT */',
+    why: 'The seen ON\'s boundary (nowMs - ownOn >= the grace): a verify on the grace\'s own minute read past.',
+  },
+  {
+    id: 'F9-ii(c). ★★ late counted from the ON, not its re-issue',
+    file: NFC, tests: [T_RISK],
+    find: '  const attempt = s.forceChargeOnLastAttemptMs ?? s.forceChargeOnAtMs;\n  return at != null',
+    to: '  const attempt = s.forceChargeOnAtMs; /* MUTANT */\n  return at != null',
+    why: 'A re-issue that took inside its own grace is waited out a second time.',
+  },
+  {
+    id: 'F9-ii(d). ★★ every verify taken as late',
+    file: NFC, tests: [T_RISK],
+    find: '  return at != null && attempt != null && at - attempt >= FORCE_CHARGE_ON_VERIFY_AFTER_MS ? at : null;',
+    to: '  return at != null && attempt != null ? at : null; /* MUTANT */',
+    why: 'Every night\'s trend waits from the verify, not the ON: a push on a night the line is lost comes later.',
+  },
+  {
+    id: 'F9-ii(e). ★★ an ON seen after the late verify not the one waited out',
+    file: NFC, tests: [T_RISK],
+    find: '  const seen = seenOn != null && (lateOn == null || seenOn > lateOn) ? seenOn : lateOn;',
+    to: '  const seen = lateOn ?? seenOn; /* MUTANT */',
+    why: 'The panel\'s stop, then Charge Now switched on in the app: the trend judges the person\'s fix against the fall before it.',
+  },
+  {
+    id: 'F9-ii(f). ★ a seen ON older than the late verify waited out instead of it',
+    file: NFC, tests: [T_RISK],
+    find: '  const seen = seenOn != null && (lateOn == null || seenOn > lateOn) ? seenOn : lateOn;',
+    to: '  const seen = seenOn ?? lateOn; /* MUTANT */',
+    why: 'An earlier seen ON shortens the late verify\'s wait.',
   },
   /* ── R: the ledger ── */
   {
