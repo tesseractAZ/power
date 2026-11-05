@@ -72,6 +72,7 @@
  * not-held or caps sentence on a held armed night or leg (A5-xxxiii); the H1 reach's PV term not over-counted (A5-xxxiv).
  * (A5 final 1) The mid-day push names Charge Now on an armed leg whatever its stated level, and keeps the cost rule (A5-xxxv).
  * (A5 final 2) …in the reserve-hold shape too: armed for the line, not expected to start; no ask byte for byte (A5-xxxvi).
+ * (Fix7 review 1) …naming the plan's line round1(L), never its ask ⌈L⌉; a record without the line, unnumbered (A5-xxxvi(c)-(g)).
  *
  *   node scripts/mutate-line-force-charge.mjs [--only <id prefix>]
  *
@@ -1958,6 +1959,42 @@ const MUTANTS = [
     find: '      : `; it is restored at ${restore}`;',
     to: '      : `, and Charge Now is armed for the outage line (not expected to start); both are restored at ${restore}`; /* MUTANT */',
     why: 'A reserve hold with nothing armed tells a person Charge Now is armed.',
+  },
+  /* (Fix7 review 1) …naming the plan's line round1(L), as the overnight clause does — never its ask ⌈L⌉. */
+  {
+    id: 'A5-xxxvi(c). ★★★ the mid-day hold shape names the ask ⌈L⌉ as the outage line',
+    file: CTX, tests: [T_LINE],
+    find: '      ? `, and Charge Now is armed for the ${c.linePct != null ? `${Math.round(c.linePct * 10) / 10}% ` : \'\'}outage line (not expected to start); both are restored at ${restore}`',
+    to: '      ? `, and Charge Now is armed for the ${Math.round(c.lineAskPct * 10) / 10}% outage line (not expected to start); both are restored at ${restore}` /* MUTANT */',
+    why: 'A leg the sun carries on a 60.03% line is pushed "armed for the 61% outage line" while its rationale, the overnight clause and the morning give 60% (every one of the 115 / 105 held legs names a line other than its own; 141349c7).',
+  },
+  {
+    id: 'A5-xxxvi(d). ★ the mid-day hold shape, its line lost, names the ask as the line',
+    file: CTX, tests: [T_LINE],
+    find: '      ? `, and Charge Now is armed for the ${c.linePct != null ? `${Math.round(c.linePct * 10) / 10}% ` : \'\'}outage line (not expected to start); both are restored at ${restore}`',
+    to: '      ? `, and Charge Now is armed for the ${c.linePct != null ? `${Math.round(c.linePct * 10) / 10}% ` : `${c.lineAskPct}% `}outage line (not expected to start); both are restored at ${restore}` /* MUTANT */',
+    why: 'A record without the line names ⌈L⌉ as the line, up to a point above it.',
+  },
+  {
+    id: 'A5-xxxvi(e). ★★ the mid-day hold shape names the line to the whole percent',
+    file: CTX, tests: [T_LINE],
+    find: '      ? `, and Charge Now is armed for the ${c.linePct != null ? `${Math.round(c.linePct * 10) / 10}% ` : \'\'}outage line (not expected to start); both are restored at ${restore}`',
+    to: '      ? `, and Charge Now is armed for the ${c.linePct != null ? `${Math.round(c.linePct)}% ` : \'\'}outage line (not expected to start); both are restored at ${restore}` /* MUTANT */',
+    why: 'A 56.24% line is pushed as "56%", while the overnight clause gives round1 (56.2%).',
+  },
+  {
+    id: 'A5-xxxvi(f). ★★ the evening input drops the line beside its ask',
+    file: MSH, tests: [T_LINE],
+    find: '      ...(c.lineAskPct != null && c.cushionLineSocPct != null ? { linePct: c.cushionLineSocPct } : {}),',
+    to: '      ...({}), /* MUTANT */',
+    why: 'Every held armed leg is pushed "armed for the outage line" with no number, though the record carries it.',
+  },
+  {
+    id: 'A5-xxxvi(g). ★★★ the evening input carries the ask as the line',
+    file: MSH, tests: [T_LINE],
+    find: '      ...(c.lineAskPct != null && c.cushionLineSocPct != null ? { linePct: c.cushionLineSocPct } : {}),',
+    to: '      ...(c.lineAskPct != null ? { linePct: c.lineAskPct } : {}), /* MUTANT */',
+    why: 'The 141349c7 defect by the wiring: the push names ⌈L⌉ as the line.',
   },
 
   /* ── R: the ledger ── */
