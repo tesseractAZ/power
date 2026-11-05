@@ -74,7 +74,10 @@
  * (A5 final 2) …in the reserve-hold shape too: armed for the line, not expected to start; no ask byte for byte (A5-xxxvi).
  * (Fix7 review 1) …naming the plan's line round1(L), never its ask ⌈L⌉; a record without the line, unnumbered (A5-xxxvi(c)-(g)).
  * (Fix7 review 2) The overnight log's line-mode whys name the record's line round1(L), never the ask, and never "stays on to
- * the close" (A5-xxxvii(a)-(e)).
+ * the close" (A5-xxxvii(a)-(e); (b) re-anchored in Fix8).
+ * (Fix8) The "already at the ceiling" why words the line's actual order (F8-i); every line text names the line beside the
+ * levels it orders it against so the order shows, says only what holds in every outcome, and the log lines name round1(L)
+ * (F8-ii); the line-at-risk push is judged after the line ceiling lowering (F8-iii).
  *
  *   node scripts/mutate-line-force-charge.mjs [--only <id prefix>]
  *
@@ -1543,8 +1546,8 @@ const MUTANTS = [
   {
     id: 'T-xxiv. ★★ the card says "stays on to the window close" on a walk that reaches the ceiling',
     file: CARD, tests: [T_LINE],
-    find: '    if (stop != null) {\n      return `outage line ${r1(',
-    to: '    if (stop != null && stop.ceilingPct < 0) { /* MUTANT */\n      return `outage line ${r1(',
+    find: '    if (stop != null) {\n      return `outage line ${lineText(',
+    to: '    if (stop != null && stop.ceilingPct < 0) { /* MUTANT */\n      return `outage line ${lineText(',
     why: 'The same on the card.',
   },
   {
@@ -2008,11 +2011,11 @@ const MUTANTS = [
     why: 'The a07ebb42 defect: a 60.03% line night logs "for the 61% outage line" while the rationale, the pushes and the morning give 60%.',
   },
   {
-    id: 'A5-xxxvii(b). ★★ the overnight "already at the ceiling" log names the ask ⌈L⌉ as the outage line',
+    id: 'A5-xxxvii(b). ★★ the overnight "already at the ceiling" log names the ask ⌈L⌉ as the outage line (Fix8: re-anchored on the line it names)',
     file: NFC, tests: [T_LINE],
-    find: '      return { kind: \'none\', why: `the pool already reads the ${mode.panelCeilingPct}% panel ceiling — above tonight\'s ${linePct}% outage line` };',
-    to: '      return { kind: \'none\', why: `the pool already reads the ${mode.panelCeilingPct}% panel ceiling — above tonight\'s ${mode.askPct}% outage line` }; /* MUTANT */',
-    why: 'The same misstatement on the other line-mode why: "above tonight\'s 61% outage line" on a 60.03% line.',
+    find: '      const n = lineBesidePct(l, c);',
+    to: '      const n = mode.askPct; /* MUTANT */',
+    why: 'The same misstatement on the other line-mode why: "tonight\'s 100% outage line is above a full pool" on a 101.57% line asked at 100.',
   },
   {
     id: 'A5-xxxvii(c). ★★ the overnight log names the line to the whole percent',
@@ -2034,6 +2037,221 @@ const MUTANTS = [
     find: '      return { kind: \'none\', why: `just in time — holding off so the pool reaches ~${mode.startTargetPct}% ${Math.round(FORCE_CHARGE_MIN_RUN_MS / 60_000)} min before the window closes, for the ${linePct}% outage line at the close` };',
     to: '      return { kind: \'none\', why: `just in time — holding off so the pool reaches ~${mode.startTargetPct}% ${Math.round(FORCE_CHARGE_MIN_RUN_MS / 60_000)} min before the window closes, then stays on to the close for the ${linePct}% outage line` }; /* MUTANT */',
     why: 'The log promises the force-charge stays on to the close; the panel switches each slot off at its ceiling (the measured shape).',
+  },
+
+  /* (Fix8) ITEM 1 — the "already at the ceiling" why words the line's actual order: above it, at it, or the line above a full
+   * pool, the line named so that the order shows (lineBesidePct). */
+  {
+    id: 'F8-i(a). ★★★ the "already at the ceiling" why says "above" whatever the order (the defect)',
+    file: NFC, tests: [T_LINE],
+    find: "        : l === c ? `at tonight's ${n}% outage line` : `tonight's ${n}% outage line is above a full pool`}` };",
+    to: "        : `above tonight's ${n}% outage line`}` }; /* MUTANT */",
+    why: 'The 89d8dece defect: a 101.57% line asked at 100 logs "the 100% panel ceiling — above tonight\'s 101.6% outage line", contradicting its own rationale ("above a full pool, so no charge can hold it").',
+  },
+  {
+    id: 'F8-i(b). ★★ a line AT the ceiling read as under it',
+    file: NFC, tests: [T_LINE],
+    find: "      return { kind: 'none', why: `the pool already reads the ${c}% panel ceiling — ${l < c ? `above tonight's ${n}% outage line`",
+    to: "      return { kind: 'none', why: `the pool already reads the ${c}% panel ceiling — ${l <= c ? `above tonight's ${n}% outage line` /* MUTANT */",
+    why: 'A 100% line under a 100% ceiling logs "above tonight\'s 100% outage line" (equal, not above).',
+  },
+  {
+    id: 'F8-i(c). ★★ a line above a full pool read as at the ceiling',
+    file: NFC, tests: [T_LINE],
+    find: "        : l === c ? `at tonight's ${n}% outage line` : `tonight's ${n}% outage line is above a full pool`}` };",
+    to: "        : l >= c ? `at tonight's ${n}% outage line` : `tonight's ${n}% outage line is above a full pool`}` }; /* MUTANT */",
+    why: 'A 101.57% line logs "at tonight\'s 101.6% outage line" under a 100% ceiling.',
+  },
+  {
+    id: 'F8-i(d). ★★ the why orders the ask, not the line, against the ceiling',
+    file: NFC, tests: [T_LINE],
+    find: '      const l = forceChargeLineNightPct(s) ?? mode.askPct;',
+    to: '      const l = mode.askPct; /* MUTANT */',
+    why: 'A 101.57% line asked at 100 logs "at tonight\'s 100% outage line": the line is above a full pool.',
+  },
+  {
+    id: 'F8-i(e). ★★ the why names the line to one decimal beside the ceiling it equals',
+    file: NFC, tests: [T_LINE],
+    find: '      const n = lineBesidePct(l, c);',
+    to: '      const n = Math.round(l * 10) / 10; /* MUTANT */',
+    why: 'A 99.96% line logs "the 100% panel ceiling — above tonight\'s 100% outage line" (equal, as named).',
+  },
+  /* (Fix8) ITEM 3 — the line beside the levels it is ordered against, named so the order shows. */
+  {
+    id: 'F8-ii(a). ★★★ lineBesidePct never names two decimals',
+    file: NFC, tests: [T_LINE],
+    find: '  return levelsPct.includes(r) ? Math.round(linePct * 100) / 100 : r;',
+    to: '  return r; /* MUTANT */',
+    why: 'A 50.03% line is pushed "for tonight\'s 50% outage line (above the 50% the panel holds as a reserve)"; a 99.96% one logged above as 100%.',
+  },
+  {
+    id: 'F8-ii(b). ★★★ a line stated at the reserve numbered beside it',
+    file: NFC, tests: [T_LINE],
+    find: "  return n > RESERVE_WRITE_MAX_PCT ? `${lead}${n}%${tail}` : [lead.trim(), tail.trim()].filter((w) => w !== '').join(' ');",
+    to: "  return `${lead}${n}%${tail}`; /* MUTANT */",
+    why: 'A line stated at 50.00 (asked at 51) is pushed and logged "the 50% outage line is above the 50% reserve" (2026-11-25, nameplate, 11 h).',
+  },
+  {
+    id: 'F8-ii(c). ★★ the line beside the reserve forgets a full pool',
+    file: NFC, tests: [T_LINE],
+    find: '  const n = lineBesidePct(linePct, RESERVE_WRITE_MAX_PCT, 100);',
+    to: '  const n = lineBesidePct(linePct, RESERVE_WRITE_MAX_PCT); /* MUTANT */',
+    why: 'A 99.96% line is pushed "for tonight\'s 100% outage line" beside a note on a full pool and a 100% ceiling.',
+  },
+  {
+    id: 'F8-ii(d). ★★ the line beside the reserve forgets the reserve',
+    file: NFC, tests: [T_LINE],
+    find: '  const n = lineBesidePct(linePct, RESERVE_WRITE_MAX_PCT, 100);',
+    to: '  const n = lineBesidePct(linePct, 100); /* MUTANT */',
+    why: 'A 50.03% line reads as at the reserve and goes unnumbered, though two decimals show it above.',
+  },
+  {
+    id: 'F8-ii(e). ★★ the log lines name the record\'s raw two decimals',
+    file: NFC, tests: [T_LINE],
+    find: '  return l != null ? round1(l) : null;',
+    to: '  return l; /* MUTANT */',
+    why: 'The ON, re-ON, lowering, at-risk and declined-start lines log "55.55%" while every other surface names 55.6%.',
+  },
+  {
+    id: 'F8-ii(f). ★ the log lines read the line alone (a record without it names nothing)',
+    file: NFC, tests: [T_LINE],
+    find: '  const l = forceChargeLineNightPct(s);\n  return l != null ? round1(l) : null;',
+    to: '  const l = s.forceChargeLinePct; /* MUTANT */\n  return l != null ? round1(l) : null;',
+    why: 'A record whose line is unknown logs "?%" or the mode\'s ask, where forceChargeLineNightPct names the record\'s ask.',
+  },
+  {
+    id: 'F8-ii(g). ★★ the ON log names the raw record value',
+    file: IDX, tests: [T_LINE],
+    find: "for the ${lineLogPct(state) ?? onLineMode.askPct}% outage line: timed to reach",
+    to: "for the ${state.forceChargeLinePct ?? onLineMode.askPct}% outage line: timed to reach /* MUTANT */",
+    why: 'The ON line logs "for the 55.55% outage line" (the defect on 89d8dece).',
+  },
+  {
+    id: 'F8-ii(h). ★★ the re-ON log names the raw record value',
+    file: IDX, tests: [T_LINE],
+    find: "back under the start target for the ${lineLogPct(state) ?? '?'}% outage line; switching them back ON",
+    to: "back under the start target for the ${state.forceChargeLinePct ?? state.forceChargeLineAskPct ?? '?'}% outage line; switching them back ON /* MUTANT */",
+    why: 'The re-ON line logs the raw 55.55%.',
+  },
+  {
+    id: 'F8-ii(i). ★★ the lowering log names the raw record value',
+    file: IDX, tests: [T_LINE],
+    find: "so tonight runs for the ${lineLogPct(state) ?? '?'}% outage line under its own ceiling.",
+    to: "so tonight runs for the ${state.forceChargeLinePct ?? state.forceChargeLineAskPct ?? '?'}% outage line under its own ceiling. /* MUTANT */",
+    why: 'The lowering line logs the raw 55.55%.',
+  },
+  {
+    id: 'F8-ii(j). ★★ the at-risk log names the raw record value',
+    file: IDX, tests: [T_LINE],
+    find: "outage line (${lineLogPct(state)}%) is AT RISK",
+    to: "outage line (${risk.linePct}%) is AT RISK /* MUTANT */",
+    why: 'The at-risk line logs "(55.55%)" while its push names 55.6%.',
+  },
+  {
+    id: 'F8-ii(k). ★★ the declined-start log names the raw record value',
+    file: IDX, tests: [T_LINE],
+    find: "'s ${lineLogPct(state)}% outage line cannot start yet",
+    to: "'s ${declinedLinePct}% outage line cannot start yet /* MUTANT */",
+    why: 'The declined-start line logs the raw 55.55% while its push names 55.6%.',
+  },
+  {
+    id: 'F8-ii(l). ★★★ the evening push\'s clause names the line to one decimal beside the reserve',
+    file: NTF, tests: [T_LINE],
+    find: "    const why = `${lineAboveReserveWords(l.linePct, \"for tonight's \", ' outage line')} (above the ${RESERVE_WRITE_MAX_PCT}% the panel holds as a reserve)`;",
+    to: "    const why = `for tonight's ${round1(l.linePct)}% outage line (above the ${RESERVE_WRITE_MAX_PCT}% the panel holds as a reserve)`; /* MUTANT */",
+    why: 'The 89d8dece words: "for tonight\'s 50% outage line (above the 50% the panel holds as a reserve)" on the year\'s 50.00-50.03% lines.',
+  },
+  {
+    id: 'F8-ii(m). ★★ the push\'s notes name the line to one decimal beside the reserve and a full pool',
+    file: NTF, tests: [T_LINE],
+    find: "    ? lineAboveReserveWords(plan.cushionLineSocPct, \"tonight's \", ' outage line') : \"tonight's outage line\";",
+    to: "    ? `tonight's ${round1(plan.cushionLineSocPct)}% outage line` : \"tonight's outage line\"; /* MUTANT */",
+    why: 'The advisory disclosure says "tonight\'s 50% outage line is above the 50% the panel accepts as a reserve" on a 50.03% line.',
+  },
+  {
+    id: 'F8-ii(n). ★★ the ON failure names the line to one decimal beside the reserve',
+    file: NTF, tests: [T_LINE],
+    find: '  const line = o.lineLinePct != null && Number.isFinite(o.lineLinePct) ? lineBesidePct(o.lineLinePct, RESERVE_WRITE_MAX_PCT) : null;',
+    to: '  const line = o.lineLinePct != null && Number.isFinite(o.lineLinePct) ? round1(o.lineLinePct) : null; /* MUTANT */',
+    why: 'A 50.03% line\'s ON failure names "the 50% outage line" beside "only the 50% reserve holds the pool".',
+  },
+  {
+    id: 'F8-ii(o). ★★★ the ON failure says the pool WILL close near the reserve, under the line (the defect)',
+    file: NTF, tests: [T_LINE, T_RISK],
+    find: "      : `Tonight's force-charge for the ${line}% outage line will not happen: without it only the ${RESERVE_WRITE_MAX_PCT}% reserve `\n        + `holds the pool${underReach ? ', and it may close the window under the line' : ''}. `)",
+    to: "      : `Tonight's force-charge for the ${line}% outage line will not happen: without it the pool will close the window near `\n        + `the ${RESERVE_WRITE_MAX_PCT}% reserve, under the line. `) /* MUTANT */",
+    why: 'The 89d8dece words: false wherever the pool reads above the line at the failure (an ON timed from a pool between the line and the start target).',
+  },
+  {
+    id: 'F8-ii(p). ★★ the ON failure says a line the reserve holds may close under it',
+    file: NTF, tests: [T_LINE],
+    find: '  const underReach = line != null && line > RESERVE_WRITE_MAX_PCT;',
+    to: '  const underReach = line != null; /* MUTANT */',
+    why: 'A line stated at 50.00 (the reserve holds it) is told the pool may close under it, or short of it.',
+  },
+  {
+    id: 'F8-ii(q). ★★★ the declined start says the pool is expected to close under the line, near the reserve (the defect)',
+    file: NTF, tests: [T_LINE],
+    find: "        ? `If it has not started by ~${o.latestStartText}, the pool may close under the line; if it never starts, only the ${RESERVE_WRITE_MAX_PCT}% reserve holds it.`",
+    to: "        ? `If it has not started by ~${o.latestStartText}, the pool is expected to close under the line; if it never starts, near the ${RESERVE_WRITE_MAX_PCT}% reserve.` /* MUTANT */",
+    why: 'The 89d8dece words: false with the pool above the line, or a person\'s Charge Now lifting it (a declined cause).',
+  },
+  {
+    id: 'F8-ii(r). ★★ the declined start says a line the reserve holds may close under it',
+    file: NTF, tests: [T_LINE],
+    find: '      + (line > RESERVE_WRITE_MAX_PCT',
+    to: '      + (line > 0 /* MUTANT */',
+    why: 'A line stated at 50.00 is told the pool may close under it.',
+  },
+  {
+    id: 'F8-ii(s). ★★ the declined start names the line to one decimal beside the reserve',
+    file: NTF, tests: [T_LINE],
+    find: '  const line = lineBesidePct(o.linePct, RESERVE_WRITE_MAX_PCT);',
+    to: '  const line = round1(o.linePct); /* MUTANT */',
+    why: 'A 50.03% line is pushed "the force-charge for tonight\'s 50% outage line … only the 50% reserve holds it".',
+  },
+  {
+    id: 'F8-ii(t). ★★ the at-risk push says "falling toward" a line its numbers show the pool under',
+    file: NTF, tests: [T_LINE],
+    find: '  const where = r.poolPct < r.linePct - 0.05 || round1(r.poolPct) < line',
+    to: '  const where = r.poolPct < r.linePct - 0.05 /* MUTANT */',
+    why: 'A 50.05% line, the pool at 50: "the pool reads 50%, … falling toward tonight\'s 50.1% outage line".',
+  },
+  {
+    id: 'F8-ii(u). ★★ the card names the line to one decimal beside the reserve and a full pool',
+    file: CARD, tests: [T_LINE],
+    find: '    const n = r === max || r === 100 ? Math.round(l * 100) / 100 : r;',
+    to: '    const n = r; /* MUTANT */',
+    why: 'The card reads "outage line 50% is above the 50% reserve" on a 50.03% line.',
+  },
+  {
+    id: 'F8-ii(v). ★★ the card forgets a full pool',
+    file: CARD, tests: [T_LINE],
+    find: '    const n = r === max || r === 100 ? Math.round(l * 100) / 100 : r;',
+    to: '    const n = r === max ? Math.round(l * 100) / 100 : r; /* MUTANT */',
+    why: 'A 99.96% line reads "outage line 100%" on the card beside its 100% ceiling.',
+  },
+  {
+    id: 'F8-ii(w). ★★ the card numbers a line stated at the reserve',
+    file: CARD, tests: [T_LINE],
+    find: "    return n > max ? `${n}% ` : '';",
+    to: "    return `${n}% `; /* MUTANT */",
+    why: 'A line stated at 50.00 reads "outage line 50% is above the 50% reserve".',
+  },
+  /* (Fix8) ITEM 2 — the push judged after the line ceiling lowering while ON, and on its refusal. */
+  {
+    id: 'F8-iii(a). ★★ the push not judged after the line ceiling lowering',
+    file: IDX, tests: [T_RISK],
+    find: "Force-charge waits for it to read back.'}`);\n    if (whileOn) pushLineAtRiskIfDue();\n",
+    to: "Force-charge waits for it to read back.'}`); /* MUTANT */\n",
+    why: 'A hold followed by the lowering skips the judgement like a lost tick (round 6\'s residual): 2 of 86,400 hand-backs pushed a tick later or not before the retry.',
+  },
+  {
+    id: 'F8-iii(b). ★ the push not judged when the write block refuses the lowering',
+    file: IDX, tests: [T_RISK],
+    find: "if (blocked) { app.log.warn(`night-charge: force-charge ceiling sync refused — ${blocked}`); if (whileOn) pushLineAtRiskIfDue(); return; }",
+    to: "if (blocked) { app.log.warn(`night-charge: force-charge ceiling sync refused — ${blocked}`); return; } /* MUTANT */",
+    why: 'A refused lowering skips the judgement like a lost tick.',
   },
 
   /* ── R: the ledger ── */
