@@ -1646,6 +1646,20 @@ test('★★ T19 the mid-day push and its shadow record: a leg with a line ask i
   assert.equal(fcOf({ ...noAsk, levelPct: 57.3, reservePct: 50 }), true, 'no ask, above the reserve: Charge Now');
   const at50 = buildMiddayPlanMessage(ms.middayShadowAnnounceInput({ ...back, cost: { ...back.cost!, levelPct: 50, reservePct: 50 } }, buildApsREvModel())!).body;
   assert.ok(at50.includes(' SUPERVISED: at 10:00 AM the backup reserve is held at 50% and Charge Now switches on just in time; both are restored at 3:00 PM'), at50);
+  // (Fix7, A5 final 2) …and a leg that expects to draw nothing (the reserve-hold shape): the line force-charge is armed on it all
+  // the same (armFromPlan's lineRides), and the actuator switches Charge Now on if the sun falls short. The push names it,
+  // armed and not expected to start, as the overnight held line clause does. With no ask, that shape byte for byte as before.
+  const heldBody = (c: Record<string, unknown>) => body({ levelPct: 50, reservePct: 50, expectedKwh: 0.02, buyKwh: 1.3, cushionShortfall: false,
+    cushionShortfallCause: undefined, ...c });
+  const armedHeld = heldBody({ lineAskPct: 62 });
+  assert.ok(armedHeld.includes(': holding the backup reserve at 50% as a floor; no charge is expected.'), armedHeld);
+  assert.ok(armedHeld.includes(' SUPERVISED: at 10:00 AM the backup reserve is held at 50%, and Charge Now is armed for the 62% outage line (not expected to start); both are restored at 3:00 PM, before the 4–7pm on-peak. Cancel from the charge card before 10:00 AM tomorrow.'), armedHeld);
+  const noAskHeld = heldBody({ forceCharge: false });
+  assert.ok(noAskHeld.includes(' SUPERVISED: at 10:00 AM the backup reserve is held at 50%; it is restored at 3:00 PM, before the 4–7pm on-peak. Cancel from the charge card before 10:00 AM tomorrow.'), noAskHeld);
+  assert.doesNotMatch(noAskHeld, /Charge Now/);
+  // Advisory arms nothing: its tail is unchanged whatever the ask.
+  assert.ok(buildMiddayPlanMessage({ ...input({ levelPct: 50, reservePct: 50, expectedKwh: 0.02, lineAskPct: 62 }), mode: 'advisory' } as never).body
+    .includes(' Advisory only — the add-on will NOT charge.'));
 });
 
 test('★★ T22 (H1) the spoken notice of a window-bound line night: its level is the window\'s reach, so never "which ends before it gets there" — except where that reach is under the 50% reserve the level is floored at', () => {
@@ -1842,6 +1856,41 @@ for (const basis of ['np', 'm'] as const) {
     assert.deepEqual(pin, PIN_T23[basis]);
   });
 }
+
+/** (Fix7, A5 final 2) The same grid with the pool at 90% and 95% at 21:30: an armed leg the sun carries expects to draw nothing
+ *  and takes the reserve-hold shape ("no charge is expected"). Measured on the landed change: `armed` legs (armFromPlan's
+ *  lineRides), `rides` pushed "Charge Now switches on just in time", `held` pushed in the hold shape and naming Charge Now armed
+ *  for the line. 31e87ca4 pushed every one of the `held` with no Charge Now (the A5 final-2 finding). */
+const PIN_T23_HELD: Record<'np' | 'm', { armed: number; rides: number; held: number }> = {
+  np: { armed: -1, rides: -1, held: -1 },
+  m: { armed: -1, rides: -1, held: -1 },
+};
+const CHARGE_NOW_ARMED_HELD = /^SUPERVISED: at 10:00 AM the backup reserve is held at 50%, and Charge Now is armed for the (\d+)% outage line \(not expected to start\); both are restored at 3:00 PM/;
+
+test('★★★ T23 (Fix7) the mid-day grid with the pool at 90% and 95%: every armed leg\'s push names Charge Now, in the charging shape and in the reserve-hold one (armed for the line, not expected to start)', () => {
+  for (const basis of ['np', 'm'] as const) {
+    const got = { armed: 0, rides: 0, held: 0 };
+    const ex: string[] = [];
+    for (const socPct of [90, 95]) for (const floor of [26, 30, 31, 35, 40]) for (const capKw of [4.5, 5, 6, 7, 10]) for (const pvScale of [0, 0.1, 0.3, 1]) {
+      for (let h = 4; h <= 20; h++) {
+        const p = middayLegPlan({ floor, capKw, socPct, pvScale, h, basis });
+        const rec = act.armFromPlan(act.emptyActuationState(), '2026-10-14', p as never, midPhx(10, 14, 21, 30), floor, true, null, true);
+        if (rec?.forceChargeLineAskPct == null) continue;
+        got.armed += 1;
+        const push = middayLegPush(p);
+        const tail = push.slice(push.indexOf('SUPERVISED: '));
+        const heldShape = push.includes('as a floor; no charge is expected.');
+        const m = CHARGE_NOW_ARMED_HELD.exec(tail);
+        if (!heldShape && push.includes(CHARGE_NOW_RIDES)) got.rides += 1;
+        else if (heldShape && m != null && Number(m[1]) === rec.forceChargeLineAskPct) got.held += 1;
+        else if (ex.length < 8) ex.push(`${basis} pool ${socPct}%, floor ${floor}, ${capKw} kW, sun ×${pvScale}, ${h} h (ask ${rec.forceChargeLineAskPct}): ${push}`);
+      }
+    }
+    assert.deepEqual(ex, [], 'an armed leg pushed with no Charge Now');
+    assert.equal(got.rides + got.held, got.armed);
+    assert.deepEqual(got, PIN_T23_HELD[basis], basis);
+  }
+});
 
 /* ══ T10b — the gate: an armed line the plan disclosed whose force-charge never switched on is a strike ═══════════ */
 

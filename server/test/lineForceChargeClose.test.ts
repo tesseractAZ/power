@@ -139,6 +139,7 @@ function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Varian
   let importing = true;
   let pushedAtMs: number | null = null;
   let pushCause: string | null = null;
+  let pushRetryPossible = false;
   let shapeAtMs: number | null = null;
   let lossAtMs: number | null = null;
   let onMin = 0;
@@ -191,7 +192,7 @@ function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Varian
     if (a.kind === 'none' && pushedAtMs == null) {
       const risk = nfc.lineAtRiskPushDue(s, t, o);
       if (risk != null) {
-        pushedAtMs = t; pushCause = risk.cause; s = { ...s, forceChargeLineAtRiskPushedAtMs: t };
+        pushedAtMs = t; pushCause = risk.cause; pushRetryPossible = risk.reOnRetryPossible; s = { ...s, forceChargeLineAtRiskPushedAtMs: t };
         // (review 5) 'reOnPerson': the person switches Charge Now on in the app 5 min after a push naming slots reading OFF.
         if (variant === 'reOnPerson' && risk.offSlots.length > 0 && !chargeNowOn) { onEffectiveMs = t + 5 * MIN; personPending = true; }
       }
@@ -222,7 +223,7 @@ function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Varian
         s = { ...s, forceChargeLineReOnAtMs: t + kn.lagMs, forceChargeLineReOnSlots: null };
         if (pushedAtMs == null) {
           const risk = nfc.lineAtRiskPushDue(s, t, o);
-          if (risk != null) { pushedAtMs = t; pushCause = risk.cause; s = { ...s, forceChargeLineAtRiskPushedAtMs: t }; }
+          if (risk != null) { pushedAtMs = t; pushCause = risk.cause; pushRetryPossible = risk.reOnRetryPossible; s = { ...s, forceChargeLineAtRiskPushedAtMs: t }; }
         }
       } else if (variant !== 'noReOn') {
         if (handBackAtMs != null && retryAtMs == null) retryAtMs = t;
@@ -274,7 +275,7 @@ function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Varian
       .body.includes("until the panel's own stop switched Charge Now off at");
   }
   return {
-    close, onMin, reOns, reOnsFailed, pushedAtMs, shapeAtMs, lossAtMs, pushCause,
+    close, onMin, reOns, reOnsFailed, pushedAtMs, shapeAtMs, lossAtMs, pushCause, pushRetryPossible,
     handBackAtMs, retryAtMs, personOnAtMs, personStopAtMs, panelOffAtMs: s.forceChargeLinePanelOffAtMs ?? null, stopNamed, onWrites,
   };
 }
@@ -293,19 +294,22 @@ const KS = [0.9, 1.0, 1.1, 1.25];
  *  `lost` — of them, those with neither its retry nor a push though a tick came between the hand-back and the lead;
  *  `lastTick` — those handed back on the last tick before the re-ON's cutoff with no retry and no push (the next tick is at or
  *  past the cutoff and the push's lead; review 8 pushes on the hand-back's own tick); `refusedRetried` — a 'reOnRefused'
- *  push followed by the retry (review 8: allowed, its words say the add-on may try once more);
+ *  push followed by the retry (review 8: allowed, its words say the add-on may try once more); (review 8) `refusedSure` — the
+ *  'reOnRefused' pushes worded "its next try would come after ~<cutoff>" (the stamp + 15 min at or past the re-ON's cutoff: no
+ *  tick can bring the retry), `sureRetried` — of them, any the retry then followed (words the night contradicts);
  *  `personOn` — nights a person's ON took effect; `personStop` — of them, those the panel stopped at its ceiling after it;
  *  `stopStamped` — of those, the panel's stop on the record after the person's ON; `stopNamed` — the morning account naming
  *  the panel's stop as what ended the charge. */
 function cell(lines: number[], kn: Partial<Knobs>, ks: number[] = KS, variant: Variant = 'real'): {
   under: number; n: number; worst: number; meanOn: number; reOns: number; pushed: number; underPushed: number; latePushed: number;
   underPushedEarly: number; shapes: number; heldPushes: number; refusedPushes: number;
-  handBacks: number; lost: number; lastTick: number; refusedRetried: number; personOn: number; personStop: number; stopStamped: number; stopNamed: number;
+  handBacks: number; lost: number; lastTick: number; refusedRetried: number; refusedSure: number; sureRetried: number;
+  personOn: number; personStop: number; stopStamped: number; stopNamed: number;
   maxOnWrites: number;
 } {
   const k2 = { ...BASE, ...kn };
   let under = 0, n = 0, worst = Infinity, on = 0, reOns = 0, pushed = 0, underPushed = 0, latePushed = 0, underPushedEarly = 0, shapes = 0, heldPushes = 0, refusedPushes = 0;
-  let handBacks = 0, lost = 0, lastTick = 0, refusedRetried = 0, personOn = 0, personStop = 0, stopStamped = 0, stopNamed = 0, maxOnWrites = 0;
+  let handBacks = 0, lost = 0, lastTick = 0, refusedRetried = 0, refusedSure = 0, sureRetried = 0, personOn = 0, personStop = 0, stopStamped = 0, stopNamed = 0, maxOnWrites = 0;
   for (const L of lines) for (const h of HOUSES) for (const k of ks) {
     const r = night(L, h, k, k2, variant);
     n += 1; on += r.onMin; reOns += r.reOns; worst = Math.min(worst, r.close - L); maxOnWrites = Math.max(maxOnWrites, r.onWrites);
@@ -315,7 +319,11 @@ function cell(lines: number[], kn: Partial<Knobs>, ks: number[] = KS, variant: V
       if (r.retryAtMs == null && r.pushedAtMs == null) {
         if (r.handBackAtMs + MIN >= W1 - nfc.FORCE_CHARGE_LINE_AT_RISK_LEAD_MS) lastTick += 1; else lost += 1;
       }
-      if (r.pushCause === 'reOnRefused' && r.retryAtMs != null && r.pushedAtMs != null && r.retryAtMs > r.pushedAtMs) refusedRetried += 1;
+      if (r.pushCause === 'reOnRefused' && r.retryAtMs != null && r.pushedAtMs != null && r.retryAtMs > r.pushedAtMs) {
+        refusedRetried += 1;
+        if (!r.pushRetryPossible) sureRetried += 1;
+      }
+      if (r.pushCause === 'reOnRefused' && !r.pushRetryPossible) refusedSure += 1;
     }
     if (r.personOnAtMs != null) {
       personOn += 1;
@@ -338,7 +346,7 @@ function cell(lines: number[], kn: Partial<Knobs>, ks: number[] = KS, variant: V
   }
   return {
     under, n, worst, meanOn: on / n, reOns, pushed, underPushed, latePushed, underPushedEarly, shapes, heldPushes, refusedPushes,
-    handBacks, lost, lastTick, refusedRetried, personOn, personStop, stopStamped, stopNamed, maxOnWrites,
+    handBacks, lost, lastTick, refusedRetried, refusedSure, sureRetried, personOn, personStop, stopStamped, stopNamed, maxOnWrites,
   };
 }
 
@@ -505,7 +513,7 @@ test('★★★ T7 (review 6, review 8) with the ticks off the minute and each r
   const got: Record<string, Record<string, number>> = {};
   for (const [label, variant, knobs] of runs) {
     const t = { under: 0, reached: 0, held: 0, shapes: 0, heldCause: 0, refused: 0, handBacks: 0, lost: 0, lastTick: 0, refusedRetried: 0,
-      personOn: 0, personStop: 0, stopStamped: 0, stopNamed: 0 };
+      refusedSure: 0, sureRetried: 0, personOn: 0, personStop: 0, stopStamped: 0, stopNamed: 0 };
     for (const [, kn] of PREDICTED) {
       for (const [lines, floor] of [[YEAR_LINES, false], [YEAR_LINES, true], [HIGH_LINES, false], [HIGH_LINES, true]] as const) {
         const r = cell(lines as number[], { ...kn, ...knobs, floor }, KS, variant);
@@ -513,6 +521,7 @@ test('★★★ T7 (review 6, review 8) with the ticks off the minute and each r
         t.under += r.under; t.reached += r.underPushed; t.held += r.pushed - r.underPushed;
         t.shapes += r.shapes; t.heldCause += r.heldPushes; t.refused += r.refusedPushes;
         t.handBacks += r.handBacks; t.lost += r.lost; t.lastTick += r.lastTick; t.refusedRetried += r.refusedRetried;
+        t.refusedSure += r.refusedSure; t.sureRetried += r.sureRetried;
         t.personOn += r.personOn; t.personStop += r.personStop; t.stopStamped += r.stopStamped; t.stopNamed += r.stopNamed;
       }
     }
@@ -523,6 +532,8 @@ test('★★★ T7 (review 6, review 8) with the ticks off the minute and each r
     // and the retry came a tick later, past it); (review 8) nor one on the last tick before the cutoff (pushed on its own
     // tick). A 'reOnRefused' push may be followed by the retry (its words say the add-on may try once more): counted, pinned.
     assert.equal(t.lost + t.lastTick, 0, `${label}: ${t.lost + t.lastTick} hand-backs with neither the retry nor the push`);
+    // (review 8) …and one worded "its next try would come after ~<cutoff>" is never followed by the retry.
+    assert.equal(t.sureRetried, 0, `${label}: ${t.sureRetried} pushes saying no tick can bring the retry, then the retry`);
     assert.equal(t.shapes + t.heldCause, 0, `${label}: shape logs or 'reOnHeld' pushes`);
     // A person's ON that the panel stops at its ceiling is a stop on the record, and the morning names it.
     assert.equal(t.stopStamped, t.personStop, `${label}: ${t.stopStamped} of ${t.personStop} stops after the person's ON stamped`);
