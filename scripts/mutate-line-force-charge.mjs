@@ -2526,18 +2526,18 @@ const MUTANTS = [
     why: 'Closed from the close less 20 min on: at that instant 20 min are left, not under.',
   },
   {
-    id: 'F9-i(m). ★ the options\' words lost (no reason named)',
+    id: 'F9-i(m). ★ the options\' words lose their reason',
     file: NFC, tests: [T_LINE],
     find: "  if (why === 'gatedOff') return `no force-charge for ${line} starts while the options keep it off`;\n",
-    to: '  /* MUTANT */\n',
-    why: '"no force-charge for the line starts: undefined".',
+    to: "  if (why === 'gatedOff') return `no force-charge for ${line} starts`; /* MUTANT */\n",
+    why: '"no force-charge for the line starts", with no reason, on a night an option change could still start it.',
   },
   {
-    id: 'F9-i(n). ★ the started words lost',
+    id: 'F9-i(n). ★ the started words lose their reason',
     file: NFC, tests: [T_LINE],
     find: "  if (why === 'started') return `the force-charge for ${line} was switched on earlier and does not start again`;\n",
-    to: '  /* MUTANT */\n',
-    why: 'The same, for a force-charge already on.',
+    to: "  if (why === 'started') return `no force-charge for ${line} starts`; /* MUTANT */\n",
+    why: 'A night whose force-charge already ran is told none starts, with no reason.',
   },
   {
     id: 'F9-i(o). ★★★ index.ts: the attempt proved unlanded waits on a reading whatever the start (the defect)',
@@ -2592,7 +2592,7 @@ const MUTANTS = [
     id: 'F9-i(v). ★★★ the apply-failure push waits on the write whatever the start (the defect)',
     file: NTF, tests: [T_LINE],
     find: "  const closed = line != null && o.startClosed != null ? lineStartClosedWords('the line', o.startClosed) : null;",
-    to: "  const closed = line != null && o.startClosed != null ? null : null; /* MUTANT */",
+    to: "  const closed = (false as boolean) && o.startClosed != null ? lineStartClosedWords('the line', o.startClosed) : null; /* MUTANT */",
     why: 'The push named in the round-7 verify (medium on its own): "once the panel reads it, the add-on starts the force-charge for the line as planned" where none can start.',
   },
   {
