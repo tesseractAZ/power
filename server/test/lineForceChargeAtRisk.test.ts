@@ -1526,7 +1526,7 @@ test('★★★ W3 a line night: the panel\'s own stop and the re-ONs (issued, a
     forceChargeOffAtMs: WIN_END, forceChargeOffReason: 'windowEnd',
   }), lineGates);
   assert.ok(sum(ended, { closePoolPct: 51 }).includes(
-    "force-charge ran for the 55.6% outage line until the panel's own stop switched Charge Now off at 3:10am; Charge Now was switched back on 2 time(s) after the panel's own stop (slot(s) still read off at the readback check after 1 of them); the pool read 51% at the close, under the 55.6% outage line"), sum(ended, { closePoolPct: 51 }));
+    "force-charge ran for the 55.6% outage line until the panel's own stop switched Charge Now off at 3:10am; Charge Now was switched back on 2 time(s) after the panel's own stop (slot(s) still off at the readback check after 1 of them); the pool read 51% at the close, under the 55.6% outage line"), sum(ended, { closePoolPct: 51 }));
   assert.doesNotMatch(sum(ended, { closePoolPct: 51 }), /to the window close/);
   // A re-ON after the panel's stop that then ran to the close.
   const reOnRan = nfc.forceChargeNightOutcome(onNight({
@@ -1554,10 +1554,10 @@ test('★★★ W3 (review 3) a re-ON resumes the charge only when it took effec
   });
   const two = sum(nfc.forceChargeNightOutcome(failedAfterStop(2), lineGates), { closePoolPct: 52 });
   assert.ok(two.includes("force-charge ran for the 55.6% outage line until the panel's own stop switched Charge Now off at 1am; "
-    + "Charge Now was switched back on 2 time(s) after the panel's own stop (slot(s) still read off at the readback check after 2 of them); the pool read 52% at the close, under the 55.6% outage line"), two);
+    + "Charge Now was switched back on 2 time(s) after the panel's own stop (slot(s) still off at the readback check after 2 of them); the pool read 52% at the close, under the 55.6% outage line"), two);
   assert.doesNotMatch(two, /to the window close/);
   const one = sum(nfc.forceChargeNightOutcome(failedAfterStop(1), lineGates), { closePoolPct: 52 });
-  assert.ok(one.includes("until the panel's own stop switched Charge Now off at 1am; Charge Now was switched back on 1 time(s) after the panel's own stop (slot(s) still read off at the readback check after 1 of them)"), one);
+  assert.ok(one.includes("until the panel's own stop switched Charge Now off at 1am; Charge Now was switched back on 1 time(s) after the panel's own stop (slot(s) still off at the readback check after 1 of them)"), one);
   // A re-ON that took on one slot of the two resumed the charge: it ran to the close.
   const partial = sum(nfc.forceChargeNightOutcome(failedAfterStop(1, { forceChargeLineReOnNotAppliedSlots: [3] }), lineGates), { closePoolPct: 60 });
   assert.ok(partial.includes('force-charge ran to the window close for the 55.6% outage line; Charge Now was switched back on 1 time(s)'), partial);
@@ -1597,7 +1597,7 @@ test('★★★ W3 (review 4) every re-ON after the panel\'s stop counts, not th
     forceChargeLineReOnNotAppliedSlots: [1], forceChargeLineReOnsNotApplied: 1, forceChargeOffAtMs: WIN_END, forceChargeOffReason: 'windowEnd',
   });
   const aText = sum(nfc.forceChargeNightOutcome(a, lineGates), { closePoolPct: 60 });
-  assert.ok(aText.includes("force-charge ran for the 55.6% outage line; Charge Now read off on slot(s) 1 before the window close and was switched back on 2 time(s) after the panel's own stop (slot(s) still read off at the readback check after 1 of them); the pool read 60% at the close"), aText);
+  assert.ok(aText.includes("force-charge ran for the 55.6% outage line; Charge Now read off on slot(s) 1 before the window close and was switched back on 2 time(s) after the panel's own stop (slot(s) still off at the readback check after 1 of them); the pool read 60% at the close"), aText);
   assert.doesNotMatch(aText, /until the panel's own stop|to the window close for/);
   // …the same night whose second re-ON never reached the panel (every write rate-limited: handed back, no slots). It was
   // written to slots reading OFF, and nothing of ours switched them on after it: read off, no slot named (no check judged it).
@@ -1607,7 +1607,7 @@ test('★★★ W3 (review 4) every re-ON after the panel\'s stop counts, not th
   // A second panel stop AFTER the re-ON that took effect (re-stamped once its grace ran), then a re-ON that did not: the
   // second stop ended it.
   const again = sum(nfc.forceChargeNightOutcome({ ...a, forceChargeLinePanelOffAtMs: WIN_START + 4 * H } as S, lineGates), { closePoolPct: 52 });
-  assert.ok(again.includes("force-charge ran for the 55.6% outage line until the panel's own stop switched Charge Now off at 3am; Charge Now was switched back on 2 time(s) after the panel's own stop (slot(s) still read off at the readback check after 1 of them)"), again);
+  assert.ok(again.includes("force-charge ran for the 55.6% outage line until the panel's own stop switched Charge Now off at 3am; Charge Now was switched back on 2 time(s) after the panel's own stop (slot(s) still off at the readback check after 1 of them)"), again);
   // Case (b): no stop on record (a slot switched off in the app, or a stop the readback never caught with every slot off);
   // both re-ONs checked not applied. Slots of ours read off before the close, so never "ran to the window close" — the
   // account names the slots the last check found off.
@@ -1617,7 +1617,7 @@ test('★★★ W3 (review 4) every re-ON after the panel\'s stop counts, not th
     forceChargeOffAtMs: WIN_END, forceChargeOffReason: 'windowEnd',
   });
   const bText = sum(nfc.forceChargeNightOutcome(b, lineGates), { closePoolPct: 52 });
-  assert.ok(bText.includes('force-charge ran for the 55.6% outage line; Charge Now read off on slot(s) 1, 2, 3 before the window close and was switched back on 2 time(s) (slot(s) still read off at the readback check after 2 of them); the pool read 52% at the close, under the 55.6% outage line'), bText);
+  assert.ok(bText.includes('force-charge ran for the 55.6% outage line; Charge Now read off on slot(s) 1, 2, 3 before the window close and was switched back on 2 time(s) (slot(s) still off at the readback check after 2 of them); the pool read 52% at the close, under the 55.6% outage line'), bText);
   assert.doesNotMatch(bText, /to the window close for|panel's own stop/);
   // …with the only re-ON never reaching the panel (handed back: no count, no check): the read-off alone, no slots to name.
   const bLimited = sum(nfc.forceChargeNightOutcome(onNight({ forceChargeLineReOnAtMs: WIN_END - 40 * M, forceChargeLineReOnSlots: null,
@@ -1627,12 +1627,12 @@ test('★★★ W3 (review 4) every re-ON after the panel\'s stop counts, not th
   // was written to slots reading OFF and found them still OFF, with the budget spent — read off, never "ran to the window
   // close" (the round-5 reviewer's NOSTOP-MIXED night).
   const bTook = sum(nfc.forceChargeNightOutcome({ ...b, forceChargeLineReOnAppliedAtMs: WIN_END - 180 * M, forceChargeLineReOnsNotApplied: 1 } as S, lineGates), { closePoolPct: 60 });
-  assert.ok(bTook.includes('force-charge ran for the 55.6% outage line; Charge Now read off on slot(s) 1, 2, 3 before the window close and was switched back on 2 time(s) (slot(s) still read off at the readback check after 1 of them); the pool read 60% at the close'), bTook);
+  assert.ok(bTook.includes('force-charge ran for the 55.6% outage line; Charge Now read off on slot(s) 1, 2, 3 before the window close and was switched back on 2 time(s) (slot(s) still off at the readback check after 1 of them); the pool read 60% at the close'), bTook);
   assert.doesNotMatch(bTook, /to the window close for/);
   // …the same with a stop on record before re-ON 1 (STOP-MIXED): re-ON 1 resumed the charge, re-ON 2's slots read off.
   const stopMixed = sum(nfc.forceChargeNightOutcome({ ...b, forceChargeLinePanelOffAtMs: WIN_END - 250 * M, forceChargeLineReOnAppliedAtMs: WIN_END - 210 * M,
     forceChargeLineReOnsNotApplied: 1 } as S, lineGates), { closePoolPct: 50 });
-  assert.ok(stopMixed.includes("force-charge ran for the 55.6% outage line; Charge Now read off on slot(s) 1, 2, 3 before the window close and was switched back on 2 time(s) after the panel's own stop (slot(s) still read off at the readback check after 1 of them); the pool read 50% at the close, under the 55.6% outage line"), stopMixed);
+  assert.ok(stopMixed.includes("force-charge ran for the 55.6% outage line; Charge Now read off on slot(s) 1, 2, 3 before the window close and was switched back on 2 time(s) after the panel's own stop (slot(s) still off at the readback check after 1 of them); the pool read 50% at the close, under the 55.6% outage line"), stopMixed);
   // An early OFF of ours still says when and why, whatever the re-ONs did.
   const bEarly = sum(nfc.forceChargeNightOutcome({ ...b, forceChargeOffAtMs: WIN_END - 30 * M, forceChargeOffReason: 'gridLoss' } as S, lineGates), { closePoolPct: 52 });
   assert.ok(bEarly.includes('force-charge ran for the 55.6% outage line until 4:30am (switched off: the grid was lost); Charge Now was switched back on 2 time(s)'), bEarly);
@@ -1646,7 +1646,7 @@ test('★★★ W3 (review 5) the read-off is the last re-ON\'s check, unless a 
   // Both re-ONs checked not applied, no stop on record (case b above), and then a slot of ours read ON again (the last re-ON
   // applied late, or Charge Now switched on in the app — forceChargeLineOnSeenAtMs). Charge Now did not simply read off
   // to the close: "ran to the window close". (Fix8 review 2) The re-ONs the checks found not applied are named as what those
-  // checks read ("slot(s) still read off at the readback check after 2 of them"), never "did not take effect": the slot seen ON
+  // checks read ("slot(s) still off at the readback check after 2 of them"), never "did not take effect": the slot seen ON
   // after them may be one of them applied late, which the code cannot tell from a person's ON.
   const b = onNight({
     forceChargeLineReOns: 2, forceChargeLineReOnAtMs: WIN_END - 150 * M, forceChargeLineReOnSlots: [1, 2, 3],
@@ -1654,7 +1654,7 @@ test('★★★ W3 (review 5) the read-off is the last re-ON\'s check, unless a 
     forceChargeOffAtMs: WIN_END, forceChargeOffReason: 'windowEnd',
   });
   const seenAfter = sum(nfc.forceChargeNightOutcome({ ...b, forceChargeLineOnSeenAtMs: WIN_END - 120 * M } as S, lineGates), { closePoolPct: 60 });
-  assert.ok(seenAfter.includes('force-charge ran to the window close for the 55.6% outage line; Charge Now was switched back on 2 time(s) (slot(s) still read off at the readback check after 2 of them); the pool read 60% at the close'), seenAfter);
+  assert.ok(seenAfter.includes('force-charge ran to the window close for the 55.6% outage line; Charge Now was switched back on 2 time(s) (slot(s) still off at the readback check after 2 of them); the pool read 60% at the close'), seenAfter);
   assert.doesNotMatch(seenAfter, /read off/);
   // A slot seen ON BEFORE the last re-ON (the re-ON was written to it once it read OFF again): still read off.
   const seenBefore = sum(nfc.forceChargeNightOutcome({ ...b, forceChargeLineOnSeenAtMs: WIN_END - 200 * M } as S, lineGates), { closePoolPct: 52 });
@@ -1663,7 +1663,7 @@ test('★★★ W3 (review 5) the read-off is the last re-ON\'s check, unless a 
   // end the charge.
   const stop = { ...b, forceChargeLinePanelOffAtMs: WIN_START + 2 * H } as S;
   const stopThenSeen = sum(nfc.forceChargeNightOutcome({ ...stop, forceChargeLineOnSeenAtMs: WIN_START + 4 * H } as S, lineGates), { closePoolPct: 60 });
-  assert.ok(stopThenSeen.includes("force-charge ran to the window close for the 55.6% outage line; Charge Now was switched back on 2 time(s) after the panel's own stop (slot(s) still read off at the readback check after 2 of them)"), stopThenSeen);
+  assert.ok(stopThenSeen.includes("force-charge ran to the window close for the 55.6% outage line; Charge Now was switched back on 2 time(s) after the panel's own stop (slot(s) still off at the readback check after 2 of them)"), stopThenSeen);
   assert.doesNotMatch(stopThenSeen, /until the panel's own stop/);
   // …seen ON before the stop: the stop ended it.
   const seenThenStop = sum(nfc.forceChargeNightOutcome({ ...stop, forceChargeLineOnSeenAtMs: WIN_START + H } as S, lineGates), { closePoolPct: 52 });
@@ -1676,7 +1676,7 @@ test('★★★ W3 (review 5) the read-off is the last re-ON\'s check, unless a 
     forceChargeOffAtMs: WIN_END, forceChargeOffReason: 'windowEnd',
   });
   const hb = sum(nfc.forceChargeNightOutcome(handedBack, lineGates), { closePoolPct: 52 });
-  assert.ok(hb.includes('force-charge ran for the 55.6% outage line; Charge Now read off before the window close and was switched back on 1 time(s) (slot(s) still read off at the readback check after 1 of them)'), hb);
+  assert.ok(hb.includes('force-charge ran for the 55.6% outage line; Charge Now read off before the window close and was switched back on 1 time(s) (slot(s) still off at the readback check after 1 of them)'), hb);
   // The outcome carries the seen ON, and the last check's slots only when that check judged the last re-ON.
   const line = (s: S) => (nfc.forceChargeNightOutcome(s, lineGates) as unknown as { line: { onSeenAtMs: number | null; reOnNotAppliedSlots: number[] | null } }).line;
   assert.equal(line({ ...b, forceChargeLineOnSeenAtMs: WIN_END - 120 * M } as S).onSeenAtMs, WIN_END - 120 * M);

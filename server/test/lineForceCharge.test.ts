@@ -2214,7 +2214,7 @@ test('★★★ T24 (Fix8) the line texts at their edges: every text on the line
     }), { cost: false, line: true });
     const late = buildNightChargeMorningSummary({ day: '2026-09-16', targetPct: 50, restorePct: 30, expectedKwh: 17.6, forceCharge: lateReOn, closePoolPct: 62, linePct: line } as never);
     add(`${late.title}\n${late.body}`, { line, named: r1(line), where: where('morning, a re-ON checked not applied, then seen ON') });
-    if (!late.body.includes("Charge Now was switched back on 1 time(s) after the panel's own stop (slot(s) still read off at the readback check after 1 of them)")) errs.push(`${where('morning late re-ON')}: ${late.body}`);
+    if (!late.body.includes("Charge Now was switched back on 1 time(s) after the panel's own stop (slot(s) still off at the readback check after 1 of them)")) errs.push(`${where('morning late re-ON')}: ${late.body}`);
     const apply = notify.buildNightChargeApplyFailure({ day: '2026-09-16', currentReservePct: 30, targetPct: 50, applyRetries: 2, expectedKwh: 20, linePct: line });
     add(`${apply.title}\n${apply.body}`, { line, named: r1(line), where: where('apply failure') });
     // 11. The mid-day push's reserve-hold shape: armed for the line (no relation), named round1(L).

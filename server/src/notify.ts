@@ -787,8 +787,8 @@ export function buildNightChargeMorningSummary(o: {
     const early = line != null && line.offReason != null && line.offReason !== 'windowEnd';
     // v1.200.0 (review 2) — the panel's own stop ended the charge when it is the latest thing that switched Charge
     // Now off: after the last re-ON, and before any early OFF of ours. The re-ONs after it are named, and those a
-    // readback check found not applied. (review 3) A last re-ON that did not take effect (or never reached the panel)
-    // resumed nothing: the panel's stop still ended the charge. (review 4) Every re-ON at or after the stop counts, not
+    // readback check found not applied (as that check read them: Fix8 review 2). (review 3) A last re-ON that did not take
+    // effect (or never reached the panel) resumed nothing: the panel's stop still ended the charge. (review 4) Every re-ON at or after the stop counts, not
     // the last alone: one that took effect (reOnAppliedAtMs, the latest such) resumed the charge, whatever a later one did.
     // (review 5) So does a slot of ours seen ON again after it that no ON write of ours explains (onSeenAtMs: a re-ON
     // applied late, Charge Now switched on in the app).
@@ -818,8 +818,12 @@ export function buildNightChargeMorningSummary(o: {
     const readOffText = readOff ? `; Charge Now read off${offSlots.length > 0 ? ` on slot(s) ${offSlots.join(', ')}` : ''} before the window close` : '';
     // (review 3) "after the panel's own stop" only when that stop is on record: a re-ON also follows a slot switched off
     // in the app, or a stop the readback never caught with every slot off.
+    // (Fix8 review 2) The re-ONs counted not applied are what their readback checks READ (lineReOnCheckedStamp: a slot of ours
+    // still OFF under the panel's ceiling, or every one OFF), never "did not take effect": a slot read ON after a check (a re-ON
+    // applied late, or Charge Now switched on in the app — the code cannot tell them apart; onSeenAtMs keeps only the latest) may
+    // be that re-ON taking effect, and the count never moves after its check. True in every outcome.
     const reOnText = reOns > 0
-      ? `${readOff ? ' and was' : '; Charge Now was'} switched back on ${reOns} time(s)${panelAt != null ? " after the panel's own stop" : ''}${reOnsNotApplied > 0 ? ` (${reOnsNotApplied} of them did not take effect)` : ''}`
+      ? `${readOff ? ' and was' : '; Charge Now was'} switched back on ${reOns} time(s)${panelAt != null ? " after the panel's own stop" : ''}${reOnsNotApplied > 0 ? ` (slot(s) still off at the readback check after ${reOnsNotApplied} of them)` : ''}`
       : '';
     night = fc.kind === 'ran'
       ? (line != null
@@ -973,7 +977,9 @@ export function buildNightChargeApplyFailure(o: {
   return {
     severity: 'warning',
     dedupId: 'night_charge_apply_failure',
-    title: 'Night-charge: write did not take effect',
+    // (Fix8 review 2) The title too: on a line night the ladder still verifies a late reading of the target, so "has not taken
+    // effect"; a night with no line keeps v1.199.1's title.
+    title: line == null ? 'Night-charge: write did not take effect' : 'Night-charge: the reserve write has not taken effect',
     body:
       `The supervised reserve write for ${o.day ?? '—'} was accepted by the EcoFlow cloud but the Smart Home Panel 2 `
       + `still reads ${o.currentReservePct ?? 'unknown'}% (target ${o.targetPct ?? '—'}%) after ${o.applyRetries} re-issues. `
@@ -1058,7 +1064,8 @@ export function buildLineForceChargeDeclinedStart(o: {
   return {
     severity: 'warning',
     dedupId: 'night_charge_line_force_charge_declined',
-    title: 'Night-charge: the force-charge for the outage line cannot start',
+    // (Fix8 review 2) "yet", as the body and the log say it: decideForceCharge decides every tick, and starts once the cause clears.
+    title: 'Night-charge: the force-charge for the outage line cannot start yet',
     // (Fix8) In words true in every outcome: the pool may already read above the line, or a person's Charge Now may be lifting it
     // (a declined cause) — never "is expected to close under the line", never "near the 50% reserve"; a line stated at 50.00 (the
     // reserve holds it) is not said to close under it. (Fix8 review 1) Nor "only the 50% reserve holds it": with the grid absent (a

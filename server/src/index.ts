@@ -6477,7 +6477,12 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     // read (onFailed needs one); each Core's settings are its last reported DPU projection.
     const slotCores = forceChargeSlotCores(sources, store.get().devices);
     const failedSlots = forceChargeFailedSlotsText(action.slots, state.forceChargeSlots, slotCores);
-    app.log.warn(`night-charge: force-charge ON NEVER TOOK EFFECT for ${state.day} — slot(s) ${failedSlots.text} still read FORCE_CHARGE_OFF after ${state.forceChargeOnRetries} re-issue(s)${action.noRetry ? ` (none sent: under ${Math.round(FORCE_CHARGE_ON_RETRY_CUTOFF_MS / 60_000)} min of the window left, so the window-end OFF is never held behind one)` : ''}, and their Cores do not read at the panel's ceiling. Tonight's buy above the ${RESERVE_WRITE_MAX_PCT}% reserve is forfeited${all ? '' : ' on those slot(s)'}; the reserve charge is unaffected, and the OFF at the window close still runs.`);
+    // v1.200.0 (Fix8 review 2) — on a night whose record carries a line ask (keyed as its push is: forceChargeOnFailureNight), in
+    // words true in every outcome: the ON is still read after this line, and a late apply is verified (verifyForceChargeOn reads
+    // onVerified before its failure guard: "after the warning — it applied late"), so "has NOT taken effect", never "NEVER TOOK
+    // EFFECT" nor "forfeited". A night with no line ask keeps v1.199.1's line, word for word.
+    if (lineLogPct(state) != null) app.log.warn(`night-charge: force-charge ON for ${state.day}'s ${lineLogPct(state)}% outage line has NOT taken effect — slot(s) ${failedSlots.text} still read FORCE_CHARGE_OFF after ${state.forceChargeOnRetries} re-issue(s)${action.noRetry ? ` (none sent: under ${Math.round(FORCE_CHARGE_ON_RETRY_CUTOFF_MS / 60_000)} min of the window left, so the window-end OFF is never held behind one)` : ''}, and their Cores do not read at the panel's ceiling. Unless it applies late (a late apply is still verified), the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve${all ? '' : ' on those slot(s)'}; the reserve charge is unaffected, and the OFF at the window close still runs.`);
+    else app.log.warn(`night-charge: force-charge ON NEVER TOOK EFFECT for ${state.day} — slot(s) ${failedSlots.text} still read FORCE_CHARGE_OFF after ${state.forceChargeOnRetries} re-issue(s)${action.noRetry ? ` (none sent: under ${Math.round(FORCE_CHARGE_ON_RETRY_CUTOFF_MS / 60_000)} min of the window left, so the window-end OFF is never held behind one)` : ''}, and their Cores do not read at the panel's ceiling. Tonight's buy above the ${RESERVE_WRITE_MAX_PCT}% reserve is forfeited${all ? '' : ' on those slot(s)'}; the reserve charge is unaffected, and the OFF at the window close still runs.`);
     try {
       // v1.187.22 — toward where it stops (~80%), as every other surface names it, not the ceiling.
       await sendNotification(loadNotifyConfig(), buildNightForceChargeOnFailure({
@@ -6997,7 +7002,12 @@ async function runNightActuationTickInner(): Promise<void> {
     // v1.187.22 — the push states the armed day's EXPECTED figure, or none (never the worst case,
     // state.buyKwh); the log keeps both, labelled.
     const expectedKwh = armedExpectedBuyKwh(state.day);
-    app.log.error(`night-charge: write NEVER TOOK EFFECT — the cloud ACK'd backupReserveSoc ${state.targetPct}% but the device still reads ${currentReservePct ?? 'unknown'}% after ${state.applyRetries} retries. Tonight's charge (${buyFiguresLogText(expectedKwh, state.buyKwh)}) is forfeited; ledger corrected to actuated:0.`);
+    // v1.200.0 (Fix8 review 2) — on a night whose record carries a line ask (keyed as its push is: forceChargeLineNightPct), in
+    // words true in every outcome: the apply ladder still verifies a reading of the target after this (a late apply, or the
+    // reserve set in the app as the push asks), and the force-charge for the line then starts — "has NOT taken effect", never
+    // "NEVER TOOK EFFECT" nor "forfeited". A night with no line ask keeps v1.199.1's line, word for word.
+    if (lineLogPct(state) != null) app.log.error(`night-charge: write has NOT taken effect — the cloud ACK'd backupReserveSoc ${state.targetPct}% but the device still reads ${currentReservePct ?? 'unknown'}% after ${state.applyRetries} retries. Tonight's charge (${buyFiguresLogText(expectedKwh, state.buyKwh)}) has not taken effect: until the panel reads ${state.targetPct}% (a late apply, or the reserve set in the EcoFlow app, is still verified) the force-charge for the ${lineLogPct(state)}% outage line waits on it; ledger corrected to actuated:0.`);
+    else app.log.error(`night-charge: write NEVER TOOK EFFECT — the cloud ACK'd backupReserveSoc ${state.targetPct}% but the device still reads ${currentReservePct ?? 'unknown'}% after ${state.applyRetries} retries. Tonight's charge (${buyFiguresLogText(expectedKwh, state.buyKwh)}) is forfeited; ledger corrected to actuated:0.`);
     try {
       await sendNotification(loadNotifyConfig(), buildNightChargeApplyFailure({
         day: state.day, currentReservePct, targetPct: state.targetPct, applyRetries: state.applyRetries, expectedKwh,
