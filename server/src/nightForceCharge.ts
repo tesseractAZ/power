@@ -152,12 +152,14 @@
  *    (review 8) Rounds 5-7 tuned that hold's prediction, and each tuning opened the opposite window: a push saying "it does
  *    not try again tonight" and then the retry, or a hold for a tick that ran late onto the cutoff and then neither. By
  *    design now, every doubt goes to the push: it is held only while the retry's tick lands a full tick before the re-ON's
- *    cutoff, it is judged on the hand-back's own tick too (index.ts), and its words say the add-on may try once more. Neither
- *    then needs the tick after a hold to be lost (the in-flight lock held past it) or a whole tick late; a push may be
- *    followed by the retry. In the plant (stamps 2 s late): 429 'reOnRefused' pushes, 18 of them on the last tick before the
- *    cutoff (none there before), 25 then retried (PIN_REVIEW6). Swept at sub-second phases with drift, late reads and stamp
- *    lags (lineForceChargeAtRisk.test.ts PIN_HANDBACK_CADENCE): neither on none of 43,156 hand-backs, and on 5 of 86,400 with
- *    a tick lost, each the tick the last hold awaited.
+ *    cutoff, it is judged on the hand-back's own tick too (index.ts), and its words are true in every outcome — the add-on
+ *    may try once more, or, where no tick can bring the retry (its spacing ends at or past the cutoff), its next try would
+ *    come after the cutoff (reOnRetryPossible). Neither then needs the tick after a hold to be lost (the in-flight lock held
+ *    past it) or a whole tick late; a push may be followed by the retry. In the plant (stamps 2 s late): 429 'reOnRefused'
+ *    pushes, 18 of them on the last tick before the cutoff (none there before), 374 worded as no tick bringing the retry
+ *    (none then retried), 25 of the other 55 then retried (PIN_REVIEW6). Swept at sub-second phases with drift, late reads
+ *    and stamp lags (lineForceChargeAtRisk.test.ts PIN_HANDBACK_CADENCE): neither on none of 43,156 hand-backs, and on 5 of
+ *    86,400 with a tick lost, each the tick the last hold awaited.
  *    (A5) A NEAR-FULL LINE (⌈L⌉ 91-100: start target 95, ceiling 100) re-ONs, and is pushed, under 95 — under a line of
  *    96-100. Emulated (T18, the measured latch, 120 nights a cell): 3 / 19 / 41 near-full nights close under at baseline,
  *    with a 20 kWh EV predicted and with a 7 kW one all window (6 / 34 / 43 floored), and 30 of 30 at 70% of the rate;
@@ -1562,8 +1564,8 @@ export function lineNightObservations(
  *    coherent reading, no live panel ceiling the pool is under);
  *  - 'reOnRefused' — (review 5) the last re-ON came back rate-limited on every write (the add-on's own per-slot write
  *    cooldown; handed back: no slots on the record) and its retry — (review 6) the first tick FORCE_CHARGE_ON_VERIFY_AFTER_MS
- *    or more after it — (review 8) is not due a full tick before the re-ON's cutoff: it may still come before the cutoff,
- *    or not;
+ *    or more after it — (review 8) is not due a full tick before the re-ON's cutoff: a tick may still bring it before the
+ *    cutoff, or not (reOnRetryPossible), or none can;
  *  - 'costMode' — a COST-DOMINANT night: its cost force-charge has its own stop and no re-ON. */
 export type LineAtRiskCause = 'onNotRising' | 'reOnSpent' | 'reOnNotApplied' | 'reOnHeld' | 'reOnRefused' | 'costMode';
 
@@ -1589,6 +1591,11 @@ export interface LineAtRisk {
   /** (review 4) The panel's own stop on the record (forceChargeLinePanelOffAtMs), or null: the push says the re-ONs came
    *  "after the panel's own stop" only with it on record (a slot switched off in the app reads the same). */
   panelOffAtMs: number | null;
+  /** (review 8) On 'reOnRefused': whether a tick CAN still bring the handed-back re-ON's retry — its spacing (the stamp +
+   *  FORCE_CHARGE_ON_VERIFY_AFTER_MS) ends before the re-ON's cutoff. When it can, the push cannot know whether one will (the
+   *  hold's margin pushes for a retry due within a tick of the cutoff), so it says the add-on may try once more; when it
+   *  cannot, lineReOnDue refuses every later tick, and the push says so. false on every other cause. */
+  reOnRetryPossible: boolean;
 }
 
 /**
@@ -1645,22 +1652,27 @@ export function lineAtRiskPushDue(s: NightActuationState, nowMs: number, o: Forc
   // (review 6) The retry comes on a TICK: the first one FORCE_CHARGE_ON_VERIFY_AFTER_MS or more after the stamp — index.ts
   // stamps a hand-back after its writes, so on the cadence the 16th after the hand-back's. (review 7 counted to the earliest
   // tick, with a 1-s tolerance; rounds 5-7 each tuned this prediction and each opened the opposite window.)
-  // (review 8) BY DESIGN, every doubt goes to the push. retryAtMs is the retry's tick on THIS tick's cadence (at least the
-  // next). The tick it comes on reads up to a tick sooner (a tick before it, running late, reaches the stamp + 15 min) or a
-  // tick later plus that tick's read lateness (the awaited one, read less late than this one, falls just short). So the push
-  // is held only while retryAtMs lands a FULL FORCE_CHARGE_TICK_MS before the re-ON's cutoff: every hold then leaves two ticks
-  // of its cadence before the cutoff, and the next tick — which judges again — reads before the cutoff unless it is lost
-  // (the in-flight lock held past it) or reads a whole tick late. Only then is there neither the retry nor the push. The
-  // push is once a night, so one sent while the retry's tick falls within a tick of the cutoff may still be followed by the
-  // retry: its words say the add-on may try once more ('reOnRefused', notify.buildLineForceChargeAtRisk). index.ts also
-  // judges the push on the hand-back's own tick, so one on the last tick before the cutoff is pushed there.
+  // (review 8) BY DESIGN, every doubt goes to the push. retryAtMs is the retry's tick on THIS tick's cadence: the first
+  // whole number of FORCE_CHARGE_TICK_MS from this tick's nowMs at or past the stamp + 15 min (at least the next tick: the
+  // spacing has not run). The tick that brings it reads within a tick of that, either way: as early as retryAtMs − one tick
+  // (a tick before it, running and read late, reaches the stamp + 15 min; never before the stamp + 15 min itself), as late as
+  // retryAtMs + one tick + that tick's drift and read lateness (the awaited tick, read less late than this one, falls just
+  // short). So the push is held only while retryAtMs lands a FULL FORCE_CHARGE_TICK_MS before the re-ON's cutoff: every hold
+  // then leaves two ticks of its cadence before the cutoff, and the next tick — which judges again — reads before the cutoff
+  // unless it is lost (the in-flight lock held past it) or reads a whole tick late. Only then is there neither the retry nor
+  // the push. The push is once a night, so one sent while the retry's tick falls within a tick of the cutoff may still be
+  // followed by the retry: its words say the add-on may try once more (reOnRetryPossible), and where no tick can bring it
+  // (the stamp + 15 min at or past the cutoff) that it does not. index.ts also judges the push on the hand-back's own tick,
+  // so one on the last tick before the cutoff is pushed there. The count is anchored on the force step's own nowMs, not the
+  // tick's start: with a tick of margin and the hold judged again on every tick, that read's lateness decides no outcome.
   const reOnAt = s.forceChargeLineReOnAtMs;
+  const reOnCutoffMs = closeAtMs - FORCE_CHARGE_ON_RETRY_CUTOFF_MS;
   const handedBack = reOnAt != null && (s.forceChargeLineReOnSlots == null || s.forceChargeLineReOnSlots.length === 0)
     && s.forceChargeLineReOns < FORCE_CHARGE_LINE_REON_MAX && nowMs - reOnAt < FORCE_CHARGE_ON_VERIFY_AFTER_MS;
   if (handedBack) {
-    const ticks = Math.max(1, Math.ceil((reOnAt! + FORCE_CHARGE_ON_VERIFY_AFTER_MS - nowMs) / FORCE_CHARGE_TICK_MS));
+    const ticks = Math.ceil((reOnAt! + FORCE_CHARGE_ON_VERIFY_AFTER_MS - nowMs) / FORCE_CHARGE_TICK_MS);
     const retryAtMs = nowMs + ticks * FORCE_CHARGE_TICK_MS;
-    if (retryAtMs + FORCE_CHARGE_TICK_MS < closeAtMs - FORCE_CHARGE_ON_RETRY_CUTOFF_MS) return null;
+    if (retryAtMs + FORCE_CHARGE_TICK_MS < reOnCutoffMs) return null;
   }
   // (review 3) The trend only on readings after the last ON of ours had its readback grace (lineTrendReference): no
   // push while an ON (or re-ON) may yet take effect, nor against the fall that called for it.
@@ -1689,6 +1701,7 @@ export function lineAtRiskPushDue(s: NightActuationState, nowMs: number, o: Forc
     cause, offSlots, onSlots, poolPct: o.poolSocPct, refPct: ref.pct, refAtMs: ref.atMs, thresholdPct, linePct, closeAtMs,
     reOnNotAppliedSlots: notApplied,
     panelOffAtMs: s.forceChargeLinePanelOffAtMs ?? null,
+    reOnRetryPossible: cause === 'reOnRefused' && reOnAt! + FORCE_CHARGE_ON_VERIFY_AFTER_MS < reOnCutoffMs,
   };
 }
 
