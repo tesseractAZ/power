@@ -82,6 +82,8 @@
  * the write block refuses too (F8r1-i); the cost-dominant margin from the numbers as named (F8r1-ii); the declined start and
  * the ON failure with no floor the islanded pool drains through (F8r1-iii, F8r1-iv(a)); "has not taken effect" wherever a late
  * apply is still verified (F8r1-iv); the shape logged once a night on the record (F8r1-v; W1-xxi re-anchored there).
+ * (Fix8 review 2) …and in every line push's title ("the reserve write has not taken effect", "cannot start yet": F8r2-i), in
+ * the line-night ON-failure and apply-failure log lines (F8r2-ii), and the morning's re-ON count as the checks read it (F8r2-iii).
  *
  *   node scripts/mutate-line-force-charge.mjs [--only <id prefix>]
  *
@@ -2352,6 +2354,70 @@ const MUTANTS = [
     find: '    forceChargeLineShapeLoggedAtMs: num(o.forceChargeLineShapeLoggedAtMs),',
     to: '    forceChargeLineShapeLoggedAtMs: null, /* MUTANT */',
     why: 'A restart logs "Logged once a night." a second time (the round-7 reviewer\'s P1).',
+  },
+  {
+    id: 'F8r2-i(a). ★★ the line apply failure\'s title says the write did not take effect (the defect)',
+    file: NTF, tests: [T_RISK, T_LINE],
+    find: "    title: line == null ? 'Night-charge: write did not take effect' : 'Night-charge: the reserve write has not taken effect',",
+    to: "    title: 'Night-charge: write did not take effect', /* MUTANT */",
+    why: 'The ladder still verifies a late reading of the target (or the reserve set by hand, as the body asks): the title states an end it contradicts.',
+  },
+  {
+    id: 'F8r2-i(b). ★★ every night\'s apply failure takes the line title',
+    file: NTF, tests: [T_RISK],
+    find: "    title: line == null ? 'Night-charge: write did not take effect' : 'Night-charge: the reserve write has not taken effect',",
+    to: "    title: 'Night-charge: the reserve write has not taken effect', /* MUTANT */",
+    why: 'A night with no line ask loses v1.199.1\'s title, pinned word for word.',
+  },
+  {
+    id: 'F8r2-i(c). ★ the declined start\'s title says the force-charge cannot start, no "yet"',
+    file: NTF, tests: [T_LINE],
+    find: "    title: 'Night-charge: the force-charge for the outage line cannot start yet',",
+    to: "    title: 'Night-charge: the force-charge for the outage line cannot start', /* MUTANT */",
+    why: 'decideForceCharge decides every tick, so a held start may still come: the title reads as an end.',
+  },
+  {
+    id: 'F8r2-ii(a). ★★ index.ts: the line ON failure logged in the cost words (the defect)',
+    file: IDX, tests: [T_LINE],
+    find: "    if (lineLogPct(state) != null) app.log.warn(`night-charge: force-charge ON for ${state.day}'s ${lineLogPct(state)}% outage line has NOT taken effect",
+    // (no `if (false)`: the branch would narrow `action` to never and not typecheck)
+    to: "    if (lineLogPct({ forceChargeLineAskPct: null, forceChargeLinePct: null }) != null /* MUTANT */) app.log.warn(`night-charge: force-charge ON for ${state.day}'s ${lineLogPct(state)}% outage line has NOT taken effect",
+    why: '"NEVER TOOK EFFECT … is forfeited" on a line night, ten minutes before the slots read ON and the ON verifies "after the warning — it applied late".',
+  },
+  {
+    id: 'F8r2-ii(b). ★★ index.ts: the line ON failure\'s log says the buy is forfeited',
+    file: IDX, tests: [T_LINE],
+    find: "Unless it applies late (a late apply is still verified), the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve${all ? '' : ' on those slot(s)'}; the reserve charge",
+    to: "Tonight's buy above the ${RESERVE_WRITE_MAX_PCT}% reserve is forfeited${all ? '' : ' on those slot(s)'}; the reserve charge /* MUTANT */",
+    why: 'A final outcome a late apply contradicts.',
+  },
+  {
+    id: 'F8r2-ii(c). ★★ index.ts: the line apply failure logged in the cost words (the defect)',
+    file: IDX, tests: [T_LINE],
+    find: "    if (lineLogPct(state) != null) app.log.error(`night-charge: write has NOT taken effect",
+    to: "    if (false /* MUTANT */) app.log.error(`night-charge: write has NOT taken effect",
+    why: '"Tonight\'s charge is forfeited" on a line night whose reserve, set by hand as the push asks, is then verified and the force-charge starts.',
+  },
+  {
+    id: 'F8r2-ii(d). ★★ index.ts: the line apply failure\'s log says the charge is forfeited',
+    file: IDX, tests: [T_LINE],
+    find: ") has not taken effect: until the panel reads ${state.targetPct}% (a late apply, or the reserve set in the EcoFlow app, is still verified) the force-charge",
+    to: ") is forfeited: until the panel reads ${state.targetPct}% (a late apply, or the reserve set in the EcoFlow app, is still verified) the force-charge /* MUTANT */",
+    why: 'The same, in the line branch\'s own words.',
+  },
+  {
+    id: 'F8r2-iii(a). ★★ the morning account says the re-ONs its checks found not applied did not take effect (the defect)',
+    file: NTF, tests: [T_RISK, T_LINE],
+    find: "` (slot(s) still off at the readback check after ${reOnsNotApplied} of them)`",
+    to: "` (${reOnsNotApplied} of them did not take effect)` /* MUTANT */",
+    why: 'A re-ON applied a minute after its check (seen ON: the account says it ran to the close) is told it did not take effect.',
+  },
+  {
+    id: 'F8r2-iii(b). ★ the morning account counts every re-ON as checked off',
+    file: NTF, tests: [T_RISK],
+    find: "` (slot(s) still off at the readback check after ${reOnsNotApplied} of them)`",
+    to: "` (slot(s) still off at the readback check after ${reOns} of them)` /* MUTANT */",
+    why: 'Two re-ONs, one that took: "after 2 of them".',
   },
   /* ── R: the ledger ── */
   {
