@@ -712,16 +712,17 @@ export function forceChargeStartClosed(
     | 'nextOnPeakStartMs' | 'forceChargeCeilingPct' | 'forceChargeLineAskPct'>,
   nowMs: number, gates: ForceChargeGates,
 ): ForceChargeStartClosed | null {
-  if (s.forceChargeOnAtMs != null) return 'started';
-  if (s.cancelled) return 'cancelled';
-  if (s.revertedAtMs != null) return 'reverted';
-  if (s.foreignSettledAtMs != null) return 'foreign';
-  if (s.windowStartMs == null || s.windowEndMs == null) return 'noWindow';
-  const endMs = writeWindowEndMs(s)!;
-  if (nowMs >= endMs) return 'over';
-  if (nowMs >= endMs - FORCE_CHARGE_MIN_RUN_MS) return 'late';
-  if (forceChargeModeOf(s, gates) == null) return 'gatedOff';
-  return null;
+  const stamped: ForceChargeStartClosed | null = s.forceChargeOnAtMs != null ? 'started'
+    : s.cancelled ? 'cancelled'
+      : s.revertedAtMs != null ? 'reverted'
+        : s.foreignSettledAtMs != null ? 'foreign'
+          : s.windowStartMs == null || s.windowEndMs == null ? 'noWindow'
+            : null;
+  if (stamped != null) return stamped;
+  const closeMs = writeWindowEndMs(s)!;
+  if (nowMs >= closeMs) return 'over';
+  if (nowMs >= closeMs - FORCE_CHARGE_MIN_RUN_MS) return 'late';
+  return forceChargeModeOf(s, gates) == null ? 'gatedOff' : null;
 }
 
 /** v1.200.0 (Fix9) — each closed start's reason, in words (lineStartClosedWords). */
