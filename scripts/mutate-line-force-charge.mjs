@@ -1135,7 +1135,8 @@ const MUTANTS = [
     id: 'W5-viii. ★★★ the reserve-apply failure on a line night says "No action needed" (finding 6)',
     file: NTF, tests: [T_RISK],
     find: '  const tail = line == null',
-    to: '  const tail = true /* MUTANT */',
+    // (Fix9) re-cut: a bare `true` makes the line arms unreachable, and TS narrows `closed` to never there.
+    to: '  const tail = (true as boolean) || line == null /* MUTANT */',
     why: 'A 55.55% line night whose reserve write never took is told no action is needed, its pool on a 30% floor.',
   },
   {
@@ -2400,7 +2401,8 @@ const MUTANTS = [
     id: 'F8r2-ii(c). ★★ index.ts: the line apply failure logged in the cost words (the defect)',
     file: IDX, tests: [T_LINE],
     find: "    if (lineLogPct(state) != null) app.log.error(`night-charge: write has NOT taken effect",
-    to: "    if (false /* MUTANT */) app.log.error(`night-charge: write has NOT taken effect",
+    // (Fix9) re-cut as F8r2-ii(a): `if (false)` narrows the keyed start (lineStartClosed) to never and does not typecheck.
+    to: "    if (lineLogPct({ forceChargeLineAskPct: null, forceChargeLinePct: null }) != null /* MUTANT */) app.log.error(`night-charge: write has NOT taken effect",
     why: '"Tonight\'s charge is forfeited" on a line night whose reserve, set by hand as the push asks, is then verified and the force-charge starts.',
   },
   {
