@@ -160,8 +160,10 @@
  *    pushes, 18 of them on the last tick before the cutoff (none there before), 374 worded as no tick bringing the retry
  *    (none then retried), 25 of the other 55 then retried (PIN_REVIEW6). Swept at sub-second phases with drift, late reads
  *    and stamp lags (lineForceChargeAtRisk.test.ts PIN_HANDBACK_CADENCE): neither on none of 43,156 hand-backs, and on 5 of
- *    86,400 with a tick lost, each the tick the last hold awaited; with a restart after a hold, on 248 of 25,920, each one
- *    whose first tick after the start reads at or past the cutoff (PIN_HANDBACK_RESTART, Fix7 review 1: a residual, stated).
+ *    86,400 with a tick lost, each the tick the last hold awaited; with a restart after a hold, on 248 of the 7,800
+ *    restarts that came after one (25,920 swept; 152 of 1,950 down 45 s), each one whose first tick after the start reads at
+ *    or past the cutoff (PIN_HANDBACK_RESTART, Fix7 review 1: a residual, stated; review 2: over the restarts after a hold —
+ *    a hand-back 15-17 min before the cutoff is pushed on its own tick, so a restart there comes after the push or retry).
  *    (A5) A NEAR-FULL LINE (⌈L⌉ 91-100: start target 95, ceiling 100) re-ONs, and is pushed, under 95 — under a line of
  *    96-100. Emulated (T18, the measured latch, 120 nights a cell): 3 / 19 / 41 near-full nights close under at baseline,
  *    with a 20 kWh EV predicted and with a 7 kW one all window (6 / 34 / 43 floored), and 30 of 30 at 70% of the rate;
@@ -1922,11 +1924,15 @@ export function decideForceCharge(s: NightActuationState, nowMs: number, o: Forc
     // v1.200.0 — LINE: "already there" is the panel ceiling (above it the panel would not import), so a
     // pool above the line but under the ceiling still gets its final segment ON; the start is timed to
     // the start target at the close less FORCE_CHARGE_MIN_RUN_MS; nothing stops it before the close.
+    // (Fix7 review 2) The whys (the add-on log, once a night) name the record's line round1(L), as every other surface does
+    // (forceChargeLineNightPct), never the ask ⌈L⌉; and never "stays on to the close" — the panel switches each slot off at
+    // its ceiling (the measured shape).
+    const linePct = round1(forceChargeLineNightPct(s) ?? mode.askPct);
     if (o.poolSocPct >= mode.panelCeilingPct) {
-      return { kind: 'none', why: `the pool already reads the ${mode.panelCeilingPct}% panel ceiling — above tonight's ${mode.askPct}% outage line` };
+      return { kind: 'none', why: `the pool already reads the ${mode.panelCeilingPct}% panel ceiling — above tonight's ${linePct}% outage line` };
     }
     if (nowMs < forceChargeLineStartAtMs(endMs, mode.startTargetPct, o.poolSocPct, o.fullKwh, o.chargeRateKw, o.evDisplacedKwh, slots.length)) {
-      return { kind: 'none', why: `just in time — holding off so the pool reaches ~${mode.startTargetPct}% ${Math.round(FORCE_CHARGE_MIN_RUN_MS / 60_000)} min before the window closes, then stays on to the close for the ${mode.askPct}% outage line` };
+      return { kind: 'none', why: `just in time — holding off so the pool reaches ~${mode.startTargetPct}% ${Math.round(FORCE_CHARGE_MIN_RUN_MS / 60_000)} min before the window closes, for the ${linePct}% outage line at the close` };
     }
     return { kind: 'on', slots };
   }
