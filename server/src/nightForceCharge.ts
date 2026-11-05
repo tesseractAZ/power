@@ -154,13 +154,19 @@
  *    design now, every doubt goes to the push: it is held only while the retry's tick lands a full tick before the re-ON's
  *    cutoff, it is judged on the hand-back's own tick too (index.ts), and its words are true in every outcome — the add-on
  *    may try once more, or, where no tick can bring the retry (its spacing ends at or past the cutoff), its next try would
- *    come after the cutoff (reOnRetryPossible). Neither then needs the tick after a hold not to run before the cutoff: lost
- *    (the in-flight lock held past it, or an add-on restart: index.ts runs no tick at boot, so the first comes a tick after
- *    the start) or a whole tick late; a push may be followed by the retry. In the plant (stamps 2 s late): 429 'reOnRefused'
- *    pushes, 18 of them on the last tick before the cutoff (none there before), 374 worded as no tick bringing the retry
- *    (none then retried), 25 of the other 55 then retried (PIN_REVIEW6). Swept at sub-second phases with drift, late reads
- *    and stamp lags (lineForceChargeAtRisk.test.ts PIN_HANDBACK_CADENCE): neither on none of 43,156 hand-backs, and on 5 of
- *    86,400 with a tick lost, each the tick the last hold awaited; with a restart after a hold, on 248 of the 7,800
+ *    come after the cutoff (reOnRetryPossible). Neither then needs the tick after a hold to bring neither before the cutoff,
+ *    the force-charge still on (an OFF ends both): lost (the in-flight lock held past it, a tick that throws, or an add-on
+ *    restart: index.ts runs no tick at boot, so the first comes a tick after the start), a whole tick late, without a fresh,
+ *    coherent panel reading (the panel missing from the device list, or stale: a lost tick for the hold, run for run), or —
+ *    the tick the retry is due — spent on the line ceiling lowering, after which (Fix8) the push is judged but the re-ON waits
+ *    a tick, as after a lost one. And while the add-on's writes are blocked (two panels, none pinned) every re-ON due is
+ *    refused before its stamp and the push is not judged on it: neither, while the block lasts (PIN_HANDBACK_AFTER: 6,071 of
+ *    86,400 hand-backs with the block from one of their first 18 ticks). A push may be followed by the retry. In the plant
+ *    (stamps 2 s late): 429 'reOnRefused' pushes, 18 of them on the last tick before the cutoff (none there before), 374
+ *    worded as no tick bringing the retry (none then retried), 25 of the other 55 then retried (PIN_REVIEW6). Swept at
+ *    sub-second phases with drift, late reads and stamp lags (lineForceChargeAtRisk.test.ts PIN_HANDBACK_CADENCE): neither on
+ *    none of 43,156 hand-backs, and on 5 of 86,400 with a tick lost, each the tick the last hold awaited (the same 5 with
+ *    that tick stale, or spent on the lowering: PIN_HANDBACK_AFTER); with a restart after a hold, on 248 of the 7,800
  *    restarts that came after one (25,920 swept; 152 of 1,950 down 45 s), each one whose first tick after the start reads at
  *    or past the cutoff (PIN_HANDBACK_RESTART, Fix7 review 1: a residual, stated; review 2: over the restarts after a hold —
  *    a hand-back 15-17 min before the cutoff is pushed on its own tick, so a restart there comes after the push or retry).
@@ -721,16 +727,45 @@ export function forceChargeLineArmNote(o: {
       : o.notHeld.kind === 'nearFull' ? ` Line NOT held: within ${2 * FORCE_CHARGE_LINE_HEADROOM_PCT} points of a full pool.`
         : ` Line NOT held: ${o.notHeld.closePct != null ? `~${round1(o.notHeld.closePct)}%` : 'under the line'} expected at the close.`;
   const from = o.expectedStartText != null ? `on from ~${o.expectedStartText}` : 'on just in time';
+  // (Fix8) The line beside the 50% reserve and a full pool (the tail) as lineBesidePct names it: never "the 50% outage line is
+  // above the 50% reserve"; a line stated at the reserve (asked a whole percent above it) unnumbered.
+  const line = lineAboveReserveWords(o.linePct, "tonight's ", ' outage line');
   if (o.ceilingStop === true) {
-    return `Force-charge: LINE — tonight's ${round1(o.linePct)}% outage line is above the ${RESERVE_WRITE_MAX_PCT}% reserve: `
+    return `Force-charge: LINE — ${line} is above the ${RESERVE_WRITE_MAX_PCT}% reserve: `
       + `${from} (timed to ${round1(o.startTargetPct)}% by ${o.timedByText}); expected to reach the panel's ${o.panelCeilingPct}% ceiling, where the panel `
       + `switches it off; switched back on under ${round1(o.startTargetPct)}% before the close (at most ${lineReOnTimesWords(FORCE_CHARGE_LINE_REON_MAX)}).${tail}`;
   }
-  return `Force-charge: LINE — tonight's ${round1(o.linePct)}% outage line is above the ${RESERVE_WRITE_MAX_PCT}% reserve: `
+  return `Force-charge: LINE — ${line} is above the ${RESERVE_WRITE_MAX_PCT}% reserve: `
     + `${from} (timed to ${round1(o.startTargetPct)}% by ${o.timedByText}) to the window close; panel ceiling ${o.panelCeilingPct}% as backstop.${tail}`;
 }
 
 function round1(n: number): number { return Math.round(n * 10) / 10; }
+
+/** v1.200.0 (Fix8) — PURE. The outage line's number in a text that orders it against whole-percent levels (the 50% reserve, the
+ *  panel's ceiling, a full pool): round1(L), as every surface names it, or to two decimals where one decimal would read as one of
+ *  those levels and the line is not that level — a 50.03% line beside the 50% reserve is "50.03%", never "50%"; a 99.96% line
+ *  beside a 100% ceiling "99.96%". A line exactly at a level reads as it. */
+export function lineBesidePct(linePct: number, ...levelsPct: number[]): number {
+  const r = round1(linePct);
+  return levelsPct.includes(r) && !levelsPct.includes(linePct) ? Math.round(linePct * 100) / 100 : r;
+}
+
+/** v1.200.0 (Fix8) — PURE. "<lead>N%<tail>" for a text saying the outage line is above the 50% reserve: N by lineBesidePct
+ *  beside the reserve and a full pool; a line stated AT the reserve — 50.00, its raw value a hair above it, asked at 51 (2026-11-25
+ *  on nameplate at 11 h) — unnumbered ("<lead><tail>"): its own number would read as the reserve it is said to be above. */
+export function lineAboveReserveWords(linePct: number, lead: string, tail: string): string {
+  const n = lineBesidePct(linePct, RESERVE_WRITE_MAX_PCT, 100);
+  return n > RESERVE_WRITE_MAX_PCT ? `${lead}${n}%${tail}` : [lead.trim(), tail.trim()].filter((w) => w !== '').join(' ');
+}
+
+/** v1.200.0 (Fix8) — PURE. The outage line the add-on's own log lines name on a night whose record carries a line ask (index.ts:
+ *  the ON, the re-ON, the ceiling lowering, the line at risk, the declined start): the record's line (forceChargeLineNightPct — the
+ *  line, or its ask where the line is unknown), round1 as every other surface names it, never the raw two-decimal record value.
+ *  null on a night with no line ask. */
+export function lineLogPct(s: Pick<NightActuationState, 'forceChargeLineAskPct' | 'forceChargeLinePct'>): number | null {
+  const l = forceChargeLineNightPct(s);
+  return l != null ? round1(l) : null;
+}
 
 /** True while a force-charge of ours is on, or its OFF has not yet verified. */
 export function forceChargeInFlight(s: NightActuationState): boolean {
@@ -1663,8 +1698,11 @@ export function lineAtRiskPushDue(s: NightActuationState, nowMs: number, o: Forc
   // retryAtMs + one tick + that tick's drift and read lateness (the awaited tick, read less late than this one, falls just
   // short). So the push is held only while retryAtMs lands a FULL FORCE_CHARGE_TICK_MS before the re-ON's cutoff: every hold
   // then leaves two ticks of its cadence before the cutoff, and the next tick — which judges again — reads before the cutoff
-  // unless it is lost (the in-flight lock held past it, or an add-on restart: index.ts runs no tick at boot, so the first
-  // comes a tick after the start) or reads a whole tick late. Only then is there neither the retry nor the push. The push
+  // unless it is lost (the in-flight lock held past it, a throw, or an add-on restart: index.ts runs no tick at boot, so the
+  // first comes a tick after the start), reads a whole tick late, or has no fresh, coherent reading (no slots, no pool: it
+  // cannot be due, and the retry is not); (Fix8) a tick spent on the line ceiling lowering is judged after it, but the retry
+  // due there waits a tick. Only then, the force-charge still on, is there neither the retry nor the push — and while the
+  // add-on's writes are blocked (two panels, none pinned), where every re-ON due is refused unjudged (index.ts). The push
   // is once a night, so one sent while the retry's tick falls within a tick of the cutoff may still be followed by the
   // retry: its words say the add-on may try once more (reOnRetryPossible), and where no tick can bring it
   // (the stamp + 15 min at or past the cutoff) that it does not. index.ts also judges the push on the hand-back's own tick,
@@ -1929,7 +1967,14 @@ export function decideForceCharge(s: NightActuationState, nowMs: number, o: Forc
     // its ceiling (the measured shape).
     const linePct = round1(forceChargeLineNightPct(s) ?? mode.askPct);
     if (o.poolSocPct >= mode.panelCeilingPct) {
-      return { kind: 'none', why: `the pool already reads the ${mode.panelCeilingPct}% panel ceiling — above tonight's ${linePct}% outage line` };
+      // (Fix8) The ceiling against the line by the line's actual order — above it, at it, or the line above a full pool (A5 arms a
+      // line above a full pool: its ask is capped at 100, the line is not; a line-mode ceiling is at least min(100, ⌈L⌉ + 10), so
+      // only a 100% one is ever under the line) — the line named so that the order shows (lineBesidePct).
+      const l = forceChargeLineNightPct(s) ?? mode.askPct;
+      const c = mode.panelCeilingPct;
+      const n = lineBesidePct(l, c);
+      return { kind: 'none', why: `the pool already reads the ${c}% panel ceiling — ${l < c ? `above tonight's ${n}% outage line`
+        : l === c ? `at tonight's ${n}% outage line` : `tonight's ${n}% outage line is above a full pool`}` };
     }
     if (nowMs < forceChargeLineStartAtMs(endMs, mode.startTargetPct, o.poolSocPct, o.fullKwh, o.chargeRateKw, o.evDisplacedKwh, slots.length)) {
       return { kind: 'none', why: `just in time — holding off so the pool reaches ~${mode.startTargetPct}% ${Math.round(FORCE_CHARGE_MIN_RUN_MS / 60_000)} min before the window closes, for the ${linePct}% outage line at the close` };
