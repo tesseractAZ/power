@@ -787,9 +787,10 @@ export function buildNightChargeMorningSummary(o: {
     const early = line != null && line.offReason != null && line.offReason !== 'windowEnd';
     // v1.200.0 (review 2) — the panel's own stop ended the charge when it is the latest thing that switched Charge
     // Now off: after the last re-ON, and before any early OFF of ours. The re-ONs after it are named, and those a
-    // readback check found not applied (as that check read them: Fix8 review 2). (review 3) A last re-ON that did not take
-    // effect (or never reached the panel) resumed nothing: the panel's stop still ended the charge. (review 4) Every re-ON at or after the stop counts, not
-    // the last alone: one that took effect (reOnAppliedAtMs, the latest such) resumed the charge, whatever a later one did.
+    // readback check found not applied (as that check read them: Fix8 review 2). (review 3) A last re-ON that did not
+    // take effect (or never reached the panel) resumed nothing: the panel's stop still ended the charge. (review 4) Every
+    // re-ON at or after the stop counts, not the last alone: one that took effect (reOnAppliedAtMs, the latest such)
+    // resumed the charge, whatever a later one did.
     // (review 5) So does a slot of ours seen ON again after it that no ON write of ours explains (onSeenAtMs: a re-ON
     // applied late, Charge Now switched on in the app).
     const panelAt = line?.panelOffAtMs != null && Number.isFinite(line.panelOffAtMs) ? line.panelOffAtMs : null;
@@ -1064,7 +1065,7 @@ export function buildLineForceChargeDeclinedStart(o: {
   return {
     severity: 'warning',
     dedupId: 'night_charge_line_force_charge_declined',
-    // (Fix8 review 2) "yet", as the body and the log say it: decideForceCharge decides every tick, and starts once the cause clears.
+    // (Fix8 review 2) "yet", as the body and the log say it: decideForceCharge decides every tick, so a held start may still come.
     title: 'Night-charge: the force-charge for the outage line cannot start yet',
     // (Fix8) In words true in every outcome: the pool may already read above the line, or a person's Charge Now may be lifting it
     // (a declined cause) — never "is expected to close under the line", never "near the 50% reserve"; a line stated at 50.00 (the

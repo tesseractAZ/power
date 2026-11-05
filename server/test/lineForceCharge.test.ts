@@ -1090,7 +1090,7 @@ test('★★ T9 the declined start (L3; review): every all-night blocker is one;
   // (Fix8 review 1) …and with the grid absent (a declined cause) the pool drains through the reserve: never "only the 50% reserve
   // holds it" — the add-on adds nothing above it, true islanded, under a person's Charge Now, and on the grid.
   assert.equal(declined.body, "Night-charge: the force-charge for tonight's 55.6% outage line cannot start yet — grid presence is unknown. If it has not started by ~04:24, the pool may close under the line; if it never starts, the add-on adds nothing above the 50% reserve.");
-  // (Fix8 review 2) The title too: decideForceCharge decides every tick, and the start comes once the cause clears — "cannot start yet".
+  // (Fix8 review 2) The title too: decideForceCharge decides every tick, so a held start may still come — "cannot start yet".
   assert.equal(declined.title, 'Night-charge: the force-charge for the outage line cannot start yet');
   // Which declines are blockers: the non-pool ones — and (review 17) no ceiling readback, no slot connected.
   const cls = nfc.forceChargeBlockerClass;
@@ -2106,8 +2106,8 @@ const lineRelationErrors = (text: string, o: { line: number; named: number; noNu
   // never said not to happen, nor not to have taken effect for good; and the reserve is no floor while islanded (the pool drains
   // through it in an outage, the case the line is for): never "only the 50% reserve holds".
   each(/will not happen|did not take effect/, () => 'a final outcome a late apply contradicts');
-  // (Fix8 review 2) …in a title too, and a start the code still makes (decideForceCharge decides every tick until the cutoff) is
-  // never said not to come: "cannot start yet".
+  // (Fix8 review 2) …in a title too, and a start the code may still make (decideForceCharge decides every tick) is never said
+  // not to come: "cannot start yet".
   each(/cannot start(?! yet)/, () => 'a start the code still makes said not to come');
   each(/only the 50% reserve holds|only the reserve holds/, () => 'a floor that holds nothing islanded');
   return e;
