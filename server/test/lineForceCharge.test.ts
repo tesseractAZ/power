@@ -2236,16 +2236,24 @@ test('★★★ T24 (Fix8) the line texts at their edges: every text on the line
 /** (Fix8 review 2) v1.199.1's failure log lines, word for word: a night with no line ask keeps them. */
 const COST_ON_FAILED_LOG = "app.log.warn(`night-charge: force-charge ON NEVER TOOK EFFECT for ${state.day} — slot(s) ${failedSlots.text} still read FORCE_CHARGE_OFF after ${state.forceChargeOnRetries} re-issue(s)${action.noRetry ? ` (none sent: under ${Math.round(FORCE_CHARGE_ON_RETRY_CUTOFF_MS / 60_000)} min of the window left, so the window-end OFF is never held behind one)` : ''}, and their Cores do not read at the panel's ceiling. Tonight's buy above the ${RESERVE_WRITE_MAX_PCT}% reserve is forfeited${all ? '' : ' on those slot(s)'}; the reserve charge is unaffected, and the OFF at the window close still runs.`);";
 const COST_APPLY_FAILED_LOG = "app.log.error(`night-charge: write NEVER TOOK EFFECT — the cloud ACK'd backupReserveSoc ${state.targetPct}% but the device still reads ${currentReservePct ?? 'unknown'}% after ${state.applyRetries} retries. Tonight's charge (${buyFiguresLogText(expectedKwh, state.buyKwh)}) is forfeited; ledger corrected to actuated:0.`);";
+const COST_APPLY_UNLANDED_LOG = "app.log.info(`night-charge: the ${state.day} write never took effect — after its re-issues the panel still reads the ${state.attemptBaselinePct}% it read before the write; its restore is a no-op and nothing of ours holds the reserve.`);";
+const COST_ATTEMPT_UNLANDED_LOG = "app.log.info(`night-charge: the ${state.day} write attempt never landed — after its apply window the panel still reads the ${state.attemptBaselinePct}% it read before the attempt; nothing of ours holds the reserve.`);";
 
-test('★★★ T24 (Fix8 review 2) the line-night failure LOG lines say only what holds in every outcome: on a night whose record carries a line ask the ON failure and the reserve-apply failure "have NOT taken effect" (a late apply is still verified) — never "NEVER TOOK EFFECT" nor "is forfeited"; a night with no line ask logs v1.199.1\'s lines word for word', () => {
+test('★★★ T24 (Fix8 review 2) the line-night failure LOG lines say only what holds in every outcome: on a night whose record carries a line ask the ON failure, the reserve-apply failure and the two proofs that the reserve write never landed "have NOT taken effect" (a late apply is still verified or adopted) — never "NEVER TOOK EFFECT", "is forfeited" nor "never landed"; a night with no line ask logs v1.199.1\'s lines word for word', () => {
   const block = (kind: string): string => {
     const start = INDEX.indexOf(`if (action.kind === '${kind}') {`);
     assert.ok(start > 0, kind);
     return INDEX.slice(start, INDEX.indexOf('\n    return;\n  }', start));
   };
+  // The two "never landed" proofs (the tick after applyFailed, or an attempt past its apply window, with the baseline read).
+  const proof = (fn: string): string => {
+    const start = INDEX.indexOf(`if (${fn}(state, currentReservePct, nowMs)) {`);
+    assert.ok(start > 0, fn);
+    return INDEX.slice(start, INDEX.indexOf('    state = nightActuationMem;', start));
+  };
   // Each branch keyed on the record's line ask (lineLogPct: forceChargeLineNightPct, round1), as its push is (forceChargeOnFailureNight,
   // linePct: forceChargeLineNightPct): line mode and a cost-dominant night alike.
-  const branch = (b: string, log: 'warn' | 'error'): { line: string; cost: string } => {
+  const branch = (b: string, log: 'warn' | 'error' | 'info'): { line: string; cost: string } => {
     const at = b.indexOf(`if (lineLogPct(state) != null) app.log.${log}(\`night-charge: `);
     const els = b.indexOf(`else app.log.${log}(`, at);
     assert.ok(at > 0 && els > at, `${log}: a line branch before the cost line`);
@@ -2262,6 +2270,25 @@ test('★★★ T24 (Fix8 review 2) the line-night failure LOG lines say only wh
   assert.doesNotMatch(apply.line, final);
   assert.ok(apply.line.includes("write has NOT taken effect — the cloud ACK'd backupReserveSoc ${state.targetPct}% but the device still reads ${currentReservePct ?? 'unknown'}% after ${state.applyRetries} retries."), apply.line);
   assert.ok(apply.line.includes("Tonight's charge (${buyFiguresLogText(expectedKwh, state.buyKwh)}) has not taken effect: until the panel reads ${state.targetPct}% (a late apply, or the reserve set in the EcoFlow app, is still verified) the force-charge for the ${lineLogPct(state)}% outage line waits on it; ledger corrected to actuated:0."), apply.line);
+  // The class: the two proofs that a reserve write never landed (each is logged on a tick of the window, and a later reading of the
+  // target still verifies the write — applyVerified — or adopts the attempt, as applyProvedUnlanded / attemptAdoptable say):
+  // "has NOT taken effect" / "has NOT landed", and the force-charge for the line waits on that reading.
+  const unlanded = branch(proof('applyProvedUnlanded'), 'info');
+  assert.equal(unlanded.cost, COST_APPLY_UNLANDED_LOG);
+  assert.doesNotMatch(unlanded.line, /never took effect|never landed|NEVER/);
+  assert.ok(unlanded.line.includes("the ${state.day} write has NOT taken effect — after its re-issues the panel still reads the ${state.attemptBaselinePct}% it read before the write; until a reading of the target verifies it (a late apply, or the reserve set in the EcoFlow app), its restore is a no-op, nothing of ours holds the reserve, and the force-charge for the ${lineLogPct(state)}% outage line waits on it."), unlanded.line);
+  const attempt = branch(proof('attemptProvedUnlanded'), 'info');
+  assert.equal(attempt.cost, COST_ATTEMPT_UNLANDED_LOG);
+  assert.doesNotMatch(attempt.line, /never took effect|never landed|NEVER/);
+  assert.ok(attempt.line.includes("the ${state.day} write attempt has NOT landed — after its apply window the panel still reads the ${state.attemptBaselinePct}% it read before the attempt: nothing of ours holds the reserve, and the force-charge for the ${lineLogPct(state)}% outage line waits on a reading of the target."), attempt.line);
+  const unlandedNight = night({ applyVerifiedAtMs: null, applyEscalated: true, applyRetries: 2, applyLastAttemptMs: WIN_START + 20 * M });
+  assert.equal(act.applyProvedUnlanded(unlandedNight, 30, WIN_START + 40 * M), true, 'proved on a tick of the window');
+  const tick = (pct: number) => ({ mode: 'supervised', writeReady: true, currentReservePct: pct, socCoherent: true, vitalsRed: false, gridPresent: true }) as act.ActuationTickOpts;
+  assert.equal(act.decideActuation(unlandedNight, WIN_START + 41 * M, tick(50)).kind, 'applyVerified', 'a later reading of the target verifies it');
+  const attemptNight = night({ appliedAtMs: null, applyVerifiedAtMs: null, applyAttemptedAtMs: WIN_START, attemptBaselinePct: 30 });
+  assert.equal(act.applyProvedUnlanded(attemptNight, 30, WIN_START + 40 * M), false);
+  assert.equal(act.attemptProvedUnlanded(attemptNight, 30, WIN_START + 40 * M), true, 'proved on a tick of the window');
+  assert.equal(act.attemptAdoptable(attemptNight, 50), true, 'a later reading of the target adopts it');
   // Why: both are still read after the failure — the ON's verify reads onVerified before its failure guard (index.ts logs "after the
   // warning — it applied late"), and the apply ladder verifies a reading of the target after applyFailed.
   assert.ok(INDEX.includes("${state.forceChargeOnFailedAtMs != null ? ' (after the warning — it applied late)' : ''}"));
