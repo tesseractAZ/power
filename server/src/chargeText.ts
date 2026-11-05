@@ -198,7 +198,8 @@ export interface MiddayCostText {
   /** The window closes before the level is reached (chargeIsWindowBound). */
   toward: boolean;
   /** Charge Now rides the leg: switched on just in time to reach `levelPct`, or (v1.200.0, A5) for the outage line the
-   *  leg's force-charge is armed for (`lineAskPct`), whatever the stated level. */
+   *  leg's force-charge is armed for (`lineAskPct`), whatever the stated level. (A5 final 2) A leg expected to draw nothing
+   *  (the reserve-hold shape) names it by `lineAskPct` alone: armed for the line, not expected to start. */
   forceCharge: boolean;
   /** The plan calls for a charge (its worst case reaches the minimum buy). */
   charges: boolean;
@@ -359,8 +360,14 @@ export function buildMiddayPlanMessage(i: MiddayAnnounceInput): NotifyMessage {
   const restore = `${phxClock(i.costRestoreAtMs)}${i.onPeak != null && i.onPeak.endMs != null ? `, before the ${onPeakSpanText(i.onPeak.startMs, i.onPeak.endMs)} on-peak` : ''}`;
   const cancel = ` Cancel from the charge card before ${phxClock(i.costApplyAtMs)} ${dayText(dayWord(i.costApplyAtMs, now))}.`;
   if (isHeld(c.expectedKwh)) {
+    // v1.200.0 (A5 final 2) — a leg the line force-charge is armed on (lineAskPct) is armed here too (armFromPlan's
+    // lineRides, whatever the expected draw), and the actuator switches Charge Now on if the sun falls short: named, armed and
+    // not expected to start, as the overnight held line clause says it (notify.buildNightChargeMessage). No ask: as before.
+    const armedLine = c.lineAskPct != null
+      ? `, and Charge Now is armed for the ${Math.round(c.lineAskPct * 10) / 10}% outage line (not expected to start); both are restored at ${restore}`
+      : `; it is restored at ${restore}`;
     const tail = supervised
-      ? ` SUPERVISED: at ${phxClock(i.costApplyAtMs)} the backup reserve is held at ${reserve}; it is restored at ${restore}.${cancel}`
+      ? ` SUPERVISED: at ${phxClock(i.costApplyAtMs)} the backup reserve is held at ${reserve}${armedLine}.${cancel}`
       : ' Advisory only — the add-on will NOT charge.';
     return {
       ...base,
