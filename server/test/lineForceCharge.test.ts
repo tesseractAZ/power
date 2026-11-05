@@ -1090,6 +1090,8 @@ test('★★ T9 the declined start (L3; review): every all-night blocker is one;
   // (Fix8 review 1) …and with the grid absent (a declined cause) the pool drains through the reserve: never "only the 50% reserve
   // holds it" — the add-on adds nothing above it, true islanded, under a person's Charge Now, and on the grid.
   assert.equal(declined.body, "Night-charge: the force-charge for tonight's 55.6% outage line cannot start yet — grid presence is unknown. If it has not started by ~04:24, the pool may close under the line; if it never starts, the add-on adds nothing above the 50% reserve.");
+  // (Fix8 review 2) The title too: decideForceCharge decides every tick, and the start comes once the cause clears — "cannot start yet".
+  assert.equal(declined.title, 'Night-charge: the force-charge for the outage line cannot start yet');
   // Which declines are blockers: the non-pool ones — and (review 17) no ceiling readback, no slot connected.
   const cls = nfc.forceChargeBlockerClass;
   for (const s of [night(), night({ applyVerifiedAtMs: WIN_START + M })]) {
@@ -2104,6 +2106,9 @@ const lineRelationErrors = (text: string, o: { line: number; named: number; noNu
   // never said not to happen, nor not to have taken effect for good; and the reserve is no floor while islanded (the pool drains
   // through it in an outage, the case the line is for): never "only the 50% reserve holds".
   each(/will not happen|did not take effect/, () => 'a final outcome a late apply contradicts');
+  // (Fix8 review 2) …in a title too, and a start the code still makes (decideForceCharge decides every tick until the cutoff) is
+  // never said not to come: "cannot start yet".
+  each(/cannot start(?! yet)/, () => 'a start the code still makes said not to come');
   each(/only the 50% reserve holds|only the reserve holds/, () => 'a floor that holds nothing islanded');
   return e;
 };
@@ -2166,13 +2171,16 @@ test('★★★ T24 (Fix8) the line texts at their edges: every text on the line
     add(buildNightChargeMessage(adv as never, 'charge', null).body, { line, named: beside(line, 50, 100), noNumber: atReserve, where: where('advisory push') });
     add((cardText as unknown as { outageLineRow: (p: unknown) => string | null }).outageLineRow(adv) ?? '', { line, named: beside(line, 50, 100), noNumber: atReserve, where: where('advisory card') });
     // 6. The ON failure (every slot, some) and 7. the declined start: the line beside the 50% reserve; no definite close.
+    // (Fix8 review 2) Each push's TITLE with its body: a title states the outcome too.
     for (const slots of [[1, 2, 3], [2]]) {
-      const b = buildNightForceChargeOnFailure({ day: '2026-09-16', slots, ourSlots: [1, 2, 3], retries: 1, noRetry: false, ceilingPct: null, lineLinePct: line } as never).body;
-      add(b, { line, named: beside(line, 50), where: where(`ON failure ${slots.length}`) });
+      const f = buildNightForceChargeOnFailure({ day: '2026-09-16', slots, ourSlots: [1, 2, 3], retries: 1, noRetry: false, ceilingPct: null, lineLinePct: line } as never);
+      const b = f.body;
+      add(`${f.title}\n${b}`, { line, named: beside(line, 50), where: where(`ON failure ${slots.length}`) });
       if (atReserve && /under the line|short of the line/.test(b)) errs.push(`${where('ON failure')}: a line the reserve holds said to close under it`);
     }
-    const dec = notify.buildLineForceChargeDeclinedStart({ day: '2026-09-16', linePct: line, why: 'grid presence is unknown', latestStartText: '04:24' }).body;
-    add(dec, { line, named: beside(line, 50), where: where('declined start') });
+    const decM = notify.buildLineForceChargeDeclinedStart({ day: '2026-09-16', linePct: line, why: 'grid presence is unknown', latestStartText: '04:24' });
+    const dec = decM.body;
+    add(`${decM.title}\n${dec}`, { line, named: beside(line, 50), where: where('declined start') });
     if (atReserve && /under the line/.test(dec)) errs.push(`${where('declined start')}: a line the reserve holds said to close under it`);
     // 8. The line at risk: whole-percent pool readings (the panel's) under the threshold, falling and flat; and 9. the morning
     // account's close; 10. the reserve-apply failure.
@@ -2182,17 +2190,33 @@ test('★★★ T24 (Fix8) the line texts at their edges: every text on the line
         if (!(P < T) || P < 0) continue;
         for (const refPct of [P + 1, P]) {
           const risk = { cause, offSlots: [1, 2, 3], onSlots: [], poolPct: P, refPct, thresholdPct: T, linePct: line, reOnNotAppliedSlots: cause === 'reOnNotApplied' ? [1, 2, 3] : null, panelOffAtMs: null, reOnRetryPossible: false };
-          add(notify.buildLineForceChargeAtRisk({ day: '2026-09-16', risk: risk as never, closeText: '5:00 AM', reOnCutoffText: '4:40 AM' }).body, { line, named: r1(line), where: where(`at risk ${cause} ${P}`) });
+          const a = notify.buildLineForceChargeAtRisk({ day: '2026-09-16', risk: risk as never, closeText: '5:00 AM', reOnCutoffText: '4:40 AM' });
+          add(`${a.title}\n${a.body}`, { line, named: r1(line), where: where(`at risk ${cause} ${P}`) });
         }
       }
     }
     for (const X of [Math.floor(line - 0.05 - 1e-9), Math.ceil(line - 0.05), 100].filter((x) => x <= 100)) {
       const ran = nfc.forceChargeNightOutcome(onNight({ forceChargeLineAskPct: ask, forceChargeLinePct: line, forceChargeOffAtMs: WIN_END, forceChargeOffReason: 'windowEnd' }), { cost: false, line: true });
-      const b = buildNightChargeMorningSummary({ day: '2026-09-16', targetPct: 50, restorePct: 30, expectedKwh: 17.6, forceCharge: ran, closePoolPct: X, linePct: line } as never).body;
-      add(b, { line, named: r1(line), where: where(`morning ${X}`) });
+      const mm = buildNightChargeMorningSummary({ day: '2026-09-16', targetPct: 50, restorePct: 30, expectedKwh: 17.6, forceCharge: ran, closePoolPct: X, linePct: line } as never);
+      const b = mm.body;
+      add(`${mm.title}\n${b}`, { line, named: r1(line), where: where(`morning ${X}`) });
       if ((X < line - 0.05) !== /under the [\d.]+% outage line/.test(b)) errs.push(`${where('morning')}: close ${X} against ${line}: ${b}`);
     }
-    add(notify.buildNightChargeApplyFailure({ day: '2026-09-16', currentReservePct: 30, targetPct: 50, applyRetries: 2, expectedKwh: 20, linePct: line }).body, { line, named: r1(line), where: where('apply failure') });
+    // (Fix8 review 2) …and a night whose re-ON its readback check found not applied, a slot of ours then reading ON again a minute
+    // later (the re-ON applied late, or Charge Now switched on in the app: forceChargeLineOnSeenAtMs, which the code cannot tell
+    // apart): the count is what the check read, true in both outcomes — never "did not take effect". (The round-7 reviewer's night:
+    // the panel's stop at close − 80 min, re-ON #1 at −70, checked at −55 with every slot OFF, the slots ON at −54.)
+    const lateReOn = nfc.forceChargeNightOutcome(onNight({
+      forceChargeLineAskPct: ask, forceChargeLinePct: line, forceChargeLinePanelOffAtMs: WIN_END - 80 * M, forceChargeLineReOns: 1,
+      forceChargeLineReOnAtMs: WIN_END - 70 * M, forceChargeLineReOnSlots: [1, 2, 3], forceChargeLineReOnCheckedAtMs: WIN_END - 55 * M,
+      forceChargeLineReOnNotAppliedSlots: [1, 2, 3], forceChargeLineReOnsNotApplied: 1, forceChargeLineOnSeenAtMs: WIN_END - 54 * M,
+      forceChargeOffAtMs: WIN_END, forceChargeOffReason: 'windowEnd',
+    }), { cost: false, line: true });
+    const late = buildNightChargeMorningSummary({ day: '2026-09-16', targetPct: 50, restorePct: 30, expectedKwh: 17.6, forceCharge: lateReOn, closePoolPct: 62, linePct: line } as never);
+    add(`${late.title}\n${late.body}`, { line, named: r1(line), where: where('morning, a re-ON checked not applied, then seen ON') });
+    if (!late.body.includes("Charge Now was switched back on 1 time(s) after the panel's own stop (slot(s) still read off at the readback check after 1 of them)")) errs.push(`${where('morning late re-ON')}: ${late.body}`);
+    const apply = notify.buildNightChargeApplyFailure({ day: '2026-09-16', currentReservePct: 30, targetPct: 50, applyRetries: 2, expectedKwh: 20, linePct: line });
+    add(`${apply.title}\n${apply.body}`, { line, named: r1(line), where: where('apply failure') });
     // 11. The mid-day push's reserve-hold shape: armed for the line (no relation), named round1(L).
     const mid = middayLegPush({ ...midBase, cushionLineSocPct: line, forceChargeLine: { askPct: ask, linePct: line } } as LinePlan);
     add(mid, { line, named: r1(line), where: where('mid-day') });
@@ -2207,6 +2231,48 @@ test('★★★ T24 (Fix8) the line texts at their edges: every text on the line
     "'s ${lineLogPct(state)}% outage line cannot start yet",
   ]) assert.ok(INDEX.includes(needle), needle);
   assert.doesNotMatch(INDEX, /\$\{state\.forceChargeLinePct \?\?|\(\$\{risk\.linePct\}%\)|\$\{declinedLinePct\}% outage line/);
+});
+
+/** (Fix8 review 2) v1.199.1's failure log lines, word for word: a night with no line ask keeps them. */
+const COST_ON_FAILED_LOG = "app.log.warn(`night-charge: force-charge ON NEVER TOOK EFFECT for ${state.day} — slot(s) ${failedSlots.text} still read FORCE_CHARGE_OFF after ${state.forceChargeOnRetries} re-issue(s)${action.noRetry ? ` (none sent: under ${Math.round(FORCE_CHARGE_ON_RETRY_CUTOFF_MS / 60_000)} min of the window left, so the window-end OFF is never held behind one)` : ''}, and their Cores do not read at the panel's ceiling. Tonight's buy above the ${RESERVE_WRITE_MAX_PCT}% reserve is forfeited${all ? '' : ' on those slot(s)'}; the reserve charge is unaffected, and the OFF at the window close still runs.`);";
+const COST_APPLY_FAILED_LOG = "app.log.error(`night-charge: write NEVER TOOK EFFECT — the cloud ACK'd backupReserveSoc ${state.targetPct}% but the device still reads ${currentReservePct ?? 'unknown'}% after ${state.applyRetries} retries. Tonight's charge (${buyFiguresLogText(expectedKwh, state.buyKwh)}) is forfeited; ledger corrected to actuated:0.`);";
+
+test('★★★ T24 (Fix8 review 2) the line-night failure LOG lines say only what holds in every outcome: on a night whose record carries a line ask the ON failure and the reserve-apply failure "have NOT taken effect" (a late apply is still verified) — never "NEVER TOOK EFFECT" nor "is forfeited"; a night with no line ask logs v1.199.1\'s lines word for word', () => {
+  const block = (kind: string): string => {
+    const start = INDEX.indexOf(`if (action.kind === '${kind}') {`);
+    assert.ok(start > 0, kind);
+    return INDEX.slice(start, INDEX.indexOf('\n    return;\n  }', start));
+  };
+  // Each branch keyed on the record's line ask (lineLogPct: forceChargeLineNightPct, round1), as its push is (forceChargeOnFailureNight,
+  // linePct: forceChargeLineNightPct): line mode and a cost-dominant night alike.
+  const branch = (b: string, log: 'warn' | 'error'): { line: string; cost: string } => {
+    const at = b.indexOf(`if (lineLogPct(state) != null) app.log.${log}(\`night-charge: `);
+    const els = b.indexOf(`else app.log.${log}(`, at);
+    assert.ok(at > 0 && els > at, `${log}: a line branch before the cost line`);
+    return { line: b.slice(at, els), cost: b.slice(els + 'else '.length, b.indexOf('\n', els)) };
+  };
+  const final = /NEVER TOOK EFFECT|forfeited|will not happen|did not take effect/;
+  const on = branch(block('onFailed'), 'warn');
+  assert.equal(on.cost, COST_ON_FAILED_LOG);
+  assert.doesNotMatch(on.line, final);
+  assert.ok(on.line.includes("force-charge ON for ${state.day}'s ${lineLogPct(state)}% outage line has NOT taken effect — slot(s) ${failedSlots.text} still read FORCE_CHARGE_OFF after ${state.forceChargeOnRetries} re-issue(s)"), on.line);
+  assert.ok(on.line.includes("Unless it applies late (a late apply is still verified), the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve${all ? '' : ' on those slot(s)'}; the reserve charge is unaffected, and the OFF at the window close still runs."), on.line);
+  const apply = branch(block('applyFailed'), 'error');
+  assert.equal(apply.cost, COST_APPLY_FAILED_LOG);
+  assert.doesNotMatch(apply.line, final);
+  assert.ok(apply.line.includes("write has NOT taken effect — the cloud ACK'd backupReserveSoc ${state.targetPct}% but the device still reads ${currentReservePct ?? 'unknown'}% after ${state.applyRetries} retries."), apply.line);
+  assert.ok(apply.line.includes("Tonight's charge (${buyFiguresLogText(expectedKwh, state.buyKwh)}) has not taken effect: until the panel reads ${state.targetPct}% (a late apply, or the reserve set in the EcoFlow app, is still verified) the force-charge for the ${lineLogPct(state)}% outage line waits on it; ledger corrected to actuated:0."), apply.line);
+  // Why: both are still read after the failure — the ON's verify reads onVerified before its failure guard (index.ts logs "after the
+  // warning — it applied late"), and the apply ladder verifies a reading of the target after applyFailed.
+  assert.ok(INDEX.includes("${state.forceChargeOnFailedAtMs != null ? ' (after the warning — it applied late)' : ''}"));
+  const ok = (s: LineState) => (decideForceCharge(s, WIN_END - 2 * H, fo({ slotsOn: [1, 2, 3], poolSocPct: 55 })) as { kind: string }).kind;
+  assert.equal(ok(night({ forceChargeOnAtMs: WIN_END - 3 * H, forceChargeSlots: [1, 2, 3], forceChargeOnVerifiedAtMs: null, forceChargeMode: 'line',
+    forceChargeOnFailedAtMs: WIN_END - 150 * M, forceChargeOnFailedSlots: [1, 2, 3], forceChargeOnRetries: 1 })), 'onVerified', 'a late apply after the ON failure is verified');
+  // The key is the push's: lineLogPct is null exactly where forceChargeLineNightPct is.
+  for (const [ask, l] of [[56, 55.55], [56, null], [50, 50], [null, null]] as Array<[number | null, number | null]>) {
+    const s = { forceChargeLineAskPct: ask, forceChargeLinePct: l } as LineState;
+    assert.equal(nfc.lineLogPct(s) == null, nfc.forceChargeLineNightPct(s) == null, `${ask}/${l}`);
+  }
 });
 
 /** (Fix8) The rationale names the line by the plan's own two decimals (cushionLineSocPct). Over the year where the edges fall
