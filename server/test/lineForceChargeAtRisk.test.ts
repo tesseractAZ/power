@@ -633,6 +633,87 @@ test('★★★ W1 (review 5) Charge Now switched on in the app after the push i
   assert.ok(run.out.every((x) => x.push == null), 'the push is once a night');
 });
 
+test('★★★ W1 (Fix9) an ON verified LATE — its slots first read ON 15 min or more after its last attempt (after its re-issue and its failure warning) — is waited out from that reading like an ON seen: no push the tick after the late verify against the pool from before it; the push still goes on a fall against a reading taken 15 min or more after it', () => {
+  const lateAt = (nfc as unknown as { onVerifiedLateAtMs?: (s: unknown) => number | null }).onVerifiedLateAtMs;
+  // Round 7's carried open issue (b): line 55.55, the ON 3 h before the close, the pool held at the 50% reserve while the slots
+  // read OFF, the re-issue at +15, the failure warning at +30; the slots read ON from +X, and the pool climbs a point every 5 min
+  // after a 5-min lag. The slots read OFF are on the record only after the verify (lineNightObservations), so no ON is seen: with
+  // +40, +45 or +60 the tick after the verify pushed 'onNotRising' (pool 50, against the 50 read before the slots read ON) and
+  // spent the night's one push; from +31, none.
+  const T0 = WIN_END - 3 * H;
+  const fresh = night({ forceChargeOnAtMs: T0, forceChargeSlots: [1, 2, 3], forceChargeOnLastAttemptMs: T0, forceChargeMode: 'line', forceChargeCeilingSyncedPct: 80 });
+  /** One tick as index.ts runs it from the ON: the observations, the decision and its stamp (the re-issue, the failure warning,
+   *  the verify, a re-ON's check), and judgeLineNight on a tick that decides nothing or checks a re-ON. */
+  const onTick = (s: S, t: number, o: ForceChargeOpts) => {
+    const obs = nfc.lineNightObservations(s, t, o);
+    let rec = obs != null ? ({ ...s, ...obs } as S) : s;
+    const a = decideForceCharge(rec, t, o);
+    if (a.kind === 'onRetry') rec = { ...rec, forceChargeOnRetries: rec.forceChargeOnRetries + 1, forceChargeOnLastAttemptMs: t } as S;
+    if (a.kind === 'onFailed') rec = { ...rec, forceChargeOnFailedAtMs: t, forceChargeOnFailedSlots: [...a.slots] } as S;
+    if (a.kind === 'onVerified') rec = { ...rec, forceChargeOnVerifiedAtMs: t } as S;
+    if (a.kind === 'lineReOnChecked') rec = { ...rec, ...nfc.lineReOnCheckedStamp(rec, t, a) } as S;
+    const judged = a.kind === 'none' || a.kind === 'lineReOnChecked';
+    const push = judged ? nfc.lineAtRiskPushDue(rec, t, o) : null;
+    if (push != null) rec = { ...rec, forceChargeLineAtRiskPushedAtMs: t } as S;
+    const shape = judged ? nfc.lineOnReadingShape(rec, t, o) : null;
+    if (shape != null) rec = { ...rec, forceChargeLineShapeLoggedAtMs: t } as S;
+    return { s: rec, kind: a.kind, push, shape };
+  };
+  const run = (onFrom: number, pool: (m: number) => number, to = 150) => {
+    let s = fresh;
+    const kinds = new Map<number, string>();
+    const pushes: string[] = [];
+    const shapes: string[] = [];
+    for (let m = 1; m <= to; m++) {
+      const p = pool(m);
+      const r = onTick(s, T0 + m * M, fo({ poolSocPct: p, slotSocPct: at(p), slotsOn: m >= onFrom ? [1, 2, 3] : [] }));
+      s = r.s;
+      kinds.set(m, r.kind);
+      if (r.push != null) pushes.push(`+${m} ${r.push.cause} pool ${r.push.poolPct} ref ${r.push.refPct}`);
+      if (r.shape != null) shapes.push(`+${m}`);
+    }
+    return { s, kinds, pushes, shapes };
+  };
+  const climbing = (X: number) => (m: number) => (m < X + 5 ? 50 : 50 + Math.floor((m - X) / 5));
+  for (const X of [40, 45, 60, 31]) {
+    const r = run(X, climbing(X));
+    assert.deepEqual([r.kinds.get(15), r.kinds.get(30), r.kinds.get(X)], ['onRetry', 'onFailed', 'onVerified'], `+${X}`);
+    assert.deepEqual(r.pushes, [], `slots ON from +${X}: no push on a pool beginning to charge`);
+    assert.deepEqual(r.shapes, [], `slots ON from +${X}: no shape log`);
+    assert.equal(lateAt?.(r.s), T0 + X * M, `+${X}: verified late`);
+  }
+  // …and the push still goes on a fall after the wait: ON from +40, the pool up to 53 by +55, then a load takes the grid cap and it
+  // falls a point. The reference must be a reading taken at +55 or later (the verify + 15 min): the 53 at +61, judged at +71.
+  const falls = run(40, (m) => (m < 45 ? 50 : m <= 61 ? Math.min(53, 50 + Math.floor((m - 40) / 5)) : 52));
+  assert.deepEqual(falls.pushes, ['+71 onNotRising pool 52 ref 53']);
+  // The boundary is the ON seen's (review 5): a reference 15 min after the late verify counts, one a millisecond sooner does not.
+  const V = T0 + 40 * M;
+  const verifiedLate = { ...fresh, forceChargeOnRetries: 1, forceChargeOnLastAttemptMs: T0 + 15 * M, forceChargeOnFailedAtMs: T0 + 30 * M,
+    forceChargeOnFailedSlots: [1, 2, 3], forceChargeOnVerifiedAtMs: V } as S;
+  const withRef = (s: S, refAt: number) => ({ ...s, forceChargeLinePoolSamples: [{ pct: 53, atMs: refAt }] } as S);
+  assert.equal(nfc.lineTrendReference(withRef(verifiedLate, V + 15 * M - 1), V + 26 * M), null);
+  assert.deepEqual(nfc.lineTrendReference(withRef(verifiedLate, V + 15 * M), V + 26 * M), { pct: 53, atMs: V + 15 * M });
+  // Late is 15 min or more after the LAST attempt (the re-issue, else the ON): a verify inside that grace is the ON's own, as before.
+  assert.equal(lateAt?.({ ...verifiedLate, forceChargeOnVerifiedAtMs: T0 + 30 * M }), T0 + 30 * M);
+  assert.equal(lateAt?.({ ...verifiedLate, forceChargeOnVerifiedAtMs: T0 + 30 * M - 1 }), null);
+  assert.equal(lateAt?.({ ...verifiedLate, forceChargeOnLastAttemptMs: null, forceChargeOnVerifiedAtMs: T0 + 15 * M }), T0 + 15 * M, 'no re-issue: from the ON');
+  assert.equal(lateAt?.({ ...verifiedLate, forceChargeOnLastAttemptMs: null, forceChargeOnVerifiedAtMs: T0 + 15 * M - 1 }), null);
+  assert.equal(lateAt?.(onNight()), null, 'the usual verify, 5 min after the ON');
+  assert.equal(lateAt?.({ ...fresh, forceChargeOnVerifiedAtMs: null } as S), null, 'not verified');
+  // A seen ON after the late verify (the panel's stop, then Charge Now switched on in the app) is waited out from its own reading…
+  const seenAfter = { ...verifiedLate, forceChargeLineOnSeenAtMs: V + 60 * M } as S;
+  assert.equal(nfc.lineTrendReference(withRef(seenAfter, V + 70 * M), V + 81 * M), null);
+  assert.deepEqual(nfc.lineTrendReference(withRef(seenAfter, V + 75 * M), V + 86 * M), { pct: 53, atMs: V + 75 * M });
+  // …a seen ON older than the late verify waits nothing extra over it, and a later re-ON of ours waits its own grace.
+  assert.equal(nfc.lineTrendReference(withRef({ ...verifiedLate, forceChargeLineOnSeenAtMs: V - 5 * M } as S, V + 15 * M - 1), V + 26 * M), null);
+  const reOnAfter = { ...verifiedLate, forceChargeLineReOns: 1, forceChargeLineReOnAtMs: V + 30 * M, forceChargeLineReOnSlots: [1, 2, 3] } as S;
+  assert.equal(nfc.lineTrendReference(withRef(reOnAfter, V + 40 * M), V + 51 * M), null);
+  assert.deepEqual(nfc.lineTrendReference(withRef(reOnAfter, V + 45 * M), V + 56 * M), { pct: 53, atMs: V + 45 * M });
+  // The at-risk push and the ON-reading shape both read this reference.
+  assert.ok(NFC_SRC.includes('  const ref = lineTrendReference(s, nowMs);\n  if (ref == null || o.poolSocPct > ref.pct) return null;'));
+  assert.ok(NFC_SRC.includes('  const ref = lineTrendReference(s, nowMs);\n  if (ref == null || !(o.poolSocPct < ref.pct)) return null;'));
+});
+
 test('★★★ W1 (review 5) a re-ON handed back (every write rate-limited): no push while its retry can still come; past the cutoff, \'reOnRefused\' — never the gates', () => {
   const due = nfc.lineAtRiskPushDue;
   // The round-5 reviewer's probe: the panel's stop on record, the pool 61 → 60 → 59 under the 61% start target, the slots

@@ -2217,6 +2217,11 @@ test('★★★ T24 (Fix8) the line texts at their edges: every text on the line
     if (!late.body.includes("Charge Now was switched back on 1 time(s) after the panel's own stop (slot(s) still off at the readback check after 1 of them)")) errs.push(`${where('morning late re-ON')}: ${late.body}`);
     const apply = notify.buildNightChargeApplyFailure({ day: '2026-09-16', currentReservePct: 30, targetPct: 50, applyRetries: 2, expectedKwh: 20, linePct: line });
     add(`${apply.title}\n${apply.body}`, { line, named: r1(line), where: where('apply failure') });
+    // (Fix9) …with the last start named, and with no start left, for every reason.
+    for (const startClosed of [null, 'late', 'over', 'cancelled', 'reverted', 'foreign', 'noWindow', 'gatedOff', 'started']) {
+      const a = notify.buildNightChargeApplyFailure({ day: '2026-09-16', currentReservePct: 30, targetPct: 50, applyRetries: 2, expectedKwh: 20, linePct: line, startClosed, startByText: '4:40 AM' } as never);
+      add(`${a.title}\n${a.body}`, { line, named: r1(line), where: where(`apply failure ${startClosed ?? 'by 4:40 AM'}`) });
+    }
     // 11. The mid-day push's reserve-hold shape: armed for the line (no relation), named round1(L).
     const mid = middayLegPush({ ...midBase, cushionLineSocPct: line, forceChargeLine: { askPct: ask, linePct: line } } as LinePlan);
     add(mid, { line, named: r1(line), where: where('mid-day') });
@@ -2269,18 +2274,20 @@ test('★★★ T24 (Fix8 review 2) the line-night failure LOG lines say only wh
   assert.equal(apply.cost, COST_APPLY_FAILED_LOG);
   assert.doesNotMatch(apply.line, final);
   assert.ok(apply.line.includes("write has NOT taken effect — the cloud ACK'd backupReserveSoc ${state.targetPct}% but the device still reads ${currentReservePct ?? 'unknown'}% after ${state.applyRetries} retries."), apply.line);
-  assert.ok(apply.line.includes("Tonight's charge (${buyFiguresLogText(expectedKwh, state.buyKwh)}) has not taken effect: until the panel reads ${state.targetPct}% (a late apply, or the reserve set in the EcoFlow app, is still verified) the force-charge for the ${lineLogPct(state)}% outage line waits on it; ledger corrected to actuated:0."), apply.line);
+  // (Fix9) The "waits on" arm only while a start can still come (T24 (Fix9) below).
+  assert.ok(apply.line.includes("Tonight's charge (${buyFiguresLogText(expectedKwh, state.buyKwh)}) has not taken effect${lineStartClosed == null ? `: until the panel reads ${state.targetPct}% (a late apply, or the reserve set in the EcoFlow app, is still verified) the force-charge for the ${lineLogPct(state)}% outage line waits on it` : "), apply.line);
+  assert.ok(apply.line.endsWith("; ledger corrected to actuated:0.`);\n    "), apply.line);
   // The class: the two proofs that a reserve write never landed (each is logged on a tick of the window, and a later reading of the
   // target still verifies the write — applyVerified — or adopts the attempt, as applyProvedUnlanded / attemptAdoptable say):
   // "has NOT taken effect" / "has NOT landed", and the force-charge for the line waits on that reading.
   const unlanded = branch(proof('applyProvedUnlanded'), 'info');
   assert.equal(unlanded.cost, COST_APPLY_UNLANDED_LOG);
   assert.doesNotMatch(unlanded.line, /never took effect|never landed|NEVER/);
-  assert.ok(unlanded.line.includes("the ${state.day} write has NOT taken effect — after its re-issues the panel still reads the ${state.attemptBaselinePct}% it read before the write; until a reading of the target verifies it (a late apply, or the reserve set in the EcoFlow app), its restore is a no-op, nothing of ours holds the reserve, and the force-charge for the ${lineLogPct(state)}% outage line waits on it."), unlanded.line);
+  assert.ok(unlanded.line.includes("the ${state.day} write has NOT taken effect — after its re-issues the panel still reads the ${state.attemptBaselinePct}% it read before the write; ${applyStartClosed == null ? `until a reading of the target verifies it (a late apply, or the reserve set in the EcoFlow app), its restore is a no-op, nothing of ours holds the reserve, and the force-charge for the ${lineLogPct(state)}% outage line waits on it` : "), unlanded.line);
   const attempt = branch(proof('attemptProvedUnlanded'), 'info');
   assert.equal(attempt.cost, COST_ATTEMPT_UNLANDED_LOG);
   assert.doesNotMatch(attempt.line, /never took effect|never landed|NEVER/);
-  assert.ok(attempt.line.includes("the ${state.day} write attempt has NOT landed — after its apply window the panel still reads the ${state.attemptBaselinePct}% it read before the attempt: nothing of ours holds the reserve, and the force-charge for the ${lineLogPct(state)}% outage line waits on a reading of the target."), attempt.line);
+  assert.ok(attempt.line.includes("the ${state.day} write attempt has NOT landed — after its apply window the panel still reads the ${state.attemptBaselinePct}% it read before the attempt: nothing of ours holds the reserve, and ${attemptStartClosed == null ? `the force-charge for the ${lineLogPct(state)}% outage line waits on a reading of the target` : "), attempt.line);
   const unlandedNight = night({ applyVerifiedAtMs: null, applyEscalated: true, applyRetries: 2, applyLastAttemptMs: WIN_START + 20 * M });
   assert.equal(act.applyProvedUnlanded(unlandedNight, 30, WIN_START + 40 * M), true, 'proved on a tick of the window');
   const tick = (pct: number) => ({ mode: 'supervised', writeReady: true, currentReservePct: pct, socCoherent: true, vitalsRed: false, gridPresent: true }) as act.ActuationTickOpts;
@@ -2301,6 +2308,119 @@ test('★★★ T24 (Fix8 review 2) the line-night failure LOG lines say only wh
   for (const [ask, l] of [[56, 55.55], [56, null], [50, 50], [null, null]] as Array<[number | null, number | null]>) {
     const s = { forceChargeLineAskPct: ask, forceChargeLinePct: l } as LineState;
     assert.equal(nfc.lineLogPct(s) == null, nfc.forceChargeLineNightPct(s) == null, `${ask}/${l}`);
+  }
+});
+
+/** (Fix9) The two line-night log arms of each "waits on" site in index.ts: the line branch's template, split at its key. */
+const lineArms = (line: string, key: string): { open: string; closed: string } => {
+  const at = line.indexOf(`\${${key} == null ? `);
+  assert.ok(at > 0, `${key}: the waits-on words keyed on it`);
+  const sep = line.indexOf('` : ', at);
+  return { open: line.slice(at, sep), closed: line.slice(sep) };
+};
+
+test('★★★ T24 (Fix9) a line night\'s force-charge "waits on" a reading of the target only while a start can still come — the checks decideForceCharge makes before a start (forceChargeStartClosed); a cancelled night, one 20 min or less from its close or past it, says no force-charge for the line starts, and why: the three index.ts log lines and the apply-failure push; a night with no line ask unchanged', () => {
+  // The apply-failure push: until the close less 20 min (the last start the add-on makes) the force-charge waits on the write;
+  // after it, or with no start left, the push says none starts and why (keyed and wired as the log line is: below).
+  const push = (over: Record<string, unknown>) => notify.buildNightChargeApplyFailure({ day: '2026-09-16', currentReservePct: 30, targetPct: 50, applyRetries: 2, expectedKwh: 20, linePct: 55.55, ...over } as never);
+  const head = 'The supervised reserve write for 2026-09-16 was accepted by the EcoFlow cloud but the Smart Home Panel 2 still reads 30% (target 50%) after 2 re-issues. '
+    + "Tonight's planned charge (~20 kWh expected) has not taken effect: until the panel reads 50%, it keeps its normal reserve, under tonight's 55.6% outage line";
+  for (const [why, sentence] of [
+    ['late', 'No force-charge for the line starts: 20 min or less of the window is left.'],
+    ['over', 'No force-charge for the line starts: the window has closed.'],
+    ['cancelled', 'No force-charge for the line starts: the night was cancelled.'],
+    ['gatedOff', 'No force-charge for the line starts while the options keep it off.'],
+  ] as Array<[string, string]>) {
+    const m = push({ startClosed: why, startByText: '4:40 AM' });
+    assert.equal(m.body, `${head}. ${sentence} If this repeats, check the SHP2 cloud link.`, why);
+    assert.equal(m.title, 'Night-charge: the reserve write has not taken effect');
+    assert.doesNotMatch(m.body, /waits on|To hold the line|as planned|No action needed|will not happen/);
+  }
+  assert.equal(push({ startClosed: null, startByText: '4:40 AM' }).body, `${head}, and the force-charge for the line waits on this write. `
+    + 'To hold the line tonight, set the backup reserve to 50% in the EcoFlow app: once the panel reads it before ~4:40 AM, the add-on starts the force-charge for the line as planned. If this repeats, check the SHP2 cloud link.');
+  // A night with no line ask: v1.199.1's push whatever the key says (COST_TEXTS-pinned in lineForceChargeAtRisk W5 #6).
+  const cost = (k: unknown) => JSON.stringify(notify.buildNightChargeApplyFailure({ day: '2026-10-12', currentReservePct: 16, targetPct: 50, applyRetries: 2, expectedKwh: 20, linePct: null, startClosed: k, startByText: '4:40 AM' } as never));
+  assert.equal(cost('late'), cost(null));
+  assert.equal(cost(null), JSON.stringify(notify.buildNightChargeApplyFailure({ day: '2026-10-12', currentReservePct: 16, targetPct: 50, applyRetries: 2, expectedKwh: 20 })));
+  // index.ts: each of the three line-night log lines keys its "waits on" on the record and the gates now, in the line branch only;
+  // the closed arm carries no "waits"; the cost lines are v1.199.1's (T24 Fix8 review 2 above).
+  const KEY = 'forceChargeStartClosed(state, nowMs, forceChargeGatesOn(legRoleOf(state)))';
+  const proof = (fn: string): string => INDEX.slice(INDEX.indexOf(`if (${fn}(state, currentReservePct, nowMs)) {`), INDEX.indexOf('    state = nightActuationMem;', INDEX.indexOf(`if (${fn}(state, currentReservePct, nowMs)) {`)));
+  const failedBlock = INDEX.slice(INDEX.indexOf("if (action.kind === 'applyFailed') {"), INDEX.indexOf('\n    return;\n  }', INDEX.indexOf("if (action.kind === 'applyFailed') {")));
+  for (const [b, key, log, open, closed] of [
+    [proof('attemptProvedUnlanded'), 'attemptStartClosed', 'info', 'the force-charge for the ${lineLogPct(state)}% outage line waits on a reading of the target',
+      'lineStartClosedWords(`the ${lineLogPct(state)}% outage line`, attemptStartClosed)}.`);'],
+    [proof('applyProvedUnlanded'), 'applyStartClosed', 'info', 'until a reading of the target verifies it (a late apply, or the reserve set in the EcoFlow app), its restore is a no-op, nothing of ours holds the reserve, and the force-charge for the ${lineLogPct(state)}% outage line waits on it',
+      '`nothing of ours holds the reserve, and ${lineStartClosedWords(`the ${lineLogPct(state)}% outage line`, applyStartClosed)}`}.`);'],
+    [failedBlock, 'lineStartClosed', 'error', ': until the panel reads ${state.targetPct}% (a late apply, or the reserve set in the EcoFlow app, is still verified) the force-charge for the ${lineLogPct(state)}% outage line waits on it',
+      '`, and ${lineStartClosedWords(`the ${lineLogPct(state)}% outage line`, lineStartClosed)}`}; ledger corrected to actuated:0.`);'],
+  ] as Array<[string, string, string, string, string]>) {
+    assert.ok(b.includes(`const ${key} = ${KEY};`), `${key}: keyed on the record and the gates now`);
+    const at = b.indexOf(`if (lineLogPct(state) != null) app.log.${log}(\`night-charge: `);
+    const line = b.slice(at, b.indexOf(`else app.log.${log}(`, at));
+    const arms = lineArms(line, key);
+    assert.ok(arms.open.includes(open), `${key} open: ${arms.open}`);
+    assert.ok(arms.closed.includes(closed), `${key} closed: ${arms.closed}`);
+    assert.doesNotMatch(arms.closed, /waits/);
+    assert.equal(line.split('waits on').length - 1, 1, `${key}: "waits on" in the open arm only`);
+  }
+  assert.ok(failedBlock.includes('        startClosed: lineStartClosed,\n        startByText: state.windowEndMs != null ? fmtSiteClock(writeWindowEndMs(state)! - FORCE_CHARGE_MIN_RUN_MS) : null,\n'), failedBlock);
+  const closedOf = (nfc as unknown as { forceChargeStartClosed?: (s: unknown, t: number, g: { cost: boolean; line: boolean }) => string | null }).forceChargeStartClosed;
+  const wordsOf = (nfc as unknown as { lineStartClosedWords?: (line: string, why: string) => string }).lineStartClosedWords;
+  assert.equal(typeof closedOf, 'function', 'nightForceCharge.forceChargeStartClosed');
+  assert.equal(typeof wordsOf, 'function', 'nightForceCharge.lineStartClosedWords');
+  const LINE_GATE = { cost: false, line: true };
+  // The write proved unlanded or failed: the reserve not verified. The round-7 reviewer's probes are the cancelled night, the
+  // applyFailed at the write end less 4 min, and the attempt proved unlanded two hours after the close.
+  const failed = (over: Partial<LineState> = {}) => night({ applyVerifiedAtMs: null, applyEscalated: true, applyRetries: 2, ...over });
+  const onPeak = WIN_END - 30 * M + act.ON_PEAK_RAISE_GUARD_MS; // on-peak 30 min after the close: its guard (an hour before) ends the writes 30 min early
+  const cases: Array<[string, LineState, number, { cost: boolean; line: boolean }, string | null]> = [
+    ['40 min into the window (T24 Fix8 review 2\'s night)', failed(), WIN_START + 40 * M, LINE_GATE, null],
+    ['before the window opens', failed(), WIN_START - 30 * M, LINE_GATE, null],
+    ['the last minute before the close less 20 min', failed(), WIN_END - 20 * M - 1, LINE_GATE, null],
+    ['a cost-dominant night, the line gate off and the cost gate on', failed({ forceChargeCeilingPct: 70 }), WIN_START + 40 * M, { cost: true, line: false }, null],
+    ['cancelled', failed({ cancelled: true }), WIN_START + 40 * M, LINE_GATE, 'cancelled'],
+    ['the restore sent', failed({ revertedAtMs: WIN_START + 39 * M }), WIN_START + 40 * M, LINE_GATE, 'reverted'],
+    ['the reserve set outside the add-on', failed({ foreignSettledAtMs: WIN_START + 39 * M }), WIN_START + 40 * M, LINE_GATE, 'foreign'],
+    ['no window', failed({ windowStartMs: null, windowEndMs: null }), WIN_START + 40 * M, LINE_GATE, 'noWindow'],
+    ['the close less 20 min', failed(), WIN_END - 20 * M, LINE_GATE, 'late'],
+    ['applyFailed at the write end less 4 min', failed(), WIN_END - 4 * M, LINE_GATE, 'late'],
+    ['the close', failed(), WIN_END, LINE_GATE, 'over'],
+    ['two hours after the close', failed(), WIN_END + 2 * H, LINE_GATE, 'over'],
+    ['the on-peak guard sooner than the close: its own less 20 min', failed({ nextOnPeakStartMs: onPeak }), WIN_END - 50 * M, LINE_GATE, 'late'],
+    ['…and a minute before that', failed({ nextOnPeakStartMs: onPeak }), WIN_END - 51 * M, LINE_GATE, null],
+    ['the line gate off (NIGHT_CHARGE_MODE advisory)', failed(), WIN_START + 40 * M, { cost: false, line: false }, 'gatedOff'],
+    ['a force-charge of ours already on', onNight(), WIN_START + 3 * H, LINE_GATE, 'started'],
+  ];
+  for (const [what, s, t, gates, want] of cases) {
+    assert.equal(closedOf!(s, t, gates), want, what);
+    // The same predicate decideForceCharge uses: with the reserve write verified now (a late apply, or the reserve set by hand),
+    // a start comes on a later tick exactly where none is closed — and a closed start never yields a blocker (no "cannot start yet").
+    const verified = { ...s, applyVerifiedAtMs: t } as LineState;
+    const o = fo({ enabled: gates.cost, lineEnabled: gates.line, poolSocPct: 50, ceilingReadbackPct: 80 });
+    let started = false;
+    for (let u = t; u < Math.max(t, WIN_END) + 3 * H && !started; u += M) {
+      const a = decideForceCharge(verified, u, o) as { kind: string; why?: string };
+      if (a.kind === 'on' || a.kind === 'syncCeiling') started = true;
+      if (want != null) assert.equal(nfc.isForceChargeStartBlocker(a.why), false, `${what}: ${a.why}`);
+    }
+    assert.equal(started, want == null, `${what}: a start ${want == null ? 'comes' : 'never comes'}`);
+  }
+  // The words, each true for the rest of the record ('gatedOff' while the options keep it off): never "waits", "yet", "may still".
+  const L = 'the 55.6% outage line';
+  const words: Record<string, string> = {
+    cancelled: 'no force-charge for the 55.6% outage line starts: the night was cancelled',
+    reverted: "no force-charge for the 55.6% outage line starts: the reserve's restore was sent",
+    foreign: 'no force-charge for the 55.6% outage line starts: the reserve was set outside the add-on',
+    noWindow: 'no force-charge for the 55.6% outage line starts: the night has no charge window',
+    over: 'no force-charge for the 55.6% outage line starts: the window has closed',
+    late: 'no force-charge for the 55.6% outage line starts: 20 min or less of the window is left',
+    gatedOff: 'no force-charge for the 55.6% outage line starts while the options keep it off',
+    started: 'the force-charge for the 55.6% outage line was switched on earlier and does not start again',
+  };
+  for (const [why, w] of Object.entries(words)) {
+    assert.equal(wordsOf!(L, why), w, why);
+    assert.doesNotMatch(w, /waits|\byet\b|may still|as planned/);
   }
 });
 
