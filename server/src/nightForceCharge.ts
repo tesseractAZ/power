@@ -147,7 +147,8 @@
  *    (review 5) An ON no write of ours explains in time — a re-ON applied a minute after its check, one all-OFF reading
  *    at the check, Charge Now switched on by a person after the push — is waited out (forceChargeLineOnSeenAtMs):
  *    emulated, the shape is logged on none of them, and a re-ON handed back rate-limited is never pushed as its gates inside
- *    its retry's spacing.
+ *    its retry's spacing. (Fix8 review 1) The push judged on a check's own tick goes before a late apply can be seen, worded
+ *    "has not taken effect" (23 of the late variant's 108 pushes on nights that held, 3 at a glitch: PIN_REVIEW5).
  *    (review 6) Nor is one lost: the push's hold counts the ticks (FORCE_CHARGE_TICK_MS). With each re-ON stamped 2 s after
  *    its tick, as index.ts stamps it, the retry is the 16th tick, and 30 hand-backs had neither it nor the push (25 of the
  *    146 nights under never reached); now every one of the 146 is (PIN_REVIEW6). And a person's ON the panel then stops at

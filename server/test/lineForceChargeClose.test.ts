@@ -917,13 +917,14 @@ const PIN_REON_INERT_HELD_PUSHES = 6;
  *  the under nights the line-at-risk push reached, the pushes on nights that held, the shape logs, the 'reOnHeld' and
  *  'reOnRefused' pushes. All four are unmeasured on this plant; each pins that the push and the shape log wait out an ON
  *  that works, wherever it came from.
- *  - reOnLate: none under. 88 of its 108 pushes on nights that held are a pool flat at ⌈L⌉ beside the EV with Charge Now ON,
+ *  - reOnLate: none under. 85 of its 108 pushes on nights that held are a pool flat at ⌈L⌉ beside the EV with Charge Now ON,
  *    on a reading 15 min or more after the late apply (the measured latch's 7, on a pool the 16-min delay left lower).
- *    (Fix8 review 1) The other 20 go on the second re-ON's check, its own tick (index.ts judges it now), a minute before that
- *    re-ON takes effect: "has not taken effect" is true when sent. Read past the "not applied" re-ON with no wait (review 4):
+ *    (Fix8 review 1) The other 23 ('reOnNotApplied', 3 of them on nights pushed later before: 88 held) go on the second
+ *    re-ON's check, its own tick (index.ts judges it now), a minute before that re-ON takes effect: "has not taken effect" is
+ *    true when sent. Read past the "not applied" re-ON with no wait (review 4):
  *    2,869 pushes on held nights, 3,271 shape logs.
- *  - reOnGlitch: none under; the measured latch's 7 pushes (PIN_REAL_PREDICTED_PUSHES) and (Fix8 review 1) 3 on the check's
- *    own all-OFF reading — 99 and 101 shape logs before.
+ *  - reOnGlitch: none under; the measured latch's 7 pushes (PIN_REAL_PREDICTED_PUSHES) and (Fix8 review 1) 3 'reOnNotApplied'
+ *    on the check's own all-OFF reading — 99 and 101 shape logs before.
  *  - reOnPerson: the person's ON 5 min after the push carries 1,026 of reOnInert's 3,005 nights under (927 with the check's
  *    tick not judged: a push a minute sooner leaves the person's ON a minute more); 1,483 of the 1,979 left are reached, as
  *    reOnInert's. The shape log fired on 2,476 of the 2,483 pushed nights before.
