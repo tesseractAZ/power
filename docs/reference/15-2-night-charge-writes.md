@@ -373,7 +373,7 @@ fixture (nameplate, 0.944), 10 and 15 of them closing near 50 (`lineForceCharge.
   itself and leaves it off, read per slot with the panel-side classifier on 2026-09-23 (ch1 04:19, ch3
   04:30) and 2026-10-02 (slots 2 and 1, 04:24-04:25). 2026-09-18 (90% ceiling at 03:30, 0 W import,
   90 → 86% by 05:00) is consistent with it; its slot state is the add-on's record, not a readback. Below the ceiling the house and an
-  EV then draw the pool again. A start pulled early by a predicted EV reaches the ceiling hours before
+  EV draw the pool again. A start pulled early by a predicted EV reaches the ceiling hours before
   the close, and a real EV that arrives later can draw the pool under the line: emulated, 8 of 200 year
   nights with a 20 kWh EV predicted and a 7 kW one arriving 90 minutes out, and 44 with 30 kWh predicted
   and an 11 kW one. So on a line night whose ON verified, when the pool reads under the start target and
@@ -389,26 +389,25 @@ fixture (nameplate, 0.944), 10 and 15 of them closing near 50 (`lineForceCharge.
   the off switches of a line night are `NIGHT_CHARGE_MODE: advisory` and the per-night cancel. The
   expected walk models the same latch and re-ON, and states the close it reaches.
 - **The panel ceiling** is `desiredForceChargeCeilingPct(max(target, ⌈L⌉ + 10))`: 80 for any ask up to
-  70, then ask + 10, at most 100. The value written is kept (`forceChargeCeilingSyncedPct`). The ON verify's
-  at-the-ceiling exemption and the settings-drift own-write list read it. The ON stamps the mode's
+  70, then ask + 10, at most 100. The value written is kept (`forceChargeCeilingSyncedPct`) for the ON verify's
+  at-the-ceiling exemption and the settings-drift own-write list. The ON stamps the mode's
   ceiling too (`forceChargeOnStamp`): a
   night whose panel already read it needed no sync, and its verify would otherwise read the cost ceiling's
   value. While ON in line mode a synced ceiling above the mode's own is lowered to it, once
   (`lineCeilingLoweringDue`): the cost gate gone off mid-run on a cost-dominant night would otherwise
   leave the cost ceiling (90) as the only stop, ten points past the line mode's 80. It lowers only what
   the panel holds, a live readback inside 80-100 above the mode's ceiling: a panel reading at or under
-  it (lowered in the app) is left alone, since the write would raise it. It only lowers, so it also runs
-  under red host vitals, as the OFFs do.
+  it (lowered in the app) is left alone, since the write would raise it. It only lowers, so it runs
+  under red vitals too, as the OFFs do.
 - **The morning refresh** (`morningRefresh.ts`) lowers or drops the cost ceiling only; the line ask
   rides through unchanged.
 - **The surfaces** state one level, the expected close of the line walk (`expectedBuyFromPlan` in line
   mode, `expectedForceChargeMode: 'line'`): the rationale, the push title and its clause, the spoken
   notice and the card. The rationale says the line "is above it, so the panel's force-charge switches on
   at ~03:25 and stays on until the window closes, taking the pool to ~78.4%" (2027-01-04). The spoken
-  notice adds "The panel keeps only 50 percent in reserve." The line sentence appears only in line mode, never on a
-  cost-dominant night. On a window-bound walk the close stated is capped at the window's reach and floored at
+  notice adds "The panel keeps only 50 percent in reserve." The line sentence appears only in line mode. On a window-bound walk the close stated is capped at the window's reach and floored at
   the 50% reserve (chapter 15 part 1). A walk that reaches the panel ceiling (`expectedLineCeilingStop`, 6 of the
-  year's 39 line-mode plans) is worded by the panel's stop and the re-ON on the rationale, the push and the
+  year's 39 line-mode plans) is worded by the panel's stop and the re-ON on the rationale, push and
   card, never "stays on until the window closes" and never the ceiling "as the backstop" (2026-10-29 21:30
   at 0.944: the 80% ceiling, the re-ON under 71%, ~72.1% at the close). A night whose pool is expected to stay at or
   above the panel ceiling says the force-charge is armed for the line "but is not expected to start",
@@ -425,7 +424,7 @@ fixture (nameplate, 0.944), 10 and 15 of them closing near 50 (`lineForceCharge.
   (`forceChargeBlockerClass`) are the ceiling refused or not read back, Charge Now already on, the grid
   unknown or absent, red vitals, no slot readback, no battery slot connected, and an incoherent SoC.
   Each cause pushes once a night, once it has held for 10 minutes unbroken (`lineDeclinedPushTick`), so a
-  passing stale reading neither pushes nor spends the push; the causes pushed are on the record before the push goes (`forceChargeLineDeclinedPushed`),
+  passing stale reading neither pushes nor spends the push; the causes pushed are recorded before the push goes (`forceChargeLineDeclinedPushed`),
   so a restart does not repeat them. The push quotes the latest start that still reaches the line at
   the rate then (`lineLatestStartMs`: ⌈L⌉ by the close with the 15-minute buffer, never inside the last
   20 minutes): "If it has not started by ~04:24, the pool is expected to close under the line; if it
@@ -447,10 +446,10 @@ fixture (nameplate, 0.944), 10 and 15 of them closing near 50 (`lineForceCharge.
   `lineNightObservations` stamps first, with the panel's own stop, anew after a re-ON or a slot seen ON; `lineTrendReference`
   takes only a reading 15 minutes or more after the last ON or re-ON, past one checked not applied, or a
   slot seen ON again that no ON of ours explains, `forceChargeLineOnSeenAtMs`), and no re-ON due nor a
-  rate-limited one's retry possible on a tick before the cutoff (else `reOnRefused`). Above a 95% line the re-ON and the push key on 95, under the line; emulated, the push reaches none of the
-  near-full nights that close under (`lineForceChargeClose.test.ts`). It names the slots: reading OFF, switch Charge Now on; reading ON with the pool not
+  rate-limited one's retry due a full tick before the cutoff (else `reOnRefused`, judged on its own tick too; "may try once more" only where a tick can). Above a 95% line the re-ON and the push key on 95, under the line; emulated, the push reaches none of the
+  near-full nights that close under (`lineForceChargeClose.test.ts`). It names the slots: reading OFF, switch Charge Now on; reading ON, the pool not
   rising, off and on again may restart the charge. A cost-dominant night's push names ⌈L⌉ + 5 by its margin over the
-  line, and says its cost force-charge is not switched back on. No write rests on the ON-reading shape;
+  line and says its cost force-charge is not switched back on. No write rests on the ON-reading shape;
   when seen (slots of ours ON, their Cores under the ceiling, the pool falling against
   `lineTrendReference`) one warning is logged a night (`lineOnReadingShape`); never on the measured latch.
 - **The morning account** of a night whose record carries a line ask says it "ran to the window close
