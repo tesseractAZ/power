@@ -511,7 +511,8 @@ test('★★★ W1 (review 4) a re-ON checked NOT APPLIED, or never written, is 
   const ref = nfc.lineTrendReference;
   // The round-4 reviewer's night (the close plant's 'reOnInert'): re-ONs 54 and 38 min before the close, both checked not
   // applied (39 and 23 min before), the pool falling 60 → 58 under the 61% start target with every slot reading OFF. A
-  // minute after the second check, 22 min before the close, the push goes, naming the re-ON that did not take effect.
+  // minute after the second check, 22 min before the close, the push is due, naming the re-ON that has not taken effect
+  // (Fix8 review 1: index.ts now judges the check's own tick too, so it goes there, 23 min before — PIN_REON_INERT's example).
   // Taken as an ON of ours, the second re-ON barred every reference before 23 min out — none 10 min old fits before the lead.
   const C = WIN_END;
   const failedTwice = (over: Record<string, unknown> = {}) => onNight({
