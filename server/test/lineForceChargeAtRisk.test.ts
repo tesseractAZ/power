@@ -980,6 +980,156 @@ test('★★★ W1 (Fix7 review 1) an add-on restart after the last hold: the fi
   assert.ok(header.includes(stated), `nightForceCharge.ts's header states: ${stated}`);
 });
 
+/* (Fix8) EVERY TICK KIND ON WHICH THE PUSH IS NOT JUDGED, read at index.ts's runForceChargeTick, and whether it can be the tick
+ * after a hold on a hand-back night (line mode, a verified ON, a re-ON whose every write came back rate-limited):
+ *  - judged: a tick that decides nothing ('none' — also on a stale or incoherent reading, where the push needs a fresh,
+ *    coherent one and cannot be due), the hand-back's own tick (review 8), and (Fix8) the line ceiling lowering while ON, after
+ *    it: the lowering writes the ceiling only, so the tick's slot and pool readings stand;
+ *  - not judged, and reachable there: a LOST tick (the in-flight lock held past it, an add-on restart — no tick at boot —, a
+ *    tick that throws), the panel missing from the device list (a blind decision: no reading, as stale), the re-ON REFUSED BY
+ *    THE WRITE BLOCK (two panels, none pinned: refused before its stamp), an OFF (a cancel, the reserve revert, a grid loss, the
+ *    gates off, the run backstop: the force-charge is over, and neither the retry nor the push follows it);
+ *  - not reachable there: the re-ON's readback check (a hand-back stamps no slots, and an earlier re-ON's check precedes the
+ *    next re-ON), the ON verification (the ON verified), the OFF verification and the wall-clock deadline (no OFF yet; the
+ *    deadline is at least half an hour past the add-on's close), the ceiling restore (the night not over), the ON and its
+ *    ceiling sync (the ON is stamped), the close's OFF and the on-peak guard (at or past the re-ON's cutoff).
+ * The lowering is decided on the tick after a hold only on a night switched ON in cost mode that runs in line mode since (its
+ * cost gate off after a restart: the gates are read at load), whose panel read at or under the line mode's ceiling until then
+ * (lowered in the app) and reads above it on that tick (raised in the app): every other tick of a line-mode night finds the
+ * synced ceiling at the mode's, or decides the lowering before any re-ON. */
+type AfterKind = 'lost' | 'stale' | 'lower' | 'blocked';
+/** A reading that is not fresh, as runForceChargeTick builds its opts from such a projection: no slots, no pool, no ceiling. */
+const STALE = fo({ slotsOn: null, connectedSlots: [], slotSocPct: null, socCoherent: false, ceilingReadbackPct: null, poolSocPct: null, fullKwh: null });
+/** (Fix8) `cadence` (no restart) with tick `kAt` of another kind: 'lost' (nothing runs), 'stale' (no fresh reading), 'lower' (the
+ *  panel's ceiling, at the line mode's 80% until then, reads 90%: the lowering is decided, stamped as index.ts stamps it and —
+ *  `judgeLowering`, Fix8 — the push judged after it), 'blocked' (the add-on's writes blocked from `kAt` on: a re-ON due is
+ *  refused before its stamp, and the push is not judged on that tick). The night: switched ON in cost mode (synced at 90%), its
+ *  cost gate off since, so the line mode (ceiling 80%) rides it. */
+const cadenceAfter = (f0: number, lagMs: number, drift: (k: number) => number, late: (k: number) => number, kind: AfterKind, kAt: number,
+  judgeLowering = true): Cadence & { pushOnLowering: boolean } => {
+  const reads: Cadence['reads'] = [];
+  let push: Cadence['push'] = null;
+  let retry: Cadence['retry'] = null;
+  let pushOnLowering = false;
+  const t0 = f0 + late(0);
+  let s = { ...reOnDueAt(f0), forceChargeCeilingPct: 90, forceChargeCeilingSyncedPct: 90 } as S;
+  const obs0 = nfc.lineNightObservations(s, t0, OFF59);
+  if (obs0 != null) s = { ...s, ...obs0 } as S;
+  assert.equal(decideForceCharge(s, t0, OFF59).kind, 'lineReOn', "the re-ON is due on the hand-back's tick");
+  reads.push({ k: 0, atMs: t0 });
+  s = { ...s, forceChargeLineReOnAtMs: t0 + lagMs, forceChargeLineReOnSlots: null } as S;
+  const p0 = nfc.lineAtRiskPushDue(s, t0, OFF59);
+  if (p0 != null) { push = { k: 0, atMs: t0, cause: p0.cause, retryPossible: p0.reOnRetryPossible }; s = { ...s, forceChargeLineAtRiskPushedAtMs: t0 } as S; }
+  let fire = f0;
+  for (let k = 1; fire < WIN_END - 15 * M; k++) {
+    fire = fire + M + drift(k);
+    if (kind === 'lost' && k === kAt) continue;
+    const t = fire + late(k);
+    reads.push({ k, atMs: t });
+    const o = kind === 'stale' && k === kAt ? STALE : kind === 'lower' && k === kAt ? { ...OFF59, ceilingReadbackPct: 90 } : OFF59;
+    const obs = nfc.lineNightObservations(s, t, o);
+    if (obs != null) s = { ...s, ...obs } as S;
+    const a = decideForceCharge(s, t, o);
+    const judge = (): void => {
+      if (push != null) return;
+      const p = nfc.lineAtRiskPushDue(s, t, o);
+      if (p != null) { push = { k, atMs: t, cause: p.cause, retryPossible: p.reOnRetryPossible }; s = { ...s, forceChargeLineAtRiskPushedAtMs: t } as S; }
+    };
+    if (a.kind === 'syncCeiling') {
+      assert.equal(kind === 'lower' && k === kAt, true, `+${k}: the lowering only on the tick the panel reads above 80%`);
+      // index.ts: the stamp before the write (the synced value moves to the lowered one, so it does not repeat).
+      s = { ...s, forceChargeCeilingAttemptedAtMs: t, forceChargeCeilingSyncRetries: 0, forceChargeCeilingPriorPct: s.forceChargeCeilingPriorPct ?? a.prior, forceChargeCeilingSyncedPct: a.pct } as S;
+      if (judgeLowering) { const before = push; judge(); if (before == null && push != null) pushOnLowering = true; }
+      continue;
+    }
+    if (a.kind === 'lineReOn') {
+      if (kind === 'blocked' && k >= kAt) continue; // refused by the write block before its stamp; not judged
+      retry = { k, atMs: t };
+      break;
+    }
+    assert.equal(a.kind, 'none', `+${k} ${a.kind}`);
+    judge();
+  }
+  return { push, retry, reads, pushOnLowering };
+};
+/** (Fix8) Measured on the landed change, hand-backs every 100 ms from 17m10s to 15m10s before the re-ON's cutoff, the stamp 5 ms
+ *  or 2 s late, the other kind at each of ticks 1-18, drift and reads seeded (0-5 ms, 0-500 ms) or adversarial (5 ms a tick, the
+ *  tick after the other one read 500 ms late) — PIN_HANDBACK_CADENCE's one-lost sweep, whose counts 'lost' repeats (asserted):
+ *  - 'stale' — run for run as 'lost' (asserted): a tick with no fresh reading is a lost tick for the hold;
+ *  - 'lost' — neither on 5, each where the lost tick is the one the last hold awaited (asserted);
+ *  - 'lower' — judged after the lowering (Fix8): pushed on the lowering's own tick on 2 runs; neither on the same 5 as 'lost', each
+ *    where the lowering takes the retry's own tick (the re-ON due then waits a tick, as after a lost one) and the next reads at or
+ *    past the cutoff (asserted). `unjudged`: the same sweep with the push not judged after the lowering (before Fix8) — neither on
+ *    the same 5, the push on another tick on 2;
+ *  - 'blocked' — a re-ON due under the write block is neither made nor pushed while the block lasts: neither on 6,071, every run
+ *    whose block starts at or before the retry's tick with no push from a hold before it (asserted).
+ * PIN_HANDBACK_CADENCE and PIN_HANDBACK_RESTART do not move: their ticks decide nothing but the retry. */
+const PIN_HANDBACK_AFTER = {
+  lost: { runs: 86400, neither: 5, push: 24236, retry: 7009, both: 55150 },
+  lower: { runs: 86400, neither: 5, push: 24236, retry: 7009, both: 55150, pushOnLowering: 2 },
+  unjudged: { neither: 5, moved: 2 },
+  blocked: { runs: 86400, neither: 6071, push: 71300, retry: 943, both: 8086 },
+};
+
+test('★★★ W1 (Fix8) one tick after a hand-back of every kind the push is not judged on: a stale reading is a lost tick; the line ceiling lowering is judged after it; the write block refuses the retry unjudged — counted, each neither explained', () => {
+  // index.ts judges the push on a tick that decides nothing, on the hand-back's own tick, and (Fix8) after the line ceiling
+  // lowering while ON (also when the write block refuses it): read at the source.
+  const sync = TICK.slice(TICK.indexOf("if (action.kind === 'syncCeiling') {"), TICK.indexOf("if (action.kind === 'restoreCeiling') {"));
+  assert.ok(sync.includes('const whileOn = state.forceChargeOnAtMs != null;') && sync.indexOf('const whileOn') < sync.indexOf('const blocked = multiPanelWriteBlock();'), 'whileOn read before the write block');
+  assert.match(sync, /if \(blocked\) \{ app\.log\.warn\(`night-charge: force-charge ceiling sync refused — \$\{blocked\}`\); if \(whileOn\) pushLineAtRiskIfDue\(\); return; \}/);
+  const logAt = sync.indexOf("app.log.info(`night-charge: force-charge ceiling →");
+  assert.ok(logAt > 0 && sync.indexOf('    if (whileOn) pushLineAtRiskIfDue();\n', logAt) > logAt, 'judged after the lowering, on its own tick');
+  assert.equal(TICK.split('pushLineAtRiskIfDue()').length - 1, 4, 'judged on: none, the hand-back, the lowering, the refused lowering');
+  // The reachable kinds, swept.
+  const tally = () => ({ runs: 0, neither: 0, push: 0, retry: 0, both: 0 });
+  const lost = tally();
+  const lower = { ...tally(), pushOnLowering: 0 };
+  const unjudged = { neither: 0, moved: 0 };
+  const blocked = tally();
+  const bad: string[] = [];
+  for (let f0 = CUTOFF - 17 * M - 10_000; f0 < CUTOFF - 15 * M - 10_000; f0 += 100) {
+    for (const lag of [5, 2_000]) for (let kAt = 1; kAt <= 18; kAt++) for (const adversarial of [false, true]) {
+      // As PIN_HANDBACK_CADENCE's one-lost sweep: seeded, or the tick after the other one read 500 ms late, the rest on time.
+      const drift = adversarial ? () => 5 : seeded(f0 + lag + kAt, 5);
+      const late = adversarial ? (k: number) => (k === kAt + 1 ? 500 : 0) : seeded(f0 * 3 + lag + kAt, 500);
+      const where = `${(CUTOFF - f0) / 1000}s, lag ${lag}, tick ${kAt}${adversarial ? ', adversarial' : ''}`;
+      const base = cadenceAfter(f0, lag, drift, late, 'lost', 99);
+      const l = cadenceAfter(f0, lag, drift, late, 'lost', kAt);
+      const st = cadenceAfter(f0, lag, drift, late, 'stale', kAt);
+      if (JSON.stringify([outcomeOf(st), st.push, st.retry]) !== JSON.stringify([outcomeOf(l), l.push, l.retry])) bad.push(`${where}: stale ${outcomeOf(st)} ≠ lost ${outcomeOf(l)}`);
+      lost.runs += 1; lost[outcomeOf(l)] += 1;
+      const lastHold = (c: Cadence) => c.reads.filter((r) => r.atMs < CUTOFF).at(-1)!;
+      if (outcomeOf(l) === 'neither' && !(lastHold(l).k + 1 === kAt)) bad.push(`${where}: lost — neither, last hold +${lastHold(l).k}`);
+      const lw = cadenceAfter(f0, lag, drift, late, 'lower', kAt);
+      lower.runs += 1; lower[outcomeOf(lw)] += 1; if (lw.pushOnLowering) lower.pushOnLowering += 1;
+      if (outcomeOf(lw) === 'neither') {
+        const next = lw.reads.find((r) => r.k === kAt + 1);
+        if (!(base.retry != null && base.retry.k === kAt && (next == null || next.atMs >= CUTOFF))) bad.push(`${where}: lower — neither not on the retry's tick`);
+      }
+      const lu = cadenceAfter(f0, lag, drift, late, 'lower', kAt, false);
+      if (outcomeOf(lu) === 'neither') unjudged.neither += 1;
+      if (JSON.stringify([outcomeOf(lu), lu.push, lu.retry]) !== JSON.stringify([outcomeOf(lw), lw.push, lw.retry])) unjudged.moved += 1;
+      const b = cadenceAfter(f0, lag, drift, late, 'blocked', kAt);
+      blocked.runs += 1; blocked[outcomeOf(b)] += 1;
+      // The block holds only ticks a re-ON is due on (from the retry's tick): a hold before it pushes as it would.
+      const expectNeither = base.retry != null && kAt <= base.retry.k && !(base.push != null && base.push.k < base.retry.k);
+      if ((outcomeOf(b) === 'neither') !== expectNeither) bad.push(`${where}: blocked — ${outcomeOf(b)}, the retry at +${base.retry?.k}`);
+    }
+  }
+  assert.deepEqual(bad.slice(0, 10), [], `${bad.length} runs not explained by their tick`);
+  // The lost tick here is PIN_HANDBACK_CADENCE's one-lost sweep, run for run.
+  const { runs, neither, push, retry, both } = PIN_HANDBACK_CADENCE.oneSkip;
+  assert.deepEqual(lost, { runs, neither, push, retry, both });
+  assert.deepEqual({ lost, lower, unjudged, blocked }, PIN_HANDBACK_AFTER);
+  // An OFF ends both: after it neither the retry nor the push can come (a cancel on the tick after a hold).
+  const hb = { ...reOnDueAt(CUTOFF - 16 * M), forceChargeLineReOnAtMs: CUTOFF - 16 * M, forceChargeLineReOnSlots: null } as S;
+  const cancelled = { ...hb, cancelled: true } as S;
+  assert.equal(decideForceCharge(cancelled, CUTOFF - 15 * M + 5, OFF59).kind, 'off');
+  const offed = { ...cancelled, forceChargeOffAtMs: CUTOFF - 15 * M + 5 } as S;
+  assert.equal(nfc.lineReOnDue(offed, CUTOFF - 14 * M, OFF59, [1, 2, 3]), null);
+  assert.equal(nfc.lineAtRiskPushDue(offed, CUTOFF - 14 * M, OFF59), null);
+});
+
 test('★★★ W1 (review 8) the margin is a full tick, and the hand-back\'s own tick is judged: a hand-back on the last tick before the cutoff is pushed on that tick; no tolerance constant is left', () => {
   // The hold, at its edge: the retry's tick on this tick's cadence (the 16th after a stamp written after its tick's read) one
   // full tick before the cutoff holds; a millisecond later, pushed at once.
@@ -1157,7 +1307,7 @@ test('★★★ W5 #1 a COST-DOMINANT line night\'s ON failure speaks for the li
   assert.deepEqual(fields, { ceilingPct: null, lineLinePct: 69.4 });
   const all = buildNightForceChargeOnFailure({ day: '2026-09-16', slots: [1, 2, 3], ourSlots: [1, 2, 3], retries: 1, noRetry: false, ...fields });
   assert.doesNotMatch(all.body, /No action needed/);
-  assert.ok(all.body.includes("Tonight's force-charge for the 69.4% outage line will not happen: without it the pool will close the window near the 50% reserve, under the line."), all.body);
+  assert.ok(all.body.includes("Tonight's force-charge for the 69.4% outage line will not happen: without it only the 50% reserve holds the pool, and it may close the window under the line."), all.body);
   assert.ok(all.body.includes('switch Charge Now on for slot(s) 1, 2, 3 in the EcoFlow app'), all.body);
   // A line-mode record: the line, as before; a cost record with no line ask: the cost ceiling, word for word.
   assert.deepEqual(nfc.forceChargeOnFailureNight(onNight()), { ceilingPct: null, lineLinePct: 55.55 });

@@ -203,6 +203,11 @@ function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Varian
     if (a.kind === 'syncCeiling') {
       s = { ...s, forceChargeCeilingAttemptedAtMs: t, forceChargeCeilingPriorPct: s.forceChargeCeilingPriorPct ?? a.prior, forceChargeCeilingSyncedPct: a.pct };
       pendingCeiling = a.pct;
+      // (Fix8) index.ts: while ON (the line ceiling lowering), the line-at-risk push is judged after it, on its own tick.
+      if (s.forceChargeOnAtMs != null && pushedAtMs == null) {
+        const risk = nfc.lineAtRiskPushDue(s, t, o);
+        if (risk != null) { pushedAtMs = t; pushCause = risk.cause; pushRetryPossible = risk.reOnRetryPossible; s = { ...s, forceChargeLineAtRiskPushedAtMs: t }; }
+      }
     } else if (a.kind === 'on') {
       // F-iii's emulation: the ON honoured only once a start timed to ⌈L⌉ alone (no + 5) is due.
       if (variant !== 'askStart' || t >= nfc.forceChargeLineStartAtMs(W1, ask, seen, NAME, chargeRateKw, evDisplacedKwh, 3)) {

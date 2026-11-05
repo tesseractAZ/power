@@ -821,6 +821,69 @@ test('★★ T6 the why-texts (L8) and the ON-step texts in line mode', () => {
   for (const s of [night(), ex]) assert.doesNotMatch(why(s, fo({ poolSocPct: 50 })), /stays on/);
 });
 
+/** (Fix8) The "already at the panel ceiling" why's relation, parsed and checked against the numbers it names: the ceiling `c`
+ *  above the line, at it, or the line above a full pool — by the line's actual order, with the line named so that the order
+ *  shows (round1, or two decimals where one would read as the ceiling: lineBesidePct). */
+const CEILING_WHY = /^the pool already reads the (\d+)% panel ceiling — (?:(above|at) tonight's ([\d.]+)% outage line|tonight's ([\d.]+)% outage line is above a full pool)$/;
+const ceilingWhyHolds = (w: string, linePct: number, c: number): string | null => {
+  const m = CEILING_WHY.exec(w);
+  if (m == null) return `unparsed: ${w}`;
+  if (Number(m[1]) !== c) return `names the ${m[1]}% ceiling, not ${c}%`;
+  const n = Number(m[3] ?? m[4]);
+  const shown = r1(linePct) === c && linePct !== c ? Math.round(linePct * 100) / 100 : r1(linePct);
+  if (n !== shown) return `names the line ${n}%, not ${shown}%`;
+  if (m[2] === 'above') return linePct < c && n < c ? null : `"above" with the line ${linePct} and the ceiling ${c}`;
+  if (m[2] === 'at') return linePct === c && n === c ? null : `"at" with the line ${linePct} and the ceiling ${c}`;
+  return linePct > 100 && n > 100 && c === 100 ? null : `"above a full pool" with the line ${linePct}`;
+};
+
+test('★★★ T6 (Fix8) the "already at the panel ceiling" why words the order its numbers show — above the line, at it, or the line above a full pool: the real plans (a 101.57% line, a 100% one, a 99.99% one) through armFromPlan, and the edges against the 80% and 100% ceilings', () => {
+  const why = (s: LineState, o: ForceChargeOpts, t = WIN_START + H) => (decideForceCharge(s, t, o) as { why?: string }).why ?? '';
+  const ceilingOf = (c: number | null, ask: number, cost: boolean) =>
+    (nfc.forceChargeModeOf({ forceChargeCeilingPct: c, forceChargeLineAskPct: ask } as never, { cost, line: true }) as { panelCeilingPct: number }).panelCeilingPct;
+  // The real plans, armed by armFromPlan (the reserve then verified), their pool reading the panel's ceiling before the first ON.
+  const real = (label: string, h: number, basis: 'np' | 'm') => {
+    const p = yearPlanAt(label, h, basis);
+    const cost = liveCost(label);
+    const rec = (armFromPlan as (...a: unknown[]) => NightActuationState | null)(emptyActuationState(), '2027-01-01', p, p.generatedAt, 30, cost, null, true) as LineState | null;
+    assert.ok(rec != null && rec.forceChargeLineAskPct === p.forceChargeLine!.askPct && rec.forceChargeLinePct === p.cushionLineSocPct, `${label}: armed with its line`);
+    const c = ceilingOf(rec!.forceChargeCeilingPct, rec!.forceChargeLineAskPct!, cost);
+    const live = { ...rec!, appliedAtMs: rec!.windowStartMs! - 5 * M, applyVerifiedAtMs: rec!.windowStartMs! + M } as LineState;
+    return { p, c, w: why(live, fo({ enabled: cost, poolSocPct: c, ceilingReadbackPct: c }), rec!.windowStartMs! + 30 * M) };
+  };
+  // 2026-10-26 21:30, nameplate, 20 h: the 101.57% line, asked at 100 under a 100% ceiling. Its rationale says the line is above
+  // a full pool, so no charge can hold it; the why said "the 100% panel ceiling — above tonight's 101.6% outage line".
+  const c20 = real('2026-10-26 21:30', 20, 'np');
+  assert.deepEqual([c20.p.cushionLineSocPct, c20.p.forceChargeLine?.askPct, c20.c], [101.57, 100, 100]);
+  assert.ok(c20.p.rationale.includes("tonight's 101.57% outage line is above a full pool, so no charge can hold it"), c20.p.rationale);
+  assert.equal(c20.w, "the pool already reads the 100% panel ceiling — tonight's 101.6% outage line is above a full pool");
+  // 2026-12-30 21:30 at 0.944, 20 h: a 100% line — at the ceiling. 2027-02-10 21:30 at 0.944, 19 h: 99.99% — two decimals.
+  const at100 = real('2026-12-30 21:30', 20, 'm');
+  assert.deepEqual([at100.p.cushionLineSocPct, at100.c], [100, 100]);
+  assert.equal(at100.w, "the pool already reads the 100% panel ceiling — at tonight's 100% outage line");
+  const n9999 = real('2027-02-10 21:30', 19, 'm');
+  assert.deepEqual([n9999.p.cushionLineSocPct, n9999.c], [99.99, 100]);
+  assert.equal(n9999.w, "the pool already reads the 100% panel ceiling — above tonight's 99.99% outage line");
+  // The edges (synthetic records). The 80% ceiling rides asks up to 70 only (⌈L⌉ + 10 ≤ 80; a cost ceiling riding in line mode
+  // stays under ⌈L⌉ + 10); 100% asks of 90 and more. An ask of 80 or 81 syncs 90 or 91: neither 80 nor 100 is reachable there.
+  const rows: Array<[number, number, number | null, string]> = [
+    [55.55, 56, null, "above tonight's 55.6% outage line"], [55.55, 56, 60, "above tonight's 55.6% outage line"],
+    [79.96, 80, null, "above tonight's 80% outage line"], [80, 80, null, "above tonight's 80% outage line"],
+    [80.04, 81, null, "above tonight's 80% outage line"], [89.96, 90, null, "above tonight's 90% outage line"],
+    [99.94, 100, null, "above tonight's 99.9% outage line"], [99.96, 100, null, "above tonight's 99.96% outage line"],
+    [100, 100, null, "at tonight's 100% outage line"], [100.03, 100, null, "tonight's 100.03% outage line is above a full pool"],
+    [101.57, 100, null, "tonight's 101.6% outage line is above a full pool"],
+  ];
+  for (const [line, ask, cost, tail] of rows) {
+    const s = night({ forceChargeLineAskPct: ask, forceChargeLinePct: line, forceChargeCeilingPct: cost });
+    const c = ceilingOf(cost, ask, cost != null);
+    assert.equal(c, ask <= 70 ? 80 : ask >= 90 ? 100 : ask + 10, `ask ${ask}`);
+    const w = why(s, fo({ enabled: cost != null, poolSocPct: c, ceilingReadbackPct: c }));
+    assert.equal(w, `the pool already reads the ${c}% panel ceiling — ${tail}`, `line ${line}`);
+    assert.equal(ceilingWhyHolds(w, line, c), null, `line ${line}: ${w}`);
+  }
+});
+
 /* ══ T8 — the morning refresh never lowers or drops the line ═══════════════════════════════════════ */
 
 test('★★ T8 a refresh with a lower cost ceiling, or none, keeps the line ask: the leg still rides the line', () => {
@@ -997,11 +1060,13 @@ test('★★ T9 (review) a line night NOT expected to start (the pool stays at o
   assert.doesNotMatch(push.body, /on until the window closes/);
 });
 
-test('★★ T9 the ON failure on a line night (review): all slots ⇒ near the 50% reserve and what would hold the line; some ⇒ the others still charge — never "no action needed"', () => {
+test('★★ T9 the ON failure on a line night (review): all slots ⇒ only the 50% reserve holds the pool, and what would hold the line; some ⇒ the others still charge — never "no action needed"', () => {
   const fail = (slots: number[], line: number | null) => buildNightForceChargeOnFailure({ day: '2026-09-16', slots, ourSlots: [1, 2, 3], retries: 1, noRetry: false, ceilingPct: line == null ? 90 : null, lineLinePct: line } as never);
   const all = fail([1, 2, 3], 55.55);
   assert.equal(all.title, 'Night-charge: the outage-line force-charge did not take effect');
-  assert.ok(all.body.includes("Tonight's force-charge for the 55.6% outage line will not happen: without it the pool will close the window near the 50% reserve, under the line."), all.body);
+  // (Fix8) The pool at the failure is not known to the push (it may read above the line): what holds it, and that it MAY close under.
+  assert.ok(all.body.includes("Tonight's force-charge for the 55.6% outage line will not happen: without it only the 50% reserve holds the pool, and it may close the window under the line."), all.body);
+  assert.doesNotMatch(all.body, /will close the window near/);
   assert.ok(all.body.includes('To hold the line tonight, switch Charge Now on for slot(s) 1, 2, 3 in the EcoFlow app (the add-on switches it off at the window close); if this repeats, check the SHP2 cloud link.'), all.body);
   assert.doesNotMatch(all.body, /No action needed/);
   const some = fail([2], 55.55);
@@ -1017,7 +1082,8 @@ test('★★ T9 the ON failure on a line night (review): all slots ⇒ near the 
 test('★★ T9 the declined start (L3; review): every all-night blocker is one; each CLASS pushes once it has held 10 min unbroken; the time quoted is the latest start that still reaches the line', () => {
   const declined = (notify as unknown as { buildLineForceChargeDeclinedStart: (o: unknown) => { title: string; body: string } })
     .buildLineForceChargeDeclinedStart({ day: '2026-09-16', linePct: 55.55, why: 'grid presence is unknown', latestStartText: '04:24' });
-  assert.equal(declined.body, "Night-charge: the force-charge for tonight's 55.6% outage line cannot start yet — grid presence is unknown. If it has not started by ~04:24, the pool is expected to close under the line; if it never starts, near the 50% reserve.");
+  // (Fix8) True in every outcome: the pool may already read above the line, or a person's Charge Now may lift it.
+  assert.equal(declined.body, "Night-charge: the force-charge for tonight's 55.6% outage line cannot start yet — grid presence is unknown. If it has not started by ~04:24, the pool may close under the line; if it never starts, only the 50% reserve holds it.");
   // Which declines are blockers: the non-pool ones — and (review 17) no ceiling readback, no slot connected.
   const cls = nfc.forceChargeBlockerClass;
   for (const s of [night(), night({ applyVerifiedAtMs: WIN_START + M })]) {
@@ -1981,4 +2047,173 @@ test('★★★ T10b the gate (A5, M3): an ARMED, disclosed, actuated row whose 
   assert.equal(run({ actuation_reverted_at_ms: NOW - 3 * 86_400_000 + 3_600_000 }).activeStrikes, 1);
   assert.equal(run({ cushion_shortfall: 0, cushion_envelope_shortfall: 0, cushion_line_force_charge_pct: 69, cushion_line_soc_pct: 68.85, window_close_soc_pct: 57.3,
     actuation_reverted_at_ms: NOW - 3 * 86_400_000 + 3_600_000 }).activeStrikes, 1, 'the carried rule strikes it alike');
+});
+
+/* ══ T24 (Fix8) — THE LINE TEXTS AT THEIR EDGES ══════════════════════════════════════════════════════════════════════════ */
+
+/** (Fix8) The matrix's lines and the asks the planner gives them (askOf: ⌈L⌉, at most 100), with the line stated at 50.00 and
+ *  asked at 51 (its raw value a hair above the reserve: 2026-11-25 on nameplate at 11 h). */
+const MATRIX: Array<[number, number]> = [[50, 51], ...[50.03, 50.05, 55.55, 79.96, 80, 80.04, 89.96, 90, 94.96, 95, 99.94, 99.96, 100, 101.57]
+  .map((l): [number, number] => [l, Math.min(100, Math.ceil(l - 1e-9))])];
+/** How a text names the line beside the whole-percent levels it orders it against (nfc.lineBesidePct): round1, as every surface
+ *  names it, or two decimals where one would read as one of those levels and the line is not that level. */
+const beside = (l: number, ...levels: number[]): number => (levels.includes(r1(l)) && !levels.includes(l) ? Math.round(l * 100) / 100 : r1(l));
+/** Every order relation a line text states, checked against the numbers it names. `named` — the number the text must give the
+ *  line (null: the text orders the line against the reserve without a number, where `noNumber` allows it). */
+const lineRelationErrors = (text: string, o: { line: number; named: number; noNumber?: boolean; where: string }): string[] => {
+  const e: string[] = [];
+  const num = (s: string): number => Number(s);
+  const each = (re: RegExp, f: (m: RegExpExecArray) => string | null): void => {
+    for (const m of text.matchAll(new RegExp(re.source, 'g'))) { const err = f(m as RegExpExecArray); if (err != null) e.push(`${o.where}: ${err} — «${m[0]}»`); }
+  };
+  // The line's number, wherever the text names it.
+  each(/(?:tonight's |the |for )([\d.]+)% outage line|outage line ([\d.]+)%|outage line is ([\d.]+)%|outage line \(([\d.]+)%\)/, (m) => {
+    const n = num(m[1] ?? m[2] ?? m[3] ?? m[4]);
+    return n === o.named ? null : `names the line ${n}%, not ${o.named}%`;
+  });
+  // Above the 50% reserve (the 21:30 log, the push's clause, the notes, the card's rows).
+  each(/tonight's ([\d.]+)% outage line is above the 50% (?:reserve|the panel accepts as a reserve)|tonight's ([\d.]+)% outage line \(above the 50% the panel holds as a reserve\)|outage line ([\d.]+)% is above the 50% (?:reserve|the panel accepts as a reserve)/, (m) => {
+    const n = num(m[1] ?? m[2] ?? m[3]);
+    return n > 50 && o.line > 50 ? null : `"above the 50% reserve" with the line ${n}% (${o.line})`;
+  });
+  each(/tonight's outage line is above the 50%|for tonight's outage line \(above the 50%|^outage line is above the 50%/, () => (o.noNumber === true ? null : 'the line unnumbered beside the reserve'));
+  // The rationale's: "The reserve is set to 50%, the most the panel accepts as a backup reserve; tonight's N% outage line is above it".
+  each(/The reserve is set to (\d+)%, the most the panel accepts as a backup reserve; tonight's ([\d.]+)% outage line is above it/,
+    (m) => (num(m[2]) > num(m[1]) && o.line > num(m[1]) ? null : `"above the ${m[1]}% reserve" with the line ${m[2]}% (${o.line})`));
+  each(/tonight's ([\d.]+)% outage line is above a full pool/, (m) => (num(m[1]) > 100 && o.line > 100 ? null : `"above a full pool" with ${m[1]}%`));
+  each(/tonight's ([\d.]+)% outage line is within 10 points of a full pool/, (m) => (num(m[1]) >= 90 && num(m[1]) <= 100 && o.line > 90 && o.line <= 100 ? null : `"within 10 points" with ${m[1]}%`));
+  each(/close at ~([\d.]+)%, under tonight's ([\d.]+)% outage line/, (m) => (num(m[1]) < num(m[2]) ? null : `${m[1]}% "under" ${m[2]}%`));
+  each(/the pool reads ([\d.]+)%, under tonight's ([\d.]+)% outage line/, (m) => (num(m[1]) < num(m[2]) ? null : `${m[1]}% "under" ${m[2]}%`));
+  each(/the pool reads ([\d.]+)%, under the ([\d.]+)% start target and (?:falling toward tonight's ([\d.]+)% outage line|not rising; tonight's outage line is ([\d.]+)%)/,
+    (m) => (num(m[1]) < num(m[2]) && num(m[1]) >= num(m[3] ?? m[4]) ? null : `${m[1]}% under ${m[2]}% and toward/at ${m[3] ?? m[4]}%`));
+  each(/the pool reads ([\d.]+)%, under ([\d.]+)%, ([\d.]+) points above tonight's ([\d.]+)% outage line/,
+    (m) => (num(m[1]) < num(m[2]) && num(m[3]) === r1(num(m[2]) - o.line) && num(m[3]) > 0 && num(m[2]) > num(m[4]) ? null : `margin ${m[0]}`));
+  each(/the pool read ([\d.]+)% at the close, under the ([\d.]+)% outage line/, (m) => (num(m[1]) < num(m[2]) ? null : `${m[1]}% "under" ${m[2]}%`));
+  each(/timed to ([\d.]+)% by [^;]*; expected to reach the panel's ([\d.]+)% ceiling/, (m) => (num(m[1]) < num(m[2]) ? null : `start target ${m[1]}% at or above the ${m[2]}% ceiling`));
+  // A forecast the builder cannot know (the pool at the failure, a person's Charge Now): never stated as certain.
+  each(/will close the window near|is expected to close under the line|close the window near the 50% reserve, under the line/, () => 'a definite close the builder cannot know');
+  return e;
+};
+
+test('★★★ T24 (Fix8) the line texts at their edges: every text on the line force-charge path that orders the line against another level, or names it by a number, rendered through its real builder at lines from 50.00 to 101.57 — each relation true, the line named round1(L), or two decimals where one reads as the level (the rationale: the plan\'s own two decimals)', () => {
+  const errs: string[] = [];
+  const add = (text: string, o: Parameters<typeof lineRelationErrors>[1]) => errs.push(...lineRelationErrors(text, o));
+  const base = L(yearPlan('2027-01-04 21:30', true));
+  const advisoryBase = linePlan(false);
+  const midBase = middayLegPlan({ floor: 26, capKw: 6, socPct: 90, pvScale: 1, h: 9, basis: 'np' });
+  assert.equal(base.expectedForceChargeMode, 'line');
+  for (const [line, ask] of MATRIX) {
+    const m = nfc.forceChargeModeOf({ forceChargeCeilingPct: null, forceChargeLineAskPct: ask } as never, { cost: false, line: true }) as { startTargetPct: number; panelCeilingPct: number };
+    const S = m.startTargetPct;
+    const C = m.panelCeilingPct;
+    const near = ask + 10 > 100;
+    const atReserve = beside(line, 50, 100) <= 50;
+    const where = (t: string) => `${t} @ ${line}`;
+    // 1. decideForceCharge: "already at the panel ceiling" (ITEM 1), and the hold-off (no relation; round1).
+    const s = night({ forceChargeLineAskPct: ask, forceChargeLinePct: line });
+    const wCeil = (decideForceCharge(s, WIN_START + H, fo({ poolSocPct: C, ceilingReadbackPct: C })) as { why?: string }).why ?? '';
+    const ce = ceilingWhyHolds(wCeil, line, C);
+    if (ce != null) errs.push(`${where('ceiling why')}: ${ce}`);
+    const wHold = (decideForceCharge(s, WIN_START + H, fo({ poolSocPct: 50, ceilingReadbackPct: C })) as { why?: string }).why ?? '';
+    add(wHold, { line, named: r1(line), where: where('hold-off why') });
+    // 2. The 21:30 log (forceChargeLineArmNote), every shape and every note.
+    const kinds: Array<{ kind: 'closeUnder' | 'aboveFull' | 'nearFull'; closePct: number | null } | null> = [null, { kind: 'closeUnder', closePct: r1(line - 1) },
+      ...(line > 100 ? [{ kind: 'aboveFull' as const, closePct: 100 }] : []), ...(near && line <= 100 ? [{ kind: 'nearFull' as const, closePct: 96 }] : [])];
+    for (const ceilingStop of [false, true]) for (const notHeld of kinds) {
+      const t = nfc.forceChargeLineArmNote({ linePct: line, startTargetPct: S, panelCeilingPct: C, expectedStartText: '03:25', timedByText: '04:40', ceilingStop, notHeld });
+      add(t, { line, named: beside(line, 50, 100), noNumber: atReserve, where: where(`21:30 ${ceilingStop ? 'stop' : 'plain'} ${notHeld?.kind ?? 'held'}`) });
+      if (!/^Force-charge: LINE — tonight's (?:[\d.]+% )?outage line is above the 50% reserve: /.test(t)) errs.push(`${where('21:30')}: ${t}`);
+    }
+    // 3. The line's number on the add-on's own log lines (index.ts: the ON, the re-ON, the ceiling lowering, the at-risk and the
+    // declined-start lines): lineLogPct, round1 of the record's line, its ask where the line is unknown.
+    const logPct = (nfc as unknown as { lineLogPct?: (s: unknown) => number | null }).lineLogPct;
+    if (logPct?.(s) !== r1(line)) errs.push(`${where('log')}: ${logPct?.(s)}`);
+    if (logPct?.(night({ forceChargeLineAskPct: ask, forceChargeLinePct: null })) !== ask) errs.push(`${where('log, no line')}: the ask`);
+    // 4. The evening push and 5. the card: the line clause (armed and not expected to start; the panel's stop; on to the close)
+    // and each note (lineNotHeldOf: under the line, above a full pool, within 10 points of it).
+    const closes: Array<[string, number]> = [['held', Math.min(100, r1(line + 3))], ['closeUnder', r1(Math.min(line, 100) - 1)]];
+    for (const [shape, E] of closes) for (const startMs of [base.expectedForceChargeStartMs!, null]) for (const stop of [false, true]) {
+      const p = {
+        ...base, cushionLineSocPct: line, forceChargeLine: { askPct: ask, linePct: line }, expectedWriteLevelPct: E, expectedForceChargeStartMs: startMs,
+        ...(stop ? { expectedLineCeilingStop: { ceilingPct: C, startTargetPct: S } } : { expectedLineCeilingStop: undefined }),
+        ...(near || shape === 'closeUnder' || line > 100 ? { cushionShortfallCause: 'envelope', cushionEnvelopeReason: near ? 'nearFull' : 'closeUnder' } : { cushionShortfallCause: undefined, cushionEnvelopeReason: undefined }),
+      } as LinePlan;
+      const sup = { cancelDeadlineText: 'tonight at 11:00 PM', targetPct: 50, forceChargeTargetPct: null, forceChargeLine: { askPct: ask, linePct: line, panelCeilingPct: C } };
+      const body = buildNightChargeMessage(p as never, 'charge', sup as never).body;
+      add(body, { line, named: beside(line, 50, 100), noNumber: atReserve, where: where(`push ${shape} ${startMs == null ? 'no start' : stop ? 'stop' : 'plain'}`) });
+      const row = (cardText as unknown as { outageLineRow: (p: unknown) => string | null }).outageLineRow(p);
+      if (row == null) errs.push(`${where('card')}: no row`);
+      else {
+        add(row, { line, named: beside(line, 50, 100), noNumber: atReserve, where: where(`card ${shape}`) });
+        if (row.includes('the line is above a full pool') && !(line > 100 && /^outage line ([\d.]+)%/.test(row) && Number(/^outage line ([\d.]+)%/.exec(row)![1]) > 100)) errs.push(`${where('card')}: ${row}`);
+      }
+    }
+    // The advisory disclosure (nothing armed): the push's note and the card's row.
+    const adv = { ...advisoryBase, cushionLineSocPct: line } as LinePlan;
+    add(buildNightChargeMessage(adv as never, 'charge', null).body, { line, named: beside(line, 50, 100), noNumber: atReserve, where: where('advisory push') });
+    add((cardText as unknown as { outageLineRow: (p: unknown) => string | null }).outageLineRow(adv) ?? '', { line, named: beside(line, 50, 100), noNumber: atReserve, where: where('advisory card') });
+    // 6. The ON failure (every slot, some) and 7. the declined start: the line beside the 50% reserve; no definite close.
+    for (const slots of [[1, 2, 3], [2]]) {
+      const b = buildNightForceChargeOnFailure({ day: '2026-09-16', slots, ourSlots: [1, 2, 3], retries: 1, noRetry: false, ceilingPct: null, lineLinePct: line } as never).body;
+      add(b, { line, named: beside(line, 50), where: where(`ON failure ${slots.length}`) });
+      if (atReserve && /under the line|short of the line/.test(b)) errs.push(`${where('ON failure')}: a line the reserve holds said to close under it`);
+    }
+    const dec = notify.buildLineForceChargeDeclinedStart({ day: '2026-09-16', linePct: line, why: 'grid presence is unknown', latestStartText: '04:24' }).body;
+    add(dec, { line, named: beside(line, 50), where: where('declined start') });
+    if (atReserve && /under the line/.test(dec)) errs.push(`${where('declined start')}: a line the reserve holds said to close under it`);
+    // 8. The line at risk: whole-percent pool readings (the panel's) under the threshold, falling and flat; and 9. the morning
+    // account's close; 10. the reserve-apply failure.
+    const costDominant = !near; // a cost-dominant night needs its cost stop at ⌈L⌉ + 10 ≤ 100
+    for (const [cause, T] of [['reOnSpent', S], ...(costDominant ? [['costMode', ask + 5]] : [])] as Array<[string, number]>) {
+      for (const P of [T - 1, Math.ceil(line - 0.05), Math.floor(line - 0.05 - 1e-9), Math.floor(line) - 3]) {
+        if (!(P < T) || P < 0) continue;
+        for (const refPct of [P + 1, P]) {
+          const risk = { cause, offSlots: [1, 2, 3], onSlots: [], poolPct: P, refPct, thresholdPct: T, linePct: line, reOnNotAppliedSlots: null, panelOffAtMs: null, reOnRetryPossible: false };
+          add(notify.buildLineForceChargeAtRisk({ day: '2026-09-16', risk: risk as never, closeText: '5:00 AM', reOnCutoffText: '4:40 AM' }).body, { line, named: r1(line), where: where(`at risk ${cause} ${P}`) });
+        }
+      }
+    }
+    for (const X of [Math.floor(line - 0.05 - 1e-9), Math.ceil(line - 0.05), 100].filter((x) => x <= 100)) {
+      const ran = nfc.forceChargeNightOutcome(onNight({ forceChargeLineAskPct: ask, forceChargeLinePct: line, forceChargeOffAtMs: WIN_END, forceChargeOffReason: 'windowEnd' }), { cost: false, line: true });
+      const b = buildNightChargeMorningSummary({ day: '2026-09-16', targetPct: 50, restorePct: 30, expectedKwh: 17.6, forceCharge: ran, closePoolPct: X, linePct: line } as never).body;
+      add(b, { line, named: r1(line), where: where(`morning ${X}`) });
+      if ((X < line - 0.05) !== /under the [\d.]+% outage line/.test(b)) errs.push(`${where('morning')}: close ${X} against ${line}: ${b}`);
+    }
+    add(notify.buildNightChargeApplyFailure({ day: '2026-09-16', currentReservePct: 30, targetPct: 50, applyRetries: 2, expectedKwh: 20, linePct: line }).body, { line, named: r1(line), where: where('apply failure') });
+    // 11. The mid-day push's reserve-hold shape: armed for the line (no relation), named round1(L).
+    const mid = middayLegPush({ ...midBase, cushionLineSocPct: line, forceChargeLine: { askPct: ask, linePct: line } } as LinePlan);
+    add(mid, { line, named: r1(line), where: where('mid-day') });
+  }
+  assert.deepEqual(errs.slice(0, 12), [], `${errs.length} false or misnamed`);
+});
+
+/** (Fix8) The rationale names the line by the plan's own two decimals (cushionLineSocPct). Over the year where the edges fall
+ *  (9-20 h, both bases, the live cost gate, eligibility true and false), every relation it states is true but one: a line
+ *  stated at 50.00 whose raw value a hair above the reserve is asked at 51 reads "tonight's 50% outage line is above it" —
+ *  the A5 identity holds those plans (a residual, counted: the identity's guard would have to move with it). The push and
+ *  the card of the same armed plans (armFromPlan's record) state none false. */
+const PIN_T24_YEAR = { plans: 13217, armed: 5742, stated50: 6 };
+
+test('★★★ T24 (Fix8) the year at the edges: the rationale, the push and the card of every line plan state each relation true — but the rationale of a line stated at 50.00, counted', () => {
+  const got = { plans: 0, armed: 0, stated50: 0 };
+  const errs: string[] = [];
+  for (const h of [9, 11, 14, 15, 17, 18, 19, 20]) for (const basis of ['np', 'm'] as const) for (const label of CASES.map((c) => c.label)) for (const elig of [true, false]) {
+    const p = yearPlanAt(label, h, basis, { line: elig });
+    if (p.cushionLineSocPct == null || !/outage line/.test(p.rationale)) continue;
+    got.plans += 1;
+    const line = p.cushionLineSocPct;
+    const where = `${label} ${basis} ${h} h ${elig ? 'armed' : 'advisory'} (${line})`;
+    const r = lineRelationErrors(p.rationale, { line, named: line, noNumber: false, where: `${where} rationale` });
+    if (line <= 50 && r.length > 0 && r.every((x) => x.includes('"above the 50% reserve"'))) got.stated50 += 1;
+    else errs.push(...r);
+    if (p.forceChargeLine == null) continue;
+    got.armed += 1;
+    const atReserve = beside(line, 50, 100) <= 50;
+    const sup = armedSupervised(p, liveCost(label));
+    errs.push(...lineRelationErrors(buildNightChargeMessage(p, 'charge', sup as never).body, { line, named: beside(line, 50, 100), noNumber: atReserve, where: `${where} push` }));
+    const row = (cardText as unknown as { outageLineRow: (p: unknown) => string | null }).outageLineRow(p);
+    if (row != null) errs.push(...lineRelationErrors(row, { line, named: beside(line, 50, 100), noNumber: atReserve, where: `${where} card` }));
+  }
+  assert.deepEqual(errs.slice(0, 10), [], `${errs.length} false`);
+  assert.deepEqual(got, PIN_T24_YEAR);
 });
