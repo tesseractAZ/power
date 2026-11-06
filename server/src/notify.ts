@@ -1276,11 +1276,11 @@ export function buildLineForceChargeDeclinedStart(o: {
     // reserve holds it) is not said to close under it. (Fix8 review 1) Nor "only the 50% reserve holds it": with the grid absent (a
     // declined cause) the pool drains through the reserve, and a person's Charge Now lifts it — the add-on adds nothing above it.
     body: `Night-charge: the force-charge for tonight's ${line}% outage line cannot start yet — ${o.why}. `
-      + (line <= RESERVE_WRITE_MAX_PCT
-        ? `If it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.`
-        : o.latestStartText != null
+      + (line > RESERVE_WRITE_MAX_PCT
+        ? o.latestStartText != null
           ? `If it has not started by ~${o.latestStartText}, the pool may close under the line; if it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.`
-          : `A start now may already close under the line; if it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.`),
+          : `A start now may already close under the line; if it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.`
+        : `If it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.`),
   };
 }
 
