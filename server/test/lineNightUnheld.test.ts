@@ -82,7 +82,7 @@ test('★★★ U1 a reserve already at the write: the plan neither claims nor a
   const p = planAt(50);
   const absent = planAt(50, { eligible: false });
   assert.equal(p.chargeTonight, true);
-  assert.ok(p.cushionLineSocPct > 50);
+  assert.ok(p.cushionLineSocPct! > 50);
   assert.equal(p.forceChargeLine, undefined, 'nothing armed: a force-charge rides a verified write, and none goes');
   assert.equal(p.cushionShortfall, true, 'the line is not claimed');
   assert.ok(p.cushionShortfallCause === 'envelope' || p.cushionShortfallCause === 'envelope+caps', String(p.cushionShortfallCause));
@@ -113,7 +113,7 @@ test('★★★ U1 the evening surfaces of such a plan: the note names why, the 
   const p = planAt(50);
   const sup = { cancelDeadlineText: 'tonight at 11:00 PM', targetPct: 50, forceChargeTargetPct: null, forceChargeLine: null };
   const body = buildNightChargeMessage(p as never, 'charge', sup as never).body;
-  assert.ok(body.includes(`NOTE: tonight's ${Math.round(p.cushionLineSocPct * 10) / 10}% outage line is above the 50% the panel accepts as a reserve, and the reserve already reads 50%: no write goes, and no force-charge runs without one — residual risk remains.`), body);
+  assert.ok(body.includes(`NOTE: tonight's ${Math.round(p.cushionLineSocPct! * 10) / 10}% outage line is above the 50% the panel accepts as a reserve, and the reserve already reads 50%: no write goes, and no force-charge runs without one — residual risk remains.`), body);
   assert.ok(body.includes('SUPERVISED: the backup reserve already reads 50%, so the add-on writes nothing tonight and no force-charge runs.'), body);
   assert.doesNotMatch(body, /raises the backup reserve|switches the panel's force-charge ON|Cancel from the night-charge card/);
   // A cost ceiling armed beside it rides nothing either.
