@@ -1177,35 +1177,124 @@ test('★★★ T9 (Fix12) a stale panel is pushed as no readback, the fact it i
   assert.ok(readFileSync(resolve(HERE, '../src/nightForceCharge.ts'), 'utf8').includes("  if (!o.socCoherent) return { kind: 'none', why: o.slotsOn == null ? W.noReadback : W.incoherent };\n"));
 });
 
-test('★★★ T9 (Fix12) the time the declined-start push quotes: from the live reading at the rate then; with none, from the reserve at the plan rate on the frozen nameplate; the close less 20 min only with no capacity at all', () => {
+test('★★★ T9 (Fix13) the time the declined-start push quotes: the earlier of the deliverable rate with the EV\'s energy and the live rate with none; from the reserve with no reading, on the frozen nameplate; no time at or before now; the close less 20 min only with no capacity at all', () => {
   const latest = nfc.lineDeclinedLatestStartMs;
-  const base = { closeAtMs: WIN_END, askPct: 56, poolSocPct: null, liveFullWh: null, frozenFullWh: 92_160, rateKw: null, evDisplacedKwh: null, slotCount: 0 };
+  const base = { nowMs: WIN_START, closeAtMs: WIN_END, askPct: 56, poolSocPct: null, liveFullWh: null, frozenFullWh: 92_160, rateKw: null, evDisplacedKwh: null, slotCount: 0 };
   // The finding: pool 50 to ask 56 at 10 kW: 33.2 min + the 15-min buffer: 04:11, where the fallback said 04:40.
   const stale = latest(base)!;
-  assert.equal(stale, nfc.lineLatestStartMs(WIN_END, 56, 50, 92.16, null, null, 0));
+  assert.equal(stale, nfc.lineLatestStartMs(WIN_END, 56, 50, 92.16, 10, null, 0));
   assert.equal(Math.round((WIN_END - stale) / M), 48);
   assert.ok(stale < WIN_END - nfc.FORCE_CHARGE_MIN_RUN_MS, 'earlier than the last start');
   // A coherent reading is the pool; a live capacity is the capacity, never the frozen one.
-  assert.equal(latest({ ...base, poolSocPct: 53 }), nfc.lineLatestStartMs(WIN_END, 56, 53, 92.16, null, null, 0));
-  assert.equal(latest({ ...base, liveFullWh: 80_000 }), nfc.lineLatestStartMs(WIN_END, 56, 50, 80, null, null, 0));
+  assert.equal(latest({ ...base, poolSocPct: 53 }), nfc.lineLatestStartMs(WIN_END, 56, 53, 92.16, 10, null, 0));
+  assert.equal(latest({ ...base, liveFullWh: 80_000 }), nfc.lineLatestStartMs(WIN_END, 56, 50, 80, 10, null, 0));
   assert.equal(latest({ ...base, liveFullWh: 0 }), stale, 'a live zero is no capacity');
-  // What the tick has: its rate, the EV it counts, its slots.
-  assert.equal(latest({ ...base, poolSocPct: 53, liveFullWh: 92_160, rateKw: 14, evDisplacedKwh: 4, slotCount: 3 }), nfc.lineLatestStartMs(WIN_END, 56, 53, 92.16, 14, 4, 3));
-  assert.notEqual(latest({ ...base, rateKw: 14 }), stale);
+  // The two figures, each counting the EV once. A live 14 kW is over the deliverable 10: the 10 kW figure is the earlier.
+  const live = { ...base, poolSocPct: 53, liveFullWh: 92_160, slotCount: 3 };
+  const plan = (ev: number | null) => nfc.lineLatestStartMs(WIN_END, 56, 53, 92.16, 10, ev, 3);
+  const at = (rate: number) => nfc.lineLatestStartMs(WIN_END, 56, 53, 92.16, rate, null, 3);
+  assert.equal(latest({ ...live, rateKw: 14 }), plan(null));
+  assert.equal(latest({ ...live, rateKw: 14, evDisplacedKwh: 4 }), plan(4), 'the EV ahead: its energy, which the live rate cannot see');
+  assert.equal(latest({ ...live, rateKw: 3.2 }), at(3.2), 'the EV on: the live rate, which carries it');
+  assert.equal(latest({ ...live, rateKw: 3.2, evDisplacedKwh: 1 }), at(3.2), 'the earlier of the two');
+  assert.equal(latest({ ...live, rateKw: 14, evDisplacedKwh: 20 }), Math.min(plan(20), at(14)));
+  assert.notEqual(latest({ ...live, rateKw: 3.2, evDisplacedKwh: 20 }), nfc.lineLatestStartMs(WIN_END, 56, 53, 92.16, 3.2, 20, 3), 'never the two together');
   assert.notEqual(latest({ ...base, evDisplacedKwh: 4 }), stale);
+  // The slots bound the deliverable rate: a one-Core home's frozen count moves the time, where its live rate is gone.
+  assert.equal(latest({ ...base, frozenFullWh: 30_720, slotCount: 1 }), nfc.lineLatestStartMs(WIN_END, 56, 50, 30.72, 5.5, null, 1));
   // Past the ask a reading needs no charge: the last start, as lineLatestStartMs caps it.
   assert.equal(latest({ ...base, poolSocPct: 60 }), WIN_END - nfc.FORCE_CHARGE_MIN_RUN_MS);
-  // No capacity at all: the last start, the one time the add-on can still name. No close: nothing.
+  // No time at or before now: to the millisecond.
+  assert.equal(latest({ ...base, nowMs: stale - 1 }), stale);
+  assert.equal(latest({ ...base, nowMs: stale }), null, 'at now');
+  assert.equal(latest({ ...base, nowMs: stale + 1 }), null, 'past');
+  // No capacity at all: the last start, the one time the add-on can still name, and no push reaches it. No close: nothing.
   for (const frozenFullWh of [null, 0, Number.NaN]) assert.equal(latest({ ...base, frozenFullWh }), WIN_END - nfc.FORCE_CHARGE_MIN_RUN_MS, String(frozenFullWh));
   assert.equal(latest({ ...base, closeAtMs: null }), null);
-  // The tick's wiring: the frozen projection reaches it, and only here.
+  // The tick's wiring: now, the frozen projection and its connected count reach it, and only here.
   assert.ok(INDEX.includes(
     '      const latestAt = lineDeclinedLatestStartMs({\n'
-    + "        closeAtMs: writeWindowEndMs(state), askPct: state.forceChargeLineAskPct!, poolSocPct: socCoherent ? socNowPct : null,\n"
+    + "        nowMs, closeAtMs: writeWindowEndMs(state), askPct: state.forceChargeLineAskPct!, poolSocPct: socCoherent ? socNowPct : null,\n"
     + "        liveFullWh: fullWh, frozenFullWh: shp2.projection?.kind === 'shp2' ? shp2.projection.backupFullCapWh : null,\n"
-    + '        rateKw: chargeRateKw, evDisplacedKwh, slotCount: connectedSlots.length,\n'
+    + '        rateKw: chargeRateKw, evDisplacedKwh,\n'
+    + "        slotCount: sp != null ? connectedSlots.length : shp2.projection?.kind === 'shp2' ? (shp2.projection.sources ?? []).filter((c) => c?.hwConnect === true).length : 0,\n"
     + '      });\n'));
-  assert.ok(INDEX.includes("latestStartText: latestAt != null ? fmtSiteClock(latestAt) : 'the window close',"));
+  assert.ok(INDEX.includes('latestStartText: latestAt != null ? fmtSiteClock(latestAt) : null,'));
+  // The START keeps its rate and its EV energy, the double count included (it errs early, and it moves writes).
+  assert.ok(INDEX.includes('    chargeRateKw,\n    evDisplacedKwh,\n    // v1.191.0 (S6, W5) — the run backstop of the tariff in effect'));
+  const NFC_SRC = readFileSync(resolve(HERE, '../src/nightForceCharge.ts'), 'utf8');
+  assert.ok(NFC_SRC.includes('if (nowMs < forceChargeLineStartAtMs(endMs, mode.startTargetPct, o.poolSocPct, o.fullKwh, o.chargeRateKw, o.evDisplacedKwh, slots.length)) {'));
+});
+
+/** (Fix13) index.ts's pushLineDeclinedIfDue over minute ticks: the real decision, the real tick, the real helper and the real body, with what
+ *  the tick has at each minute. `frozen` is the projection a stale panel leaves: its nameplate and connected count. */
+const declinedChain = (s: LineState, from: number, to: number, opts: (t: number) => ForceChargeOpts, frozen = { fullWh: 92_160, slots: 3 }) => {
+  let mem: nfc.LineDeclinedPushMem = { day: null, st: nfc.EMPTY_LINE_DECLINED_PUSH };
+  for (let t = from; t < to; t += M) {
+    const o = opts(t);
+    const a = decideForceCharge(s, t, o);
+    assert.equal(a.kind, 'none', `no write on the walk: ${(WIN_END - t) / M} min out`);
+    const why = (a as { why?: string }).why;
+    const dp = nfc.lineDeclinedPushTick(mem, s, why, t, { cost: false, line: true });
+    mem = dp.mem;
+    if (dp.push != null) {
+      const quoted = nfc.lineDeclinedLatestStartMs({
+        nowMs: t, closeAtMs: WIN_END, askPct: s.forceChargeLineAskPct!, poolSocPct: o.socCoherent ? o.poolSocPct : null,
+        liveFullWh: o.fullKwh != null ? o.fullKwh * 1000 : null, frozenFullWh: frozen.fullWh,
+        rateKw: o.chargeRateKw, evDisplacedKwh: o.evDisplacedKwh, slotCount: o.slotsOn != null ? o.connectedSlots.length : frozen.slots,
+      });
+      const body = (notify as unknown as { buildLineForceChargeDeclinedStart: (o: unknown) => { body: string } }).buildLineForceChargeDeclinedStart({
+        day: s.day, linePct: s.forceChargeLinePct, why: why!, latestStartText: quoted != null ? new Date(quoted).toISOString() : null,
+      }).body;
+      return { t, cls: dp.push, quoted, body };
+    }
+  }
+  return null;
+};
+/** The finding's night: a 70.55 line, ask 71, the panel's ceiling read back, and the panel gone stale from `staleFromMin` before the close. */
+const staleNight = (pool: number, staleFromMin: number) => {
+  const s = night({ forceChargeLineAskPct: 71, forceChargeLinePct: 70.55 });
+  const staleAt = WIN_END - staleFromMin * M + 5 * M; // index.ts's freshness: 5 min after the last report
+  return declinedChain(s, WIN_END - staleFromMin * M - 30 * M, WIN_END - 25 * M, (t) => t < staleAt
+    ? fo({ poolSocPct: pool, slotsOn: [], slotSocPct: { 1: pool, 2: pool, 3: pool }, ceilingReadbackPct: 81, chargeRateKw: 14 })
+    : fo({ ...STALE_PANEL }));
+};
+const NO_CLOCK = 'A start now may already close under the line; if it never starts, the add-on adds nothing above the 50% reserve.';
+
+test('★★★ T9 (Fix13) a stale panel on a pool above the reserve: no clock already gone, words true in every outcome; the clock while it is still ahead', () => {
+  for (const [pool, staleFromMin, pushedMin] of [[65, 85, 70], [62, 100, 85], [60, 110, 95]] as const) {
+    const r = staleNight(pool, staleFromMin)!;
+    assert.equal(r.cls, 'noReadback');
+    assert.equal(r.t, WIN_END - pushedMin * M, `pool ${pool}`);
+    assert.equal(r.quoted, null, 'the time from the reserve, 132 min out, is gone');
+    assert.ok(r.body.endsWith(`cannot start yet — no live slot readback from the panel. ${NO_CLOCK}`), r.body);
+    assert.doesNotMatch(r.body, /by ~/);
+  }
+  const ahead = staleNight(52, 200)!;
+  assert.equal(ahead.t, WIN_END - 185 * M);
+  assert.equal(ahead.quoted, nfc.lineLatestStartMs(WIN_END, 71, 50, 92.16, 10, null, 3), 'from the reserve at the plan rate');
+  assert.ok(ahead.quoted! > ahead.t);
+  assert.ok(ahead.body.includes('If it has not started by ~'), ahead.body);
+  assert.doesNotMatch(ahead.body, /A start now/);
+});
+
+test('★★★ T9 (Fix13) one Core on a stale panel: its frozen count times the quote at what it delivers, where an empty slot list reads 10 kW', () => {
+  const s = night({ forceChargeLineAskPct: 71, forceChargeLinePct: 70.55 });
+  const opts = () => fo({ ...STALE_PANEL });
+  const one = declinedChain(s, WIN_START + 30 * M, WIN_END - 25 * M, opts, { fullWh: 30_720, slots: 1 })!;
+  assert.equal(one.quoted, nfc.lineLatestStartMs(WIN_END, 71, 50, 30.72, 5.5, null, 1));
+  const unbounded = nfc.lineLatestStartMs(WIN_END, 71, 50, 30.72, 10, null, 1);
+  assert.ok(one.quoted! < unbounded, 'earlier than the 10 kW an empty slot list reads');
+  assert.equal(Math.round((WIN_END - one.quoted!) / M), 85, '6.45 kWh at 5.5 kW + the buffer');
+});
+
+test('★★★ T9 (Fix13) the body: a line above the reserve with no time has no clock and no "the window close"; a line the reserve holds keeps its own sentence with or without one', () => {
+  const build = (notify as unknown as { buildLineForceChargeDeclinedStart: (o: unknown) => { body: string } }).buildLineForceChargeDeclinedStart;
+  const b = (linePct: number, latestStartText: string | null) => build({ day: '2026-09-16', linePct, why: 'grid presence is unknown', latestStartText }).body;
+  assert.equal(b(55.55, null), `Night-charge: the force-charge for tonight's 55.6% outage line cannot start yet — grid presence is unknown. ${NO_CLOCK}`);
+  assert.doesNotMatch(b(55.55, null), /window close|null|undefined/);
+  assert.ok(b(55.55, '4:11 AM').endsWith('If it has not started by ~4:11 AM, the pool may close under the line; if it never starts, the add-on adds nothing above the 50% reserve.'));
+  for (const t of [null, '4:11 AM']) assert.ok(b(50, t).endsWith('grid presence is unknown. If it never starts, the add-on adds nothing above the 50% reserve.'), String(t));
 });
 
 test('★★ T9 the morning summary (review): "ran to the window close" only when the OFF was the window\'s; any other OFF says when and why', () => {

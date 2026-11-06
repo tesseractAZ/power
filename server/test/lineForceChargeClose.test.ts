@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as nfc from '../src/nightForceCharge.js';
-import { decideForceCharge, forceChargeRateKw, evDisplacedPackKwh, type ForceChargeOpts } from '../src/nightForceCharge.js';
+import { decideForceCharge, forceChargeRateKw, evDisplacedPackKwh, EMPTY_LINE_DECLINED_PUSH, type ForceChargeOpts, type LineDeclinedPushMem } from '../src/nightForceCharge.js';
 import { emptyActuationState, type NightActuationState } from '../src/nightChargeActuator.js';
 import { buildNightChargeMorningSummary } from '../src/notify.js';
+import { withEnv } from './golden/support/env.js';
 
 /**
  * v1.200.0 — THE CLOSE GUARANTEE OF THE LINE FORCE-CHARGE (plan §5.4 T7).
@@ -25,8 +26,9 @@ import { buildNightChargeMorningSummary } from '../src/notify.js';
  *    the add-on's record, not a readback). The plant once resumed importing below the ceiling, which no Core
  *    does. Then, or OFF, the house draws the pack (load ÷ 0.94 + the Cores' standby), held at the 50% reserve; the slots read OFF
  *    until an ON of ours (the tick's 'on', 'onRetry' or 'lineReOn') takes effect;
- *  - the tick's evDisplacedKwh is the plan's predicted (P90) window EV, constant through the night, through
- *    evDisplacedPackKwh, exactly as index.ts passes it — so a predicted EV pulls the start early;
+ *  - the tick's evDisplacedKwh is the plan's predicted (P90) window EV through evDisplacedPackKwh, as index.ts passes it, so a predicted
+ *    EV pulls the start early. The plant holds that figure constant through the night; index.ts reads it from the latest plan, whose
+ *    window EV shrinks on each recompute as the hours pass;
  *  - the panel's ceiling reads back the minute after a sync; an ON takes effect after `onDelayMin`;
  *    readings are whole percents (rounded, or floored), `staleMin` old; each slot's Core reads the pool;
  *  - the close is the median of the last 15 minutes' readings (the scorer's window_close_soc_pct), and a
@@ -76,7 +78,6 @@ import { buildNightChargeMorningSummary } from '../src/notify.js';
 const MIN = 60_000;
 const H = 3_600_000;
 const NAME = 92.16;
-const CAP = NAME * 0.944;
 const LEG = 0.927;
 const DIS = 0.94;
 const W0 = Date.UTC(2027, 0, 5, 6);
@@ -112,8 +113,19 @@ interface Knobs {
   evEndMin: number;
   /** (Fix12) A later load, once the EV has ended: lateKw from lateFromMin before the close. */
   lateKw: number | null; lateFromMin: number;
+  /** (Fix13) The plant: connected Cores, its nameplate (92.16 kWh: 3), its grid-input cap (17 kW). Each Core takes forceChargeKwPerCore(). */
+  slots: number; nameKwh: number; capKw: number;
+  /** (Fix13) 'stuck': a person restarts the charge this long after the push (null: nobody does). */
+  restartMin: number | null;
+  /** (Fix13) A blocker of the start (red vitals) from this long before the close, to the close: the declined-start push, as index.ts ticks it. */
+  blockFromMin: number | null;
+  /** (Fix13) Charge Now on from this instant, whoever's: the plant takes it, under the blocker; what a start at a quoted time closes at. */
+  startAtMs: number | null;
 }
-const BASE: Knobs = { p0: 50, evFromMin: null, evKw: 7, standbyKw: 0, onDelayMin: 0, staleMin: 0, floor: false, predEvKwh: null, costPct: null, phaseMs: 0, lagMs: 0, judgeCheck: true, evEndMin: 0, lateKw: null, lateFromMin: 0 };
+const BASE: Knobs = {
+  p0: 50, evFromMin: null, evKw: 7, standbyKw: 0, onDelayMin: 0, staleMin: 0, floor: false, predEvKwh: null, costPct: null, phaseMs: 0, lagMs: 0, judgeCheck: true, evEndMin: 0, lateKw: null, lateFromMin: 0,
+  slots: 3, nameKwh: NAME, capKw: 17, restartMin: null, blockFromMin: null, startAtMs: null,
+};
 
 type LineState = NightActuationState & {
   forceChargeLineAskPct: number | null; forceChargeLinePct: number | null; forceChargeCeilingSyncedPct: number | null;
@@ -133,6 +145,8 @@ function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Varian
   pushRetryPossible: boolean; lastCheckAtMs: number | null; reOnsAtLastCheck: number;
   handBackAtMs: number | null; retryAtMs: number | null; personOnAtMs: number | null; personStopAtMs: number | null; panelOffAtMs: number | null; stopNamed: boolean;
   onWrites: number; onAtMs: number | null; onPoolPct: number | null;
+  /** (Fix13) The declined-start push: when it went and the time it quoted (lineDeclinedLatestStartMs; null, no clock), with what the tick had. */
+  declinedAtMs: number | null; quotedAtMs: number | null; declinedRateKw: number | null; declinedEvKwh: number | null;
 } {
   // (A5) The record's ask is ⌈L⌉ at most 100 (askOf, coerceLineAskPct): a line above a full pool asks 100.
   const ask = Math.min(100, Math.ceil(L - 1e-9));
@@ -145,7 +159,11 @@ function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Varian
     forceChargeLineAskPct: ask, forceChargeLinePct: L, forceChargeCeilingSyncedPct: null, forceChargeMode: null,
   } as LineState;
   const gates = { cost: cost != null, line: true };
-  let pack = (kn.p0 / 100) * CAP;
+  const cap = kn.nameKwh * 0.944;
+  const allSlots = Array.from({ length: kn.slots }, (_, i) => i + 1);
+  /** (Fix13) The most the connected Cores take; never binds on three (16.5 kW against 15.8 at no load). */
+  const coresKw = kn.slots * nfc.forceChargeKwPerCore();
+  let pack = (kn.p0 / 100) * cap;
   let panelCeiling = 100;
   let pendingCeiling: number | null = null;
   let onEffectiveMs: number | null = null;
@@ -172,36 +190,45 @@ function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Varian
   let personPending = false;
   let personOnAtMs: number | null = null;
   let personStopAtMs: number | null = null;
+  let declinedMem: LineDeclinedPushMem = { day: null, st: EMPTY_LINE_DECLINED_PUSH };
+  let declinedAtMs: number | null = null;
+  let quotedAtMs: number | null = null;
+  let declinedRateKw: number | null = null;
+  let declinedEvKwh: number | null = null;
   const readings: number[] = [];
   const tail: number[] = [];
   const evKwh = kn.evFromMin != null ? kn.evKw * (Math.min(kn.evFromMin, (W1 - W0) / MIN) - kn.evEndMin) / 60 : 0;
   const pred = kn.predEvKwh === 'exact' ? evKwh : kn.predEvKwh;
   for (let t = W0 + kn.phaseMs; t < W1; t += MIN) {
     if (pendingCeiling != null) { panelCeiling = pendingCeiling; pendingCeiling = null; }
-    const raw = (pack / CAP) * 100;
+    const raw = (pack / cap) * 100;
     const now = kn.floor ? Math.floor(raw) : Math.round(raw);
     readings.push(now);
     const seen = readings[Math.max(0, readings.length - 1 - kn.staleMin)];
     if (t >= W1 - 15 * MIN) tail.push(now);
     const ev = kn.evFromMin != null && t >= W1 - kn.evFromMin * MIN && t < W1 - kn.evEndMin * MIN ? kn.evKw : kn.lateKw != null && t >= W1 - kn.lateFromMin * MIN ? kn.lateKw : 0;
     const load = houseKw + ev;
-    const chargeRateKw = forceChargeRateKw({ gridCapKw: 17, houseLoadKw: load, legEff: LEG, slotCount: 3 });
+    const chargeRateKw = forceChargeRateKw({ gridCapKw: kn.capKw, houseLoadKw: load, legEff: LEG, slotCount: kn.slots });
     // index.ts: the plan's P90 window EV, through evDisplacedPackKwh, on every tick of this window.
     const evDisplacedKwh = pred != null && pred > 0
-      ? evDisplacedPackKwh({ evKwh: pred, peakEvKw: kn.evKw, rateKw: chargeRateKw, unboundedRateKw: Math.max(1, (17 - load) * LEG), legEff: LEG })
+      ? evDisplacedPackKwh({ evKwh: pred, peakEvKw: kn.evKw, rateKw: chargeRateKw, unboundedRateKw: Math.max(1, (kn.capKw - load) * LEG), legEff: LEG })
       : null;
     if (onEffectiveMs != null && t >= onEffectiveMs) {
       chargeNowOn = true; importing = true; onEffectiveMs = null;
       if (personPending) { personPending = false; personOnAtMs = t; }
     }
+    if (kn.startAtMs != null && t >= kn.startAtMs) chargeNowOn = true;
+    const restarted = kn.restartMin != null && pushedAtMs != null && t >= pushedAtMs + kn.restartMin * MIN;
+    if (restarted) importing = true;
     // (review 5) 'reOnGlitch': the readback on the re-ON check's tick alone shows every slot OFF.
     const glitch = variant === 'reOnGlitch' && s.forceChargeLineReOnSlots != null && s.forceChargeLineReOnAtMs != null
       && t === s.forceChargeLineReOnAtMs + nfc.FORCE_CHARGE_ON_VERIFY_AFTER_MS;
     const o = {
       enabled: gates.cost, lineEnabled: gates.line, gridPresent: true, gridStaLost: false,
-      slotsOn: chargeNowOn && !glitch ? [1, 2, 3] : [], connectedSlots: [1, 2, 3], vitalsRed: false, socCoherent: true,
-      slotSocPct: { 1: seen, 2: seen, 3: seen },
-      ceilingReadbackPct: panelCeiling, poolSocPct: seen, fullKwh: NAME, chargeRateKw, evDisplacedKwh,
+      slotsOn: chargeNowOn && !glitch ? allSlots : [], connectedSlots: allSlots, socCoherent: true,
+      vitalsRed: kn.blockFromMin != null && t >= W1 - kn.blockFromMin * MIN,
+      slotSocPct: Object.fromEntries(allSlots.map((n) => [n, seen])),
+      ceilingReadbackPct: panelCeiling, poolSocPct: seen, fullKwh: kn.nameKwh, chargeRateKw, evDisplacedKwh,
     } as ForceChargeOpts;
     // (review 2) index.ts: the night's observations (the pool trail, the panel's own stop) on the record before
     // the decision; and on a tick that decides nothing, the line-at-risk push (once a night).
@@ -221,6 +248,15 @@ function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Varian
       }
       if (shapeAtMs == null && nfc.lineOnReadingShape(s, t, o) != null) { shapeAtMs = t; s = { ...s, forceChargeLineShapeLoggedAtMs: t }; }
     };
+    // (Fix13) index.ts's pushLineDeclinedIfDue, with the time it quotes.
+    if (kn.blockFromMin != null && a.kind === 'none') {
+      const dp = nfc.lineDeclinedPushTick(declinedMem, s, a.why, t, gates);
+      declinedMem = dp.mem;
+      if (dp.push != null) {
+        declinedAtMs = t; declinedRateKw = chargeRateKw; declinedEvKwh = evDisplacedKwh;
+        quotedAtMs = nfc.lineDeclinedLatestStartMs({ nowMs: t, closeAtMs: W1, askPct: ask, poolSocPct: seen, liveFullWh: kn.nameKwh * 1000, frozenFullWh: null, rateKw: chargeRateKw, evDisplacedKwh, slotCount: kn.slots });
+      }
+    }
     if (a.kind === 'none') judge();
     if (a.kind === 'syncCeiling') {
       s = { ...s, forceChargeCeilingAttemptedAtMs: t, forceChargeCeilingPriorPct: s.forceChargeCeilingPriorPct ?? a.prior, forceChargeCeilingSyncedPct: a.pct };
@@ -274,8 +310,8 @@ function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Varian
     }
     // F-i's emulation: a software stop at ⌈L⌉ (design A's hold without its drain allowance).
     if (variant === 'hold' && chargeNowOn && seen >= ask) { chargeNowOn = false; onEffectiveMs = null; s = { ...s, forceChargeOffAtMs: t, forceChargeOffReason: 'target' }; }
-    if (chargeNowOn && importing && variant !== 'stuck' && pack < (panelCeiling / 100) * CAP) {
-      pack = Math.min((panelCeiling / 100) * CAP, pack + Math.max(1, (17 - load) * LEG) * k * (MIN / H));
+    if (chargeNowOn && importing && (variant !== 'stuck' || restarted) && pack < (panelCeiling / 100) * cap) {
+      pack = Math.min((panelCeiling / 100) * cap, pack + Math.min(Math.max(1, (kn.capKw - load) * LEG), coresKw) * k * (MIN / H));
       onMin += 1;
     } else {
       // At the ceiling the panel switches the slots OFF by itself, and they stay OFF (measured). 'onLatch': they
@@ -287,7 +323,7 @@ function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Varian
           if (personOnAtMs != null && personStopAtMs == null) personStopAtMs = t;
         }
       }
-      if (pack > 0.5 * CAP) pack = Math.max(0.5 * CAP, pack - (load / DIS + kn.standbyKw) * (MIN / H));
+      if (pack > 0.5 * cap) pack = Math.max(0.5 * cap, pack - (load / DIS + kn.standbyKw) * (MIN / H));
     }
   }
   tail.sort((x, y) => x - y);
@@ -304,7 +340,7 @@ function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Varian
   return {
     close, onMin, reOns, reOnsFailed, pushedAtMs, shapeAtMs, lossAtMs, pushCause, pushRetryPossible, lastCheckAtMs, reOnsAtLastCheck,
     handBackAtMs, retryAtMs, personOnAtMs, personStopAtMs, panelOffAtMs: s.forceChargeLinePanelOffAtMs ?? null, stopNamed, onWrites,
-    onAtMs: s.forceChargeOnAtMs, onPoolPct,
+    onAtMs: s.forceChargeOnAtMs, onPoolPct, declinedAtMs, quotedAtMs, declinedRateKw, declinedEvKwh,
   };
 }
 
@@ -730,6 +766,108 @@ test('★★★ T7 (Fix12) an early session, then a late load: the one push is k
   assert.deepEqual(got, PIN_SESSION_THEN_LOAD);
 });
 
+/* ══ (Fix13) a rate the plant can deliver ═════════════════════════════════════════════════════════════════════════════════════════
+ * The flat hold's gate read 10 kW at any slot count with the option unset, and slots × the option with it set, though a slower plant
+ * needs longer. A stuck timed night, every slot reading on and the pool flat, is the shape the gate must not hold past the last restart
+ * that reaches the line. Each plant is 60 nights, pool 50 at the open, and a person restarts the charge 1, 5 or 10 min after the push. */
+
+const STUCK_LINES = [52.6, 55.55, 59.1, 65.95, 70.55, 90];
+const STUCK_PLANTS: Array<[string, Partial<Knobs>, string | undefined]> = [
+  ['3 Cores 92 kWh', {}, undefined],
+  ['2 Cores 61 kWh', { slots: 2, nameKwh: 61.44 }, undefined],
+  ['1 Core 31 kWh', { slots: 1, nameKwh: 30.72 }, undefined],
+  ['3 Cores, cap 12', { capKw: 12 }, undefined],
+  ['3 Cores, cap 10', { capKw: 10 }, undefined],
+  ['option 5.2', {}, '5.2'],
+  ['option 5.2, cap 12', { capKw: 12 }, '5.2'],
+];
+
+test('★★★ T7 (Fix13) a stuck timed night: pushed while a restart reaches the line on a plant slower than 10 kW; the default plants do not move; a capped plant keeps its disclosed residual', async () => {
+  const got: Record<string, { under: number; pushed: number; reach: [number, number, number] }> = {};
+  for (const [name, kn, option] of STUCK_PLANTS) {
+    await withEnv({ FORCE_CHARGE_KW_PER_CORE: option }, () => {
+      const row = got[name] = { under: 0, pushed: 0, reach: [0, 0, 0] as [number, number, number] };
+      for (const L of STUCK_LINES) for (const h of HOUSES) for (const floor of [false, true]) {
+        const night0 = night(L, h, 1, { ...BASE, ...kn, floor }, 'stuck');
+        assert.ok(night0.close < L - 0.05, `${name} ${L} ${h}: a stuck night closes under`);
+        row.under += 1;
+        if (night0.pushedAtMs != null) row.pushed += 1;
+        [1, 5, 10].forEach((D, i) => { if (night(L, h, 1, { ...BASE, ...kn, floor, restartMin: D }, 'stuck').close >= L - 0.05) row.reach[i] += 1; });
+      }
+    });
+  }
+  assert.deepEqual(got, PIN_STUCK_PLANTS);
+});
+
+test('★★★ T7 (Fix13) the named nights: a one-Core home on a line of 90 is pushed at T-154, and the restart closes over it; L 70.55 at T-91', () => {
+  const one = { slots: 1, nameKwh: 30.72 };
+  const at = (L: number) => {
+    const r = night(L, 2, 1, { ...BASE, ...one }, 'stuck');
+    return [(W1 - r.onAtMs!) / MIN, (W1 - r.pushedAtMs!) / MIN, night(L, 2, 1, { ...BASE, ...one, restartMin: 5 }, 'stuck').close];
+  };
+  assert.deepEqual([at(90), at(70.55)], PIN_ONE_CORE_NAMED);
+});
+
+/* ══ (Fix13) the time the declined-start push quotes ══════════════════════════════════════════════════════════════════════════════
+ * A blocker of the start, 10 min unbroken: lineDeclinedPushTick pushes, and lineDeclinedLatestStartMs quotes. The EV counted twice quoted
+ * hours before the push, and the EV counted never loses the line on an EV still ahead. The plant walks a start at the quoted time. */
+
+/** The EV on at the push (from the open), and still ahead of it (the last 2 hours). */
+const EV_ON = { ...BASE, ...session(EV_MAX_KW, 0, 150, 'exact', false) };
+const EV_AHEAD = { ...BASE, ...session(EV_MAX_KW, 240, 120, 'exact', false) };
+
+test('★★★ T7 (Fix13) the 23:10 push with the EV on quotes a future time, not ~18:59: the EV counted once, never twice', () => {
+  // The finding's night: house 2, 11.52 kW from the open, a 28 kWh figure, a blocker from the open.
+  const kn = { ...BASE, ...session(EV_MAX_KW, 0, 150, 28, false), blockFromMin: 360 };
+  const r = night(55.55, 2, 1, kn, 'real');
+  assert.equal(r.declinedAtMs, W0 + 10 * MIN, 'pushed at 23:10');
+  const twice = nfc.lineLatestStartMs(W1, 56, 50, NAME, r.declinedRateKw, r.declinedEvKwh, 3);
+  assert.ok(twice < W0, 'the double count: hours before the window opened');
+  const q = r.quotedAtMs!;
+  assert.ok(q > r.declinedAtMs!, 'a time still to come');
+  assert.equal(q, nfc.lineLatestStartMs(W1, 56, 50, NAME, 10, r.declinedEvKwh, 3), 'the plan rate, with the EV\'s energy, once');
+  assert.ok(q < nfc.lineLatestStartMs(W1, 56, 50, NAME, r.declinedRateKw, null, 3), 'earlier than the live rate alone');
+  assert.equal(Math.round((W1 - q) / MIN), PIN_QUOTE_EV_ON_MIN);
+  assert.ok(night(55.55, 2, 1, { ...kn, startAtMs: q }, 'real').close >= 56, 'and a start then reaches the ask');
+});
+
+test('★★★ T7 (Fix13) the EV still ahead: a start at the quoted time holds the line, and the EV-null form does not: it is why neither form stands alone', () => {
+  const kn = { ...EV_AHEAD, blockFromMin: 360 };
+  const r = night(55.55, 2, 1, kn, 'real');
+  assert.ok(r.quotedAtMs != null && r.quotedAtMs > r.declinedAtMs!);
+  assert.ok(night(55.55, 2, 1, { ...kn, startAtMs: r.quotedAtMs }, 'real').close >= 56, 'the quoted time holds');
+  const evNull = nfc.lineLatestStartMs(W1, 56, 50, NAME, r.declinedRateKw, null, 3);
+  assert.ok(evNull > r.quotedAtMs, 'the live rate cannot see an EV ahead');
+  assert.ok(night(55.55, 2, 1, { ...kn, startAtMs: evNull }, 'real').close < 55.5, 'the EV-null form closes under the line');
+  const planNull = nfc.lineLatestStartMs(W1, 56, 50, NAME, null, null, 3);
+  assert.ok(night(55.55, 2, 1, { ...kn, startAtMs: planNull }, 'real').close < 55.5, 'nor the plan rate with no EV energy');
+});
+
+test('★★★ T7 (Fix13) the grid: the quoted time is never at or before the push; with the EV on or ahead, a start at it reaches the ask; a low pool beside a large EV quotes no clock', () => {
+  const stats = { started: 0, pushes: 0, clocks: 0, none: 0, reached: 0 };
+  for (const [name, kn] of [['EV on', EV_ON], ['EV ahead', EV_AHEAD]] as const) {
+    for (const blockFromMin of [360, 300, 240]) for (const L of [...YEAR_LINES, ...HIGH_LINES]) for (const h of HOUSES) for (const k of KS) for (const floor of [false, true]) {
+      const K = { ...kn, floor, blockFromMin };
+      const r = night(L, h, k, K, 'real');
+      if (r.declinedAtMs == null) { assert.ok(r.onAtMs != null, `${name} ${L}: the predicted EV had started it before the blocker`); stats.started += 1; continue; }
+      stats.pushes += 1;
+      if (r.quotedAtMs == null) { stats.none += 1; continue; }
+      stats.clocks += 1;
+      assert.ok(r.quotedAtMs > r.declinedAtMs!, `${name} ${L} ${h} ${k}: quoted ${(W1 - r.quotedAtMs) / MIN} pushed ${(W1 - r.declinedAtMs!) / MIN}`);
+      const ask = Math.ceil(L - 1e-9);
+      const close = night(L, h, k, { ...K, startAtMs: r.quotedAtMs }, 'real').close;
+      assert.ok(close >= ask, `${name} ${L} ${h} ${k} ${floor}: a start at T-${(W1 - r.quotedAtMs) / MIN} closes ${close} under ${ask}`);
+      stats.reached += 1;
+    }
+  }
+  assert.deepEqual(stats, PIN_QUOTE_GRID);
+  // Pool 40, L 65.95, a large EV: the lead runs past the push, so no clock: the guard.
+  const low = night(65.95, 2, 1, { ...BASE, ...session(EV_MAX_KW, 0, 300, 'exact', false), p0: 40, blockFromMin: 360 }, 'real');
+  assert.equal(low.declinedAtMs, W0 + 10 * MIN);
+  assert.equal(low.quotedAtMs, null, 'no clock');
+  assert.ok(nfc.lineLatestStartMs(W1, 66, 40, NAME, low.declinedRateKw, low.declinedEvKwh, 3) <= low.declinedAtMs!, 'the double count would have quoted the past');
+});
+
 test('★★★ T7 the line force-charge actually runs: ON to the close on a 50% pool, no OFF before it', () => {
   const r = night(55.55, 2.0, 1.0, BASE, 'real');
   assert.ok(r.onMin >= 35, `ON ${r.onMin} min`);
@@ -996,6 +1134,22 @@ const PIN_EV_ENDS: Record<string, Array<[number, number, number]>> = {
 const PIN_EV_ENDS_SUM = { nights: 32000, under: 3, reached: 3, heldPushes: 100 };
 /** (Fix12) …the nights the timed-night check reads: a pool at or under the ask at the ON. */
 const PIN_STUCK_GATE_CHECKED = 2040;
+/** (Fix13) A stuck timed night per plant: 60 nights under, those pushed, and those a restart 1, 5 and 10 min after the push takes to the line. */
+const PIN_STUCK_PLANTS: Record<string, { under: number; pushed: number; reach: [number, number, number] }> = {
+  '3 Cores 92 kWh': { under: 60, pushed: 60, reach: [60, 60, 60] },
+  '2 Cores 61 kWh': { under: 60, pushed: 60, reach: [60, 60, 60] },
+  '1 Core 31 kWh': { under: 60, pushed: 60, reach: [60, 60, 60] },
+  '3 Cores, cap 12': { under: 60, pushed: 60, reach: [58, 56, 53] },
+  '3 Cores, cap 10': { under: 60, pushed: 60, reach: [40, 38, 33] },
+  'option 5.2': { under: 60, pushed: 60, reach: [60, 60, 60] },
+  'option 5.2, cap 12': { under: 60, pushed: 60, reach: [58, 56, 53] },
+};
+/** (Fix13) A one-Core home, house 2: [ON, the push, minutes before the close, the close of a restart 5 min after it], L 90 then L 70.55. */
+const PIN_ONE_CORE_NAMED = [[185, 154, 95], [122, 91, 75]];
+/** (Fix13) The 23:10 push beside an EV: minutes before the close. */
+const PIN_QUOTE_EV_ON_MIN = 204;
+/** (Fix13) The grid: nights started before the blocker, pushes, those with a clock, those with none, and of the clocks those a start at reaches the ask. */
+const PIN_QUOTE_GRID = { started: 1592, pushes: 2488, clocks: 1944, none: 544, reached: 1944 };
 /** (Fix12) An early 11.52 kW session from the open, then an 11.52 kW load from 60-150 min before the close: 32,000 nights a shape, the
  *  under nights with their one push after the load came, before it, or none. Before lineFlatPushHeld: real 189 / 0 / 45, onLatch
  *  3,595 / 10,429 / 45, reOnInert 2,036 / 10,429 / 1,604. The push no longer spends itself before the cause, and a night it reached only

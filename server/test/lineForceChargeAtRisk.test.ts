@@ -524,7 +524,7 @@ const flatNight = (pct: number, t: number, over: Record<string, unknown> = {}): 
 });
 const flatOn = (pct: number, over: Partial<ForceChargeOpts> = {}) => fo({ poolSocPct: pct, slotsOn: [1, 2, 3], slotSocPct: at(pct), ...over });
 /** The first instant the push may go on a flat pool: the line's latest start at the plan rate, less the push's own lead. */
-const gateMs = (pct: number): number => nfc.lineLatestStartMs(WIN_END, ASK, pct, FULL, null, null, 3) - nfc.FORCE_CHARGE_LINE_AT_RISK_LEAD_MS;
+const gateMs = (pct: number): number => nfc.lineLatestStartMs(WIN_END, ASK, pct, FULL, nfc.lineDeliverableRateKw(3), null, 3) - nfc.FORCE_CHARGE_LINE_AT_RISK_LEAD_MS;
 
 test('★★★ W1 (Fix12) the gate: held to the instant the time left no longer covers the charge to ⌈L⌉ at the plan rate, then pushed; from 52 that is 57.1 min out, at ⌈L⌉ the last start less the lead', () => {
   const due = nfc.lineAtRiskPushDue;
@@ -541,7 +541,7 @@ test('★★★ W1 (Fix12) the gate: held to the instant the time left no longer
   assert.equal(due(flatNight(ASK, WIN_END - 40 * M), WIN_END - 40 * M, flatOn(ASK))?.cause, 'onNotRising');
   // The on-peak guard's close is the close: the same gate, 30 min sooner.
   const guard = { nextOnPeakStartMs: WIN_END + 30 * M };
-  const gg = nfc.lineLatestStartMs(WIN_END - 30 * M, ASK, 52, FULL, null, null, 3) - nfc.FORCE_CHARGE_LINE_AT_RISK_LEAD_MS;
+  const gg = nfc.lineLatestStartMs(WIN_END - 30 * M, ASK, 52, FULL, 10, null, 3) - nfc.FORCE_CHARGE_LINE_AT_RISK_LEAD_MS;
   assert.equal(due(flatNight(52, gg - 1, guard), gg - 1, flatOn(52)), null);
   assert.equal(due(flatNight(52, gg, guard), gg, flatOn(52))?.closeAtMs, WIN_END - 30 * M);
 });
@@ -561,17 +561,41 @@ test('★★★ W1 (Fix12) the plan rate and no EV energy, on purpose: a 3 kW li
   assert.equal(nfc.FORCE_CHARGE_PLAN_RATE_KW, 10, 'under the ~14 kW a pack takes');
 });
 
-test('★★★ W1 (Fix12) the slot count reaches the plan rate as the start reads it: slots × FORCE_CHARGE_KW_PER_CORE where that is set, 10 kW where it is not', async () => {
+test('★★★ W1 (Fix13) a rate the plant can deliver: the plan rate, bounded by connected slots × the per-Core rate; the option never raises it, so a gate never opens later for it', async () => {
+  const rate = nfc.lineDeliverableRateKw;
+  await withEnv({ FORCE_CHARGE_KW_PER_CORE: undefined }, () => {
+    // The default plants must not move: min(10, 16.5) and min(10, 11). One Core is its own 5.5 kW.
+    assert.deepEqual([rate(3), rate(2), rate(1)], [10, 10, 5.5]);
+    for (const n of [null, undefined, 0, -1, 1.5, Number.NaN]) assert.equal(rate(n), nfc.FORCE_CHARGE_PLAN_RATE_KW, `slots ${n}: unknown, the plan rate`);
+  });
+  await withEnv({ FORCE_CHARGE_KW_PER_CORE: '5.2' }, () => assert.deepEqual([rate(3), rate(2), rate(1)], [10, 10, 5.2], 'the option never above 10 kW, where the start\'s own fallback reads 15.6'));
+  await withEnv({ FORCE_CHARGE_KW_PER_CORE: '2' }, () => assert.deepEqual([rate(3), rate(4), rate(1)], [6, 6, 2], 'never over the panel\'s three slots'));
+  // No grid cap in it, on purpose: lineFlatPushHeld's docblock.
+  await withEnv({ FORCE_CHARGE_KW_PER_CORE: undefined, ARB_GRID_INPUT_CAP_KW: '10' }, () => assert.equal(rate(3), 10));
+  // It reads the gate and the quote and nothing else: not the start, nor anything that writes.
+  assert.equal(NFC_SRC.split('lineDeliverableRateKw(').length - 1, 3, 'its definition, the gate, the quote');
+  assert.ok(!INDEX.includes('lineDeliverableRateKw'));
+  assert.ok(!readFileSync(resolve(HERE, '../src/nightChargeActuator.ts'), 'utf8').includes('lineDeliverableRateKw'));
+});
+
+test('★★★ W1 (Fix13) the slot count reaches the gate: a slower plant opens it sooner, at what it delivers; the option does not open it later', async () => {
   const due = nfc.lineAtRiskPushDue;
+  const gate = (rate: number) => nfc.lineLatestStartMs(WIN_END, ASK, 52, FULL, rate, null, 3) - nfc.FORCE_CHARGE_LINE_AT_RISK_LEAD_MS;
   await withEnv({ FORCE_CHARGE_KW_PER_CORE: '5' }, () => {
-    // 15 kW for three slots: 14.7 min of charge from 52, against 22.1 at 10 kW. 5 kW with one connected, a gate sooner.
-    const three = nfc.lineLatestStartMs(WIN_END, ASK, 52, FULL, null, null, 3) - nfc.FORCE_CHARGE_LINE_AT_RISK_LEAD_MS;
-    const one = nfc.lineLatestStartMs(WIN_END, ASK, 52, FULL, null, null, 1) - nfc.FORCE_CHARGE_LINE_AT_RISK_LEAD_MS;
-    assert.ok(one < three, 'fewer slots, a slower plan rate, a gate sooner');
+    // 10 kW for three slots, as with the option unset, where 15 kW would hold 7.4 min longer. 5 kW with one connected, a gate sooner.
+    const three = gate(10);
+    const one = gate(5);
+    assert.ok(one < three, 'fewer slots, a slower rate, a gate sooner');
     assert.equal(due(flatNight(52, three - 1), three - 1, flatOn(52)), null);
     assert.equal(due(flatNight(52, three), three, flatOn(52))?.cause, 'onNotRising');
     assert.equal(due(flatNight(52, one), one, flatOn(52, { connectedSlots: [1], slotsOn: [1, 2, 3] }))?.cause, 'onNotRising', 'one connected: open at its own rate');
+    assert.equal(due(flatNight(52, one - 1), one - 1, flatOn(52, { connectedSlots: [1], slotsOn: [1, 2, 3] })), null, 'one connected: held to it');
     assert.equal(due(flatNight(52, one), one, flatOn(52)), null, 'three connected: still held there');
+  });
+  await withEnv({ FORCE_CHARGE_KW_PER_CORE: undefined }, () => {
+    const one = gate(5.5);
+    assert.equal(nfc.lineFlatPushHeld(one - 1, WIN_END, ASK, 52, FULL, 1), true);
+    assert.equal(nfc.lineFlatPushHeld(one, WIN_END, ASK, 52, FULL, 1), false, 'the option unset, one Core: 5.5 kW, where the plan rate read 10');
   });
 });
 
@@ -1479,6 +1503,34 @@ test('★★ W1 (review 5) a slot its check found not applied that reads ON sinc
   assert.deepEqual([r2?.cause, r2?.reOnNotAppliedSlots], ['reOnSpent', []]);
 });
 
+/** (Fix13) The words on every body with a slot reading on. The load first: on the measured shape every such push comes from a load or a rate
+ *  limit, where cycling Charge Now cannot help and costs 2 minutes with the load on the pack; the cycle conditional. Every clause conditional:
+ *  the builder has no load reading. */
+const AT_RISK_ON = (slots: string): string => `Charge Now reads on for slot(s) ${slots} but the pool is not rising. `
+  + 'A large load such as an EV shares the grid input: stopping it may let the pool rise. '
+  + 'With none on, switching Charge Now off and on again in the EcoFlow app may restart the charge.';
+
+test('★★★ W1 (Fix13) the load goes first on EVERY body with a slot reading on: mixed off and on, cost-dominant, a falling pool, a flat one; none with no slot on', () => {
+  const build = (notify as unknown as { buildLineForceChargeAtRisk: (o: unknown) => { body: string } }).buildLineForceChargeAtRisk;
+  const r = (over: Record<string, unknown>) => ({ cause: 'onNotRising', offSlots: [], onSlots: [1, 2, 3], poolPct: 58, refPct: 58, refAtMs: 0, thresholdPct: 61, linePct: 55.55, closeAtMs: 0, reOnNotAppliedSlots: null, panelOffAtMs: null, reOnRetryPossible: false, ...over });
+  const body = (over: Record<string, unknown>) => build({ day: '2026-09-16', risk: r(over), closeText: '4:40am', reOnCutoffText: '4:40am' }).body;
+  const cases: Array<[Record<string, unknown>, string]> = [
+    [{}, '1, 2, 3'], [{ poolPct: 57, refPct: 59 }, '1, 2, 3'], [{ poolPct: 54, refPct: 54 }, '1, 2, 3'],
+    [{ cause: 'reOnHeld', offSlots: [2], onSlots: [1, 3] }, '1, 3'], [{ cause: 'reOnSpent', offSlots: [2], onSlots: [1] }, '1'],
+    [{ cause: 'reOnNotApplied', offSlots: [2], onSlots: [3], reOnNotAppliedSlots: [2] }, '3'], [{ cause: 'reOnRefused', offSlots: [1], onSlots: [2, 3] }, '2, 3'],
+    [{ cause: 'costMode', thresholdPct: 75, linePct: 69.4, poolPct: 73, refPct: 76 }, '1, 2, 3'], [{ cause: 'costMode', thresholdPct: 75, linePct: 69.4, poolPct: 73, refPct: 73, offSlots: [2], onSlots: [1] }, '1'],
+  ];
+  for (const [over, slots] of cases) {
+    const b = body(over);
+    assert.ok(b.endsWith(AT_RISK_ON(slots)), b);
+    assert.ok(b.indexOf('A large load') < b.indexOf('off and on again'), 'the load first');
+    // Conditional clauses: "not rising" stays true of a falling pool, and "may let" of a load beside a stuck slot.
+    assert.doesNotMatch(b, /lets the (pool|charge)|will (rise|restart)|must stop|is level/);
+  }
+  const offOnly = body({ cause: 'reOnHeld', offSlots: [1, 2, 3], onSlots: [] });
+  assert.doesNotMatch(offOnly, /A large load|off and on again/, 'no slot on, no such words');
+});
+
 test('★★★ W1 the push words: the pool, the start target, the line, the close; what to switch — never "No action needed"', () => {
   const build = (notify as unknown as { buildLineForceChargeAtRisk: (o: unknown) => { title: string; body: string; severity: string; dedupId: string } }).buildLineForceChargeAtRisk;
   const r = (over: Record<string, unknown>) => ({ cause: 'onNotRising', offSlots: [], onSlots: [1, 2, 3], poolPct: 58, refPct: 62, refAtMs: 0, thresholdPct: 61, linePct: 55.55, closeAtMs: 0, reOnNotAppliedSlots: null, panelOffAtMs: null, ...over });
@@ -1487,7 +1539,7 @@ test('★★★ W1 the push words: the pool, the start target, the line, the clo
   assert.equal(onLatch.dedupId, 'night_charge_line_at_risk');
   assert.equal(onLatch.title, "Night-charge: tonight's outage line is at risk");
   assert.equal(onLatch.body, "Night-charge: the pool reads 58%, under the 61% start target and falling toward tonight's 55.6% outage line; the window closes at ~4:40am. "
-    + 'Charge Now reads on for slot(s) 1, 2, 3 but the pool is not rising; switching it off and on again in the EcoFlow app may restart the charge.');
+    + AT_RISK_ON('1, 2, 3'));
   const spent = build({ day: '2026-09-16', risk: r({ cause: 'reOnSpent', offSlots: [1, 3], onSlots: [], poolPct: 57, refPct: 57, panelOffAtMs: WIN_END - 3 * H }), closeText: '4:40am' });
   assert.equal(spent.body, "Night-charge: the pool reads 57%, under the 61% start target and not rising; tonight's outage line is 55.6%; the window closes at ~4:40am. "
     + "The add-on has switched Charge Now back on 2 times tonight after the panel's own stop, the most it does in a night. "
@@ -1501,7 +1553,7 @@ test('★★★ W1 the push words: the pool, the start target, the line, the clo
   // (Fix8 review 1) A re-ON its check found not applied may still take effect late (lineNightObservations watches for it): "has
   // not taken effect", never "did not".
   assert.ok(notApplied.body.includes('The add-on switched Charge Now back on for slot(s) 2 and it has not taken effect; it does not try again tonight. '), notApplied.body);
-  assert.ok(notApplied.body.includes('Charge Now switched on for slot(s) 2 in the EcoFlow app can still lift the pool (the add-on switches it off at the close). Charge Now reads on for slot(s) 1, 3 but the pool is not rising'), notApplied.body);
+  assert.ok(notApplied.body.endsWith(`Charge Now switched on for slot(s) 2 in the EcoFlow app can still lift the pool (the add-on switches it off at the close). ${AT_RISK_ON('1, 3')}`), notApplied.body);
   const held = build({ day: '2026-09-16', risk: r({ cause: 'reOnHeld', offSlots: [1, 2, 3], onSlots: [] }), closeText: '4:40am' });
   assert.ok(held.body.includes('The add-on cannot switch Charge Now back on now (it needs the grid known present, healthy host vitals and a live panel reading). '), held.body);
   const cost = build({ day: '2026-09-16', risk: r({ cause: 'costMode', thresholdPct: 75, linePct: 69.4, poolPct: 73, refPct: 76 }), closeText: '4:40am' });
@@ -1511,7 +1563,7 @@ test('★★★ W1 the push words: the pool, the start target, the line, the clo
   assert.equal(cost.body, "Night-charge: the pool reads 73%, under 75%, 5.6 points above tonight's 69.4% outage line, and falling toward it; "
     + 'the window closes at ~4:40am. '
     + "Tonight's force-charge is the cost plan's, with its own stop: the add-on does not switch Charge Now back on for the line. "
-    + 'Charge Now reads on for slot(s) 1, 2, 3 but the pool is not rising; switching it off and on again in the EcoFlow app may restart the charge.');
+    + AT_RISK_ON('1, 2, 3'));
   const costOff = build({ day: '2026-09-16', risk: r({ cause: 'costMode', offSlots: [2], onSlots: [], thresholdPct: 75, linePct: 69.4, poolPct: 70, refPct: 70 }), closeText: '4:40am' });
   assert.equal(costOff.body, "Night-charge: the pool reads 70%, under 75%, 5.6 points above tonight's 69.4% outage line, and not rising; "
     + 'the window closes at ~4:40am. '
