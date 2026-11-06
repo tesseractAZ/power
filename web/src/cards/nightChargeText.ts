@@ -58,6 +58,9 @@ export interface BannerTextActuation extends BannerActuation {
   /** v1.200.0 (Fix10) — the server's chargeCycle.lineStartClosedStatus: a line night whose start is closed, its words, and whether
    *  anything is left to cancel. Absent on any other night. */
   lineStartClosed?: { text: string; cancel: boolean };
+  /** v1.200.0 (Fix10 review 1) — the server's chargeCycle.lineWriteUnreadStatus: a line night's write the panel has not read back.
+   *  Absent on any other night. */
+  lineWriteUnread?: boolean;
 }
 
 /** v1.189.0 — the banner's words, its tone and its Cancel control. */
@@ -96,7 +99,9 @@ export function actuationBannerState(a: BannerTextActuation, deadline: string | 
   }
   const target = a.targetPct ?? '—';
   if (a.appliedAtMs != null) {
-    return { text: `Reserve raised to ${target}% (was ${prior}%); auto-restores after the window closes.`, settled: false, cancel: 'Cancel & revert' };
+    // v1.200.0 (Fix10 review 1) — never "raised" on a line night's write no reading has shown: true in the apply's grace too.
+    const raised = a.lineWriteUnread === true ? `Reserve write to ${target}% has not read back` : `Reserve raised to ${target}%`;
+    return { text: `${raised} (was ${prior}%); auto-restores after the window closes.`, settled: false, cancel: 'Cancel & revert' };
   }
   // v1.200.0 (Fix10) — a line night whose start is closed: the server's words, never "write armed" past a window no write came of.
   if (a.lineStartClosed != null) return { text: a.lineStartClosed.text, settled: false, cancel: a.lineStartClosed.cancel ? 'Cancel tonight' : null };
@@ -228,6 +233,8 @@ export interface CushionNotePlan {
   cushionEnvelopeReason?: 'advisory' | 'backupLeg' | 'reserveAtTarget' | 'armedNoLine' | 'startClosed' | 'nearFull' | 'closeUnder';
   /** The server's words for 'startClosed' (NightChargePlan.cushionStartClosedWords). */
   cushionStartClosedWords?: string;
+  /** No verified write stands behind 'startClosed' (NightChargePlan.cushionStartClosedNoWrite): the card leads with the words. */
+  cushionStartClosedNoWrite?: boolean;
   /** The reserve the plan read: what 'reserveAtTarget' names. */
   reserveFloorPct?: number;
   cushionLineSocPct?: number | null;
@@ -310,6 +317,15 @@ export function outageLineRow(plan: CushionNotePlan, maxPct: number | null = nul
     return `outage line ${lineText(l)}is above the ${max}% the panel accepts as a reserve — its force-charge runs, but the line is not claimed; residual risk remains`;
   }
   return row == null ? null : `${row}${notHeld}`;
+}
+
+/** v1.200.0 (Fix10 review 1) — the card's lead on a closed start no write stands behind: the plan's expected figures and the write's
+ *  level are the reserve-alone figures of a write nothing holds, so "reserve held as a floor" or "expected charge to ~50%" would state
+ *  what will not happen, above the banner that says why. A write that stands keeps its figure, which is true. null otherwise. */
+export function startClosedLead(plan: CushionNotePlan): { headline: string; detail: string } | null {
+  if (plan.cushionEnvelopeReason !== 'startClosed' || plan.cushionStartClosedNoWrite !== true) return null;
+  const words = plan.cushionStartClosedWords ?? 'no force-charge for it starts';
+  return { headline: 'The outage line is not claimed tonight', detail: `${words.charAt(0).toUpperCase()}${words.slice(1)}.` };
 }
 
 /** v1.200.0 — the armed line force-charge's own row (outageLineRow): line mode only. */

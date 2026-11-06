@@ -749,13 +749,13 @@ test('★★★ W1 (review 5) a re-ON handed back (every write rate-limited): no
   assert.equal(risk?.reOnRetryPossible, false, 'the stamp + 15 min IS the cutoff: no retry can come');
   const body = build({ day: '2026-09-16', risk, closeText: '5am', reOnCutoffText: '4:40am' }).body;
   assert.ok(body.includes("The add-on's last try to switch Charge Now back on was refused by its own write cooldown; its next try would come after ~4:40am, when it no longer switches Charge Now back on. "
-    + 'To hold the line, switch Charge Now on for slot(s) 1, 2, 3 in the EcoFlow app (the add-on switches it off at the close).'), body);
+    + 'Charge Now switched on for slot(s) 1, 2, 3 in the EcoFlow app can still lift the pool (the add-on switches it off at the close).'), body);
   assert.doesNotMatch(body, /grid known present|No action needed|does not try again|may try once more/);
   const mayRisk = due(handedBack(last - 1), last - 1 + M, off59);
   assert.equal(mayRisk?.reOnRetryPossible, true, 'a millisecond earlier a tick may bring it');
   const may = build({ day: '2026-09-16', risk: mayRisk, closeText: '5am', reOnCutoffText: '4:40am' }).body;
   assert.ok(may.includes("The add-on's last try to switch Charge Now back on was refused by its own write cooldown; it may try once more before ~4:40am if the cooldown allows. "
-    + 'To hold the line, switch Charge Now on for slot(s) 1, 2, 3 in the EcoFlow app (the add-on switches it off at the close).'), may);
+    + 'Charge Now switched on for slot(s) 1, 2, 3 in the EcoFlow app can still lift the pool (the add-on switches it off at the close).'), may);
   assert.doesNotMatch(may, /grid known present|No action needed|does not try again|next try would come after/);
   // Every other cause carries no retry: false.
   assert.equal(due(handedBack(H0), H0 + 16 * M, offReading({ poolSocPct: 59, slotSocPct: at(59), gridPresent: null }))?.reOnRetryPossible, false);
@@ -1305,7 +1305,7 @@ test('★★★ W1 (review 8) the margin is a full tick, and the hand-back\'s ow
 
 test('★★★ W1 (review 8) the \'reOnRefused\' push is true in every outcome: the cooldown refused the switch-on; where a tick may still bring the retry, it may try once more before the re-ON\'s cutoff; where none can, its next try would come after it; and what to do now — never "it does not try again tonight"', () => {
   const build = (notify as unknown as { buildLineForceChargeAtRisk: (o: unknown) => { body: string } }).buildLineForceChargeAtRisk;
-  const todo = 'To hold the line, switch Charge Now on for slot(s) 1, 2, 3 in the EcoFlow app (the add-on switches it off at the close).';
+  const todo = 'Charge Now switched on for slot(s) 1, 2, 3 in the EcoFlow app can still lift the pool (the add-on switches it off at the close).';
   const MAY = "The add-on's last try to switch Charge Now back on was refused by its own write cooldown; it may try once more before ~4:40 AM if the cooldown allows. ";
   const SURE = "The add-on's last try to switch Charge Now back on was refused by its own write cooldown; its next try would come after ~4:40 AM, when it no longer switches Charge Now back on. ";
   const bodyAt = (f0: number, lag: number): { risk: nfc.LineAtRisk; body: string } => {
@@ -1369,7 +1369,7 @@ test('★★★ W1 the push words: the pool, the start target, the line, the clo
   const spent = build({ day: '2026-09-16', risk: r({ cause: 'reOnSpent', offSlots: [1, 3], onSlots: [], poolPct: 57, refPct: 57, panelOffAtMs: WIN_END - 3 * H }), closeText: '4:40am' });
   assert.equal(spent.body, "Night-charge: the pool reads 57%, under the 61% start target and not rising; tonight's outage line is 55.6%; the window closes at ~4:40am. "
     + "The add-on has switched Charge Now back on 2 times tonight after the panel's own stop, the most it does in a night. "
-    + 'To hold the line, switch Charge Now on for slot(s) 1, 3 in the EcoFlow app (the add-on switches it off at the close).');
+    + 'Charge Now switched on for slot(s) 1, 3 in the EcoFlow app can still lift the pool (the add-on switches it off at the close).');
   // (review 4) With no panel stop on record (Charge Now switched off in the app, re-ONed twice) the stop is not named.
   const spentNoStop = build({ day: '2026-09-16', risk: r({ cause: 'reOnSpent', offSlots: [1, 3], onSlots: [], poolPct: 57, refPct: 57 }), closeText: '4:40am' });
   assert.ok(spentNoStop.body.includes('The add-on has switched Charge Now back on 2 times tonight, the most it does in a night. '), spentNoStop.body);
@@ -1379,7 +1379,7 @@ test('★★★ W1 the push words: the pool, the start target, the line, the clo
   // (Fix8 review 1) A re-ON its check found not applied may still take effect late (lineNightObservations watches for it): "has
   // not taken effect", never "did not".
   assert.ok(notApplied.body.includes('The add-on switched Charge Now back on for slot(s) 2 and it has not taken effect; it does not try again tonight. '), notApplied.body);
-  assert.ok(notApplied.body.includes('To hold the line, switch Charge Now on for slot(s) 2 in the EcoFlow app (the add-on switches it off at the close). Charge Now reads on for slot(s) 1, 3 but the pool is not rising'), notApplied.body);
+  assert.ok(notApplied.body.includes('Charge Now switched on for slot(s) 2 in the EcoFlow app can still lift the pool (the add-on switches it off at the close). Charge Now reads on for slot(s) 1, 3 but the pool is not rising'), notApplied.body);
   const held = build({ day: '2026-09-16', risk: r({ cause: 'reOnHeld', offSlots: [1, 2, 3], onSlots: [] }), closeText: '4:40am' });
   assert.ok(held.body.includes('The add-on cannot switch Charge Now back on now (it needs the grid known present, healthy host vitals and a live panel reading). '), held.body);
   const cost = build({ day: '2026-09-16', risk: r({ cause: 'costMode', thresholdPct: 75, linePct: 69.4, poolPct: 73, refPct: 76 }), closeText: '4:40am' });
@@ -1394,7 +1394,7 @@ test('★★★ W1 the push words: the pool, the start target, the line, the clo
   assert.equal(costOff.body, "Night-charge: the pool reads 70%, under 75%, 5.6 points above tonight's 69.4% outage line, and not rising; "
     + 'the window closes at ~4:40am. '
     + "Tonight's force-charge is the cost plan's, with its own stop: the add-on does not switch Charge Now back on for the line. "
-    + 'To hold the line, switch Charge Now on for slot(s) 2 in the EcoFlow app (the add-on switches it off at the close).');
+    + 'Charge Now switched on for slot(s) 2 in the EcoFlow app can still lift the pool (the add-on switches it off at the close).');
   for (const m of [cost, costOff]) assert.doesNotMatch(m.body, /start target/);
   // (Fix8 review 1) The margin is worked from the numbers the push names, so they add up: the 55.55% line named 55.6%, its 61%
   // threshold 5.4 points above it (round1(61 − 55.55) = 5.5 named 61 − 55.6); a 50.05% line named 50.1%, 56 − 50.1 = 5.9.
@@ -1487,7 +1487,7 @@ test('★★★ W5 #1 a COST-DOMINANT line night\'s ON failure speaks for the li
   const all = buildNightForceChargeOnFailure({ day: '2026-09-16', slots: [1, 2, 3], ourSlots: [1, 2, 3], retries: 1, noRetry: false, ...fields });
   assert.doesNotMatch(all.body, /No action needed/);
   assert.ok(all.body.includes("Tonight's force-charge for the 69.4% outage line has not taken effect: unless it applies late, the add-on adds nothing above the 50% reserve, and the pool may close the window under the line."), all.body);
-  assert.ok(all.body.includes('switch Charge Now on for slot(s) 1, 2, 3 in the EcoFlow app'), all.body);
+  assert.ok(all.body.includes('Charge Now switched on for slot(s) 1, 2, 3 in the EcoFlow app can still lift the pool tonight'), all.body);
   // A line-mode record: the line, as before; a cost record with no line ask: the cost ceiling, word for word.
   assert.deepEqual(nfc.forceChargeOnFailureNight(onNight()), { ceilingPct: null, lineLinePct: 55.55 });
   const cost = onNight({ forceChargeCeilingPct: 90, forceChargeLineAskPct: null, forceChargeLinePct: null, forceChargeMode: 'cost' });

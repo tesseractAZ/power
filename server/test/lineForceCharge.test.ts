@@ -1060,7 +1060,7 @@ test('★★ T9 (review) a line night NOT expected to start (the pool stays at o
   assert.doesNotMatch(push.body, /on until the window closes/);
 });
 
-test('★★ T9 the ON failure on a line night (review): all slots ⇒ unless it applies late, the add-on adds nothing above the 50% reserve, and what would hold the line; some ⇒ the pool may close short — never "no action needed"', () => {
+test('★★ T9 the ON failure on a line night (review): all slots ⇒ unless it applies late, the add-on adds nothing above the 50% reserve, and what can still lift the pool; some ⇒ the pool may close short — never "no action needed"', () => {
   const fail = (slots: number[], line: number | null) => buildNightForceChargeOnFailure({ day: '2026-09-16', slots, ourSlots: [1, 2, 3], retries: 1, noRetry: false, ceilingPct: line == null ? 90 : null, lineLinePct: line } as never);
   const all = fail([1, 2, 3], 55.55);
   // (Fix8 review 1) The ON is still watched after the warning, and a late apply is verified (verifyForceChargeOn reads onVerified
@@ -1070,13 +1070,15 @@ test('★★ T9 the ON failure on a line night (review): all slots ⇒ unless it
   // And no floor that holds nothing islanded (the pool drains through the reserve in an outage): the add-on adds nothing above it.
   assert.ok(all.body.includes("Tonight's force-charge for the 55.6% outage line has not taken effect: unless it applies late, the add-on adds nothing above the 50% reserve, and the pool may close the window under the line."), all.body);
   assert.doesNotMatch(all.body, /will close the window near|will not happen|only the 50% reserve holds/);
-  assert.ok(all.body.includes('To hold the line tonight, switch Charge Now on for slot(s) 1, 2, 3 in the EcoFlow app (the add-on switches it off at the window close); if this repeats, check the SHP2 cloud link.'), all.body);
+  assert.ok(all.body.includes('Charge Now switched on for slot(s) 1, 2, 3 in the EcoFlow app can still lift the pool tonight (the add-on switches it off at the window close); if this repeats, check the SHP2 cloud link.'), all.body);
+  // (Fix10 review 1) How far it gets depends on when it goes on: never a promise of the line.
+  assert.doesNotMatch(all.body, /[Tt]o hold the line|holds? the line/);
   assert.doesNotMatch(all.body, /No action needed/);
   const some = fail([2], 55.55);
   // (Fix8 review 1) The other slots read ON or at the panel's ceiling (switched off by the panel: not charging): never "still charge".
   assert.ok(some.body.includes("Tonight's force-charge for the 55.6% outage line has not taken effect on those slot(s), so the pool may close the window short of the line."), some.body);
   assert.doesNotMatch(some.body, /near the 50% reserve|No action needed|still charge|will not happen/, 'never "near 50%", never "still charge"');
-  assert.ok(some.body.includes('switch Charge Now on for slot(s) 2 in the EcoFlow app'), some.body);
+  assert.ok(some.body.includes('Charge Now switched on for slot(s) 2 in the EcoFlow app can still lift the pool tonight'), some.body);
   // A cost night's warning is today's, word for word.
   const cost = fail([2], null);
   assert.equal(cost.title, 'Night-charge: force-charge did not take effect');

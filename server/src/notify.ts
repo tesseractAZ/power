@@ -740,6 +740,12 @@ export function buildNightChargeMorningSummary(o: {
   /** v1.200.0 (Fix9 review 1) — the add-on's close as clock text while it has not passed (index.ts), else null/omitted: on a grid
    *  loss, how long Charge Now by hand can still help. */
   closeText?: string | null;
+  /** v1.200.0 (Fix10 review 1) — this account goes too long after the close for `closePoolPct` to be the close's
+   *  (nightForceCharge.lineCloseReadingLate): what it reads now, with no verdict on the line. */
+  closeReadLate?: boolean;
+  /** v1.200.0 (Fix10 review 1) — on a line night, the write was acknowledged and the panel never read it back (applyVerifiedAtMs null):
+   *  it says that, never "raised" or "held". Always false or omitted on a night with no line: v1.199.1's words, word for word. */
+  writeUnread?: boolean;
 }): NotifyMessage {
   const base = { severity: 'info' as const, dedupId: 'night_charge_actuation' };
   const day = o.day ?? '—';
@@ -747,6 +753,8 @@ export function buildNightChargeMorningSummary(o: {
   const acked = o.restore === 'acknowledged';
   const sent = `the restore to ${o.restorePct}% was sent (the EcoFlow cloud acknowledged it), and the panel has not read it back yet`;
   const titleRestore = acked ? `reserve restore to ${o.restorePct}% sent` : `reserve restored to ${o.restorePct}%`;
+  // (Fix10 review 1) The 2026-08-16 phantom write on a line night: the failure push said the reserve never moved.
+  const unread = o.writeUnread === true ? `the reserve write to ${raised} never read back` : null;
   if (o.ended === 'cancelled' || o.ended === 'gridLoss') {
     const cancelled = o.ended === 'cancelled';
     // v1.200.0 (Fix9 review 1) — a night whose record carries a line ask names the line and where the pool stands against it: on a grid
@@ -754,11 +762,8 @@ export function buildNightChargeMorningSummary(o: {
     // night stopped early): "reads", and the line named so the order shows. A night with no line: v1.199.1's words.
     const stopLine = o.linePct != null && Number.isFinite(o.linePct) ? o.linePct : null;
     const stopRead = o.closePoolPct != null && Number.isFinite(o.closePoolPct) ? round1(o.closePoolPct) : null;
-    const stopNamed = stopLine != null ? lineBesidePct(stopLine, RESERVE_WRITE_MAX_PCT, stopRead ?? RESERVE_WRITE_MAX_PCT) : null;
     const under = stopLine != null && stopRead != null && stopRead < stopLine;
-    const stopClose = stopLine == null ? ''
-      : stopRead == null ? ` The pool was not read (no fresh panel reading); the outage line is ${stopNamed}%.`
-        : ` The pool reads ${stopRead}%, ${under ? 'under' : 'at or above'} the ${stopNamed}% outage line.`;
+    const stopClose = stopLine == null ? '' : ` ${linePoolStandsWords(stopLine, o.closePoolPct)}`;
     const hand = stopLine != null && !cancelled && o.closeText != null && (stopRead == null || under)
       ? ` ${lineChargeNowByHandWords(o.closeText, 'once the grid is back')}` : '';
     return {
@@ -767,8 +772,10 @@ export function buildNightChargeMorningSummary(o: {
       body:
         `Supervised night charge for ${day} ${cancelled ? 'was cancelled after the write' : 'stopped: the grid was lost during the window'}: `
         + (acked
-          ? `the reserve was raised to ${raised}; ${sent}. Nothing more is charged tonight.`
-          : `the reserve, raised to ${raised}, is restored to ${o.restorePct}% and nothing more is charged tonight.`)
+          ? `${unread ?? `the reserve was raised to ${raised}`}; ${sent}. Nothing more is charged tonight.`
+          : unread != null
+            ? `${unread}; the reserve is restored to ${o.restorePct}% and nothing more is charged tonight.`
+            : `the reserve, raised to ${raised}, is restored to ${o.restorePct}% and nothing more is charged tonight.`)
         + stopClose + hand,
     };
   }
@@ -784,14 +791,16 @@ export function buildNightChargeMorningSummary(o: {
   const note = expected && figureFits ? ` (${expected})` : '';
   const restored = acked ? `${sent}. ` : `the reserve is restored to ${o.restorePct}%. `;
   let night: string;
-  if (fc.kind === 'none') {
+  if (fc.kind === 'none' && unread != null) {
+    night = `${unread}; ${restored}`;
+  } else if (fc.kind === 'none') {
     night = acked
       ? `${held ? `the reserve was held at ${raised} overnight as a floor (no charge was expected)` : `reserve raised to ${raised}${note}`}; ${sent}. `
       : held
         ? `the reserve was held at ${raised} overnight as a floor (no charge was expected) and is restored to ${o.restorePct}%. `
         : `reserve raised to ${raised}${note} and restored to ${o.restorePct}%. `;
   } else {
-    const reserve = held ? `the reserve was held at ${raised} overnight as a floor (no charge was expected)` : `reserve raised to ${raised}`;
+    const reserve = unread ?? (held ? `the reserve was held at ${raised} overnight as a floor (no charge was expected)` : `reserve raised to ${raised}`);
     // v1.200.0 — a LINE night ran to the window close for its outage line (no stop to name).
     const line = 'line' in fc ? fc.line : undefined;
     const toward = line != null ? ` for the ${round1(line.linePct)}% outage line`
@@ -803,8 +812,10 @@ export function buildNightChargeMorningSummary(o: {
     const closeRead = o.closePoolPct != null && Number.isFinite(o.closePoolPct) ? o.closePoolPct : null;
     const close = linePct == null ? ''
       : closeRead == null ? '; the pool was not read at the close (no fresh panel reading)'
-        // (Fix9 review 2) As read, and the line beside it: rounded to the whole percent a close of 55.5 read "56%, under the 55.6% outage line".
-        : `; the pool read ${round1(closeRead)}% at the close${closeRead < linePct - 0.05 ? `, under the ${lineBesidePct(linePct, round1(closeRead))}% outage line` : ''}`;
+        // (Fix10 review 1) Too long after the close to be the close's: as it reads, with no verdict on the line, in either direction.
+        : o.closeReadLate === true ? `; the pool reads ${round1(closeRead)}% now, past the window close`
+          // (Fix9 review 2) As read, and the line beside it: rounded to the whole percent a close of 55.5 read "56%, under the 55.6% outage line".
+          : `; the pool read ${round1(closeRead)}% at the close${closeRead < linePct - 0.05 ? `, under the ${lineBesidePct(linePct, round1(closeRead))}% outage line` : ''}`;
     // v1.187.22 — a PARTIAL failure (the other slots took the ON) is not "did not take effect":
     // the slots, as the ON-failure push named them ("will not happen on those slot(s)").
     const failedOn = fc.kind === 'failed' && fc.partialSlots != null
@@ -878,6 +889,40 @@ export function buildNightChargeMorningSummary(o: {
  *  words of the push: nothing of the add-on's is left to do it. PURE. */
 function lineChargeNowByHandWords(closeText: string, when = 'tonight'): string {
   return `Charge Now switched on by hand in the EcoFlow app can still lift the pool ${when}; switch it off again by ~${closeText}.`;
+}
+
+/** v1.200.0 (Fix9 review 1) — where the pool stands against the line, now: "reads", the night stopped early, and the line named so the
+ *  order shows beside the reading and the reserve. PURE. */
+function linePoolStandsWords(linePct: number, poolPct: number | null | undefined): string {
+  const read = poolPct != null && Number.isFinite(poolPct) ? round1(poolPct) : null;
+  const named = lineBesidePct(linePct, RESERVE_WRITE_MAX_PCT, read ?? RESERVE_WRITE_MAX_PCT);
+  return read == null ? `The pool was not read (no fresh panel reading); the outage line is ${named}%.`
+    : `The pool reads ${read}%, ${read < linePct ? 'under' : 'at or above'} the ${named}% outage line.`;
+}
+
+/** v1.200.0 (Fix10 review 1) — an OFF of the add-on's on a grid-status reading that no abort reports (nightForceCharge.lineGridOffPushDue):
+ *  the one a person did not cause, in the grid-loss account's words. "Lost" is the panel's reading: grid flow may still be measured. Charge
+ *  Now by hand always, whatever the pool reads now: nothing of the add-on's watches the line after this. PURE. */
+export function buildLineForceChargeGridOff(o: { linePct: number; poolPct: number | null; closeText: string }): NotifyMessage {
+  return {
+    severity: 'warning',
+    dedupId: 'night_charge_line_grid_off',
+    title: 'Night-charge: the force-charge for the outage line stopped',
+    body: `The panel read the grid as lost, so the add-on switched off the force-charge for tonight's ${lineBesidePct(o.linePct, RESERVE_WRITE_MAX_PCT)}% outage line; it does not start again tonight. `
+      + `${linePoolStandsWords(o.linePct, o.poolPct)} ${lineChargeNowByHandWords(o.closeText, 'with the grid present')}`,
+  };
+}
+
+/** v1.200.0 (Fix10 review 1) — a window no record holds, with no evening job left (chargeCycle.lineNotArmedPushDue): no missed push or
+ *  close account knows such a night, and it may be one the evening told as a hold. The window by its clock: it may open tomorrow. PURE. */
+export function buildLineNightNotArmed(o: { linePct: number; windowStartMs: number; windowEndMs: number; closeText: string }): NotifyMessage {
+  return {
+    severity: 'warning',
+    dedupId: 'night_charge_line_not_armed',
+    title: 'Night-charge: no write is armed for the outage line',
+    body: `No reserve write is armed for the ${phxShortClock(o.windowStartMs)}–${phxShortClock(o.windowEndMs)} window, so no force-charge runs for the ${lineBesidePct(o.linePct, RESERVE_WRITE_MAX_PCT)}% outage line, `
+      + `and the pool may close under the line. ${lineChargeNowByHandWords(o.closeText, 'in the window')}`,
+  };
 }
 
 /** v1.200.0 (Fix9 review 1) — the reserve set by hand while a start can still come (the apply failure, an attempt never confirmed).
@@ -1182,7 +1227,8 @@ export function buildNightForceChargeOnFailure(o: {
   // (Fix8) Only where the line, as named, is above the reserve can the pool close under it: a line stated at 50.00 the reserve holds.
   const underReach = line != null && line > RESERVE_WRITE_MAX_PCT;
   // v1.200.0 (review) — a LINE night is the outage cushion, not a buy: say what the failure does to the line, and
-  // what would hold it tonight — never "no action needed". The add-on's close OFF goes to these slots too.
+  // what can still lift the pool — never "no action needed". The add-on's close OFF goes to these slots too. (Fix10 review 1) Never
+  // "to hold the line": a start held late and an ON that does not take can leave too little of the window for that.
   // (Fix8 review 1) In words true in every outcome: the ON is still watched after this warning and a late apply is verified
   // (verifyForceChargeOn reads onVerified before its failure guard), so "has not taken effect", never "will not happen"; the
   // reserve is no floor islanded (the pool drains through it in an outage), so the add-on "adds nothing above" it, never "only
@@ -1196,7 +1242,7 @@ export function buildNightForceChargeOnFailure(o: {
       // (Fix8) The pool at the failure is not known here (it may read above the line): never "will close … under the line".
       : `Tonight's force-charge for the ${line}% outage line has not taken effect: unless it applies late, the add-on adds nothing `
         + `above the ${RESERVE_WRITE_MAX_PCT}% reserve${underReach ? ', and the pool may close the window under the line' : ''}. `)
-      + `The reserve charge is unaffected. To hold the line tonight, switch Charge Now on for slot(s) ${named.text} in the EcoFlow app `
+      + `The reserve charge is unaffected. Charge Now switched on for slot(s) ${named.text} in the EcoFlow app can still lift the pool tonight `
       + `(the add-on switches it off at the window close); if this repeats, check the SHP2 cloud link${compare}.`;
   return {
     severity: 'warning',
@@ -1291,7 +1337,7 @@ export function buildLineForceChargeAtRisk(o: {
             : `its next try would come after ~${o.reOnCutoffText}, when it no longer switches Charge Now back on. `)
           : '';
   const off = r.offSlots.length > 0
-    ? `To hold the line, switch Charge Now on for slot(s) ${r.offSlots.join(', ')} in the EcoFlow app (the add-on switches it off at the close).`
+    ? `Charge Now switched on for slot(s) ${r.offSlots.join(', ')} in the EcoFlow app can still lift the pool (the add-on switches it off at the close).`
     : '';
   const on = r.onSlots.length > 0
     ? `${off !== '' ? ' ' : ''}Charge Now reads on for slot(s) ${r.onSlots.join(', ')} but the pool is not rising; `

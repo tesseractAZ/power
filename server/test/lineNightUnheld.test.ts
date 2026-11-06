@@ -41,6 +41,9 @@ import * as cardText from '../../web/src/cards/nightChargeText.js';
  * goes, and a recompute claims no ON a record with no ask cannot make.
  * U1c (Fix10) neither does one with an ask whose start is closed (forceChargeStartClosed, its one source): the plan the card and the
  * entities serve discloses it, the banner stops saying a write is armed, and nothing written and no ledger row moves.
+ * U6 (Fix10 review 1) a run stopped for good is such a record too, the card leads with it where no write stands, and a window no record
+ * holds with no evening job left is told; a grid-status OFF is pushed; an instruction promises no line; a late account is no close
+ * reading; a write the panel never read back is not told as raised.
  */
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -326,10 +329,11 @@ const CLOSED_CASES = (): Array<[string, NightActuationState, number]> => [
 test('★★★ U1c armedLineStartClosed: forceChargeStartClosed is its one source; every key but "started" and "gatedOff" is a record with an ask that cannot start one', () => {
   for (const [why, s, t] of CLOSED_CASES()) {
     assert.equal(nfc.forceChargeStartClosed(s, t, GATES), why, why);
-    assert.deepEqual(closedRec(s, t), { windowStartMs: OPEN, why }, why);
+    assert.deepEqual(closedRec(s, t), { windowStartMs: OPEN, why, ...(s.applyVerifiedAtMs != null && !s.cancelled && s.revertedAtMs == null ? { writeStands: true } : {}) }, why);
     assert.equal(closedRec({ ...s, forceChargeLineAskPct: null, forceChargeLinePct: null }, t), null, `${why}: no ask, no line to disclose (armedNoLine has it)`);
     assert.equal(closedRec({ ...s, forceChargeLineAskPct: 50, forceChargeLinePct: 50 }, t), null, `${why}: an ask at the reserve is no line`);
-    assert.equal(closedRec({ ...s, forceChargeOnAtMs: OPEN + H, forceChargeLineAskPct: 56 }, t), null, `${why}: it ran: 'started' is no record that cannot`);
+    // (Fix10 review 1) 'started' shadows the stamps of the shapes that end for good (U6 has them); a late key behind it is still a run.
+    if (why === 'late' || why === 'over' || why === 'lateGuard' || why === 'overGuard') assert.equal(closedRec({ ...s, forceChargeOnAtMs: OPEN + H, forceChargeLineAskPct: 56 }, t), null, `${why}: a run with no OFF yet`);
   }
   assert.equal(nfc.forceChargeStartClosed(armed(), OPEN + M, { cost: false, line: false }), 'gatedOff');
   assert.equal(closedRec(armed(), OPEN + M, { cost: false, line: false }), null, "'gatedOff': what advisory already discloses");
@@ -427,7 +431,7 @@ test('★★★ U1c the wiring: only the plan the card and the entities serve re
   const deps = fn.slice(0, fn.indexOf('const inputs = buildNightChargeInputs(deps);'));
   assert.ok(!deps.includes('armedLineStartClosed'), 'never in the inputs of the plan of record');
   assert.ok(fn.includes('  const plan = computeNightChargePlan(inputs);\n'), 'nor where it is computed');
-  assert.ok(fn.includes('const lineClosed = shadowLeg == null && opts.arming !== true ? armedLineStartClosed(nightActuationMem, nowMs, forceChargeGatesOn(legRoleOf(nightActuationMem))) : null;'), fn);
+  assert.ok(fn.includes('const lineClosed = shadowLeg == null && opts.arming !== true ? servedLineClosure(nightCycleView(), plan.window?.startMs ?? null, armedLineStartClosed(nightActuationMem, nowMs, forceChargeGatesOn(legRoleOf(nightActuationMem))), plan.window != null && noEveningArmLeft(plan.window.startMs, nowMs, eveningJobClock(nowMs))) : null;'), fn);
   assert.ok(fn.includes('if (!shadowLeg) setLatestNightChargePlan(lineClosed != null ? computeNightChargePlan({ ...inputs, armedLineStartClosed: lineClosed }) : plan);'), fn);
   assert.equal([...INDEX.matchAll(/armedLineStartClosed: lineClosed/g)].length, 1, 'that one plan');
   assert.ok(/atomicWriteFileSync\(NIGHT_CHARGE_PLANSNAP_PATH, JSON\.stringify\(\{[\s\S]{0,300}?\n\s+plan, extras,\n/.test(fn), 'the snapshot holds the plan of record');
@@ -900,4 +904,307 @@ test('★★★ U4 a grid loss before the close says what can still hold the lin
   const at = INDEX.indexOf('function sendRestoreSummary(');
   const fn = INDEX.slice(at, INDEX.indexOf('\n}\n', at));
   assert.ok(fn.includes('closeText: lineNight != null && state.windowEndMs != null && nowMs < writeWindowEndMs(state)! ? fmtSiteClock(writeWindowEndMs(state)!) : null,'), fn);
+});
+
+/* ══ U6 — (Fix10 review 1) what the night can no longer do, told on every surface ═════════════════════════════════════════ */
+
+const RUN = (over: Partial<NightActuationState> = {}): NightActuationState => applied({
+  forceChargeOnAtMs: CLOSE - 2 * H, forceChargeSlots: [1, 2, 3], forceChargeOnVerifiedAtMs: CLOSE - 2 * H + 16 * M, forceChargeMode: 'line', ...over,
+});
+const STOP_AT = CLOSE - H;
+const STOPPED_CASES = (): Array<[string, Partial<NightActuationState>]> => [
+  ['cancelled', { cancelled: true }],
+  ['reverted', { revertedAtMs: STOP_AT }],
+  ['foreign', { foreignSettledAtMs: STOP_AT, foreignReservePct: 40 }],
+  ['stopped', { forceChargeOffAtMs: STOP_AT, forceChargeOffReason: 'gridLoss' }],
+  ['stopped', { forceChargeOffAtMs: STOP_AT, forceChargeOffReason: 'disabled' }],
+  ['cancelled', { cancelled: true, forceChargeOffAtMs: STOP_AT, forceChargeOffReason: 'cancelled' }],
+  ['foreign', { foreignSettledAtMs: STOP_AT, foreignReservePct: 40, forceChargeOffAtMs: STOP_AT, forceChargeOffReason: 'foreign' }],
+];
+
+test('★★★ U6 a run stopped for good is a closed start: every stamp behind "started", and an OFF of ours; a run that can still run or be switched back on stays armed', () => {
+  for (const [why, over] of STOPPED_CASES()) {
+    const s = RUN(over);
+    const t = STOP_AT + 15 * M;
+    assert.equal(nfc.forceChargeStartClosed(s, t, GATES), 'started', "the pushes' own key stays");
+    assert.equal(closedRec(s, t)?.why, why, JSON.stringify(over));
+    assert.equal(closedRec(s, t)?.windowStartMs, OPEN);
+    // Nothing starts or comes back on any of them, on the real decisions, whatever the pool reads.
+    for (let at = t; at < CLOSE; at += 5 * M) {
+      assert.notEqual(decideForceCharge(s, at, fo({ poolSocPct: 52, slotsOn: [] })).kind, 'on');
+      assert.notEqual(decideForceCharge(s, at, fo({ poolSocPct: 52, slotsOn: [] })).kind, 'lineReOn');
+      assert.equal(nfc.lineReOnDue(s, at, fo({ poolSocPct: 52, slotsOn: [] }), [1, 2, 3]), null);
+    }
+  }
+  const t = CLOSE - H;
+  assert.equal(closedRec(RUN(), t), null, 'a verified ON still running');
+  assert.equal(closedRec(RUN({ forceChargeLinePanelOffAtMs: t - 10 * M } as Partial<NightActuationState>), t), null, "the panel's own stop: the re-ON can still bring it back");
+  assert.notEqual(nfc.lineReOnDue(RUN({ forceChargeLinePanelOffAtMs: t - 10 * M } as Partial<NightActuationState>), t, fo({ poolSocPct: 52, slotsOn: [] }), [1, 2, 3]), null, 'and does');
+  assert.equal(closedRec(RUN({ forceChargeOnVerifiedAtMs: null, forceChargeOnFailedAtMs: t - 5 * M }), t), null, 'an ON warned of: a late apply still verifies');
+  assert.equal(closedRec(RUN({ forceChargeOffAtMs: STOP_AT, forceChargeLineAskPct: null, forceChargeLinePct: null }), t), null, 'a cost night: not a word');
+  assert.deepEqual([nfc.lineStartClosedWords('it', 'stopped' as never), nfc.lineStartClosedWords('the 55.6% outage line', 'stopped' as never)],
+    ['the force-charge for it was switched off and does not start again', 'the force-charge for the 55.6% outage line was switched off and does not start again']);
+});
+
+test('★★★ U6 the served plan of a stopped run claims no ON: the row, the rationale and the banner say what the push says', () => {
+  const base = planAt(45);
+  const open = base.window!.startMs;
+  for (const [why, words] of [
+    ['stopped', 'the force-charge for it was switched off and does not start again'],
+    ['cancelled', 'no force-charge for it starts: the night was cancelled'],
+    ['foreign', 'no force-charge for it starts: the reserve was set outside the add-on'],
+    ['reverted', "no force-charge for it starts: the reserve's restore was sent"],
+  ] as const) {
+    const p = planAt(45, { closed: { windowStartMs: open, why } });
+    assert.equal(p.forceChargeLine, undefined, why);
+    assert.equal(p.cushionEnvelopeReason, 'startClosed', why);
+    assert.equal((p as unknown as { cushionStartClosedWords: string }).cushionStartClosedWords, words);
+    assert.ok(p.rationale.includes(words), p.rationale);
+    assert.doesNotMatch(p.rationale, ON_CLAIM, p.rationale);
+    const row = cardText.outageLineRow(p as never, 50)!;
+    assert.ok(row.includes(`not claimed tonight (${words})`), row);
+    assert.doesNotMatch(row, /stays on|switches it back on|expected at the close/, row);
+    assert.deepEqual(sizing(p), sizing(base), why);
+  }
+  // The status keeps its words for the banner, on a stopped run with nothing applied, and a banner of an applied night keeps its own.
+  const status = (cycle as unknown as { lineStartClosedStatus: (s: NightActuationState, t: number, g: { cost: boolean; line: boolean }) => Record<string, unknown> }).lineStartClosedStatus;
+  const off = RUN({ forceChargeOffAtMs: STOP_AT, forceChargeOffReason: 'gridLoss' });
+  assert.deepEqual(status(off, STOP_AT + M, GATES), { lineStartClosed: { text: 'The force-charge for the 55.6% outage line was switched off and does not start again.', cancel: true } });
+  assert.equal(cardText.actuationBannerState({ ...off, ...status(off, STOP_AT + M, GATES), cancelDeadlineMs: OPEN } as never, '23:00', 50).text, 'Reserve raised to 50% (was 30%); auto-restores after the window closes.');
+});
+
+test('★★★ U6 whether a write stands travels with the closure: verified, and neither cancelled, restored nor set outside the add-on', () => {
+  const stands = (s: NightActuationState, t: number) => (closedRec(s, t) as unknown as { writeStands?: boolean } | null)?.writeStands === true;
+  assert.equal(stands(applied(), CLOSE - 20 * M), true, "a verified write, 'late': the reserve stands");
+  assert.equal(stands(RUN({ forceChargeOffAtMs: STOP_AT }), STOP_AT + M), true, 'an OFF leaves the write in place');
+  assert.equal(stands(applied({ applyVerifiedAtMs: null }), CLOSE - 20 * M), false, 'acknowledged, never read back');
+  assert.equal(stands(applied({ cancelled: true }), OPEN + H), false);
+  assert.equal(stands(applied({ revertedAtMs: OPEN + H }), OPEN + H), false);
+  assert.equal(stands(applied({ foreignSettledAtMs: OPEN + H }), OPEN + H), false);
+  assert.equal(stands(armed(), OPEN + APPLY_LATE_MS + 1), false, 'noWrite');
+  const base = planAt(45);
+  const open = base.window!.startMs;
+  assert.equal((planAt(45, { closed: { windowStartMs: open, why: 'noWrite' } }) as never as { cushionStartClosedNoWrite?: boolean }).cushionStartClosedNoWrite, true);
+  assert.equal((planAt(45, { closed: { windowStartMs: open, why: 'late', writeStands: true } as never }) as never as { cushionStartClosedNoWrite?: boolean }).cushionStartClosedNoWrite, undefined);
+  assert.equal((base as never as { cushionStartClosedNoWrite?: boolean }).cushionStartClosedNoWrite, undefined);
+});
+
+test('★★★ U6 the card leads with a closed start no write stands behind, and names no reserve set or held; a write that stands keeps its figure, and any other night its own', () => {
+  const lead = (cardText as unknown as { startClosedLead: (p: unknown) => { headline: string; detail: string } | null }).startClosedLead;
+  const open = planAt(45).window!.startMs;
+  for (const [why, detail] of [
+    ['noWrite', 'No force-charge for it starts: it rides a verified reserve write, and none was issued.'],
+    ['cancelled', 'No force-charge for it starts: the night was cancelled.'],
+    ['foreign', 'No force-charge for it starts: the reserve was set outside the add-on.'],
+    ['reverted', "No force-charge for it starts: the reserve's restore was sent."],
+    ['noArm', 'No force-charge for it starts: no write is armed for this window.'],
+  ] as const) {
+    const p = planAt(45, { closed: { windowStartMs: open, why } });
+    assert.deepEqual(lead(p), { headline: 'The outage line is not claimed tonight', detail }, why);
+  }
+  assert.equal(lead(planAt(45, { closed: { windowStartMs: open, why: 'late', writeStands: true } as never })), null, 'a write that stands: its figure is true');
+  assert.equal(lead(planAt(45, { closed: { windowStartMs: open, why: 'stopped', writeStands: true } as never })), null);
+  assert.equal(lead(planAt(45)), null, 'armed');
+  assert.equal(lead(planAt(50)), null, 'reserveAtTarget');
+  assert.equal(lead(planAt(45, { noLineAt: open })), null, 'armedNoLine: its write goes');
+  const CARD = readFileSync(resolve(HERE, '../../web/src/cards/NightChargeCard.tsx'), 'utf8');
+  assert.ok(CARD.includes('const closedLead = startClosedLead(plan);'), CARD);
+  assert.ok(/\{refused \? \([\s\S]{0,300}?\) : closedLead \? \(\n\s+<div className="mb-3 text-sm">\n\s+<div className="text-warn font-medium">\{closedLead\.headline\}<\/div>\n\s+<div className="text-muted mt-1 leading-relaxed">\{closedLead\.detail\}<\/div>\n\s+<\/div>\n\s+\) : \(/.test(CARD), 'the same shape as the refused lead, ahead of the figure');
+  assert.ok(CARD.includes('closedLead != null ? null : reserveWriteLabel(plan.setpointSocPct, plan.targetSocPct, status.reserveWriteMaxPct ?? null),'), 'the stat names no reserve set');
+  assert.ok(CARD.includes('cushionStartClosedNoWrite?: boolean;'), 'the field reaches the card');
+});
+
+test('★★★ U6 noEveningArmLeft: only once no evening job can run before the window opens; the weekend\'s shared window, and a night inside its own window', () => {
+  const left = (cycle as unknown as { noEveningArmLeft: (w: number, now: number, j: { consumed: boolean; fireMin: number; nowMin: number }) => boolean }).noEveningArmLeft;
+  const FIRE = 21 * 60 + 30;
+  const at = (hoursBeforeOpen: number) => OPEN - hoursBeforeOpen * H;
+  const min = (hoursBeforeOpen: number) => 23 * 60 - hoursBeforeOpen * 60;
+  assert.equal(left(OPEN, at(10), { consumed: false, fireMin: FIRE, nowMin: min(10) }), false, '13:00: tonight\'s job is ahead');
+  assert.equal(left(OPEN, at(1), { consumed: false, fireMin: FIRE, nowMin: min(1) }), false, '22:00: deferred, still retrying');
+  assert.equal(left(OPEN, at(1), { consumed: true, fireMin: FIRE, nowMin: min(1) }), true, '22:00: latched');
+  assert.equal(left(OPEN, OPEN + 5 * M, { consumed: true, fireMin: FIRE, nowMin: 23 * 60 + 5 }), true, 'past the cutoff');
+  assert.equal(left(OPEN, OPEN + 3 * H, { consumed: false, fireMin: FIRE, nowMin: 2 * 60 }), true, "02:00: the new day's job fires after this window opened");
+  // Saturday's job for the Monday 00:00 window: Sunday's can still arm it. On Sunday, once latched, none can.
+  const MON = Date.UTC(2027, 0, 11, 7);
+  const sat2200 = MON - 26 * H;
+  assert.equal(left(MON, sat2200, { consumed: true, fireMin: FIRE, nowMin: 22 * 60 }), false, 'Saturday, latched: Sunday\'s job is ahead');
+  assert.equal(left(MON, MON - 2 * H, { consumed: true, fireMin: FIRE, nowMin: 22 * 60 }), true, 'Sunday, latched');
+  assert.equal(left(MON, MON - 2 * H, { consumed: false, fireMin: FIRE, nowMin: 22 * 60 }), false, 'Sunday, not yet');
+});
+
+test('★★★ U6 servedLineClosure: the record of the window speaks for it; any leg of that window holds it; with none, and no evening job left, no write is armed', () => {
+  const served = (cycle as unknown as { servedLineClosure: (c: unknown, w: number | null, rec: unknown, noneLeft: boolean) => unknown }).servedLineClosure;
+  const view = (active: NightActuationState, pending: NightActuationState[] = []) => ({ active, pendingLegs: pending, trailing: null });
+  const TONIGHT = OPEN + 24 * H;
+  const closedOld = { windowStartMs: OPEN, why: 'over' };
+  assert.deepEqual(served(view(armed()), TONIGHT, closedOld, true), { windowStartMs: TONIGHT, why: 'noArm' }, "last night's closed record is no record of tonight");
+  assert.equal(served(view(armed()), TONIGHT, closedOld, false), null, 'a job can still arm it');
+  assert.equal(served(view(emptyActuationState()), TONIGHT, null, false), null);
+  assert.deepEqual(served(view(emptyActuationState()), TONIGHT, null, true), { windowStartMs: TONIGHT, why: 'noArm' });
+  assert.deepEqual(served(view(armed()), OPEN, closedOld, true), closedOld, "the record's own closure");
+  assert.equal(served(view(armed()), OPEN, null, true), null, 'its record, a start still to come');
+  assert.equal(served(view(armed({ forceChargeLineAskPct: null, forceChargeLinePct: null })), OPEN, null, true), null, 'its record with no ask: armedNoLine has it');
+  assert.equal(served(view(emptyActuationState(), [armed({ windowStartMs: TONIGHT })]), TONIGHT, null, true), null, 'a pending leg of the window');
+  assert.equal(served({ active: emptyActuationState(), pendingLegs: [], trailing: armed({ windowStartMs: TONIGHT }) }, TONIGHT, null, true), null, 'a trailing leg of the window');
+  assert.equal(served(view(emptyActuationState()), null, null, true), null, 'no window');
+});
+
+test('★★★ U6 a window no record holds: the served plan claims no write and no ON, and every sizing figure stays; the year', () => {
+  let n = 0;
+  for (const c of CASES) {
+    const a = planAt(45, { label: c.label, hours: 4 });
+    if (a.forceChargeLine == null) continue;
+    const p = planAt(45, { label: c.label, hours: 4, closed: { windowStartMs: a.window!.startMs, why: 'noArm' } });
+    assert.equal(p.forceChargeLine, undefined, c.label);
+    assert.equal(p.cushionEnvelopeReason, 'startClosed', c.label);
+    assert.doesNotMatch(p.rationale, /switches on at|stays on until the window closes|runs until the panel|The reserve is set to|Charge (to|toward) ~|Hold the reserve at/, c.label);
+    assert.ok(p.rationale.includes('no force-charge for it starts: no write is armed for this window, so the cushion is not assured — residual risk remains.'), p.rationale);
+    assert.deepEqual(sizing(p), sizing(a), c.label);
+    n++;
+  }
+  assert.equal(n, PIN_U1C_YEAR.disclosed);
+});
+
+test('★★★ U6 the push of a window no record holds: once, on a served charge plan, never beside a refusal the evening already pushed; what still lifts the pool', () => {
+  const due = (cycle as unknown as { lineNotArmedPushDue: (closure: unknown, plan: unknown, pushed: number | null, refusal: string | null) => unknown }).lineNotArmedPushDue;
+  const open = planAt(45).window!.startMs;
+  const closure = { windowStartMs: open, why: 'noArm' };
+  const p = planAt(45, { closed: closure });
+  const want = { windowStartMs: open, windowEndMs: p.window!.endMs, linePct: p.cushionLineSocPct };
+  assert.deepEqual(due(closure, p, null, null), want);
+  assert.deepEqual(due(closure, p, open - 24 * H, null), want, "last night's stamp");
+  assert.equal(due(closure, p, open, null), null, 'once a window');
+  assert.equal(due(closure, p, null, 'a prior write is unresolved'), null, 'the refusal: the evening said so');
+  assert.equal(due(null, p, null, null), null);
+  assert.equal(due({ windowStartMs: open, why: 'cancelled' }, planAt(45, { closed: { windowStartMs: open, why: 'cancelled' } }), null, null), null, 'a record speaks for itself');
+  assert.equal(due(closure, planAt(50, { closed: closure }), null, null), null, 'a disclosed reserve at the write, not this');
+  assert.equal(due(closure, planAt(45, { eligible: false, closed: closure }), null, null), null, 'no write mode');
+  const build = (notify as unknown as { buildLineNightNotArmed: (o: unknown) => { severity: string; dedupId: string; title: string; body: string } }).buildLineNightNotArmed;
+  const m = build({ linePct: 55.55, windowStartMs: OPEN, windowEndMs: CLOSE, closeText: '5:00 AM' });
+  assert.equal(m.severity, 'warning');
+  assert.equal(m.dedupId, 'night_charge_line_not_armed');
+  assert.equal(m.title, 'Night-charge: no write is armed for the outage line');
+  assert.equal(m.body, 'No reserve write is armed for the 11pm–5am window, so no force-charge runs for the 55.6% outage line, and the pool may close under the line. Charge Now switched on by hand in the EcoFlow app can still lift the pool in the window; switch it off again by ~5:00 AM.');
+  // The wiring: on the plan just served, stamped on the latch before it goes, the stamp surviving every other latch write.
+  const at = INDEX.indexOf('async function recomputeNightChargePlan(');
+  const fn = INDEX.slice(at, INDEX.indexOf('function armedExpectedBuyKwh(', at));
+  assert.ok(fn.includes('if (!shadowLeg) pushLineNotArmedIfDue(getLatestNightChargePlan(), lineClosed, nowMs);'), fn);
+  const pushAt = INDEX.indexOf('function pushLineNotArmedIfDue(');
+  const push = INDEX.slice(pushAt, INDEX.indexOf('\n}\n', pushAt));
+  assert.ok(push.indexOf('writeNightChargeLatch({ ...latch, lineNotArmedWindowStartMs: due.windowStartMs });') > 0, push);
+  assert.ok(push.indexOf('writeNightChargeLatch({ ...latch, lineNotArmedWindowStartMs: due.windowStartMs });') < push.indexOf('sendNotification('), 'stamped before it goes');
+  assert.ok(push.includes('servedArmRefusal(latch.armRefused, plan, NIGHT_CHARGE_MODE, nowMs)'), push);
+  const writer = INDEX.slice(INDEX.indexOf('function writeNightChargeLatch('), INDEX.indexOf('\n}\n', INDEX.indexOf('function writeNightChargeLatch(')));
+  assert.ok(writer.includes('lineNotArmedWindowStartMs: l.lineNotArmedWindowStartMs ?? nightChargeLatchMem.lineNotArmedWindowStartMs ?? null,'), writer);
+  assert.ok(writer.includes('atomicWriteFileSync(NIGHT_CHARGE_LATCH_PATH, JSON.stringify(nightChargeLatchMem));'), writer);
+  const read = INDEX.slice(INDEX.indexOf('function readNightChargeLatchFile('), INDEX.indexOf('let nightChargeLatchMem'));
+  assert.ok(read.includes('lineNotArmedWindowStartMs: typeof raw?.lineNotArmedWindowStartMs === \'number\' ? raw.lineNotArmedWindowStartMs : null'), read);
+  const clock = INDEX.slice(INDEX.indexOf('function eveningJobClock('), INDEX.indexOf('\n}\n', INDEX.indexOf('function eveningJobClock(')));
+  assert.ok(clock.includes('consumed: readNightChargeLatch().lastNotifyDay === siteYmd(nowMs) || nowMin >= sched.eveningCutoffMin,'), clock);
+  assert.ok(clock.includes('fireMin: sched.notify.fireMin,'), clock);
+});
+
+test('★★★ U6 the force-charge row never stands under a refused arm: an armed row gives way to the lead, a disclosed one stays', () => {
+  const CARD = readFileSync(resolve(HERE, '../../web/src/cards/NightChargeCard.tsx'), 'utf8');
+  assert.ok(CARD.includes('const lineRow = refused != null && plan.forceChargeLine != null ? null : outageLineRow(plan, status.reserveWriteMaxPct ?? null);'), CARD);
+  assert.ok(CARD.includes('{lineRow != null && ('), CARD);
+  assert.equal([...CARD.matchAll(/outageLineRow\(plan/g)].length, 1, 'one row, read once');
+});
+
+test('★★★ U6 a grid-status OFF the abort does not report is pushed once, at the OFF: it stopped, it does not start again, where the pool stands, and what can still lift it', () => {
+  const due = (nfc as unknown as { lineGridOffPushDue: (s: NightActuationState, r: string, o: { gridPresent: boolean | null }) => number | null }).lineGridOffPushDue;
+  const s = RUN();
+  // The finding's walk: gridSta 2 with flow still measured. The OFF goes, the abort does not.
+  const t = STOP_AT;
+  const off = decideForceCharge(s, t, fo({ gridPresent: true, gridStaLost: true, slotsOn: [1, 2, 3], poolSocPct: 54 }));
+  assert.deepEqual([off.kind, (off as { reason?: string }).reason], ['off', 'gridLoss']);
+  assert.equal(decideActuation(s, t, TICK(50)).kind, 'none', 'gridPresent true: no abort, and nothing else reports it');
+  assert.equal(due(s, 'gridLoss', { gridPresent: true }), 55.55);
+  assert.equal(due(s, 'gridLoss', { gridPresent: null }), 55.55, 'unknown: no abort either');
+  assert.equal(due(s, 'gridLoss', { gridPresent: false }), null, "the abort's own account says it");
+  assert.equal(decideActuation(s, t, { ...TICK(50), gridPresent: false }).kind, 'revert');
+  for (const reason of ['windowEnd', 'onPeakGuard', 'cancelled', 'reverted', 'foreign', 'target']) assert.equal(due(s, reason, { gridPresent: true }), null, reason);
+  assert.equal(due(RUN({ forceChargeLineAskPct: null, forceChargeLinePct: null }), 'gridLoss', { gridPresent: true }), null, 'a night with no line: v1.199.1');
+  const build = (notify as unknown as { buildLineForceChargeGridOff: (o: unknown) => { severity: string; dedupId: string; title: string; body: string } }).buildLineForceChargeGridOff;
+  const m = build({ linePct: 55.55, poolPct: 54, closeText: '5:00 AM' });
+  assert.equal(m.severity, 'warning');
+  assert.equal(m.dedupId, 'night_charge_line_grid_off');
+  assert.equal(m.title, 'Night-charge: the force-charge for the outage line stopped');
+  assert.equal(m.body, "The panel read the grid as lost, so the add-on switched off the force-charge for tonight's 55.6% outage line; it does not start again tonight. The pool reads 54%, under the 55.6% outage line. Charge Now switched on by hand in the EcoFlow app can still lift the pool with the grid present; switch it off again by ~5:00 AM.");
+  assert.ok(build({ linePct: 55.55, poolPct: 60, closeText: '5:00 AM' }).body.includes('The pool reads 60%, at or above the 55.6% outage line. Charge Now switched on by hand'));
+  assert.ok(build({ linePct: 55.55, poolPct: null, closeText: '5:00 AM' }).body.includes('The pool was not read (no fresh panel reading); the outage line is 55.6%. Charge Now switched on by hand'));
+  // The wiring: the OFF's first tick only, on the record as the OFF found it, not awaited.
+  const at = INDEX.indexOf("if (action.kind === 'off' || action.kind === 'offRetry') {");
+  const block = INDEX.slice(at, INDEX.indexOf("if (action.kind === 'offVerified') {", at));
+  assert.ok(block.includes("const gridOffLine = action.kind === 'off' && state.forceChargeOffAtMs == null ? lineGridOffPushDue(state, action.reason, fcOpts) : null;"), block);
+  assert.ok(block.includes('void sendNotification(loadNotifyConfig(), buildLineForceChargeGridOff({ linePct: gridOffLine, poolPct: fcOpts.poolSocPct ?? null, closeText: fmtSiteClock(writeWindowEndMs(state)!) }))'), block);
+});
+
+test('★★★ U6 an instruction promises no line it cannot hold: both pushes say what can still lift the pool, the close\'s OFF beside it', () => {
+  const on = (notify as unknown as { buildNightForceChargeOnFailure: (o: unknown) => { body: string } }).buildNightForceChargeOnFailure({ day: '2027-01-04', slots: [1, 2, 3], ourSlots: [1, 2, 3], retries: 0, noRetry: true, ceilingPct: null, lineLinePct: 55.55 });
+  assert.ok(on.body.includes('Charge Now switched on for slot(s) 1, 2, 3 in the EcoFlow app can still lift the pool tonight (the add-on switches it off at the window close)'), on.body);
+  assert.doesNotMatch(on.body, /[Tt]o hold the line|would hold/);
+});
+
+test('★★★ U6 an account sent long after the close is no reading of the close: it reads now, with no verdict; a prompt one keeps its verdict', () => {
+  const late = (nfc as unknown as { lineCloseReadingLate: (s: NightActuationState, t: number) => boolean }).lineCloseReadingLate;
+  assert.equal(late(applied(), CLOSE), false);
+  assert.equal(late(applied(), CLOSE + 15 * M), false, "the restore's readback grace and the restart hold");
+  assert.equal(late(applied(), CLOSE + 15 * M + 1), true);
+  assert.equal(late(applied(), CLOSE + 4 * H), true);
+  assert.equal(late(applied({ nextOnPeakStartMs: CLOSE + 30 * M }), CLOSE - 30 * M + 15 * M + 1), true, "from the add-on's close, the guard's when sooner");
+  assert.equal(late(applied({ windowEndMs: null }), CLOSE + 4 * H), false, 'no close to read');
+  const base = { day: '2027-01-04', targetPct: 50, restorePct: 30, expectedKwh: 20, linePct: 55.55 };
+  const fc = (kind: string) => ({ kind, stopPct: null, expectedLeg: true, line: { askPct: 56, linePct: 55.55 } }) as never;
+  const body = (o: Record<string, unknown>) => buildNightChargeMorningSummary({ ...base, forceCharge: fc('neverStarted'), ...o } as never).body;
+  assert.ok(body({ closePoolPct: 48 }).includes('the pool read 48% at the close, under the 55.6% outage line'), 'prompt');
+  const lateUnder = body({ closePoolPct: 48, closeReadLate: true });
+  assert.ok(lateUnder.includes('; the pool reads 48% now, past the window close;'), lateUnder);
+  assert.doesNotMatch(lateUnder, /at the close|under the 55\.6/, lateUnder);
+  const lateOver = body({ closePoolPct: 85, closeReadLate: true });
+  assert.ok(lateOver.includes('; the pool reads 85% now, past the window close;'), lateOver);
+  assert.ok(body({ closePoolPct: null, closeReadLate: true }).includes('; the pool was not read at the close (no fresh panel reading)'), 'no reading: as ever');
+  const at = INDEX.indexOf('function sendRestoreSummary(');
+  const fn = INDEX.slice(at, INDEX.indexOf('\n}\n', at));
+  assert.ok(fn.includes('closeReadLate: lineNight != null && lineCloseReadingLate(state, nowMs),'), fn);
+});
+
+test('★★★ U6 a write the panel never read back is not told as raised: the morning, the abort and the cancel accounts, and the banner; a verified write, and a night with no line, keep their words', () => {
+  const base = { day: '2027-01-04', targetPct: 50, restorePct: 30, expectedKwh: 20, linePct: 55.55, closePoolPct: 30 };
+  const fc = { kind: 'neverStarted', stopPct: null, expectedLeg: true, line: { askPct: 56, linePct: 55.55 } } as never;
+  const unread = buildNightChargeMorningSummary({ ...base, forceCharge: fc, writeUnread: true } as never).body;
+  assert.equal(unread, 'Supervised night charge for 2027-01-04 completed: the reserve write to 50% never read back; force-charge for the 55.6% outage line never started; the pool read 30% at the close, under the 55.6% outage line; the reserve is restored to 30%. Delivery vs plan scores in the ledger at tomorrow evening\'s update.');
+  assert.ok(buildNightChargeMorningSummary({ ...base, forceCharge: fc }).body.includes('completed: reserve raised to 50%; force-charge'), 'verified');
+  // A night expected to hold is told no hold either; nor the shape with no force-charge, nor the acknowledged restore.
+  assert.doesNotMatch(buildNightChargeMorningSummary({ ...base, expectedKwh: 0, forceCharge: fc, writeUnread: true } as never).body, /held at 50%/);
+  assert.ok(buildNightChargeMorningSummary({ ...base, forceCharge: { kind: 'none', expectedLeg: false }, writeUnread: true } as never).body.includes('completed: the reserve write to 50% never read back; the reserve is restored to 30%. '));
+  assert.ok(buildNightChargeMorningSummary({ ...base, forceCharge: { kind: 'none', expectedLeg: false }, writeUnread: true, restore: 'acknowledged' } as never).body.includes('completed: the reserve write to 50% never read back; the restore to 30% was sent'));
+  for (const [ended, head] of [['gridLoss', 'stopped: the grid was lost during the window'], ['cancelled', 'was cancelled after the write']] as const) {
+    const m = buildNightChargeMorningSummary({ ...base, ended, writeUnread: true } as never).body;
+    assert.ok(m.includes(`${head}: the reserve write to 50% never read back; the reserve is restored to 30% and nothing more is charged tonight.`), m);
+    assert.doesNotMatch(m, /raised to/, m);
+    const acked = buildNightChargeMorningSummary({ ...base, ended, writeUnread: true, restore: 'acknowledged' } as never).body;
+    assert.ok(acked.includes(`${head}: the reserve write to 50% never read back; the restore to 30% was sent`), acked);
+    assert.doesNotMatch(acked, /was raised to/, acked);
+  }
+  // A night with no line: v1.199.1's words, whatever it is told.
+  assert.equal(buildNightChargeMorningSummary({ day: 'd', targetPct: 50, restorePct: 30, expectedKwh: 20, writeUnread: false } as never).body, buildNightChargeMorningSummary({ day: 'd', targetPct: 50, restorePct: 30, expectedKwh: 20 }).body);
+  const at = INDEX.indexOf('function sendRestoreSummary(');
+  const fn = INDEX.slice(at, INDEX.indexOf('\n}\n', at));
+  assert.ok(fn.includes('writeUnread: lineNight != null && state.applyVerifiedAtMs == null,'), fn);
+  // The banner: the server's field, on a record with its ask, acknowledged and unread; its Cancel stays. In the apply's grace too: the words hold there.
+  const status = (cycle as unknown as { lineWriteUnreadStatus: (s: NightActuationState) => Record<string, unknown> }).lineWriteUnreadStatus;
+  const phantom = applied({ applyVerifiedAtMs: null, applyEscalated: true });
+  assert.deepEqual(status(phantom), { lineWriteUnread: true });
+  assert.deepEqual(status(applied({ applyVerifiedAtMs: null })), { lineWriteUnread: true });
+  assert.deepEqual(status(applied()), {}, 'read back');
+  assert.deepEqual(status(armed()), {}, 'no write acknowledged');
+  assert.deepEqual(status(applied({ applyVerifiedAtMs: null, forceChargeLineAskPct: null, forceChargeLinePct: null })), {}, 'a night with no line: byte for byte');
+  const banner = cardText.actuationBannerState as unknown as (a: unknown, d: string | null, r?: number | null) => { text: string; settled: boolean; cancel: string | null };
+  assert.deepEqual(banner({ ...phantom, ...status(phantom), cancelDeadlineMs: OPEN }, '23:00', 30), { text: 'Reserve write to 50% has not read back (was 30%); auto-restores after the window closes.', settled: false, cancel: 'Cancel & revert' });
+  assert.equal(banner({ ...applied(), ...status(applied()), cancelDeadlineMs: OPEN }, '23:00', 50).text, 'Reserve raised to 50% (was 30%); auto-restores after the window closes.');
+  assert.equal(banner({ ...phantom, ...status(phantom), cancelled: true, cancelDeadlineMs: OPEN }, '23:00', 30).text, 'Cancelled — the applied write reverts within a minute.', 'a state ahead of it keeps its words');
+  assert.ok(INDEX.includes('...lineWriteUnreadStatus(nightActuationMem),'), 'the status route');
+  const CARD = readFileSync(resolve(HERE, '../../web/src/cards/NightChargeCard.tsx'), 'utf8');
+  assert.ok(CARD.includes('lineWriteUnread?: boolean;'), 'the field reaches the card');
 });

@@ -86,7 +86,7 @@ import {
   // v1.200.0 (review 2) — the re-ON budget in words, for the texts of a night whose walk reaches the ceiling.
   lineReOnTimesWords,
   // v1.200.0 (Fix10) — a closed start, in the words its pushes use.
-  lineStartClosedWords, type ForceChargeStartClosed,
+  lineStartClosedWords, type LineClosure,
 } from './nightForceCharge.js';
 // R2 — the window resolver and the per-leg rules live with the cycle chooser; the taper ceiling
 // with the curtailment engine's taper band. (chargeWindows.ts imports only tariff.ts;
@@ -274,7 +274,7 @@ export interface NightChargeInputs {
   /** v1.200.0 (Fix10) — a record WITH a line whose start is closed (nightForceCharge.armedLineStartClosed): a plan of that window says
    *  so ('startClosed'). Set only on the plan the card and the entities serve (index.ts): the plan of record, whose ask the ledger and
    *  its strike rule read, never reads it. Absent ⇒ no such record. */
-  armedLineStartClosed?: { windowStartMs: number; why: ForceChargeStartClosed } | null;
+  armedLineStartClosed?: LineClosure | null;
 
   // ── The cheap charge window tonight (resolved upstream via tariff.rateAt) ──
   window: { startMs: number; endMs: number } | null;
@@ -612,6 +612,9 @@ export interface NightChargePlan {
    *  tonight (CushionEnvelopeReason). An armed night ('nearFull', 'closeUnder') is worded by lineNotHeldOf — never
    *  "no force-charge" — and the not-armed sentence is kept for 'advisory' and 'backupLeg'. */
   cushionEnvelopeReason?: CushionEnvelopeReason;
+  /** v1.200.0 (Fix10 review 1) — beside the reason 'startClosed', where no verified write of the night stands behind it (LineClosure):
+   *  the expected figures and the write's level, read beside it, would name a reserve nothing holds, so the card leads with the words. */
+  cushionStartClosedNoWrite?: true;
   /** v1.200.0 (Fix10) — beside the reason 'startClosed', and only there: why no force-charge for the line starts, in words
    *  (nightForceCharge.lineStartClosedWords, the pushes' own), for the card's row. */
   cushionStartClosedWords?: string;
@@ -2683,6 +2686,7 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
     ...(cushionShortfallCause != null ? { cushionShortfallCause } : {}),
     ...(cushionEnvelopeReason != null ? { cushionEnvelopeReason } : {}),
     ...(cushionStartClosedWords != null ? { cushionStartClosedWords } : {}),
+    ...(lineStartClosed != null && inputs.armedLineStartClosed?.writeStands !== true ? { cushionStartClosedNoWrite: true as const } : {}),
     ...(forceChargeLine != null ? { forceChargeLine } : {}),
     ...(expected.mode === 'line' ? { expectedForceChargeMode: 'line' as const } : {}),
     ...(lineCeilingStop != null ? { expectedLineCeilingStop: lineCeilingStop } : {}),

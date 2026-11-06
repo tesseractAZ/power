@@ -1,7 +1,7 @@
 import { memo, useEffect, useState } from 'react';
 import {
   actuationBannerState, actuationBannerVisible, actuationKey, cancelOutcome, cancelRequestInit, chargeFigureParts, floorCushionLinePct, fmtLinePct,
-  holdSummary, noChargeExpected, noPlanText, refusedArmLead, reserveWriteLabel, sizingLine, withConfirmedCancel, writeStands,
+  holdSummary, noChargeExpected, noPlanText, refusedArmLead, reserveWriteLabel, sizingLine, startClosedLead, withConfirmedCancel, writeStands,
   capsShortfallShown, outageLineRow, lineNotHeldOfCard,
   writtenReservePct, middayShadowView, type MiddayShadowStatus, type MiddayShadowPreviewStatus,
 } from './nightChargeText';
@@ -61,6 +61,7 @@ interface NightChargePlan {
   /** v1.200.0 (A5) — why the plan does not claim the line (nightChargeText.CushionNotePlan). */
   cushionEnvelopeReason?: 'advisory' | 'backupLeg' | 'reserveAtTarget' | 'armedNoLine' | 'startClosed' | 'nearFull' | 'closeUnder';
   cushionStartClosedWords?: string;
+  cushionStartClosedNoWrite?: boolean;
   forceChargeLine?: { askPct: number; linePct: number } | null;
   expectedForceChargeMode?: 'line';
   /** v1.200.0 (review 2) — the expected walk reaches the panel ceiling: the panel switches Charge Now off there and
@@ -121,6 +122,8 @@ interface NightActuation {
   foreignReservePct?: number | null;
   /** v1.200.0 (Fix10) — a line night whose start is closed (lineStartClosedStatus): absent on any other night. */
   lineStartClosed?: { text: string; cancel: boolean };
+  /** v1.200.0 (Fix10 review 1) — a line night's write the panel has not read back (lineWriteUnreadStatus). */
+  lineWriteUnread?: boolean;
 }
 
 interface NightChargeStatus {
@@ -306,6 +309,10 @@ export const NightChargeCard = memo(function NightChargeCard() {
   const refused = status.mode !== 'advisory' && status.armRefusal
     ? refusedArmLead(status.armRefusal, { mode: status.mode, held: noChargeNight, reservePct: writtenReservePct(plan, status.reserveWriteMaxPct ?? null) })
     : null;
+  // v1.200.0 (Fix10 review 1) — a closed start no write stands behind leads with that, in the refused lead's shape.
+  const closedLead = startClosedLead(plan);
+  // v1.200.0 (Fix10 review 1) — no force-charge row under a refused arm: a disclosed one still says what the lead does not.
+  const lineRow = refused != null && plan.forceChargeLine != null ? null : outageLineRow(plan, status.reserveWriteMaxPct ?? null);
 
   return (
     <div className="card">
@@ -318,6 +325,11 @@ export const NightChargeCard = memo(function NightChargeCard() {
         <div className="mb-3 text-sm">
           <div className="text-warn font-medium">{refused.headline}</div>
           <div className="text-muted mt-1 leading-relaxed">{refused.detail}</div>
+        </div>
+      ) : closedLead ? (
+        <div className="mb-3 text-sm">
+          <div className="text-warn font-medium">{closedLead.headline}</div>
+          <div className="text-muted mt-1 leading-relaxed">{closedLead.detail}</div>
         </div>
       ) : (
         <div className="flex items-baseline gap-4 mb-3 flex-wrap">
@@ -347,9 +359,9 @@ export const NightChargeCard = memo(function NightChargeCard() {
 
       {/* v1.200.0 — the outage line above the panel's 50% reserve: disclosed, or the force-charge's own row; (A5) a warning
           wherever the plan does not claim it or its walk cannot hold it (a carried night whose sizing fell short too). */}
-      {outageLineRow(plan, status.reserveWriteMaxPct ?? null) != null && (
+      {lineRow != null && (
         <div className={`text-xs ${plan.cushionShortfallCause != null || lineNotHeldOfCard(plan) != null ? 'text-warn' : 'text-muted'} mb-3 -mt-1`}>
-          {outageLineRow(plan, status.reserveWriteMaxPct ?? null)}
+          {lineRow}
         </div>
       )}
 
@@ -396,7 +408,8 @@ export const NightChargeCard = memo(function NightChargeCard() {
             [
               'sizing basis',
               // v1.182.0 — what will actually be WRITTEN (clamped to the panel's maximum).
-              reserveWriteLabel(plan.setpointSocPct, plan.targetSocPct, status.reserveWriteMaxPct ?? null),
+              // v1.200.0 (Fix10 review 1) — and on a closed start no write stands behind, nothing: the stat names no reserve set.
+              closedLead != null ? null : reserveWriteLabel(plan.setpointSocPct, plan.targetSocPct, status.reserveWriteMaxPct ?? null),
               plan.bindingCap ? `cap: ${BINDING_CAP_LABEL[plan.bindingCap] ?? plan.bindingCap}` : null,
             ]
               .filter(Boolean)

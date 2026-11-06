@@ -235,7 +235,7 @@
 
 import {
   APPLY_LATE_MS, RESERVE_WRITE_MAX_PCT, armedForceChargeCeilingPct, clampReserveTarget, type NightActuationState,
-  writeWindowEndMs, ON_PEAK_PAGE_LEAD_MS,
+  writeWindowEndMs, ON_PEAK_PAGE_LEAD_MS, REVERT_VERIFY_AFTER_MS, REVERT_DEADLINE_HOLD_MAX_MS,
 } from './nightChargeActuator.js';
 import type { ForceChargeCommands } from './settingsDrift.js';
 import { FORCE_CHARGE_CEILING_MIN_PCT, FORCE_CHARGE_CEILING_MAX_PCT, SHP2_SOURCE_SLOTS } from './hwSpec.js';
@@ -695,6 +695,18 @@ export function lineLatestStartMs(
 
 /** v1.200.0 (Fix9) — why no force-charge can START on a record any more (forceChargeStartClosed). */
 export type ForceChargeStartClosed = 'started' | 'cancelled' | 'reverted' | 'foreign' | 'noWindow' | 'over' | 'late' | 'overGuard' | 'lateGuard' | 'noWrite' | 'gatedOff';
+/** v1.200.0 (Fix10 review 1) — why a plan of a window claims no force-charge (armedLineStartClosed, chargeCycle.servedLineClosure):
+ *  forceChargeStartClosed's keys less the two that are no such record ('started' may still be running, 'gatedOff' is what advisory
+ *  discloses), a run stopped for good ('stopped': an OFF of ours is one-way), and a window no record holds with no evening job left. */
+export type LineStartClosed = Exclude<ForceChargeStartClosed, 'started' | 'gatedOff'> | 'stopped' | 'noArm';
+/** v1.200.0 (Fix10 review 1) — a closed start as a plan reads it: its window, why, and `writeStands` where a verified reserve write of
+ *  the night still holds (reserveWriteStands; absent otherwise): the card's figure is true only then. */
+export interface LineClosure { windowStartMs: number; why: LineStartClosed; writeStands?: true }
+
+/** v1.200.0 (Fix10 review 1) — PURE. The one-way stamps that end a night for good, whether or not a force-charge of ours ran. */
+function nightSettledKey(s: Pick<NightActuationState, 'cancelled' | 'revertedAtMs' | 'foreignSettledAtMs'>): 'cancelled' | 'reverted' | 'foreign' | null {
+  return s.cancelled ? 'cancelled' : s.revertedAtMs != null ? 'reverted' : s.foreignSettledAtMs != null ? 'foreign' : null;
+}
 
 /**
  * v1.200.0 (Fix9) — PURE. Why decideForceCharge can no longer START a force-charge on this record, whatever a later
@@ -718,11 +730,7 @@ export function forceChargeStartClosed(
   nowMs: number, gates: ForceChargeGates,
 ): ForceChargeStartClosed | null {
   const stamped: ForceChargeStartClosed | null = s.forceChargeOnAtMs != null ? 'started'
-    : s.cancelled ? 'cancelled'
-      : s.revertedAtMs != null ? 'reverted'
-        : s.foreignSettledAtMs != null ? 'foreign'
-          : s.windowStartMs == null || s.windowEndMs == null ? 'noWindow'
-            : null;
+    : nightSettledKey(s) ?? (s.windowStartMs == null || s.windowEndMs == null ? 'noWindow' : null);
   if (stamped != null) return stamped;
   const closeMs = writeWindowEndMs(s)!;
   const guard = closeMs < s.windowEndMs!; // the on-peak guard ends the writes with the window still open
@@ -733,7 +741,7 @@ export function forceChargeStartClosed(
 }
 
 /** v1.200.0 (Fix9) — each closed start's reason, in words (lineStartClosedWords). */
-export const FORCE_CHARGE_START_CLOSED_WHY: Readonly<Record<Exclude<ForceChargeStartClosed, 'started' | 'gatedOff'>, string>> = Object.freeze({
+export const FORCE_CHARGE_START_CLOSED_WHY: Readonly<Record<Exclude<LineStartClosed, 'stopped'>, string>> = Object.freeze({
   cancelled: 'the night was cancelled',
   reverted: "the reserve's restore was sent",
   foreign: 'the reserve was set outside the add-on',
@@ -744,13 +752,15 @@ export const FORCE_CHARGE_START_CLOSED_WHY: Readonly<Record<Exclude<ForceChargeS
   overGuard: 'the on-peak guard (an hour before on-peak) has begun',
   lateGuard: `${Math.round(FORCE_CHARGE_MIN_RUN_MS / 60_000)} min or less is left before the on-peak guard (an hour before on-peak)`,
   noWrite: 'it rides a verified reserve write, and none was issued',
+  noArm: 'no write is armed for this window',
 });
 
 /** v1.200.0 (Fix9) — PURE. A line night's words for a start that can no longer come (forceChargeStartClosed), `line` naming the
  *  line ("the 55.6% outage line", or "the line"): true in every outcome — each reason holds for the rest of the record, and
  *  'gatedOff' says while the options keep it off. */
-export function lineStartClosedWords(line: string, why: ForceChargeStartClosed): string {
+export function lineStartClosedWords(line: string, why: ForceChargeStartClosed | LineStartClosed): string {
   if (why === 'started') return `the force-charge for ${line} was switched on earlier and does not start again`;
+  if (why === 'stopped') return `the force-charge for ${line} was switched off and does not start again`;
   if (why === 'gatedOff') return `no force-charge for ${line} starts while the options keep it off`;
   return `no force-charge for ${line} starts: ${FORCE_CHARGE_START_CLOSED_WHY[why]}`;
 }
@@ -1546,18 +1556,57 @@ export function armedNoLineStartMs(
   return s.day != null && forceChargeLineNightPct(s) == null ? s.windowStartMs : null;
 }
 
+/** v1.200.0 (Fix10 review 1) — PURE. A verified reserve write of the night still holds: the record's word for what the panel was
+ *  last read holding, neither cancelled, restored nor set outside the add-on since. */
+export function reserveWriteStands(
+  s: Pick<NightActuationState, 'applyVerifiedAtMs' | 'cancelled' | 'revertedAtMs' | 'foreignSettledAtMs'>,
+): boolean {
+  return s.applyVerifiedAtMs != null && nightSettledKey(s) == null;
+}
+
 /** v1.200.0 (Fix10) — PURE. The window open of a record WITH a line whose start is closed (forceChargeStartClosed, the one source),
- *  and why: no force-charge for its line can come of it. 'started' ran, and 'gatedOff' is what advisory already discloses; neither
- *  is such a record. null with no record, no line (armedNoLineStartMs has that one) or a start still to come. It reaches only the
- *  plan the card and the entities serve (index.ts), never a plan an arm or the ledger reads, and nothing written reads it. */
+ *  and why: no force-charge for its line can come of it. 'gatedOff' is what advisory already discloses. null with no record, no line
+ *  (armedNoLineStartMs has that one) or a start still to come. It reaches only the plan the card and the entities serve (index.ts),
+ *  never a plan an arm or the ledger reads, and nothing written reads it.
+ *  (Fix10 review 1) 'started' goes first in forceChargeStartClosed and shadows the stamps behind it, so a run is read apart: one still
+ *  on, or one the panel's own stop ended (the re-ON can bring it back), stays armed; a cancel, a restore, a foreign reserve or an OFF
+ *  of ours ends it for good (lineReOnDue needs no OFF, and a record starts once), whatever the plan would say of the rest of the night.
+ *  An ON warned of with no OFF is left: it may still apply late, and is verified then. */
 export function armedLineStartClosed(
   s: Pick<NightActuationState, 'day' | 'forceChargeOnAtMs' | 'cancelled' | 'revertedAtMs' | 'foreignSettledAtMs' | 'windowStartMs' | 'windowEndMs'
-    | 'nextOnPeakStartMs' | 'forceChargeCeilingPct' | 'forceChargeLineAskPct' | 'forceChargeLinePct' | 'appliedAtMs' | 'applyAttemptedAtMs'>,
+    | 'nextOnPeakStartMs' | 'forceChargeCeilingPct' | 'forceChargeLineAskPct' | 'forceChargeLinePct' | 'appliedAtMs' | 'applyAttemptedAtMs'
+    | 'applyVerifiedAtMs' | 'forceChargeOffAtMs'>,
   nowMs: number, gates: ForceChargeGates,
-): { windowStartMs: number; why: ForceChargeStartClosed } | null {
+): LineClosure | null {
   if (s.day == null || s.windowStartMs == null || forceChargeLineNightPct(s) == null) return null;
-  const why = forceChargeStartClosed(s, nowMs, gates);
-  return why == null || why === 'started' || why === 'gatedOff' ? null : { windowStartMs: s.windowStartMs, why };
+  const key = forceChargeStartClosed(s, nowMs, gates);
+  if (key == null || key === 'gatedOff') return null;
+  const why: LineStartClosed | null = key !== 'started' ? key : nightSettledKey(s) ?? (s.forceChargeOffAtMs != null ? 'stopped' : null);
+  if (why == null) return null;
+  return { windowStartMs: s.windowStartMs, why, ...(reserveWriteStands(s) ? { writeStands: true as const } : {}) };
+}
+
+/** v1.200.0 (Fix10 review 1) — how long after the add-on's close a pool reading is still the close's: the restore's readback grace and
+ *  the restart hold of its summary (restoreSummaryDue), the longest a prompt night's summary waits. */
+export const LINE_CLOSE_READING_MAX_MS = REVERT_VERIFY_AFTER_MS + REVERT_DEADLINE_HOLD_MAX_MS;
+
+/** v1.200.0 (Fix10 review 1) — PURE. The morning account goes too long after the close for its pool reading to be the close's: a process
+ *  down across the close, or a cloud refusing the restore, sends it hours on, and the sun or the house has moved the pool since. It then
+ *  says what the pool reads now, with no verdict on the line (the ledger's window_close_soc_pct is the close's, at close + 16 h). */
+export function lineCloseReadingLate(s: Pick<NightActuationState, 'windowEndMs' | 'nextOnPeakStartMs'>, nowMs: number): boolean {
+  const closeMs = writeWindowEndMs(s);
+  return s.windowEndMs != null && closeMs != null && nowMs - closeMs > LINE_CLOSE_READING_MAX_MS;
+}
+
+/** v1.200.0 (Fix10 review 1) — PURE. The line to push at an OFF of ours nothing else reports while a person can act: 'gridLoss' fires on a
+ *  gridSta reading alone (offReason: gridStaLost), and the restore's abort needs gridPresent false, so with grid flow still measured, or
+ *  the reading unknown, the force-charge ends for good with no restore, no summary and no at-risk push (it needs no OFF of ours yet).
+ *  With gridPresent false the abort's own account goes, with the same words. null on a night with no line (v1.199.1). */
+export function lineGridOffPushDue(
+  s: Pick<NightActuationState, 'forceChargeLineAskPct' | 'forceChargeLinePct'>,
+  reason: ForceChargeOffReason, o: Pick<ForceChargeOpts, 'gridPresent'>,
+): number | null {
+  return reason === 'gridLoss' && o.gridPresent !== false ? forceChargeLineNightPct(s) : null;
 }
 
 /** v1.200.0 (review 2) — PURE. The ON-failure push's night fields (notify.buildNightForceChargeOnFailure): a

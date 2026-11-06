@@ -69,7 +69,7 @@ import {
   // v1.200.0 (Fix9) — a line night's force-charge "waits on" a reading of the target only while a start can still come.
   forceChargeStartClosed, lineStartClosedWords,
   // v1.200.0 (Fix9 review 2) — a recompute of a window whose armed record carries no line claims no ON the record cannot make.
-  armedNoLineStartMs, armedLineStartClosed,
+  armedNoLineStartMs, armedLineStartClosed, lineCloseReadingLate, lineGridOffPushDue, type LineClosure,
   // v1.200.0 (review 4) — what a line re-ON's readback check stamps, the re-ON that took effect included.
   lineReOnCheckedStamp,
   // v1.200.0 (review 6) — the force-charge tick's cadence, which the line-at-risk push's hand-back hold counts.
@@ -314,13 +314,13 @@ import {
   buildNightChargeMessage, sendNotification, loadNotifyConfig,
   // v1.187.22 — the after-the-fact night-charge pushes, built where their text is tested.
   buildNightChargeMorningSummary, buildNightChargeApplyFailure, buildNightForceChargeOnFailure, buildLineForceChargeDeclinedStart,
-  buildLineForceChargeAtRisk,
+  buildLineForceChargeAtRisk, buildLineForceChargeGridOff, buildLineNightNotArmed,
   buildNightChargeRevertDeadline, buildNightChargeForeignReserve, buildNightChargeMissedApply, buildLineNightCloseAccount,
 } from './notify.js';
 // v1.189.0 — the charge cycle: the legs one evening arms (chargeCycle.ts).
 import {
   coerceCycle, serializeCycle, emptyCycle, asChargeLeg, legRoleOf, armCycle, promoteCycle, cancelLeg, parseCancelLeg,
-  cycleLegsStatus, lineStartClosedStatus, cycleDriftLeg, missedApplyDue, missedApplyReason, legLedgerFields, supersededLegs, trailingResolved,
+  cycleLegsStatus, lineStartClosedStatus, lineWriteUnreadStatus, noEveningArmLeft, servedLineClosure, lineNotArmedPushDue, priorArmSuperseded, cycleDriftLeg, missedApplyDue, missedApplyReason, legLedgerFields, supersededLegs, trailingResolved,
   departedAfterStep, forceChargeDriftLeg, type DepartedLeg,
   nextForceChargeOpenMs, withLiveTrailing, MISSED_APPLY_FALLBACK_REASON,
   type ChargeCycleState, type ChargeLegState,
@@ -3404,14 +3404,19 @@ interface NightChargeLatch {
   /** v1.187.22 — the evening's refused arm (armRefusalReason) and the window it was refused for:
    *  the status route serves it (servedArmRefusal) so the card leads with it. null = none. */
   armRefused?: ArmRefusalRecord | null;
+  /** v1.200.0 (Fix10 review 1) — the window whose no-write push went (chargeCycle.lineNotArmedPushDue), stamped before it goes. */
+  lineNotArmedWindowStartMs?: number | null;
 }
 function readNightChargeLatchFile(): NightChargeLatch {
   try {
     const raw = JSON.parse(readFileSync(NIGHT_CHARGE_LATCH_PATH, 'utf8'));
     const d = raw?.lastNotifyDay;
-    return { lastNotifyDay: typeof d === 'string' ? d : null, armRefused: coerceArmRefusalRecord(raw?.armRefused) };
+    return {
+      lastNotifyDay: typeof d === 'string' ? d : null, armRefused: coerceArmRefusalRecord(raw?.armRefused),
+      lineNotArmedWindowStartMs: typeof raw?.lineNotArmedWindowStartMs === 'number' ? raw.lineNotArmedWindowStartMs : null,
+    };
   } catch {
-    return { lastNotifyDay: null, armRefused: null };
+    return { lastNotifyDay: null, armRefused: null, lineNotArmedWindowStartMs: null };
   }
 }
 // In-memory mirror of the persisted latch, seeded once from disk at module load.
@@ -3424,9 +3429,12 @@ function readNightChargeLatch(): NightChargeLatch {
   return nightChargeLatchMem;
 }
 function writeNightChargeLatch(l: NightChargeLatch): void {
-  nightChargeLatchMem = { lastNotifyDay: l.lastNotifyDay, armRefused: l.armRefused ?? null };
+  nightChargeLatchMem = {
+    lastNotifyDay: l.lastNotifyDay, armRefused: l.armRefused ?? null,
+    lineNotArmedWindowStartMs: l.lineNotArmedWindowStartMs ?? nightChargeLatchMem.lineNotArmedWindowStartMs ?? null,
+  };
   try {
-    atomicWriteFileSync(NIGHT_CHARGE_LATCH_PATH, JSON.stringify(l));
+    atomicWriteFileSync(NIGHT_CHARGE_LATCH_PATH, JSON.stringify(nightChargeLatchMem));
   } catch (e: any) {
     app.log.debug(`night-charge: latch persist failed (${e?.message ?? e})`);
   }
@@ -4109,9 +4117,12 @@ async function recomputeNightChargePlan(
   // `plan` stays the plan of record. The snapshot, the ledger row and its strike rule read that one: disclosing here must never take
   // the ask off a night whose record carries it. As armedNoLineStartMs, never an arm or a shadow leg. (A stale panel's note above is the
   // evening job's and a shadow leg's only: this plan has none to carry.)
-  const lineClosed = shadowLeg == null && opts.arming !== true ? armedLineStartClosed(nightActuationMem, nowMs, forceChargeGatesOn(legRoleOf(nightActuationMem))) : null;
+  // (Fix10 review 1) And a window no record holds, once no evening job can arm it (chargeCycle.servedLineClosure): read off the plan of
+  // record's window, since a closed record of an earlier night says nothing of this one.
+  const lineClosed = shadowLeg == null && opts.arming !== true ? servedLineClosure(nightCycleView(), plan.window?.startMs ?? null, armedLineStartClosed(nightActuationMem, nowMs, forceChargeGatesOn(legRoleOf(nightActuationMem))), plan.window != null && noEveningArmLeft(plan.window.startMs, nowMs, eveningJobClock(nowMs))) : null;
   // R4 — never a shadow leg: the holder is the live overnight plan the entities, card and status serve.
   if (!shadowLeg) setLatestNightChargePlan(lineClosed != null ? computeNightChargePlan({ ...inputs, armedLineStartClosed: lineClosed }) : plan);
+  if (!shadowLeg) pushLineNotArmedIfDue(getLatestNightChargePlan(), lineClosed, nowMs);
 
   // Ledger diagnostics computed over the authoritative 24 h band (where the
   // P10/P50/P90 percentiles are actually defined).
@@ -4923,6 +4934,31 @@ function cancelStalePriorArm(today: string, nowMs: number, reason: string): bool
   return true;
 }
 
+/** v1.200.0 (Fix10 review 1) — where today's evening job stands (chargeCycle.noEveningArmLeft): latched, or past its cutoff. */
+function eveningJobClock(nowMs: number): { consumed: boolean; fireMin: number; nowMin: number } {
+  const nowMin = siteMinuteOfDay(nowMs);
+  const sched = nightScheduleNow();
+  return {
+    consumed: readNightChargeLatch().lastNotifyDay === siteYmd(nowMs) || nowMin >= sched.eveningCutoffMin,
+    fireMin: sched.notify.fireMin,
+    nowMin,
+  };
+}
+
+/** v1.200.0 (Fix10 review 1) — a window no record holds, with no evening job left: nothing re-arms, and no other surface knows the night
+ *  (chargeCycle.lineNotArmedPushDue). Stamped on the latch before it goes, not awaited. By hand until the add-on's close would be. */
+function pushLineNotArmedIfDue(plan: NightChargePlan | null, closure: LineClosure | null, nowMs: number): void {
+  const latch = readNightChargeLatch();
+  const due = lineNotArmedPushDue(closure, plan, latch.lineNotArmedWindowStartMs ?? null, servedArmRefusal(latch.armRefused, plan, NIGHT_CHARGE_MODE, nowMs));
+  if (due == null) return;
+  writeNightChargeLatch({ ...latch, lineNotArmedWindowStartMs: due.windowStartMs });
+  const closeMs = writeWindowEndMs({ windowEndMs: due.windowEndMs, nextOnPeakStartMs: nextOnPeakStartMs(tariffModelFromEnv(), due.windowStartMs) })!;
+  app.log.warn(`night-charge: no write is armed for the ${new Date(due.windowStartMs).toISOString()} window and no evening job is left to arm one: no force-charge runs for the ${round1(due.linePct)}% outage line.`);
+  void sendNotification(loadNotifyConfig(), buildLineNightNotArmed({ ...due, closeText: fmtSiteClock(closeMs) })).catch((e: any) => {
+    app.log.debug(`night-charge: line not-armed notify failed (${e?.message ?? e})`);
+  });
+}
+
 async function runNightChargeEveningJobInner(): Promise<void> {
   const nowMs = Date.now();
   const today = siteYmd(nowMs);
@@ -5099,9 +5135,8 @@ async function runNightChargeEveningJobInner(): Promise<void> {
         // 00:00, one hour, since the weekday rule is evaluated per-instant).
         // The pair that genuinely shares a window is SAT + SUN, both resolving
         // to Mon 00:00 → 05:00, because Saturday has no window of its own.
-        if (nightActuationMem.day != null && nightActuationMem.day !== today &&
-            nightActuationMem.appliedAtMs == null && nightActuationMem.applyAttemptedAtMs == null &&
-            nightActuationMem.targetPct != null) {
+        // v1.200.0 (Fix10 review 1) — the test is chargeCycle.priorArmSuperseded: it leaves a 'missed — ' disposition, the strike's evidence.
+        if (nightActuationMem.day != null && priorArmSuperseded(nightActuationMem, today)) {
           app.log.info(`night-charge: prior ARM for ${nightActuationMem.day} (target ${nightActuationMem.targetPct}%, worst-case sizing ~${nightActuationMem.buyKwh ?? '—'} kWh) superseded by tonight's plan — one write fires at the shared window.`);
           // v1.132.0 — and STAMP it. A log line is not the ledger: the superseded
           // night keeps actuated=null forever, indistinguishable from four other
@@ -6523,6 +6558,8 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
 
   if (action.kind === 'off' || action.kind === 'offRetry') {
     const isRetry = action.kind === 'offRetry';
+    // (Fix10 review 1) An OFF on a grid-status reading no abort reports, on its first tick only (the stamp below is one-way).
+    const gridOffLine = action.kind === 'off' && state.forceChargeOffAtMs == null ? lineGridOffPushDue(state, action.reason, fcOpts) : null;
     persistNightActuation({
       ...nightActuationMem,
       forceChargeOffAtMs: nightActuationMem.forceChargeOffAtMs ?? nowMs,
@@ -6555,6 +6592,12 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
         : state.forceChargeOnFailedAtMs != null ? ' (the ON never took effect — see the earlier warning)'
           : ' (the ON was never verified by readback)';
       app.log.info(`night-charge: FORCE-CHARGE OFF for ${state.day} (${action.reason === 'target' ? `reached the ${state.forceChargeCeilingPct}% target` : action.reason}) — ${results.join(', ')}; verifying by readback${onNote}.`);
+    }
+    if (gridOffLine != null) {
+      app.log.warn(`night-charge: the force-charge for ${state.day}'s ${lineLogPct(state)}% outage line stopped on the panel's grid reading, with no abort to report it; pushed once.`);
+      void sendNotification(loadNotifyConfig(), buildLineForceChargeGridOff({ linePct: gridOffLine, poolPct: fcOpts.poolSocPct ?? null, closeText: fmtSiteClock(writeWindowEndMs(state)!) })).catch((e: any) => {
+        app.log.debug(`night-charge: line grid-off notify failed (${e?.message ?? e})`);
+      });
     }
     return;
   }
@@ -6777,6 +6820,10 @@ function sendRestoreSummary(state: ChargeLegState, restore: RestoreSummaryKind, 
       linePct: lineNight,
       // (Fix9 review 1) While the add-on's close has not passed: a grid loss's push says what can still hold the line.
       closeText: lineNight != null && state.windowEndMs != null && nowMs < writeWindowEndMs(state)! ? fmtSiteClock(writeWindowEndMs(state)!) : null,
+      // (Fix10 review 1) Sent hours after the close (a process down across it, a restore refused): that reading is not the close's.
+      closeReadLate: lineNight != null && lineCloseReadingLate(state, nowMs),
+      // (Fix10 review 1) A write the panel never read back is not told as raised. A night with no line keeps its words.
+      writeUnread: lineNight != null && state.applyVerifiedAtMs == null,
     })).catch((e: any) => {
       app.log.debug(`night-charge: morning summary notify failed (${e?.message ?? e})`);
     });
@@ -7693,6 +7740,8 @@ app.get('/api/night-charge/status', async () => {
       forceChargeOnVerify: forceChargeOnReadbackStatus(nightActuationMem),
       // v1.200.0 (Fix10) — a line night whose start is closed: the banner's words (absent on any other night).
       ...lineStartClosedStatus(nightActuationMem, Date.now(), forceChargeGatesOn(legRoleOf(nightActuationMem))),
+      // (Fix10 review 1) A line night's write the panel has not read back: the banner's words (absent on any other night).
+      ...lineWriteUnreadStatus(nightActuationMem),
     },
     // v1.189.0 — the charge cycle's legs, in order: a trailing leg, the active one (the record
     // above), the pending ones (chargeCycle.cycleLegsStatus). One entry with one leg.
