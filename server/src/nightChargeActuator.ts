@@ -709,6 +709,9 @@ export interface NightActuationState {
    *  (restoreSummaryDue). A record from before the field had its summary sent on the ACK, and reads
    *  back with revertedAtMs here (coerceActuationState), so an update never sends it again. */
   restoreSummaryAtMs: number | null;
+  /** v1.200.0 (Fix9 review 1) — when the close account of a line night with no restore to summarise went
+   *  (nightForceCharge.lineCloseAccountDue), stamped before it goes: once a record. */
+  lineCloseAccountAtMs: number | null;
   /** v1.190.1 — when the owed summary first waited for this process's first reading of the reserve
    *  (restoreSummaryDue 'hold': a restart across the restore's readback grace). It waits at most
    *  REVERT_DEADLINE_HOLD_MAX_MS from here; on the record, so a second restart inside the wait does
@@ -753,7 +756,7 @@ export function emptyActuationState(): NightActuationState {
     applyUnlandedAtMs: null,
     revertDeadlineHeldAtMs: null,
     revertGridLossAbort: false,
-    restoreSummaryAtMs: null, restoreSummaryHeldAtMs: null,
+    restoreSummaryAtMs: null, lineCloseAccountAtMs: null, restoreSummaryHeldAtMs: null,
     lastError: null,
   };
 }
@@ -875,6 +878,7 @@ export function coerceActuationState(raw: unknown): NightActuationState {
     // A record written before the field (v1.189.0 review) sent its summary on the restore's ACK:
     // absent, it reads as sent then, so the update never sends a second one.
     restoreSummaryAtMs: o.restoreSummaryAtMs === undefined ? num(o.revertedAtMs) : num(o.restoreSummaryAtMs),
+    lineCloseAccountAtMs: num(o.lineCloseAccountAtMs),
     restoreSummaryHeldAtMs: num(o.restoreSummaryHeldAtMs),
     lastError: str(o.lastError),
   };

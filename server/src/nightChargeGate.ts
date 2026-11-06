@@ -140,6 +140,10 @@ function maxYmd(a: string, b: string): string { return a >= b ? a : b; }
  *  start on a sound one. */
 export const CURRENT_ALGO_VERSION = 3;
 
+/** v1.200.0 (Fix9 review 1) — how the ledger's arm_disposition opens on a leg whose apply window passed with no write (index.ts
+ *  runMissedApplyStep): the gate reads it on a line night (lineWriteNeverHeld). */
+export const MISSED_APPLY_DISPOSITION = 'missed — ';
+
 /** Graduation floor: scored ACTUATED nights (a bounded reserve write applied,
  *  delivery measured) before AUTO is considerable. ~3 weeks at one per night. */
 const MIN_ACTUATED_NIGHTS = 21;
@@ -539,8 +543,14 @@ export function computeNightChargeReadiness(
   // told apart (the ledger records no cancel: actuation_reverted_at_ms is every early restore's), so such a night is
   // struck as a carried one is; a cancel before the apply is not actuated. An ON sent that never took is not seen here
   // (no ON-verified column): the ON-failure push is its run-time word. Any other disclosed row stays exempt.
+  // v1.200.0 (Fix9 review 1) — the night's reserve write never held a line it armed (lineWriteNeverHeld): a write the cloud accepted
+  // and the panel never took (actuated 0, applyFailed) or one that never went or was never confirmed (the missed push's disposition,
+  // on a record with a line ask), with no force-charge of ours on. A run-time refusal, graded like any actuated night; a night
+  // cancelled before the write, or never armed, is neither.
+  const lineWriteNeverHeld = (r: NightLedgerRow): boolean => asNum(r.cushion_line_force_charge_pct) != null && !truthy(r.actuated)
+    && r.force_charge_on_at_ms == null && (asNum(r.actuated) === 0 || String(r.arm_disposition ?? '').startsWith(MISSED_APPLY_DISPOSITION));
   const armedNeverRanUnder = (r: NightLedgerRow): boolean => {
-    if (asNum(r.cushion_line_force_charge_pct) == null || !truthy(r.actuated) || r.force_charge_on_at_ms != null) return false;
+    if (asNum(r.cushion_line_force_charge_pct) == null || !(truthy(r.actuated) || lineWriteNeverHeld(r)) || r.force_charge_on_at_ms != null) return false;
     const line = asNum(r.cushion_line_soc_pct);
     const close = asNum(r.window_close_soc_pct);
     if (line != null && close != null) return !holdsLineAtClose(close, Math.min(line, 100));
@@ -549,7 +559,7 @@ export function computeNightChargeReadiness(
   const strikeRows = currentAlgo.filter((r) => {
     if (truthy(r.cushion_shortfall)) return armedNeverRanUnder(r); // disclosed — physics, not fault (A5: unless armed and never ran)
     const trajStrike = trajBreached(r) && trajGradedOnSizingTrough(r);
-    const realizedStrike = truthy(r.actuated) && realizedBreached(r);
+    const realizedStrike = (truthy(r.actuated) || lineWriteNeverHeld(r)) && realizedBreached(r);
     return trajStrike || realizedStrike;
   });
   const strikeWindowStart = siteYmd(nowMs - STRIKE_WINDOW_DAYS * DAY_MS);
@@ -621,7 +631,7 @@ export function computeNightChargeReadiness(
     // v1.200.0 (A5) — a disclosed row the strike rule still grades counts too: an ARMED, actuated one
     // (armedNeverRanUnder), so a real 0 beside armed line nights does not read as "cannot count".
     strikesMeasurable: currentAlgo.length > 0 && currentAlgo.some((r) => !truthy(r.cushion_shortfall)
-      || (asNum(r.cushion_line_force_charge_pct) != null && truthy(r.actuated))) ? 1 : 0,
+      || (asNum(r.cushion_line_force_charge_pct) != null && (truthy(r.actuated) || lineWriteNeverHeld(r)))) ? 1 : 0,
     trajStrikesSetAside, // v1.186.0 — see the strike rule
     realizedStrikesSetAside, // v1.196.0 — see realizedCushionBreach
     lineForceChargeStrikes, // v1.200.0 — see the strike rule

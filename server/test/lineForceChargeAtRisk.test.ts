@@ -1221,7 +1221,7 @@ test('★★★ W1 (Fix8) one tick after a hand-back of every kind the push is n
   // lowering while ON (also when the write block refuses it): read at the source.
   const sync = TICK.slice(TICK.indexOf("if (action.kind === 'syncCeiling') {"), TICK.indexOf("if (action.kind === 'restoreCeiling') {"));
   assert.ok(sync.includes('const whileOn = state.forceChargeOnAtMs != null;') && sync.indexOf('const whileOn') < sync.indexOf('const blocked = multiPanelWriteBlock();'), 'whileOn read before the write block');
-  assert.match(sync, /if \(blocked\) \{ app\.log\.warn\(`night-charge: force-charge ceiling sync refused — \$\{blocked\}`\); if \(whileOn\) judgeLineNight\(\); return; \}/);
+  assert.match(sync, /if \(blocked\) \{ app\.log\.warn\(`night-charge: force-charge ceiling sync refused — \$\{blocked\}`\); if \(whileOn\) judgeLineNight\(\); else pushLineDeclinedIfDue\(/);
   const logAt = sync.indexOf("app.log.info(`night-charge: force-charge ceiling →");
   assert.ok(logAt > 0 && sync.indexOf('    if (whileOn) judgeLineNight();\n', logAt) > logAt, 'judged after the lowering, on its own tick');
   // (Fix8 review 1) Judged on: none, the hand-back, the re-ON refused by the write block (for the shape: a re-ON due holds the
@@ -1549,7 +1549,7 @@ test('★★★ W5 #1 + #9 the declined-start push: a cost-dominant line night t
   assert.deepEqual(raw('vitals'), []);
   assert.deepEqual((emptyActuationState() as unknown as { forceChargeLineDeclinedPushed: string[] }).forceChargeLineDeclinedPushed, []);
   // index.ts: the class is on the record before the push goes; the latest start is the record's ⌈L⌉.
-  const step = TICK.indexOf('const dp = lineDeclinedPushTick(lineDeclinedPush, state, action.why, nowMs, ');
+  const step = TICK.indexOf('const dp = lineDeclinedPushTick(lineDeclinedPush, state, why, nowMs, ');
   assert.ok(step > 0);
   const persist = TICK.indexOf('persistNightActuation({ ...nightActuationMem, forceChargeLineDeclinedPushed: [...dp.mem.st.pushed] });', step);
   const send = TICK.indexOf('buildLineForceChargeDeclinedStart({', step);
@@ -1563,7 +1563,7 @@ test('★★★ W5 #6 the reserve-apply failure on a line night: until the panel
   assert.equal(line.body,
     'The supervised reserve write for 2027-01-04 was accepted by the EcoFlow cloud but the Smart Home Panel 2 still reads 30% (target 50%) after 2 re-issues. '
     + "Tonight's planned charge (~28.2 kWh expected) has not taken effect: until the panel reads 50%, it keeps its normal reserve, under tonight's 55.6% outage line, and the force-charge for the line waits on this write. "
-    + 'To hold the line tonight, set the backup reserve to 50% in the EcoFlow app: once the panel reads it, the add-on starts the force-charge for the line as planned. If this repeats, check the SHP2 cloud link.');
+    + 'To let it start, set the backup reserve to 50% in the EcoFlow app now: the sooner the panel reads it, the more of the line a start can reach. If this repeats, check the SHP2 cloud link.');
   assert.doesNotMatch(line.body, /No action needed|will not happen/);
   // (Fix8 review 2) …nor its title: "the reserve write has not taken effect"; a night with no line keeps v1.199.1's (below).
   assert.equal(line.title, 'Night-charge: the reserve write has not taken effect');

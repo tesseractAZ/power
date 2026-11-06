@@ -234,7 +234,7 @@
  */
 
 import {
-  RESERVE_WRITE_MAX_PCT, armedForceChargeCeilingPct, clampReserveTarget, type NightActuationState,
+  APPLY_LATE_MS, RESERVE_WRITE_MAX_PCT, armedForceChargeCeilingPct, clampReserveTarget, type NightActuationState,
   writeWindowEndMs, ON_PEAK_PAGE_LEAD_MS,
 } from './nightChargeActuator.js';
 import type { ForceChargeCommands } from './settingsDrift.js';
@@ -606,6 +606,8 @@ export const FORCE_CHARGE_BLOCKER_WHY = Object.freeze({
   noSlots: 'no battery slots are connected',
   ceilingReadback: 'no live readback of the panel\'s force-charge ceiling',
   ceilingRefused: 'the panel would not take the ',
+  // (Fix9 review 1) index.ts: an ON or a ceiling sync due, refused by multiPanelWriteBlock; the block's own reason follows.
+  writeBlock: 'the add-on is not writing to the panel: ',
 });
 
 /** v1.200.0 (review) — the class of a declined start's `why` (a FORCE_CHARGE_BLOCKER_WHY key), or null when it
@@ -692,7 +694,7 @@ export function lineLatestStartMs(
 }
 
 /** v1.200.0 (Fix9) — why no force-charge can START on a record any more (forceChargeStartClosed). */
-export type ForceChargeStartClosed = 'started' | 'cancelled' | 'reverted' | 'foreign' | 'noWindow' | 'over' | 'late' | 'gatedOff';
+export type ForceChargeStartClosed = 'started' | 'cancelled' | 'reverted' | 'foreign' | 'noWindow' | 'over' | 'late' | 'overGuard' | 'lateGuard' | 'noWrite' | 'gatedOff';
 
 /**
  * v1.200.0 (Fix9) — PURE. Why decideForceCharge can no longer START a force-charge on this record, whatever a later
@@ -700,7 +702,10 @@ export type ForceChargeStartClosed = 'started' | 'cancelled' | 'reverted' | 'for
  * a start (step 4) that no later tick of the record undoes, each stamp one-way: a force-charge of ours already switched
  * on (at most once a night), the night cancelled, the reserve's restore sent, the reserve set outside the add-on, no
  * window, the close (writeWindowEndMs: the window close, or an hour before on-peak if that is sooner) passed ('over') or
- * within FORCE_CHARGE_MIN_RUN_MS ('late': "not worth starting"); and last, no mode riding the record under the live
+ * within FORCE_CHARGE_MIN_RUN_MS ('late': "not worth starting"), each with its own key where the on-peak guard is that
+ * close ('overGuard', 'lateGuard', as decideForceCharge's why tells them apart: the window itself is still open there);
+ * (Fix9 review 1) no write issued and the apply window passed ('noWrite': no apply comes after it, and with no attempt on
+ * record no reading is adopted, so appliedAtMs stays null); and last, no mode riding the record under the live
  * gates (forceChargeModeOf: the line gate off is NIGHT_CHARGE_MODE advisory, which only an option change and a restart
  * undo). The line-night words that say the force-charge "waits on" a reading of the target (index.ts: the reserve-apply
  * failure and the two proofs that the write never landed; notify.buildNightChargeApplyFailure) are keyed on it: a
@@ -709,7 +714,7 @@ export type ForceChargeStartClosed = 'started' | 'cancelled' | 'reverted' | 'for
  */
 export function forceChargeStartClosed(
   s: Pick<NightActuationState, 'forceChargeOnAtMs' | 'cancelled' | 'revertedAtMs' | 'foreignSettledAtMs' | 'windowStartMs' | 'windowEndMs'
-    | 'nextOnPeakStartMs' | 'forceChargeCeilingPct' | 'forceChargeLineAskPct'>,
+    | 'nextOnPeakStartMs' | 'forceChargeCeilingPct' | 'forceChargeLineAskPct' | 'appliedAtMs' | 'applyAttemptedAtMs'>,
   nowMs: number, gates: ForceChargeGates,
 ): ForceChargeStartClosed | null {
   const stamped: ForceChargeStartClosed | null = s.forceChargeOnAtMs != null ? 'started'
@@ -720,8 +725,10 @@ export function forceChargeStartClosed(
             : null;
   if (stamped != null) return stamped;
   const closeMs = writeWindowEndMs(s)!;
-  if (nowMs >= closeMs) return 'over';
-  if (nowMs >= closeMs - FORCE_CHARGE_MIN_RUN_MS) return 'late';
+  const guard = closeMs < s.windowEndMs!; // the on-peak guard ends the writes with the window still open
+  if (nowMs >= closeMs) return guard ? 'overGuard' : 'over';
+  if (nowMs >= closeMs - FORCE_CHARGE_MIN_RUN_MS) return guard ? 'lateGuard' : 'late';
+  if (s.appliedAtMs == null && s.applyAttemptedAtMs == null && nowMs > s.windowStartMs! + APPLY_LATE_MS) return 'noWrite';
   return forceChargeModeOf(s, gates) == null ? 'gatedOff' : null;
 }
 
@@ -733,6 +740,10 @@ export const FORCE_CHARGE_START_CLOSED_WHY: Readonly<Record<Exclude<ForceChargeS
   noWindow: 'the night has no charge window',
   over: 'the window has closed',
   late: `${Math.round(FORCE_CHARGE_MIN_RUN_MS / 60_000)} min or less of the window is left`,
+  // (Fix9 review 1) The guard's own words: the window is still open there (60 min or more of it, a tariff's whole-hour periods).
+  overGuard: 'the on-peak guard (an hour before on-peak) has begun',
+  lateGuard: `${Math.round(FORCE_CHARGE_MIN_RUN_MS / 60_000)} min or less is left before the on-peak guard (an hour before on-peak)`,
+  noWrite: 'it rides a verified reserve write, and none was issued',
 });
 
 /** v1.200.0 (Fix9) — PURE. A line night's words for a start that can no longer come (forceChargeStartClosed), `line` naming the
@@ -742,6 +753,21 @@ export function lineStartClosedWords(line: string, why: ForceChargeStartClosed):
   if (why === 'started') return `the force-charge for ${line} was switched on earlier and does not start again`;
   if (why === 'gatedOff') return `no force-charge for ${line} starts while the options keep it off`;
   return `no force-charge for ${line} starts: ${FORCE_CHARGE_START_CLOSED_WHY[why]}`;
+}
+
+/**
+ * v1.200.0 (Fix9 review 1) — PURE. A LINE night that closes with nothing for the restore's summary to account for
+ * (restoreSummaryDue needs a restore): a record with a line ask, from the add-on's close, once (lineCloseAccountAtMs), whose
+ * reserve write never applied ('noWrite': the morning's only word for it) or settled as someone else's ('foreign': nothing of
+ * ours restores it). A restore sent has its summary; a cancelled night is the person's own act. Active leg only: a leg
+ * promoted past (a mid-day cycle: inert until the mid-day switch) has had its missed push.
+ */
+export function lineCloseAccountDue(s: NightActuationState, nowMs: number): 'noWrite' | 'foreign' | null {
+  if (s.day == null || forceChargeLineNightPct(s) == null || s.lineCloseAccountAtMs != null) return null;
+  if (s.cancelled || s.revertedAtMs != null) return null;
+  const closeMs = writeWindowEndMs(s);
+  if (closeMs == null || nowMs < closeMs) return null;
+  return s.foreignSettledAtMs != null ? 'foreign' : s.appliedAtMs == null ? 'noWrite' : null;
 }
 
 /**

@@ -1134,7 +1134,7 @@ test('★★ T9 the declined start (L3; review): every all-night blocker is one;
   assert.deepEqual(pushes, []);
   // index.ts steps it on every declined tick (lineDeclinedPushTick: a live night whose record carries a line ask,
   // keyed by the night and seeded from the record after a restart — lineForceChargeAtRisk.test.ts W5).
-  assert.ok(INDEX.includes("    const dp = lineDeclinedPushTick(lineDeclinedPush, state, action.why, nowMs, "));
+  assert.ok(INDEX.includes("    const dp = lineDeclinedPushTick(lineDeclinedPush, state, why, nowMs, "));
   assert.ok(INDEX.includes("    lineDeclinedPush = dp.mem;\n"));
   assert.ok(!INDEX.includes("'push:line-declined'"), 'no single per-night key');
   // The latest start (review 15): to ⌈L⌉ at the rate now, never after the dead zone; 2027-01-04 at 50.8%,
@@ -2422,9 +2422,6 @@ test('★★★ T24 (Fix9) a line night\'s force-charge "waits on" a reading of 
     ['…and a minute before that', failed({ nextOnPeakStartMs: onPeak }), WIN_END - 51 * M, LINE_GATE, null],
     ['the on-peak guard reached, the window still open', failed({ nextOnPeakStartMs: onPeak }), WIN_END - 30 * M, LINE_GATE, 'overGuard'],
     ['a guard that binds nothing (on-peak over an hour after the close): the window\'s words', failed({ nextOnPeakStartMs: WIN_END + 2 * H }), WIN_END, LINE_GATE, 'over'],
-    ['(review 9) no write issued, past the apply window', night({ appliedAtMs: null, applyAttemptedAtMs: null, applyVerifiedAtMs: null }), WIN_START + act.APPLY_LATE_MS + 1, LINE_GATE, 'noWrite'],
-    ['…at the end of the apply window a write may still go', night({ appliedAtMs: null, applyAttemptedAtMs: null, applyVerifiedAtMs: null }), WIN_START + act.APPLY_LATE_MS, LINE_GATE, null],
-    ['…an attempt on record may still be adopted', night({ appliedAtMs: null, applyAttemptedAtMs: WIN_START, applyVerifiedAtMs: null }), WIN_START + act.APPLY_LATE_MS + 1, LINE_GATE, null],
     ['the line gate off (NIGHT_CHARGE_MODE advisory)', failed(), WIN_START + 40 * M, { cost: false, line: false }, 'gatedOff'],
     ['a force-charge of ours already on', onNight(), WIN_START + 3 * H, LINE_GATE, 'started'],
   ];
@@ -2442,6 +2439,16 @@ test('★★★ T24 (Fix9) a line night\'s force-charge "waits on" a reading of 
     }
     assert.equal(started, want == null, `${what}: a start ${want == null ? 'comes' : 'never comes'}`);
   }
+  // (review 9) No write issued past the apply window: none goes after it, and with no attempt on record no reading is adopted, so
+  // appliedAtMs stays null (decideForceCharge waits for good). An attempt on record may still be adopted; the window's last moment
+  // may still bring the write. Past the close or inside its last 20 min those keys stand, as for any record.
+  const noWrite = night({ appliedAtMs: null, applyAttemptedAtMs: null, applyVerifiedAtMs: null });
+  assert.equal(closedOf!(noWrite, WIN_START + act.APPLY_LATE_MS + 1, LINE_GATE), 'noWrite');
+  assert.equal(closedOf!(noWrite, WIN_START + act.APPLY_LATE_MS, LINE_GATE), null);
+  assert.equal(closedOf!(night({ appliedAtMs: null, applyVerifiedAtMs: null }), WIN_START + act.APPLY_LATE_MS + 1, LINE_GATE), null, 'an attempt on record');
+  assert.equal(closedOf!(night({ applyAttemptedAtMs: null, applyVerifiedAtMs: null }), WIN_START + act.APPLY_LATE_MS + 1, LINE_GATE), null, 'applied');
+  assert.equal(closedOf!(noWrite, WIN_END - 10 * M, LINE_GATE), 'late');
+  assert.equal(closedOf!(noWrite, WIN_END, LINE_GATE), 'over');
   // The words, each true for the rest of the record ('gatedOff' while the options keep it off): never "waits", "yet", "may still".
   const L = 'the 55.6% outage line';
   const words: Record<string, string> = {

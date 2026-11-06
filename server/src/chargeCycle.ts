@@ -37,11 +37,11 @@
  * foreign rule, R1): a change of their value is theirs.
  */
 import {
-  APPLY_LATE_MS, RESERVE_WRITE_MAX_PCT, RESERVE_WRITE_MIN_PCT,
+  APPLY_LATE_MS, APPLY_VERIFY_AFTER_MS, RESERVE_WRITE_MAX_PCT, RESERVE_WRITE_MIN_PCT,
   armFromPlan, armOpenItem, armRefusalReason, coerceActuationState, emptyActuationState, onPeakGuardActive,
   type ArmablePlan, type NightActuationState,
 } from './nightChargeActuator.js';
-import { forceChargeInFlight, FORCE_CHARGE_CEILING_RESTORE_ATTEMPTS } from './nightForceCharge.js';
+import { forceChargeInFlight, forceChargeLineNightPct, FORCE_CHARGE_CEILING_RESTORE_ATTEMPTS } from './nightForceCharge.js';
 import type { ChargeLegRole, ChargeWindowKind } from './chargeWindows.js';
 
 /** What names a leg, beside its per-night actuation record. */
@@ -615,15 +615,23 @@ export function forceChargeDriftLeg(
 /**
  * A leg's apply window passed with no write: armed, not cancelled, no attempt, past
  * windowStartMs + APPLY_LATE_MS, not yet pushed. Only for a leg the overnight-only cycle never had
- * — a backup leg, or a mid-day leg: the overnight cost leg keeps today's behaviour (only a write
- * that never took effect pushes, applyFailed). PURE.
+ * — a backup leg, or a mid-day leg: an overnight cost leg with no line ask keeps today's behaviour
+ * (only a write that never took effect pushes, applyFailed). PURE.
+ *
+ * v1.200.0 (Fix9 review 1) — and any leg whose record carries a line ask (forceChargeLineNightPct): the force-charge for the
+ * line rides a verified reserve write, so no write leaves the line unheld, and nothing else says so (applyFailed needs an
+ * accepted write, the declined start and the at-risk push a verified one, the summary a restore). There too an attempt the
+ * cloud never confirmed: the apply stops for good at the window's end, so its push falls due once the last attempt has had
+ * its readback grace (a write that landed with its confirmation lost is adopted on its reading first).
  */
 export function missedApplyDue(leg: ChargeLegState, nowMs: number): boolean {
   if (leg.day == null || leg.announcedAtMs == null || leg.cancelled) return false;
   if (leg.missedApplyPushedAtMs != null) return false;
-  if (leg.applyAttemptedAtMs != null || leg.appliedAtMs != null) return false;
+  if (leg.appliedAtMs != null) return false;
+  const line = forceChargeLineNightPct(leg) != null;
+  if (leg.applyAttemptedAtMs != null && !(line && nowMs - leg.applyAttemptedAtMs >= APPLY_VERIFY_AFTER_MS)) return false;
   if (leg.windowStartMs == null || nowMs <= leg.windowStartMs + APPLY_LATE_MS) return false;
-  return leg.leg === 'backup' || leg.windowKind !== 'overnight';
+  return line || leg.leg === 'backup' || leg.windowKind !== 'overnight';
 }
 
 /** The missed apply's reason when no guard names one (or the tick could not read them). */
@@ -648,6 +656,8 @@ export interface MissedApplyContext {
  * after the cycle's own: a leg still pending behind an unresolved one.
  */
 export function missedApplyReason(leg: ChargeLegState, ctx: MissedApplyContext): string {
+  // v1.200.0 (Fix9 review 1) — an attempt on record is the cloud's answer, whatever the guards read now (missedApplyDue: a line ask).
+  if (leg.applyAttemptedAtMs != null && forceChargeLineNightPct(leg) != null) return 'the EcoFlow cloud did not confirm the reserve write';
   if (ctx.blockedBy != null) {
     const b = ctx.blockedBy;
     const what = b.leg === 'backup' ? 'the outage backup before it' : 'the leg before it';

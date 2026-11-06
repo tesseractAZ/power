@@ -214,8 +214,10 @@ export interface CushionNotePlan {
   /** The server's NightChargePlan.cushionShortfallCause: the 50% reserve envelope contributes. */
   cushionShortfallCause?: 'envelope' | 'envelope+caps';
   /** The server's NightChargePlan.cushionEnvelopeReason: why the plan does not claim the line (review; A5: armed
-   *  'nearFull' / 'closeUnder', or nothing armed 'advisory' / 'backupLeg'). */
-  cushionEnvelopeReason?: 'advisory' | 'backupLeg' | 'nearFull' | 'closeUnder';
+   *  'nearFull' / 'closeUnder', or nothing armed 'advisory' / 'backupLeg' / 'reserveAtTarget'). */
+  cushionEnvelopeReason?: 'advisory' | 'backupLeg' | 'reserveAtTarget' | 'nearFull' | 'closeUnder';
+  /** The reserve the plan read: what 'reserveAtTarget' names. */
+  reserveFloorPct?: number;
   cushionLineSocPct?: number | null;
   /** The outage line the night force-charge is armed for (A5: carried, or disclosed beside it). */
   forceChargeLine?: { askPct: number; linePct: number } | null;
@@ -278,7 +280,8 @@ export function outageLineRow(plan: CushionNotePlan, maxPct: number | null = nul
   if (plan.cushionShortfallCause != null && !armed) {
     const l = plan.cushionLineSocPct;
     const why = plan.cushionEnvelopeReason === 'backupLeg' ? 'not held tonight (the backup leg writes the reserve only)'
-      : plan.cushionEnvelopeReason === 'advisory' ? 'not held tonight (advisory mode)' : 'not held tonight';
+      : plan.cushionEnvelopeReason === 'advisory' ? 'not held tonight (advisory mode)'
+        : plan.cushionEnvelopeReason === 'reserveAtTarget' ? `not held tonight (the reserve already reads ${plan.reserveFloorPct ?? max}%: no write, no force-charge)` : 'not held tonight';
     return `outage line ${lineText(l)}is above the ${max}% the panel accepts as a reserve — ${why}; residual risk remains`;
   }
   // A5 — an ARMED night: the force-charge's row (what it does), then what its walk cannot hold. Never "not held tonight".

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { computeNightChargePlan, buildNightChargeInputs, chargeLevelPct, lineForceChargeLedgerColumns, type NightChargePlan } from '../src/nightChargeAdvisor.js';
+import { computeNightChargePlan, buildNightChargeInputs, lineForceChargeLedgerColumns, type NightChargePlan } from '../src/nightChargeAdvisor.js';
 import * as nfc from '../src/nightForceCharge.js';
 import { decideForceCharge, lineDeclinedPushTick, EMPTY_LINE_DECLINED_PUSH, type ForceChargeOpts } from '../src/nightForceCharge.js';
 import {
@@ -106,8 +106,7 @@ test('★★★ U1 no force-charge is expected on such a plan, a cost night too:
   assert.equal(costOn.forceChargeLine, undefined);
   assert.equal(costOn.cushionEnvelopeReason, 'reserveAtTarget');
   assert.equal(costOn.expectedForceChargeStartMs == null, true, 'no start stated');
-  const level = chargeLevelPct(costOn);
-  assert.ok(level == null || level <= 50 + 1e-9 || level >= 50, 'a level is stated');
+  assert.equal(costOn.expectedForceChargeMode === 'line', false);
 });
 
 test('★★★ U1 the evening surfaces of such a plan: the note names why, the supervised tail says nothing is written, no raise and no force-charge are promised; the card row says why', () => {
@@ -126,7 +125,7 @@ test('★★★ U1 the evening surfaces of such a plan: the note names why, the 
   // The record arms with no line, so no line surface promises one; the 21:30 line says the same.
   const rec = armFromPlan(emptyActuationState(), '2027-01-04', p as never, p.window!.startMs - 90 * M, 50, false, null, true)!;
   assert.equal(rec.forceChargeLineAskPct, null);
-  assert.ok(INDEX.includes("if (plan?.cushionEnvelopeReason === 'reserveAtTarget') return `Force-charge: none tonight — the reserve already reads ${armed.targetPct}%, so no write goes and no force-charge runs without one; tonight's outage line is not held.`;"));
+  assert.ok(INDEX.includes("if (plan?.cushionEnvelopeReason === 'reserveAtTarget') return `Force-charge: none tonight — the reserve already reads ${plan.reserveFloorPct}%, so no write goes and no force-charge runs without one; tonight's outage line is not held.`;"));
 });
 
 test('★★ U1 the spoken notice of such a plan says the cushion is not met, and promises no raise', () => {
@@ -140,8 +139,8 @@ test('★★ U1 the spoken notice of such a plan says the cushion is not met, an
   assert.doesNotMatch(spoken.en, /raise|force|Charge Now/i);
 });
 
-/** The year at a standing 50: measured with the fix (the probe's 234 armed nights, all of them never able to start). */
-const PIN_U1_YEAR = { charge: 293, armed: 0, disclosed: 234 };
+/** The year at a standing 50 and 4 h of cushion, every case: measured with the fix (each of these armed before, and never could start). */
+const PIN_U1_YEAR = { charge: 815, armed: 0, disclosed: 655 };
 
 test('★★★ U1 the year at a standing 50: every line that armed and could never start is now disclosed, and none arms; at 49 they arm as before', () => {
   let charge = 0;
@@ -174,6 +173,8 @@ const walk = (start: NightActuationState, tick: (t: number) => { reserve: number
       s = { ...s, applyAttemptedAtMs: t, attemptBaselinePct: o.reserve };
       if (o.cloud !== false) s = { ...s, appliedAtMs: t, priorReservePct: o.reserve };
     }
+    if (a.kind === 'adopt') s = { ...s, appliedAtMs: s.applyAttemptedAtMs, priorReservePct: a.priorPct };
+    if (a.kind === 'applyVerified') s = { ...s, applyVerifiedAtMs: t };
     const f = decideForceCharge(s, t, fo({ vitalsRed: o.vitalsRed ?? false, socCoherent: o.socCoherent ?? true }));
     if (f.kind === 'on') out.on = true;
     const d = lineDeclinedPushTick(dp, s, f.kind === 'none' ? f.why : null, t, { cost: false, line: true });
@@ -229,7 +230,7 @@ test('★★★ U2 missedApplyDue: a line ask widens the overnight leg; a night 
   assert.equal(missedApplyDue(leg(attempted), OPEN + 30 * M + APPLY_VERIFY_AFTER_MS - 1), false, 'its grace');
   assert.equal(missedApplyDue(leg(attempted), OPEN + 30 * M + APPLY_VERIFY_AFTER_MS), true);
   assert.equal(missedApplyDue(leg({ ...attempted, forceChargeLineAskPct: null, forceChargeLinePct: null }), CLOSE), false, 'no ask: an attempt is not "missed"');
-  assert.equal(missedApplyDue(leg(attempted, { leg: 'backup' }), CLOSE), false, 'a backup leg never carries a line, and an attempt there is as before');
+  assert.equal(missedApplyDue(leg({ ...attempted, forceChargeLineAskPct: null, forceChargeLinePct: null }, { leg: 'backup' }), CLOSE), false, 'a backup leg never carries a line: an attempt there is as before');
 });
 
 test('★★ U2 the cycle holds the promotion for a line night\'s push as for a mid-day leg\'s', () => {
@@ -249,7 +250,7 @@ test('★★★ U2 missedApplyReason names an attempt the cloud never confirmed,
   assert.equal(missedApplyReason(leg(armed({ applyAttemptedAtMs: OPEN, forceChargeLineAskPct: null, forceChargeLinePct: null })), ctx), 'no write was issued in the 30 minutes after the window opened');
 });
 
-const SPAN = /^Tonight's 11:00(?:pm|PM| PM)?[^ ]*–5:00/;
+const SPAN = /^Tonight's 11pm–5am /;
 
 test('★★★ U2 the missed push on a line night: no write went, so no force-charge for the line starts, and what still holds it (Charge Now by hand); the words are v1.199.1\'s with no line', () => {
   const base = { day: '2027-01-04', role: 'cost' as const, windowStartMs: OPEN, windowEndMs: CLOSE, reservePct: 50, nowMs: OPEN + 31 * M };

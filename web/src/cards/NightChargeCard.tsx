@@ -59,7 +59,7 @@ interface NightChargePlan {
    *  whether the expected walk ran it (nightChargeText.outageLineRow). Absent on older plans. */
   cushionShortfallCause?: 'envelope' | 'envelope+caps';
   /** v1.200.0 (A5) — why the plan does not claim the line (nightChargeText.CushionNotePlan). */
-  cushionEnvelopeReason?: 'advisory' | 'backupLeg' | 'nearFull' | 'closeUnder';
+  cushionEnvelopeReason?: 'advisory' | 'backupLeg' | 'reserveAtTarget' | 'nearFull' | 'closeUnder';
   forceChargeLine?: { askPct: number; linePct: number } | null;
   expectedForceChargeMode?: 'line';
   /** v1.200.0 (review 2) — the expected walk reaches the panel ceiling: the panel switches Charge Now off there and
