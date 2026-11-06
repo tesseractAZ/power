@@ -1257,12 +1257,13 @@ export function buildNightForceChargeOnFailure(o: {
  * the pool (nightForceCharge.forceChargeBlockerClass: the ceiling refused or unread, Charge Now already on,
  * the grid unknown or absent, vitals red, no slot readback, no slot connected, an incoherent SoC), once per
  * blocker class a night, once it has held (nightForceCharge.lineDeclinedPushStep) — while there is still
- * time to act. `latestStartText` is the LATEST start that still reaches the line at the rate now, with no live reading
- * from the reserve at the plan rate (nightForceCharge.lineDeclinedLatestStartMs), as clock text; a later start closes
- * lower, and with none the add-on adds nothing above the 50% reserve. PURE.
+ * time to act. `latestStartText` is the time from nightForceCharge.lineDeclinedLatestStartMs as clock text: the earlier of a start reaching
+ * the line at the rate the plant can deliver, a predicted EV's energy counted, and at the rate now, with no live reading from the reserve;
+ * a later start may close lower, and with none the add-on adds nothing above the 50% reserve. null where no time can be quoted (a time
+ * already gone at the push): then a start now may already close under the line, true in every outcome. PURE.
  */
 export function buildLineForceChargeDeclinedStart(o: {
-  day: string | null; linePct: number; why: string; latestStartText: string;
+  day: string | null; linePct: number; why: string; latestStartText: string | null;
 }): NotifyMessage {
   const line = lineBesidePct(o.linePct, RESERVE_WRITE_MAX_PCT);
   return {
@@ -1275,9 +1276,11 @@ export function buildLineForceChargeDeclinedStart(o: {
     // reserve holds it) is not said to close under it. (Fix8 review 1) Nor "only the 50% reserve holds it": with the grid absent (a
     // declined cause) the pool drains through the reserve, and a person's Charge Now lifts it — the add-on adds nothing above it.
     body: `Night-charge: the force-charge for tonight's ${line}% outage line cannot start yet — ${o.why}. `
-      + (line > RESERVE_WRITE_MAX_PCT
-        ? `If it has not started by ~${o.latestStartText}, the pool may close under the line; if it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.`
-        : `If it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.`),
+      + (line <= RESERVE_WRITE_MAX_PCT
+        ? `If it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.`
+        : o.latestStartText != null
+          ? `If it has not started by ~${o.latestStartText}, the pool may close under the line; if it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.`
+          : `A start now may already close under the line; if it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.`),
   };
 }
 
@@ -1287,8 +1290,10 @@ export function buildLineForceChargeDeclinedStart(o: {
  * against the start target (review 3: on a cost-dominant night, against ⌈L⌉ + 5 named by its margin over the line — that
  * night has no start target) and the line, when the window closes, why the add-on cannot switch Charge Now back
  * on (every cause, the cost-dominant night's included), and what to switch: slots reading OFF — switch Charge Now on (the add-on's close OFF covers them, they are
- * ours); slots reading ON while the pool is not rising — off and on again may restart the charge (the ON-reading
- * shape, unmeasured on this plant; or a load taking the grid cap). Never "No action needed". (review 4) The spent budget
+ * ours); slots reading ON while the pool is not rising — (Fix13) a large load first, for on the measured shape every such push
+ * comes from a load or a rate limit (stopping it 10 min after the push reached the line on 2,080 of 2,090 emulated nights; cycling
+ * Charge Now with it on reached 0, and lowered the close on 1,027), then, with none on, off and on again may restart the charge (the
+ * ON-reading shape, unmeasured on this plant). Each clause conditional: the builder has no load reading. Never "No action needed". (review 4) The spent budget
  * is "after the panel's own stop" only with that stop on record (a slot switched off in the app reads the same).
  * (review 5) A handed-back re-ON whose retry the cutoff may refuse ('reOnRefused') says so, never the gates. (review 8) In
  * words true in every outcome: the cooldown refused it; where a tick can still bring the retry (reOnRetryPossible — the push
@@ -1340,8 +1345,9 @@ export function buildLineForceChargeAtRisk(o: {
     ? `Charge Now switched on for slot(s) ${r.offSlots.join(', ')} in the EcoFlow app can still lift the pool (the add-on switches it off at the close).`
     : '';
   const on = r.onSlots.length > 0
-    ? `${off !== '' ? ' ' : ''}Charge Now reads on for slot(s) ${r.onSlots.join(', ')} but the pool is not rising; `
-      + 'switching it off and on again in the EcoFlow app may restart the charge.'
+    ? `${off !== '' ? ' ' : ''}Charge Now reads on for slot(s) ${r.onSlots.join(', ')} but the pool is not rising. `
+      + 'A large load such as an EV shares the grid input: stopping it may let the pool rise. '
+      + 'With none on, switching Charge Now off and on again in the EcoFlow app may restart the charge.'
     : '';
   return {
     severity: 'warning',

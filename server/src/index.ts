@@ -6301,7 +6301,7 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
   // v1.200.0 (L3; review) — a LINE night whose start a non-pool blocker holds (the ceiling refused or unread,
   // Charge Now already on, the grid unknown, vitals red, no readback, no slot connected, an incoherent SoC; (Fix9 review 1) an ON or
   // a ceiling sync the write block refuses, on those ticks): each blocker CLASS pushed once a night, once it has held unbroken, with
-  // the latest start that still reaches the line (lineDeclinedLatestStartMs) — time to act. (review 2) On every night whose record carries a
+  // the time a start must come by to reach the line, where one can be quoted (lineDeclinedLatestStartMs) — time to act. (review 2) On every night whose record carries a
   // line ask, also a cost-dominant one; and once a night ACROSS RESTARTS: the class is on the record before the push goes
   // (nightForceCharge.lineDeclinedPushTick).
   const pushLineDeclinedIfDue = (why: string | null | undefined): void => {
@@ -6310,14 +6310,17 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     const declinedLinePct = forceChargeLineNightPct(state);
     if (dp.push != null && why != null && declinedLinePct != null) {
       persistNightActuation({ ...nightActuationMem, forceChargeLineDeclinedPushed: [...dp.mem.st.pushed] });
+      // (Fix13) The rate and the EV as the start takes them, counted once there (lineDeclinedLatestStartMs). On a stale panel connectedSlots is
+      // empty: the frozen projection's connected count, on the same terms as its capacity (a sentence, never a write).
       const latestAt = lineDeclinedLatestStartMs({
-        closeAtMs: writeWindowEndMs(state), askPct: state.forceChargeLineAskPct!, poolSocPct: socCoherent ? socNowPct : null,
+        nowMs, closeAtMs: writeWindowEndMs(state), askPct: state.forceChargeLineAskPct!, poolSocPct: socCoherent ? socNowPct : null,
         liveFullWh: fullWh, frozenFullWh: shp2.projection?.kind === 'shp2' ? shp2.projection.backupFullCapWh : null,
-        rateKw: chargeRateKw, evDisplacedKwh, slotCount: connectedSlots.length,
+        rateKw: chargeRateKw, evDisplacedKwh,
+        slotCount: sp != null ? connectedSlots.length : shp2.projection?.kind === 'shp2' ? (shp2.projection.sources ?? []).filter((c) => c?.hwConnect === true).length : 0,
       });
       void sendNotification(loadNotifyConfig(), buildLineForceChargeDeclinedStart({
         day: state.day, linePct: declinedLinePct, why,
-        latestStartText: latestAt != null ? fmtSiteClock(latestAt) : 'the window close',
+        latestStartText: latestAt != null ? fmtSiteClock(latestAt) : null,
       })).catch((e: any) => app.log.debug(`night-charge: line force-charge declined-start notify failed (${e?.message ?? e})`));
       app.log.warn(`night-charge: the force-charge for ${state.day}'s ${lineLogPct(state)}% outage line cannot start yet — ${why}; held ${Math.round(FORCE_CHARGE_LINE_DECLINED_PERSIST_MS / 60_000)} min, pushed once tonight for this cause.`);
     }

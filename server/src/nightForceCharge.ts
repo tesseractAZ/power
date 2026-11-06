@@ -167,7 +167,7 @@
  *    stamp, and holds the push — neither, while the block lasts: PIN_HANDBACK_AFTER, 6,071 of 86,400 hand-backs with the block from
  *    one of their first 18 ticks), or — the tick the retry is due — spent on the line ceiling lowering, after which (Fix8)
  *    the push is judged but the re-ON waits a tick, as after a lost one. A push may be followed by the retry. In the plant
- *    (stamps 2 s late): 429 'reOnRefused' pushes, 18 of them on the last tick before the cutoff (none there before), 374
+ *    (stamps 2 s late): 433 'reOnRefused' pushes, 18 of them on the last tick before the cutoff (none there before), 378
  *    worded as no tick bringing the retry (none then retried), 25 of the other 55 then retried (PIN_REVIEW6). Swept at
  *    sub-second phases with drift, late reads and stamp lags (lineForceChargeAtRisk.test.ts PIN_HANDBACK_CADENCE): neither on
  *    none of 43,156 hand-backs, and on 5 of 86,400 with a tick lost, each the tick the last hold awaited (the same 5 with
@@ -308,6 +308,17 @@ export function planRateFallbackKw(slotCount?: number | null): number {
   const perCore = limits.forceChargeKwPerCore;
   if (perCore == null || slotCount == null || !Number.isInteger(slotCount) || slotCount < 1) return FORCE_CHARGE_PLAN_RATE_KW;
   return Math.min(SHP2_SOURCE_SLOTS, slotCount) * perCore;
+}
+/**
+ * v1.200.0 (Fix13) — PURE apart from the option read. A rate a line night's plant can deliver, for the two figures that must not run ahead
+ * of it (lineFlatPushHeld's gate, lineDeclinedLatestStartMs's time) and read by nothing else: the fixed FORCE_CHARGE_PLAN_RATE_KW, bounded
+ * by connected slots × the per-Core rate; the plan rate with the slots unknown. FORCE_CHARGE_KW_PER_CORE never raises it above 10 kW,
+ * as planRateFallbackKw's slots × that rate would: a higher rate opens the gate later. It carries no house, no EV and no grid cap
+ * (lineFlatPushHeld says why). Unset, 3 Cores and 2 are min(10, 16.5) and min(10, 11): the same 10 kW.
+ */
+export function lineDeliverableRateKw(slotCount?: number | null): number {
+  if (slotCount == null || !Number.isInteger(slotCount) || slotCount < 1) return FORCE_CHARGE_PLAN_RATE_KW;
+  return Math.min(FORCE_CHARGE_PLAN_RATE_KW, Math.min(SHP2_SOURCE_SLOTS, slotCount) * forceChargeKwPerCore());
 }
 /** v1.167.0 — added to the computed lead: readback latency, the ramp, the first tick. */
 export const FORCE_CHARGE_JIT_BUFFER_MS = 15 * 60_000;
@@ -680,7 +691,7 @@ export function lineDeclinedPushTick(
 /**
  * v1.200.0 (review) — PURE. The LATEST start that still takes the pool to the line's ask (⌈L⌉) by the close
  * at the rate now: forceChargeStartAtMs to ⌈L⌉ (its 15-min buffer kept), never later than the last start
- * decideForceCharge makes (the close less FORCE_CHARGE_MIN_RUN_MS). The declined-start push quotes it — not
+ * decideForceCharge makes (the close less FORCE_CHARGE_MIN_RUN_MS). The declined-start push quotes it (lineDeclinedLatestStartMs) — not
  * the timed start (⌈L⌉ + 5 by the close − 20 min), which a later start still beats: 2027-01-04 is timed for
  * ~03:25 and reaches the line from a start as late as ~04:24.
  */
@@ -695,20 +706,34 @@ export function lineLatestStartMs(
 }
 
 /**
- * v1.200.0 (Fix12) — PURE. The time the declined-start push quotes. lineLatestStartMs from the coherent live reading, else from the reserve:
- * with no reading the earlier and safer time, and a stale panel is the usual such night. The pool size is the live one, else the frozen
- * projection's: its backupFullCapWh is a nameplate capacity, not a reading, and while a frozen projection never decides a write, this
- * decides only a sentence. The rate is what the tick has, so with no live load it is the plan rate (forceChargeStartAtMs). Only with no
- * capacity at all does it fall back to the last start, the close less FORCE_CHARGE_MIN_RUN_MS. null with no close.
+ * v1.200.0 (Fix13) — PURE. The time the declined-start push quotes, or null where no clock can be given. Two figures, each counting a
+ * predicted EV ONCE, and the earlier of them, both lineLatestStartMs:
+ *  - planT: at what the plant can deliver (lineDeliverableRateKw, a rate with no EV in it) with the EV's energy;
+ *  - liveT: at the live rate, whose load already carries an EV that is on, with no EV energy; no such figure with no live rate.
+ * The EV-null forms alone LOSE THE LINE on an EV still ahead, which the live rate cannot see (an EV 03:00-05:00 quotes ~04:21, and a start
+ * then closes 52.2 under a 55.55 line). The live rate WITH the EV's energy, a double count, is hours early with the EV on (a push at 23:10
+ * quoting ~18:59, before the window opened). The earlier of the two held on both shapes. That double count stays for the START alone
+ * (index.ts): it errs early there, and it moves writes; a quoted deadline has no safe direction.
+ * The pool is the coherent live reading, else the reserve: with no reading the earlier and safer time, and a stale panel is the usual such
+ * night. Not the frozen last reading: it ignores the drain still to come, and quotes too late on 21,903 of 68,963 year pushes. The pool size
+ * is the live one, else the frozen projection's: its backupFullCapWh is a nameplate capacity, not a reading, and while a frozen projection
+ * never decides a write, this decides only a sentence. A time at or before now is null: from the reserve on a pool above it, or beside a
+ * large EV, it can be gone before the push, and a deadline that cannot be met is no time to act. With no capacity at all it falls back to
+ * the last start, the close less FORCE_CHARGE_MIN_RUN_MS, which no push reaches: decideForceCharge declines on the clock from there, and
+ * the clock is no blocker. null with no close.
  */
 export function lineDeclinedLatestStartMs(o: {
-  closeAtMs: number | null; askPct: number; poolSocPct: number | null; liveFullWh: number | null; frozenFullWh: number | null;
+  nowMs: number; closeAtMs: number | null; askPct: number; poolSocPct: number | null; liveFullWh: number | null; frozenFullWh: number | null;
   rateKw?: number | null; evDisplacedKwh?: number | null; slotCount?: number | null;
 }): number | null {
   if (o.closeAtMs == null) return null;
   const fullWh = o.liveFullWh != null && o.liveFullWh > 0 ? o.liveFullWh : o.frozenFullWh != null && o.frozenFullWh > 0 ? o.frozenFullWh : null;
   if (fullWh == null) return o.closeAtMs - FORCE_CHARGE_MIN_RUN_MS;
-  return lineLatestStartMs(o.closeAtMs, o.askPct, o.poolSocPct ?? RESERVE_WRITE_MAX_PCT, fullWh / 1000, o.rateKw, o.evDisplacedKwh, o.slotCount);
+  const pool = o.poolSocPct ?? RESERVE_WRITE_MAX_PCT;
+  const planT = lineLatestStartMs(o.closeAtMs, o.askPct, pool, fullWh / 1000, lineDeliverableRateKw(o.slotCount), o.evDisplacedKwh, o.slotCount);
+  const liveT = o.rateKw != null ? lineLatestStartMs(o.closeAtMs, o.askPct, pool, fullWh / 1000, o.rateKw, null, o.slotCount) : planT;
+  const t = Math.min(planT, liveT);
+  return t <= o.nowMs ? null : t;
 }
 
 /** v1.200.0 (Fix9) — why no force-charge can START on a record any more (forceChargeStartClosed). */
@@ -1883,7 +1908,7 @@ export interface LineAtRisk {
   cause: LineAtRiskCause;
   /** Slots of ours reading OFF, connected, their Cores under the panel's stop ceiling: switch Charge Now on. */
   offSlots: number[];
-  /** Slots of ours reading ON while the pool is not rising: off and on again may restart the charge. */
+  /** Slots of ours reading ON while the pool is not rising: stopping a large load may let the pool rise; with none on, off and on again may restart the charge. */
   onSlots: number[];
   poolPct: number;
   /** The reading at least FORCE_CHARGE_LINE_TREND_MS older the pool is not above. */
@@ -1912,15 +1937,21 @@ export interface LineAtRisk {
  * cannot tell a stopped charge from a slow one: a pack importing under about 5 kW beside an EV on the grid cap reads level, hours before
  * the close, and the push said "not rising", told a person to switch Charge Now off and on for nothing, and spent its one go of the night
  * (on a healthy 11.52 kW EV night, 318 min before a close of 74 over a 55.55 line). So it waits until the time left no longer covers the
- * charge to the ask at the PLAN rate: the line's latest start (lineLatestStartMs), less the push's own lead. A held tick returns no
+ * charge to the ask at a rate the plant can deliver: the line's latest start (lineLatestStartMs), less the push's own lead. A held tick returns no
  * risk and spends nothing, so the once-a-night stamp stays free for the real thing. Each choice is deliberate:
- *  - The plan rate and no EV energy (rate and EV null): the live rate and the EV's kWh are what inflate the lead on exactly the nights
- *    of the false alarm (3 kW live beside an EV opens the gate at once at a 70% line). FORCE_CHARGE_PLAN_RATE_KW, 10 kW, sits under the
- *    ~14 kW a pack takes, so the gate opens early enough to act on.
- *  - Timed nights lose nothing: with no EV the start is timed to ⌈L⌉ + 5 by the close less 20 min, so this gate opens BEFORE the ON's
- *    first trend reading (ON + 25 min): at a 2 kW house, on minute ticks, L 52.62 at T-51 against T-41, L 70.55 at T-151 against T-113,
- *    L 55.55 from pool 45 at T-95 against T-73, and a stuck charge is pushed when it always was (the close test's 2,040 nights, ON + 31
- *    min on each). Only a start a load pulled early is held.
+ *  - A rate the plant can deliver and no EV energy (lineDeliverableRateKw, EV null): the live rate and the EV's kWh are what inflate the
+ *    lead on exactly the nights of the false alarm (3 kW live beside an EV opens the gate at once at a 70% line). On 3 Cores at the 17 kW
+ *    cap and a 0.6-3.6 kW house the plant takes 12.4-15.2 kW, so the 10 kW sits under it and the gate opens early enough to act on. A slower
+ *    plant is what the slot bound is for: a one-Core home (31 kWh, 5.5 kW) on a line of 90 needs about 134 min, and held at 10 kW to T-108
+ *    a restart closed 10 points short.
+ *  - NOT the grid cap and NOT the house, on purpose. Measured over stuck nights, the cap adds nothing at 12 kW, where it never binds (cap ×
+ *    0.927 is 11.1), and at 10 kW moves only 40 to 45 of 58 reached; and with the house back in, the EV false alarm reopens, because the
+ *    panel's load includes the EV. So a plant capped under about 12 kW, or a steady 7-10 kW house, keeps a residual: it delivers less than
+ *    this rate, is pushed later, and a restart there may no longer reach the line. Disclosed, not fixed.
+ *  - Where the plant delivers more than this rate, timed nights lose nothing: with no EV the start is timed to ⌈L⌉ + 5 by the close less 20
+ *    min, so this gate opens BEFORE the ON's first trend reading (ON + 25 min): at a 2 kW house, on minute ticks, L 52.62 at T-51 against
+ *    T-41, L 70.55 at T-151 against T-113, L 55.55 from pool 45 at T-95 against T-73, and a stuck charge is pushed when it always was (the
+ *    close test's 2,040 nights, ON + 31 min on each). Only a start a load pulled early is held.
  *  - Only with no slot reading off (lineAtRiskPushDue): a slot off EXPLAINS a flat pool, and its pushes (reOnHeld, reOnRefused, reOnSpent,
  *    reOnNotApplied) are real on a flat reading. Nor on a FALLING reading: neither is a slow charge. A flat pool above the ask stays out.
  *  - A pool size not known holds nothing: as lineAtRiskPushDue's hand-back hold, every doubt goes to the push.
@@ -1929,7 +1960,7 @@ export function lineFlatPushHeld(
   nowMs: number, closeAtMs: number, askPct: number, poolSocPct: number, fullKwh: number | null | undefined, slotCount: number,
 ): boolean {
   if (fullKwh == null || !(fullKwh > 0)) return false;
-  return nowMs < lineLatestStartMs(closeAtMs, askPct, poolSocPct, fullKwh, null, null, slotCount) - FORCE_CHARGE_LINE_AT_RISK_LEAD_MS;
+  return nowMs < lineLatestStartMs(closeAtMs, askPct, poolSocPct, fullKwh, lineDeliverableRateKw(slotCount), null, slotCount) - FORCE_CHARGE_LINE_AT_RISK_LEAD_MS;
 }
 
 /**
@@ -1955,7 +1986,7 @@ export function lineFlatPushHeld(
  *    FORCE_CHARGE_ON_VERIFY_AFTER_MS after the last ON of ours (lineTrendReference, review 3) — so none while a re-ON (or
  *    the ON) may yet take effect; FALLING under the threshold, or FLAT at or under ⌈L⌉ (review 3: a flat pool above
  *    ⌈L⌉ is a pack importing slowly beside a load on the grid cap — 392 of the 429 emulated pushes on carried nights), and
- *    (Fix12) with every slot that counts reading ON, only once the time left no longer covers the charge to ⌈L⌉ at the plan
+ *    (Fix12) with every slot that counts reading ON, only once the time left no longer covers the charge to ⌈L⌉ at a deliverable
  *    rate (lineFlatPushHeld: a slower charge beside an EV reads flat there too);
  *  - a live slot readback that names a slot a person can switch: one of ours reading OFF (connected, its Core
  *    under the panel's stop ceiling), or reading ON;
