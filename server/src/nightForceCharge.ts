@@ -132,23 +132,24 @@
  *    line (0-72 with floored readings) and 52-140 of 140 at lines of 70-90% (lineForceChargeClose.test.ts
  *    PIN_ON_LATCH). No write rests on that shape. The real-time cover is the line-at-risk push
  *    (lineAtRiskPushDue): once a night, at least FORCE_CHARGE_LINE_AT_RISK_LEAD_MS before the close, it
- *    reaches every one of those nights, after the latch on all but one (and, on the measured latch, also
- *    warns on 2 of the 3,740 predicted-EV nights that still hold — 202 before review 3 judged the trend only
- *    on readings taken after the last ON of ours took effect, a flat pool only at ⌈L⌉: lineTrendReference);
+ *    reaches every one of those nights, after the latch (and, on the measured latch, warns on none of the
+ *    3,740 predicted-EV nights, which all hold — 202 before review 3 judged the trend only on readings taken
+ *    after the last ON of ours took effect, a flat pool only at ⌈L⌉: lineTrendReference; 2 before Fix12 held a
+ *    flat pool with every slot reading ON until the time left no longer covers the charge: lineFlatPushHeld);
  *    the shape, when seen, is logged once a night (lineOnReadingShape; on the record, across restarts), never on the measured latch.
  *    It also reaches most late unpredicted loads (69 of the 73 year nights under with the 11.52 kW EV from
  *    90 min); a load that only slows the charge leaves the pool rising and is not pushed.
  *    A RE-ON THE CLOUD ACCEPTS THAT NEVER TAKES EFFECT — UNMEASURED too (its readback check finds the slots still
  *    OFF): the trend reads past it (lineTrendReference, review 4), so the push goes on that check's own tick (Fix8 review 1:
  *    index.ts judges it there). Emulated (variant reOnInert) it reaches 174 of the 390 predicted-EV year nights that close
- *    under and 2,335 of 2,615 at lines of 70-90%; of the rest, 471 have their last check at or inside the push's lead, and
+ *    under and 2,334 of 2,615 at lines of 70-90%; of the rest, 472 have their last check at or inside the push's lead, and
  *    25 have it on the last tick before the re-ON's cutoff with a re-ON left: that re-ON, due, holds the push, waits a tick
  *    (the check took this one) and meets the cutoff (a residual, stated).
  *    (review 5) An ON no write of ours explains in time — a re-ON applied a minute after its check, one all-OFF reading
  *    at the check, Charge Now switched on by a person after the push — is waited out (forceChargeLineOnSeenAtMs):
  *    emulated, the shape is logged on none of them, and a re-ON handed back rate-limited is never pushed as its gates inside
  *    its retry's spacing. (Fix8 review 1) The push judged on a check's own tick goes before a late apply can be seen, worded
- *    "has not taken effect" (23 of the late variant's 108 pushes on nights that held, 3 at a glitch: PIN_REVIEW5).
+ *    "has not taken effect" (23 of the late variant's 61 pushes on nights that held, 3 at a glitch: PIN_REVIEW5).
  *    (review 6) Nor is one lost: the push's hold counts the ticks (FORCE_CHARGE_TICK_MS). With each re-ON stamped 2 s after
  *    its tick, as index.ts stamps it, the retry is the 16th tick, and 30 hand-backs had neither it nor the push (25 of the
  *    146 nights under never reached); now every one of the 146 is (PIN_REVIEW6). And a person's ON the panel then stops at
@@ -693,16 +694,35 @@ export function lineLatestStartMs(
   );
 }
 
+/**
+ * v1.200.0 (Fix12) — PURE. The time the declined-start push quotes. lineLatestStartMs from the coherent live reading, else from the reserve:
+ * with no reading the earlier and safer time, and a stale panel is the usual such night. The pool size is the live one, else the frozen
+ * projection's: its backupFullCapWh is a nameplate capacity, not a reading, and while a frozen projection never decides a write, this
+ * decides only a sentence. The rate is what the tick has, so with no live load it is the plan rate (forceChargeStartAtMs). Only with no
+ * capacity at all does it fall back to the last start, the close less FORCE_CHARGE_MIN_RUN_MS. null with no close.
+ */
+export function lineDeclinedLatestStartMs(o: {
+  closeAtMs: number | null; askPct: number; poolSocPct: number | null; liveFullWh: number | null; frozenFullWh: number | null;
+  rateKw?: number | null; evDisplacedKwh?: number | null; slotCount?: number | null;
+}): number | null {
+  if (o.closeAtMs == null) return null;
+  const fullWh = o.liveFullWh != null && o.liveFullWh > 0 ? o.liveFullWh : o.frozenFullWh != null && o.frozenFullWh > 0 ? o.frozenFullWh : null;
+  if (fullWh == null) return o.closeAtMs - FORCE_CHARGE_MIN_RUN_MS;
+  return lineLatestStartMs(o.closeAtMs, o.askPct, o.poolSocPct ?? RESERVE_WRITE_MAX_PCT, fullWh / 1000, o.rateKw, o.evDisplacedKwh, o.slotCount);
+}
+
 /** v1.200.0 (Fix9) — why no force-charge can START on a record any more (forceChargeStartClosed). */
 export type ForceChargeStartClosed = 'started' | 'cancelled' | 'reverted' | 'foreign' | 'noWindow' | 'over' | 'late' | 'overGuard' | 'lateGuard' | 'noWrite' | 'gatedOff';
 /** v1.200.0 (Fix10 review 1) — why a plan of a window claims no force-charge (armedLineStartClosed, chargeCycle.servedLineClosure):
  *  forceChargeStartClosed's keys less the two that are no such record ('started' may still be running, 'gatedOff' is what advisory
  *  discloses), a run stopped for good ('stopped': an OFF of ours is one-way), and a window no record holds with no evening job left.
  *  (Fix10 review 2) And a run nothing of ours brings back (lineRunGone): 'notTaken', an ON warned of on every slot; 'noReOn', every slot
- *  reading off with no re-ON left. */
-export type LineStartClosed = Exclude<ForceChargeStartClosed, 'started' | 'gatedOff'> | 'stopped' | 'noArm' | 'notTaken' | 'noReOn';
+ *  reading off with no re-ON left. (Fix12) 'partTaken', an ON warned of on some slots: the others may be running, or may stop. */
+export type LineStartClosed = Exclude<ForceChargeStartClosed, 'started' | 'gatedOff'> | 'stopped' | 'noArm' | 'notTaken' | 'partTaken' | 'noReOn';
 /** v1.200.0 (Fix10 review 1) — a closed start as a plan reads it: its window, why, and `writeStands` where a verified reserve write of
- *  the night still holds (reserveWriteStands; absent otherwise): the card's figure is true only then. */
+ *  the night still holds (reserveWriteStands; absent otherwise): the card's figure is true only then. (Fix12) Never on 'partTaken': its
+ *  write stands, but the figure beside it, "reserve held as a floor — no charge expected", would be false while two slots charge, so the
+ *  card leads with the words (startClosedLead). */
 export interface LineClosure { windowStartMs: number; why: LineStartClosed; writeStands?: true }
 
 /** v1.200.0 (Fix10 review 1) — PURE. The one-way stamps that end a night for good, whether or not a force-charge of ours ran. */
@@ -743,7 +763,7 @@ export function forceChargeStartClosed(
 }
 
 /** v1.200.0 (Fix9) — each closed start's reason, in words (lineStartClosedWords). */
-export const FORCE_CHARGE_START_CLOSED_WHY: Readonly<Record<Exclude<LineStartClosed, 'stopped' | 'notTaken' | 'noReOn'>, string>> = Object.freeze({
+export const FORCE_CHARGE_START_CLOSED_WHY: Readonly<Record<Exclude<LineStartClosed, 'stopped' | 'notTaken' | 'partTaken' | 'noReOn'>, string>> = Object.freeze({
   cancelled: 'the night was cancelled',
   reverted: "the reserve's restore was sent",
   foreign: 'the reserve was set outside the add-on',
@@ -766,6 +786,8 @@ export function lineStartClosedWords(line: string, why: ForceChargeStartClosed |
   // (Fix10 review 2) These two a reading can reopen (lineRunGone), and their words hold either way: a late apply is verified, as the
   // ON-failure push says, and a slot read ON again by hand is no switch of the add-on's.
   if (why === 'notTaken') return `the force-charge for ${line} was switched on and has not taken effect: unless it applies late, none runs`;
+  // (Fix12) No figure, and true in every outcome: the slots that took may run on or stop, and a late apply verifies it.
+  if (why === 'partTaken') return `the force-charge for ${line} was switched on and has not taken effect on all its slots: unless it applies late, the add-on does not switch it back on`;
   if (why === 'noReOn') return `the force-charge for ${line} reads off and the add-on does not switch it back on tonight`;
   if (why === 'gatedOff') return `no force-charge for ${line} starts while the options keep it off`;
   return `no force-charge for ${line} starts: ${FORCE_CHARGE_START_CLOSED_WHY[why]}`;
@@ -1598,21 +1620,23 @@ export function armedLineStartClosed(
   if (key == null || key === 'gatedOff') return null;
   const why: LineStartClosed | null = key !== 'started' ? key : nightSettledKey(s) ?? (s.forceChargeOffAtMs != null ? 'stopped' : lineRunGone(s, nowMs));
   if (why == null) return null;
-  return { windowStartMs: s.windowStartMs, why, ...(reserveWriteStands(s) ? { writeStands: true as const } : {}) };
+  return { windowStartMs: s.windowStartMs, why, ...(why !== 'partTaken' && reserveWriteStands(s) ? { writeStands: true as const } : {}) };
 }
 
 /** v1.200.0 (Fix10 review 2) — PURE. A run with no OFF that nothing of ours brings back, read off the record:
  *  'notTaken', an ON warned of on every slot (verifyForceChargeOn issues nothing after its warning, a record starts once, and a re-ON
- *  needs a verified ON), until a late apply verifies it; a failure on some slots is armedLineNoReOn's, they may be running;
+ *  needs a verified ON), until a late apply verifies it; 'partTaken', an ON warned of on some slots, on the same terms: its other slots
+ *  may be running, at a rate no walk of three slots states, and it stays out of armedLineRunOn;
  *  'noReOn', a verified run every slot of which last read OFF, whatever switched them off, with no re-ON left (lineReOnGone) and the last
  *  re-ON past its readback grace, until a slot reads ON again. null otherwise: a run still on, or one a re-ON can bring back. */
 function lineRunGone(
   s: Pick<NightActuationState, 'forceChargeOnVerifiedAtMs' | 'forceChargeOnFailedAtMs' | 'forceChargeOnFailedSlots' | 'forceChargeSlots'
     | 'forceChargeLineOffSlots' | 'forceChargeLineReOns' | 'forceChargeLineReOnAtMs' | 'windowEndMs' | 'nextOnPeakStartMs'>,
   nowMs: number,
-): 'notTaken' | 'noReOn' | null {
+): 'notTaken' | 'partTaken' | 'noReOn' | null {
   if (s.forceChargeOnVerifiedAtMs == null) {
-    return s.forceChargeOnFailedAtMs != null && partialForceChargeOnFailureSlots(s) == null ? 'notTaken' : null;
+    if (s.forceChargeOnFailedAtMs == null) return null;
+    return partialForceChargeOnFailureSlots(s) == null ? 'notTaken' : 'partTaken';
   }
   if (!everySlotReadsOff(s) || !lineReOnGone(s, nowMs)) return null;
   const reOnAt = s.forceChargeLineReOnAtMs;
@@ -1629,8 +1653,9 @@ function everySlotReadsOff(s: Pick<NightActuationState, 'forceChargeSlots' | 'fo
  *  not every slot of ours reading off. The plan walks forward from a pool reading and knows no record, so it told a run long on that it
  *  "switches on at" a time, and from the last-start gate on that it is armed and not expected to start (NightChargeInputs.armedLineRunOnStartMs).
  *  An ON in its readback grace, or one warned of in whole or in part, has no verified stamp, and a run every slot of which reads off is
- *  not on: each keeps its words (armedLineStartClosed, armedLineNoReOn). A closed start and a run on are never one record. Like the
- *  closure, it reaches only the plan the card and the entities serve, and nothing written reads it. null otherwise. */
+ *  not on: each keeps its words (armedLineStartClosed). (Fix12) Never a partial ON: told it is on, the walk takes the three-slot rate and
+ *  drops a true under-the-line warning. A closed start and a run on are never one record. Like the closure, it reaches only the plan the
+ *  card and the entities serve, and nothing written reads it. null otherwise. */
 export function armedLineRunOn(
   s: Pick<NightActuationState, 'windowStartMs' | 'forceChargeLineAskPct' | 'forceChargeLinePct' | 'forceChargeOnVerifiedAtMs' | 'forceChargeOffAtMs'
     | 'cancelled' | 'revertedAtMs' | 'foreignSettledAtMs' | 'forceChargeSlots' | 'forceChargeLineOffSlots'>,
@@ -1643,20 +1668,16 @@ export function armedLineRunOn(
  *  the re-ON's clause, a sentence of its own only where the plan's walk reaches the panel's stop). */
 export interface LineNoReOn { windowStartMs: number; words: string }
 
-/** v1.200.0 (Fix10 review 2) — PURE. A record with a line whose run stays claimed but gets no re-ON: a verified one with none left
- *  (lineReOnGone), or an ON warned of on some slots, whose others may be running and whose re-ON needs it verified. Its words hold in
- *  either outcome: a late apply verifies it, and a re-ON can then come. Like the closure, it reaches only the plan the card and the
- *  entities serve, and a closure goes first (computeNightChargePlan: 'notTaken' on an ON warned of on every slot). null with no run, or
- *  one a re-ON can bring back. */
+/** v1.200.0 (Fix10 review 2) — PURE. A record with a line whose verified run stays claimed with no re-ON left (lineReOnGone). Like the
+ *  closure, it reaches only the plan the card and the entities serve, and a closure goes first (computeNightChargePlan). (Fix12) An ON
+ *  warned of, on every slot or on some, is a closure's ('notTaken', 'partTaken'), so an unverified ON never reaches this: null with no
+ *  verified run, or one a re-ON can bring back. */
 export function armedLineNoReOn(
-  s: Pick<NightActuationState, 'windowStartMs' | 'windowEndMs' | 'nextOnPeakStartMs' | 'forceChargeOnVerifiedAtMs' | 'forceChargeOnFailedAtMs'
+  s: Pick<NightActuationState, 'windowStartMs' | 'windowEndMs' | 'nextOnPeakStartMs' | 'forceChargeOnVerifiedAtMs'
     | 'forceChargeLineReOns' | 'forceChargeLineAskPct' | 'forceChargeLinePct'>,
   nowMs: number,
 ): LineNoReOn | null {
-  if (s.windowStartMs == null || forceChargeLineNightPct(s) == null) return null;
-  if (s.forceChargeOnVerifiedAtMs == null) {
-    return s.forceChargeOnFailedAtMs != null ? { windowStartMs: s.windowStartMs, words: 'unless it applies late, the add-on does not switch it back on' } : null;
-  }
+  if (s.windowStartMs == null || forceChargeLineNightPct(s) == null || s.forceChargeOnVerifiedAtMs == null) return null;
   return lineReOnGone(s, nowMs) ? { windowStartMs: s.windowStartMs, words: 'the add-on does not switch it back on tonight' } : null;
 }
 
@@ -1696,7 +1717,8 @@ export function forceChargeOnFailureNight(
 
 /** v1.200.0 (review 2) — the line-at-risk push waits for a reading at least this much older to say the pool is
  *  not rising. Ten minutes at the ~14 kW a pack takes under Charge Now is ~2.5 points of a 92 kWh pool, so a
- *  charging pool shows on whole-percent readings; a shorter span reads a slow charge as flat. */
+ *  charging pool shows on whole-percent readings; a shorter span reads a slow charge as flat. (Fix12) So does this one under about
+ *  5 kW, a pack beside an EV on the grid cap: lineFlatPushHeld holds that reading until the time left says otherwise. */
 export const FORCE_CHARGE_LINE_TREND_MS = 10 * 60_000;
 /** v1.200.0 (review 2) — no line-at-risk push inside this much of the add-on's close OFF (writeWindowEndMs). It is
  *  the start's own "not worth starting" margin (FORCE_CHARGE_MIN_RUN_MS, 20 min): a Charge Now switched on by hand
@@ -1886,6 +1908,30 @@ export interface LineAtRisk {
 }
 
 /**
+ * v1.200.0 (Fix12) — PURE. Does a FLAT pool wait, with every slot of ours that counts reading ON? Whole-percent readings 10-20 min apart
+ * cannot tell a stopped charge from a slow one: a pack importing under about 5 kW beside an EV on the grid cap reads level, hours before
+ * the close, and the push said "not rising", told a person to switch Charge Now off and on for nothing, and spent its one go of the night
+ * (on a healthy 11.52 kW EV night, 318 min before a close of 74 over a 55.55 line). So it waits until the time left no longer covers the
+ * charge to the ask at the PLAN rate: the line's latest start (lineLatestStartMs), less the push's own lead. A held tick returns no
+ * risk and spends nothing, so the once-a-night stamp stays free for the real thing. Each choice is deliberate:
+ *  - The plan rate and no EV energy (rate and EV null): the live rate and the EV's kWh are what inflate the lead on exactly the nights
+ *    of the false alarm (3 kW live beside an EV opens the gate at once at a 70% line). FORCE_CHARGE_PLAN_RATE_KW, 10 kW, sits under the
+ *    ~14 kW a pack takes, so the gate opens early enough to act on.
+ *  - Timed nights lose nothing: with no EV the start is timed to ⌈L⌉ + 5 by the close less 20 min, so this gate opens BEFORE the ON's
+ *    first trend reading (ON + 25 min): L 52.6 at T-52 against T-42, L 70.55 at T-151 against T-113, L 55.55 from pool 45 at T-96
+ *    against T-73, and a stuck charge is pushed when it always was. Only a start a load pulled early is held.
+ *  - Only with no slot reading off (lineAtRiskPushDue): a slot off EXPLAINS a flat pool, and its pushes (reOnHeld, reOnRefused, reOnSpent,
+ *    reOnNotApplied) are real on a flat reading. Nor on a FALLING reading: neither is a slow charge. A flat pool above the ask stays out.
+ *  - A pool size not known holds nothing: as lineAtRiskPushDue's hand-back hold, every doubt goes to the push.
+ */
+export function lineFlatPushHeld(
+  nowMs: number, closeAtMs: number, askPct: number, poolSocPct: number, fullKwh: number | null | undefined, slotCount: number,
+): boolean {
+  if (fullKwh == null || !(fullKwh > 0)) return false;
+  return nowMs < lineLatestStartMs(closeAtMs, askPct, poolSocPct, fullKwh, null, null, slotCount) - FORCE_CHARGE_LINE_AT_RISK_LEAD_MS;
+}
+
+/**
  * v1.200.0 (review 2) — PURE. THE LINE AT RISK, while a person can still act. A line night's only in-night remedy
  * after its verified ON is the re-ON (lineReOnDue), and it keys on slots reading OFF, spends at most
  * FORCE_CHARGE_LINE_REON_MAX, and rides the start's gates. Every other way the line is lost after the start —
@@ -1907,7 +1953,9 @@ export interface LineAtRisk {
  *  - the pool NOT RISING against a reading at least FORCE_CHARGE_LINE_TREND_MS older taken at least
  *    FORCE_CHARGE_ON_VERIFY_AFTER_MS after the last ON of ours (lineTrendReference, review 3) — so none while a re-ON (or
  *    the ON) may yet take effect; FALLING under the threshold, or FLAT at or under ⌈L⌉ (review 3: a flat pool above
- *    ⌈L⌉ is a pack importing slowly beside a load on the grid cap — 392 of the 429 emulated pushes on carried nights);
+ *    ⌈L⌉ is a pack importing slowly beside a load on the grid cap — 392 of the 429 emulated pushes on carried nights), and
+ *    (Fix12) with every slot that counts reading ON, only once the time left no longer covers the charge to ⌈L⌉ at the plan
+ *    rate (lineFlatPushHeld: a slower charge beside an EV reads flat there too);
  *  - a live slot readback that names a slot a person can switch: one of ours reading OFF (connected, its Core
  *    under the panel's stop ceiling), or reading ON;
  *  - once a night (forceChargeLineAtRiskPushedAtMs, stamped write-ahead by index.ts).
@@ -1982,6 +2030,8 @@ export function lineAtRiskPushDue(s: NightActuationState, nowMs: number, o: Forc
   const offSlots = ours.filter((n) => !o.slotsOn!.includes(n) && o.connectedSlots.includes(n) && coreBelowStop(n));
   const onSlots = ours.filter((n) => o.slotsOn!.includes(n));
   if (offSlots.length === 0 && onSlots.length === 0) return null;
+  // (Fix12) A pool FLAT with every slot that counts reading ON is a slow charge until the time left says otherwise (lineFlatPushHeld).
+  if (!(o.poolSocPct < ref.pct) && offSlots.length === 0 && lineFlatPushHeld(nowMs, closeAtMs, s.forceChargeLineAskPct!, o.poolSocPct, o.fullKwh, o.connectedSlots.length)) return null;
   // (review 5) The check's not-applied slots that still read OFF: one reading ON since is no longer "did not take effect".
   const notApplied = s.forceChargeLineReOnNotAppliedSlots != null ? s.forceChargeLineReOnNotAppliedSlots.filter((n) => !o.slotsOn!.includes(n)) : null;
   const cause: LineAtRiskCause = mode.kind === 'cost' ? 'costMode'
@@ -2181,7 +2231,7 @@ export function decideForceCharge(s: NightActuationState, nowMs: number, o: Forc
   }
   const W = FORCE_CHARGE_BLOCKER_WHY;
   if (o.vitalsRed) return { kind: 'none', why: W.vitals };
-  if (!o.socCoherent) return { kind: 'none', why: W.incoherent };
+  if (!o.socCoherent) return { kind: 'none', why: o.slotsOn == null ? W.noReadback : W.incoherent };
   if (o.gridPresent !== true || o.gridStaLost) { // unknown grid never starts a grid charge
     return { kind: 'none', why: o.gridStaLost ? W.gridSta : `${W.gridPresence}${o.gridPresent === false ? 'ABSENT' : 'unknown'}` };
   }

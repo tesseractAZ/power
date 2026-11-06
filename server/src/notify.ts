@@ -1257,9 +1257,9 @@ export function buildNightForceChargeOnFailure(o: {
  * the pool (nightForceCharge.forceChargeBlockerClass: the ceiling refused or unread, Charge Now already on,
  * the grid unknown or absent, vitals red, no slot readback, no slot connected, an incoherent SoC), once per
  * blocker class a night, once it has held (nightForceCharge.lineDeclinedPushStep) — while there is still
- * time to act. `latestStartText` is the LATEST start that still reaches the line at the rate now
- * (nightForceCharge.lineLatestStartMs), as clock text; a later start closes lower, and with none the add-on adds
- * nothing above the 50% reserve. PURE.
+ * time to act. `latestStartText` is the LATEST start that still reaches the line at the rate now, with no live reading
+ * from the reserve at the plan rate (nightForceCharge.lineDeclinedLatestStartMs), as clock text; a later start closes
+ * lower, and with none the add-on adds nothing above the 50% reserve. PURE.
  */
 export function buildLineForceChargeDeclinedStart(o: {
   day: string | null; linePct: number; why: string; latestStartText: string;

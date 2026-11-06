@@ -621,7 +621,8 @@ export interface NightChargePlan {
    *  "no force-charge" — and the not-armed sentence is kept for 'advisory' and 'backupLeg'. */
   cushionEnvelopeReason?: CushionEnvelopeReason;
   /** v1.200.0 (Fix10 review 1) — beside the reason 'startClosed', where no verified write of the night stands behind it (LineClosure):
-   *  the expected figures and the write's level, read beside it, would name a reserve nothing holds, so the card leads with the words. */
+   *  the expected figures and the write's level, read beside it, would name a reserve nothing holds, so the card leads with the words.
+   *  (Fix12) Set on 'partTaken' too, whose write stands: "reserve held as a floor — no charge expected" is false while two slots charge. */
   cushionStartClosedNoWrite?: true;
   /** v1.200.0 (Fix10) — beside the reason 'startClosed', and only there: why no force-charge for the line starts, in words
    *  (nightForceCharge.lineStartClosedWords, the pushes' own), for the card's row. */

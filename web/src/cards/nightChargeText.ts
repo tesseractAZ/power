@@ -233,7 +233,7 @@ export interface CushionNotePlan {
   cushionEnvelopeReason?: 'advisory' | 'backupLeg' | 'reserveAtTarget' | 'armedNoLine' | 'startClosed' | 'nearFull' | 'closeUnder';
   /** The server's words for 'startClosed' (NightChargePlan.cushionStartClosedWords). */
   cushionStartClosedWords?: string;
-  /** No verified write stands behind 'startClosed' (NightChargePlan.cushionStartClosedNoWrite): the card leads with the words. */
+  /** No verified write stands behind 'startClosed', or a partial ON runs beside it (NightChargePlan.cushionStartClosedNoWrite): the card leads with the words. */
   cushionStartClosedNoWrite?: boolean;
   /** The reserve the plan read: what 'reserveAtTarget' names. */
   reserveFloorPct?: number;
@@ -321,7 +321,8 @@ export function outageLineRow(plan: CushionNotePlan, maxPct: number | null = nul
 
 /** v1.200.0 (Fix10 review 1) — the card's lead on a closed start no write stands behind: the plan's expected figures and the write's
  *  level are the reserve-alone figures of a write nothing holds, so "reserve held as a floor" or "expected charge to ~50%" would state
- *  what will not happen, above the banner that says why. A write that stands keeps its figure, which is true. null otherwise. */
+ *  what will not happen, above the banner that says why. A write that stands keeps its figure, which is true. (Fix12) Not on 'partTaken':
+ *  its write stands, and "no charge expected" is false while two slots charge. null otherwise. */
 export function startClosedLead(plan: CushionNotePlan): { headline: string; detail: string } | null {
   if (plan.cushionEnvelopeReason !== 'startClosed' || plan.cushionStartClosedNoWrite !== true) return null;
   const words = plan.cushionStartClosedWords ?? 'no force-charge for it starts';

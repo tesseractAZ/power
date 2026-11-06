@@ -61,7 +61,7 @@ import {
   FORCE_CHARGE_MIN_RUN_MS,
   // v1.200.0 (review) — the ON's write-ahead stamp, the line re-ON's budget.
   forceChargeOnStamp, FORCE_CHARGE_LINE_REON_MAX, armedForceChargeAnnouncement, lineReOnTimesWords,
-  EMPTY_LINE_DECLINED_PUSH, lineLatestStartMs, FORCE_CHARGE_LINE_DECLINED_PERSIST_MS,
+  EMPTY_LINE_DECLINED_PUSH, lineDeclinedLatestStartMs, FORCE_CHARGE_LINE_DECLINED_PERSIST_MS,
   // v1.200.0 (review 2) — the line at risk after the start, the re-ON's readback check, the night's observations, a
   // line-ask night's texts whatever its mode, and the declined-start push across restarts.
   lineDeclinedPushTick, type LineDeclinedPushMem, lineAtRiskPushDue, lineOnReadingShape, lineNightObservations,
@@ -6301,7 +6301,7 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
   // v1.200.0 (L3; review) — a LINE night whose start a non-pool blocker holds (the ceiling refused or unread,
   // Charge Now already on, the grid unknown, vitals red, no readback, no slot connected, an incoherent SoC; (Fix9 review 1) an ON or
   // a ceiling sync the write block refuses, on those ticks): each blocker CLASS pushed once a night, once it has held unbroken, with
-  // the latest start that still reaches the line (lineLatestStartMs) — time to act. (review 2) On every night whose record carries a
+  // the latest start that still reaches the line (lineDeclinedLatestStartMs) — time to act. (review 2) On every night whose record carries a
   // line ask, also a cost-dominant one; and once a night ACROSS RESTARTS: the class is on the record before the push goes
   // (nightForceCharge.lineDeclinedPushTick).
   const pushLineDeclinedIfDue = (why: string | null | undefined): void => {
@@ -6310,11 +6310,11 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     const declinedLinePct = forceChargeLineNightPct(state);
     if (dp.push != null && why != null && declinedLinePct != null) {
       persistNightActuation({ ...nightActuationMem, forceChargeLineDeclinedPushed: [...dp.mem.st.pushed] });
-      const endMs = writeWindowEndMs(state);
-      const fullKwhNow = fullWh != null && fullWh > 0 ? fullWh / 1000 : null;
-      const latestAt = endMs != null && fullKwhNow != null
-        ? lineLatestStartMs(endMs, state.forceChargeLineAskPct!, socCoherent && socNowPct != null ? socNowPct : RESERVE_WRITE_MAX_PCT, fullKwhNow, chargeRateKw, evDisplacedKwh, connectedSlots.length)
-        : endMs != null ? endMs - FORCE_CHARGE_MIN_RUN_MS : null;
+      const latestAt = lineDeclinedLatestStartMs({
+        closeAtMs: writeWindowEndMs(state), askPct: state.forceChargeLineAskPct!, poolSocPct: socCoherent ? socNowPct : null,
+        liveFullWh: fullWh, frozenFullWh: shp2.projection?.kind === 'shp2' ? shp2.projection.backupFullCapWh : null,
+        rateKw: chargeRateKw, evDisplacedKwh, slotCount: connectedSlots.length,
+      });
       void sendNotification(loadNotifyConfig(), buildLineForceChargeDeclinedStart({
         day: state.day, linePct: declinedLinePct, why,
         latestStartText: latestAt != null ? fmtSiteClock(latestAt) : 'the window close',
