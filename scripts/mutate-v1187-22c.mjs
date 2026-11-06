@@ -879,8 +879,8 @@ const MUTANTS = [
   {
     id: 'C-cvi. ★★ the held push calls the write "this charge"',
     file: NOTIFY,
-    find: "    + `without ${held ? \"tonight's write\" : 'this charge'}, ~${pct(plan.minProjSocPct)} with it; the floor+cushion line is ${pct(line)}. `",
-    to: "    + `without this charge, ~${pct(plan.minProjSocPct)} with it; the floor+cushion line is ${pct(line)}. ` /* MUTANT */",
+    find: "    : `without ${held ? \"tonight's write\" : 'this charge'}, ~${pct(plan.minProjSocPct)} with it`;",
+    to: "    : `without this charge, ~${pct(plan.minProjSocPct)} with it`; /* MUTANT */",
     why: 'A night that charges nothing is described as having a charge.',
   },
   {

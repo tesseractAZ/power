@@ -94,6 +94,10 @@
  * (F9r1-e); the reserve settling as someone else's says what it does to the force-charge (F9r1-f); a grid loss or a cancel names
  * the line (F9r1-g); the hand-set reserve's time is the last start, never a deadline that holds the line (F9r1-h); the closed
  * start's guard words (F9r1-i). A5-i, P-xii, A5-xxiii(b)-(d), A5-xxiv, F8-iii(b), F8r1-i(c), F9-i(f)-(h), F9-i(w) re-anchored.
+ * (Fix9 review 2) The plan's reserve is a reading: words true whichever way it goes (F9r2-a(vii), c(v), d); a recompute of a window whose
+ * armed record has no line ask says so, never an ON the record cannot make (F9r2-a, b, c); no reading says nothing of what the panel holds
+ * (F9r2-e); a late push names its night (F9r2-f); the line named beside the reading it is read against (F9r2-g); the card (F9r2-h).
+ * A5-i, P-xii, F9r1-a(iv)-(vi), (viii), (ix) re-anchored.
  *
  *   node scripts/mutate-line-force-charge.mjs [--only <id prefix>]
  *
@@ -217,7 +221,7 @@ const MUTANTS = [
   {
     id: 'P-xii. ★★ the envelope reason always "advisory" (an armed near-full or close-under night recorded as nothing armed)',
     file: NCA, tests: [T_LINE],
-    find: "    : backupLeg ? 'backupLeg' : lineEligible !== true ? 'advisory' : lineNoWrite ? 'reserveAtTarget' : lineNearFull ? 'nearFull' : 'closeUnder';",
+    find: "    : backupLeg ? 'backupLeg' : lineEligible !== true ? 'advisory' : lineNoWrite ? 'reserveAtTarget' : lineNotOnRecord ? 'armedNoLine' : lineNearFull ? 'nearFull' : 'closeUnder';",
     to: "    : 'advisory' as CushionEnvelopeReason; /* MUTANT */",
     why: 'An armed 92% line, its force-charge running to ~99.6%, is recorded as advisory: the margin NOTE goes, and the push and the card lose why.',
   },
@@ -1599,8 +1603,8 @@ const MUTANTS = [
   {
     id: 'A5-i. ★★★ the cut restored: a line within 10 points of full is not armed',
     file: NCA, tests: [T_LINE, T_YEAR],
-    find: '  const lineArmed = lineQualifies && lineEligible === true && !lineNoWrite;',
-    to: '  const lineArmed = lineQualifies && lineEligible === true && !lineNoWrite && lineAsk + 2 * FORCE_CHARGE_LINE_HEADROOM_PCT <= 100; /* MUTANT */',
+    find: '  const lineArmed = lineQualifies && lineEligible === true && !lineNoWrite && !lineNotOnRecord;',
+    to: '  const lineArmed = lineQualifies && lineEligible === true && !lineNoWrite && !lineNotOnRecord && lineAsk + 2 * FORCE_CHARGE_LINE_HEADROOM_PCT <= 100; /* MUTANT */',
     why: 'More cushion switches the force-charge off: 2026-10-29 at 15 h stores ~43 kWh less than at 14 h (ITEM 5).',
   },
   {
@@ -2679,15 +2683,15 @@ const MUTANTS = [
   {
     id: 'F9r1-a(iv). ★★ such a night\'s reason read as closeUnder',
     file: NCA, tests: [T_UNHELD],
-    find: "lineEligible !== true ? 'advisory' : lineNoWrite ? 'reserveAtTarget' : lineNearFull ? 'nearFull' : 'closeUnder';",
-    to: "lineEligible !== true ? 'advisory' : (lineNoWrite && (false as boolean)) ? 'reserveAtTarget' : lineNearFull ? 'nearFull' : 'closeUnder'; /* MUTANT */",
+    find: "lineEligible !== true ? 'advisory' : lineNoWrite ? 'reserveAtTarget' : lineNotOnRecord",
+    to: "lineEligible !== true ? 'advisory' : (lineNoWrite && (false as boolean)) ? 'reserveAtTarget' : lineNotOnRecord",
     why: 'The push and the card lose why, and the note reads like a walk that closes under.',
   },
   {
     id: 'F9r1-a(v). ★★ the rationale words it as advisory',
     file: NCA, tests: [T_UNHELD],
-    find: "cushionEnvelopeReason === 'reserveAtTarget' ? `the reserve already reads ${round1(reserveFloorPct)}%: no write goes, and no force-charge runs without one` : 'no force-charge runs in advisory mode'",
-    to: "(false as boolean) ? '' : 'no force-charge runs in advisory mode' /* MUTANT */",
+    find: ": cushionEnvelopeReason === 'reserveAtTarget' ? `the reserve reads",
+    to: ": (false as boolean) ? `the reserve reads",
     why: 'A supervised plan says "no force-charge runs in advisory mode".',
   },
   {
@@ -2700,7 +2704,7 @@ const MUTANTS = [
   {
     id: 'F9r1-a(vi). ★★ the push\'s note falls to its generic words',
     file: NTF, tests: [T_UNHELD],
-    find: "      : plan.cushionEnvelopeReason === 'reserveAtTarget' ? `and the reserve already reads ${round1(plan.reserveFloorPct)}%: no write goes, and no force-charge runs without one`\n        : 'and no force-charge carries it to the window close';",
+    find: "      : plan.cushionEnvelopeReason === 'reserveAtTarget' ? `and the reserve reads ${round1(plan.reserveFloorPct)}%: no write is due while it does, and no force-charge runs without one`\n        : 'and no force-charge carries it to the window close';",
     to: "      : 'and no force-charge carries it to the window close'; /* MUTANT */",
     why: 'The push does not say why, or what would change it.',
   },
@@ -2714,14 +2718,14 @@ const MUTANTS = [
   {
     id: 'F9r1-a(viii). ★ the card row names no reason',
     file: CARD, tests: [T_UNHELD],
-    find: "        : plan.cushionEnvelopeReason === 'reserveAtTarget' ? `not held tonight (the reserve already reads ${plan.reserveFloorPct ?? max}%: no write, no force-charge)` : 'not held tonight';",
-    to: "        : 'not held tonight'; /* MUTANT */",
+    find: "        : plan.cushionEnvelopeReason === 'reserveAtTarget' ? `not claimed tonight (the reserve reads ${plan.reserveFloorPct ?? max}%: no write while it does, no force-charge without one)`\n",
+    to: "        : (false as boolean) ? '' /* MUTANT */\n",
     why: 'The card says the line is not held, and not why.',
   },
   {
     id: 'F9r1-a(ix). ★ the 21:30 line says force-charge eligible',
     file: IDX, tests: [T_UNHELD],
-    find: "  if (plan?.cushionEnvelopeReason === 'reserveAtTarget') return `Force-charge: none tonight — the reserve already reads ${plan.reserveFloorPct}%, so no write goes and no force-charge runs without one; tonight's outage line is not held.`;\n",
+    find: "  if (plan?.cushionEnvelopeReason === 'reserveAtTarget') return `Force-charge: none for the line — the reserve reads ${plan.reserveFloorPct}%, so no write is due while it does, and no force-charge runs without one; the plan does not claim tonight's outage line.`;\n",
     to: '  /* MUTANT */\n',
     why: 'The log promises what the plan disclosed will not run.',
   },
@@ -3180,6 +3184,330 @@ const MUTANTS = [
     find: "  lateGuard: `${Math.round(FORCE_CHARGE_MIN_RUN_MS / 60_000)} min or less is left before the on-peak guard (an hour before on-peak)`,\n",
     to: "  lateGuard: `${Math.round(FORCE_CHARGE_MIN_RUN_MS / 60_000)} min or less of the window is left`, /* MUTANT */\n",
     why: 'The finding\'s words under the guard\'s key.',
+  },
+  // ── (Fix9 review 2) the reserve is a reading; the record is what the night can do; a late push names its night ──
+  // (a) the plan
+  {
+    id: 'F9r2-a(i). ★★★ a recompute claims the ON its armed record cannot make (the finding)',
+    file: NCA, tests: [T_UNHELD],
+    find: '  const lineNotOnRecord = lineQualifies && lineEligible === true && !lineNoWrite && inputs.armedNoLineStartMs === window.startMs;',
+    to: '  const lineNotOnRecord = (false as boolean) && lineQualifies && lineEligible === true && !lineNoWrite && inputs.armedNoLineStartMs === window.startMs; /* MUTANT */',
+    why: 'The card and rationale say the force-charge switches on at ~02:02; the record has no ask, so it never starts, and no push says so.',
+  },
+  {
+    id: 'F9r2-a(ii). ★★★ any record with no ask unarms every window',
+    file: NCA, tests: [T_UNHELD],
+    find: '!lineNoWrite && inputs.armedNoLineStartMs === window.startMs;',
+    to: '!lineNoWrite && inputs.armedNoLineStartMs != null; /* MUTANT */',
+    why: "Last night's record stops tonight's plan arming its line.",
+  },
+  {
+    id: 'F9r2-a(iii). ★★ such a plan reads as a walk that closes under',
+    file: NCA, tests: [T_UNHELD],
+    find: "lineNotOnRecord ? 'armedNoLine' : lineNearFull ? 'nearFull' : 'closeUnder';",
+    to: "lineNearFull ? 'nearFull' : 'closeUnder'; /* MUTANT */",
+    why: 'The card loses why the line is not carried.',
+  },
+  {
+    id: 'F9r2-a(iv). ★★ the rationale calls it advisory',
+    file: NCA, tests: [T_UNHELD],
+    find: ": cushionEnvelopeReason === 'armedNoLine' ? 'no write armed for this window",
+    to: ": (false as boolean) ? 'no write armed for this window",
+    why: 'A supervised night says "no force-charge runs in advisory mode".',
+  },
+  {
+    id: 'F9r2-a(v). ★★ the record never reaches the plan',
+    file: NCA, tests: [T_UNHELD],
+    find: '    ...(armedNoLineStartMs !== undefined ? { armedNoLineStartMs } : {}),\n',
+    to: '    /* MUTANT */\n',
+    why: 'buildNightChargeInputs drops the field: the finding, on every recompute.',
+  },
+  {
+    id: 'F9r2-a(vi). ★★★ disclosed, and armed all the same',
+    file: NCA, tests: [T_UNHELD],
+    find: '  const lineArmed = lineQualifies && lineEligible === true && !lineNoWrite && !lineNotOnRecord;',
+    to: '  const lineArmed = lineQualifies && lineEligible === true && !lineNoWrite; /* MUTANT */',
+    why: 'The plan states the start and the line walk the record cannot run.',
+  },
+  {
+    id: 'F9r2-a(vii). ★★ the rationale promises no write (the finding\'s words)',
+    file: NCA, tests: [T_UNHELD],
+    find: '`the reserve reads ${round1(reserveFloorPct)}%: no write is due while it does, and no force-charge runs without one, so the cushion is not assured`',
+    to: '`the reserve already reads ${round1(reserveFloorPct)}%: no write goes, and no force-charge runs without one, so the cushion is not fully held`',
+    why: 'decideActuation applies at a reserve lowered before the window, and a cost force-charge can then hold the line.',
+  },
+  // (b) the helper
+  {
+    id: 'F9r2-b(i). ★★★ a record with its line read as one without',
+    file: NFC, tests: [T_UNHELD],
+    find: '  return s.day != null && forceChargeLineNightPct(s) == null ? s.windowStartMs : null;',
+    to: '  return s.day != null ? s.windowStartMs : null; /* MUTANT */',
+    why: 'Every armed line night\'s recompute says no write carries a force-charge.',
+  },
+  {
+    id: 'F9r2-b(ii). ★ an ask at the reserve read as a line',
+    file: NFC, tests: [T_UNHELD],
+    find: '  return s.day != null && forceChargeLineNightPct(s) == null ? s.windowStartMs : null;',
+    to: '  return s.day != null && s.forceChargeLineAskPct == null ? s.windowStartMs : null; /* MUTANT */',
+    why: 'A record no line force-charge can ride counts as carrying one.',
+  },
+  {
+    id: 'F9r2-b(iii). ★★ an empty record reads as armed',
+    file: NFC, tests: [T_UNHELD],
+    find: '  return s.day != null && forceChargeLineNightPct(s) == null ? s.windowStartMs : null;',
+    to: '  return forceChargeLineNightPct(s) == null ? s.windowStartMs : null; /* MUTANT */',
+    why: 'A record with no day is no armed write.',
+  },
+  // (c) the wiring
+  {
+    id: 'F9r2-c(i). ★★★ the recompute never reads the armed record (the finding)',
+    file: IDX, tests: [T_UNHELD],
+    find: 'armedNoLineStartMs: shadowLeg == null && opts.arming !== true ? armedNoLineStartMs(nightActuationMem) : null,',
+    to: 'armedNoLineStartMs: null, /* MUTANT */',
+    why: 'The plan logic exists and nothing feeds it.',
+  },
+  {
+    id: 'F9r2-c(ii). ★★★ the evening plan reads the record it replaces',
+    file: IDX, tests: [T_UNHELD],
+    find: 'armedNoLineStartMs: shadowLeg == null && opts.arming !== true ? armedNoLineStartMs(nightActuationMem) : null,',
+    to: 'armedNoLineStartMs: shadowLeg == null ? armedNoLineStartMs(nightActuationMem) : null, /* MUTANT */',
+    why: 'Saturday\'s record, sharing the Monday window, stops Sunday\'s arm carrying its line.',
+  },
+  {
+    id: 'F9r2-c(iii). ★★ a shadow leg reads the live record',
+    file: IDX, tests: [T_UNHELD],
+    find: 'armedNoLineStartMs: shadowLeg == null && opts.arming !== true ? armedNoLineStartMs(nightActuationMem) : null,',
+    to: 'armedNoLineStartMs: opts.arming !== true ? armedNoLineStartMs(nightActuationMem) : null, /* MUTANT */',
+    why: 'A leg that writes nothing is judged by a record that is not its own.',
+  },
+  {
+    id: 'F9r2-c(iv). ★★★ the evening job does not say it arms',
+    file: IDX, tests: [T_UNHELD],
+    find: 'recomputeNightChargePlan({ allowStalePanel: nowMin >= deferUntilMin, arming: true });',
+    to: 'recomputeNightChargePlan({ allowStalePanel: nowMin >= deferUntilMin }); /* MUTANT */',
+    why: 'See F9r2-c(ii).',
+  },
+  {
+    id: 'F9r2-c(v). ★★ the 21:30 line promises none tonight',
+    file: IDX, tests: [T_UNHELD],
+    find: "`Force-charge: none for the line — the reserve reads ${plan.reserveFloorPct}%, so no write is due while it does, and no force-charge runs without one; the plan does not claim tonight's outage line.`",
+    to: "`Force-charge: none tonight — the reserve already reads ${plan.reserveFloorPct}%, so no write goes and no force-charge runs without one; tonight's outage line is not held.`",
+    why: 'A cost ceiling beside it rides a write that goes.',
+  },
+  // (d) the evening push
+  {
+    id: 'F9r2-d(i). ★★★ the tail says the add-on writes nothing (the finding)',
+    file: NTF, tests: [T_UNHELD],
+    find: "    ? `SUPERVISED: the backup reserve reads ${round1(plan.reserveFloorPct)}% now, so no write is due while it does, and no force-charge runs without one. `\n      + `A reading under ${supervised.targetPct}% when the window opens lets the armed write go, and it carries no force-charge for the outage line.`\n",
+    to: "    ? `SUPERVISED: the backup reserve already reads ${round1(plan.reserveFloorPct)}%, so the add-on writes nothing tonight and no force-charge runs.`\n",
+    why: 'decideActuation applies at a reserve lowered before the window.',
+  },
+  {
+    id: 'F9r2-d(ii). ★★ the tail keeps silent about the write that can go',
+    file: NTF, tests: [T_UNHELD],
+    find: "      + `A reading under ${supervised.targetPct}% when the window opens lets the armed write go, and it carries no force-charge for the outage line.`\n",
+    to: "      + '' /* MUTANT */\n",
+    why: 'A person reading "no force-charge runs without one" lowers the reserve, and gets the write and no line force-charge.',
+  },
+  {
+    id: 'F9r2-d(iii). ★★ the projection prices a write none is due to make (the finding)',
+    file: NTF, tests: [T_UNHELD],
+    find: "  const lowSoc = plan.cushionEnvelopeReason === 'reserveAtTarget'\n",
+    to: "  const lowSoc = (false as boolean)\n",
+    why: '"without tonight\'s write … with it" beside "no write is due".',
+  },
+  {
+    id: 'F9r2-d(iv). ★★ the note promises no write',
+    file: NTF, tests: [T_UNHELD],
+    find: '`and the reserve reads ${round1(plan.reserveFloorPct)}%: no write is due while it does, and no force-charge runs without one`',
+    to: '`and the reserve already reads ${round1(plan.reserveFloorPct)}%: no write goes, and no force-charge runs without one`',
+    why: 'See F9r2-d(i).',
+  },
+  // (e) the attempt never confirmed
+  {
+    id: 'F9r2-e(i). ★★★ no reading, and the push says what the panel holds (the finding)',
+    file: NTF, tests: [T_UNHELD],
+    find: '          : (o.reservePct != null\n            ? `Until the panel reads ${target}%, the reserve stays under',
+    to: '          : ((true as boolean)\n            ? `Until the panel reads ${target}%, the reserve stays under',
+    why: 'A write that landed with its confirmation lost holds 50%, and the push says it does not.',
+  },
+  {
+    id: 'F9r2-e(ii). ★★ a reading, and the push says only that it waits',
+    file: NTF, tests: [T_UNHELD],
+    find: '          : (o.reservePct != null\n            ? `Until the panel reads ${target}%, the reserve stays under',
+    to: '          : ((false as boolean)\n            ? `Until the panel reads ${target}%, the reserve stays under',
+    why: 'The reserve under the line goes unsaid on the night it is known.',
+  },
+  {
+    id: 'F9r2-e(iii). ★ "its normal reserve" beside a reading that may be neither',
+    file: NTF, tests: [T_UNHELD],
+    find: '            ? `Until the panel reads ${target}%, the reserve stays under ${named}, and',
+    to: '            ? `Until the panel reads ${target}%, it keeps its normal reserve, under ${named}, and',
+    why: 'A write the panel granted in part reads neither the normal reserve nor the target.',
+  },
+  // (f) the late push
+  {
+    id: 'F9r2-f(i). ★★★ a late push says tonight\'s line (the finding)',
+    file: NTF, tests: [T_UNHELD],
+    find: '  const named = `${today ? lineWhen.toLowerCase() : lineWhen} ${lineBesidePct(o.linePct, RESERVE_WRITE_MAX_PCT)}% outage line`;',
+    to: '  const named = `tonight\'s ${lineBesidePct(o.linePct, RESERVE_WRITE_MAX_PCT)}% outage line`; /* MUTANT */',
+    why: 'Read at 08:00 as a statement about the coming night, on a line-safety warning.',
+  },
+  {
+    id: 'F9r2-f(ii). ★★★ the weekend\'s Monday window sent past its close says Tonight\'s',
+    file: NTF, tests: [T_UNHELD],
+    find: '  const today = sameDay && !pastClose;',
+    to: '  const today = sameDay; /* MUTANT */',
+    why: 'The same calendar day as a 00:00 window, hours past its close.',
+  },
+  {
+    id: 'F9r2-f(iii). ★★ the night read as today past midnight',
+    file: NTF, tests: [T_UNHELD],
+    find: '  const today = sameDay && !pastClose;',
+    to: '  const today = !pastClose; /* MUTANT */',
+    why: '"monday\'s" in lower case, or the wrong day\'s word.',
+  },
+  {
+    id: 'F9r2-f(iv). ★★ the on-peak guard\'s close read as a night still open',
+    file: NTF, tests: [T_UNHELD],
+    find: "  const pastClose = o.startClosed === 'over' || o.startClosed === 'overGuard';",
+    to: "  const pastClose = o.startClosed === 'over'; /* MUTANT */",
+    why: 'Guard words under "tonight" past the add-on\'s close.',
+  },
+  {
+    id: 'F9r2-f(v). ★★ the window\'s close read as a night still open',
+    file: NTF, tests: [T_UNHELD],
+    find: "  const pastClose = o.startClosed === 'over' || o.startClosed === 'overGuard';",
+    to: "  const pastClose = o.startClosed === 'overGuard'; /* MUTANT */",
+    why: 'See F9r2-f(ii).',
+  },
+  {
+    id: 'F9r2-f(vi). ★ the attempted head stays Tonight\'s',
+    file: NTF, tests: [T_UNHELD],
+    find: '      body: `${lineWhen} ${span} ${what} has not started: ${o.reason}, and ${reads}. `\n',
+    to: '      body: `${when} ${span} ${what} has not started: ${o.reason}, and ${reads}. `\n',
+    why: 'The sentence before the one that says the window has closed.',
+  },
+  {
+    id: 'F9r2-f(vii). ★ the head stays Tonight\'s',
+    file: NTF, tests: [T_UNHELD],
+    find: 'body: `${told(lineWhen)} ${closedSentence}${hand}` };',
+    to: 'body: `${told(when)} ${closedSentence}${hand}` }; /* MUTANT */',
+    why: 'See F9r2-f(vi).',
+  },
+  {
+    id: 'F9r2-f(viii). ★ the title stays tonight\'s',
+    file: NTF, tests: [T_UNHELD],
+    find: " severity: 'warning', title: titled(lineWhen, today), body:",
+    to: " severity: 'warning', /* MUTANT */ body:",
+    why: 'See F9r2-f(vi).',
+  },
+  // (g) the line named so the order shows
+  {
+    id: 'F9r2-g(i). ★★★ the close account names the line beside the reserve alone (the finding)',
+    file: NTF, tests: [T_UNHELD],
+    find: '  const lineName = lineBesidePct(o.linePct, RESERVE_WRITE_MAX_PCT, read ?? RESERVE_WRITE_MAX_PCT);',
+    to: '  const lineName = lineBesidePct(o.linePct, RESERVE_WRITE_MAX_PCT); /* MUTANT */',
+    why: '"the 55.6% outage line. The pool reads 55.6%, under the line."',
+  },
+  {
+    id: 'F9r2-g(ii). ★★ the close account forgets the reserve',
+    file: NTF, tests: [T_LINE],
+    find: '  const lineName = lineBesidePct(o.linePct, RESERVE_WRITE_MAX_PCT, read ?? RESERVE_WRITE_MAX_PCT);',
+    to: '  const lineName = lineBesidePct(o.linePct, read ?? RESERVE_WRITE_MAX_PCT); /* MUTANT */',
+    why: 'A 50.03% line, the pool at 51: "the 50% outage line" on a night the 50% reserve was said not to hold it.',
+  },
+  {
+    id: 'F9r2-g(iii). ★★ the grid-loss account forgets the reserve',
+    file: NTF, tests: [T_UNHELD],
+    find: '    const stopNamed = stopLine != null ? lineBesidePct(stopLine, RESERVE_WRITE_MAX_PCT, stopRead ?? RESERVE_WRITE_MAX_PCT) : null;',
+    to: '    const stopNamed = stopLine != null ? lineBesidePct(stopLine, stopRead ?? RESERVE_WRITE_MAX_PCT) : null; /* MUTANT */',
+    why: 'The same body says the reserve was raised to 50%.',
+  },
+  {
+    id: 'F9r2-g(iv). ★★ the grid-loss account forgets the reading',
+    file: NTF, tests: [T_LINE],
+    find: '    const stopNamed = stopLine != null ? lineBesidePct(stopLine, RESERVE_WRITE_MAX_PCT, stopRead ?? RESERVE_WRITE_MAX_PCT) : null;',
+    to: '    const stopNamed = stopLine != null ? lineBesidePct(stopLine, RESERVE_WRITE_MAX_PCT) : null; /* MUTANT */',
+    why: '"The pool reads 80%, under the 80% outage line."',
+  },
+  {
+    id: 'F9r2-g(iv-b). ★★ the morning account rounds the close over the line it is under',
+    file: NTF, tests: [T_RISK],
+    find: '`; the pool read ${round1(closeRead)}% at the close$',
+    to: '`; the pool read ${Math.round(closeRead)}% at the close$',
+    why: '"the pool read 56% at the close, under the 55.6% outage line"',
+  },
+  {
+    id: 'F9r2-g(iv-c). ★★ the morning account names the line beside nothing',
+    file: NTF, tests: [T_RISK],
+    find: ', under the ${lineBesidePct(linePct, round1(closeRead))}% outage line`',
+    to: ', under the ${round1(linePct)}% outage line`',
+    why: '"the pool read 55.6% at the close, under the 55.6% outage line"',
+  },
+  {
+    id: 'F9r2-g(v). ★ a stop read past the close says tonight\'s line',
+    file: NTF, tests: [T_UNHELD],
+    find: "; the outage line is ${stopNamed}%.`",
+    to: "; tonight's outage line is ${stopNamed}%.` /* MUTANT */",
+    why: 'A grid loss found by a restart past the close.',
+  },
+  // (h) the card
+  {
+    id: 'F9r2-h(i). ★★ the card row names no reason',
+    file: CARD, tests: [T_UNHELD],
+    find: "          : plan.cushionEnvelopeReason === 'armedNoLine' ? 'not claimed tonight (no write armed for this window carries a force-charge for it)' : 'not held tonight';",
+    to: "          : 'not held tonight'; /* MUTANT */",
+    why: 'The card says the line is not held, and not why.',
+  },
+  {
+    id: 'F9r2-h(ii). ★★ the card row says not held',
+    file: CARD, tests: [T_UNHELD],
+    find: '`not claimed tonight (the reserve reads ${plan.reserveFloorPct ?? max}%: no write while it does, no force-charge without one)`',
+    to: '`not held tonight (the reserve reads ${plan.reserveFloorPct ?? max}%: no write while it does, no force-charge without one)`',
+    why: 'A cost force-charge riding a write that goes may hold it.',
+  },
+  {
+    id: 'F9r2-h(iii). ★★★ the banner promises a write beside a row that denies it (the finding)',
+    file: CARD, tests: [T_UNHELD],
+    find: '  if (a.targetPct != null && reservePct != null && reservePct >= a.targetPct) {',
+    to: '  if ((false as boolean)) { /* MUTANT */',
+    why: '"Supervised write armed — reserve → 50% at 22:55" with the panel reading 50.',
+  },
+  {
+    id: 'F9r2-h(iv). ★★ the banner misses a reading of the target itself',
+    file: CARD, tests: [T_UNHELD],
+    find: 'reservePct != null && reservePct >= a.targetPct) {',
+    to: 'reservePct != null && reservePct > a.targetPct) { /* MUTANT */',
+    why: 'decideActuation: a target at or under the reading has nothing to raise.',
+  },
+  {
+    id: 'F9r2-h(v). ★★ any reading reads as the target',
+    file: CARD, tests: [T_UNHELD],
+    find: 'reservePct != null && reservePct >= a.targetPct) {',
+    to: 'reservePct != null) { /* MUTANT */',
+    why: 'A night whose write is due says none is.',
+  },
+  {
+    id: 'F9r2-h(vi). ★★★ the banner drops its Cancel while the write can still go',
+    file: CARD, tests: [T_UNHELD],
+    find: "so none is due while it does.`, settled: false, cancel: 'Cancel tonight' };",
+    to: "so none is due while it does.`, settled: false, cancel: null }; /* MUTANT */",
+    why: 'A reserve lowered after the plan lets the write go, and nothing can stop it.',
+  },
+  {
+    id: 'F9r2-h(vii). ★★ the card passes no reading',
+    file: CARDX, tests: [T_UNHELD],
+    find: 'hhmm={hhmm} reservePct={status.reserveFloorPercent} />',
+    to: 'hhmm={hhmm} reservePct={null} />',
+    why: 'See F9r2-h(iii).',
+  },
+  {
+    id: 'F9r2-h(viii). ★ the banner ignores the reading it is given',
+    file: CARDX, tests: [T_UNHELD],
+    find: 'const state = actuationBannerState(actuation, hhmm(actuation.cancelDeadlineMs), reservePct);',
+    to: 'const state = actuationBannerState(actuation, hhmm(actuation.cancelDeadlineMs), null);',
+    why: 'See F9r2-h(iii).',
   },
   /* ── R: the ledger ── */
   {

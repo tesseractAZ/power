@@ -127,8 +127,8 @@ const MUTANTS = [
   {
     id: 'T-i. ★★★ an armed write offers no Cancel',
     file: WEB,
-    find: "settled: false, cancel: 'Cancel tonight' };",
-    to: 'settled: false, cancel: null }; /* MUTANT */',
+    find: ": ''}.`, settled: false, cancel: 'Cancel tonight' };",
+    to: ": ''}.`, settled: false, cancel: null }; /* MUTANT */",
     why: 'Between the evening push and the window open the owner has no way to disarm the write.',
   },
   {
