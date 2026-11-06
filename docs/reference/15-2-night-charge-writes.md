@@ -393,30 +393,30 @@ fixture (nameplate, 0.944), 10 and 15 of them closing near 50 (`lineForceCharge.
   card, never "stays on until the window closes"; a run with no re-ON left says so (`armedLineNoReOn`); a run on (`armedLineRunOn`, served plan) walks from now, named as on. A pool expected at or
   above the panel ceiling reads armed "but is not expected to start". Nothing armed reads "and no
   force-charge runs in advisory mode" (the backup leg: "the outage backup leg writes the reserve only"),
-  "so the cushion is not fully held — residual risk remains". `reserveAtTarget` says "no write is due while it does, and no force-charge runs without one"; `armedNoLine`, a recompute of a window whose record has no line ask, "no write armed for this window carries a force-charge for it", each "so the cushion is not assured": a reserve lowered later can get its write, with no force-charge for the line. `startClosed` (a record with its ask, `armedLineStartClosed`, a run a cancel or an OFF ended too, an ON warned of on every slot, or all slots off with no re-ON left; or no record with no evening job left, `noArm`, pushed once): the key's words, on the served plan only; the ledger keeps the ask, and with no verified write standing the card leads with them. An armed night keeps its line sentence and adds a NOTE (`lineNotHeldOf`; the 21:30 log "Line NOT held") where its walk closes
+  "so the cushion is not fully held — residual risk remains". `reserveAtTarget` says "no write is due while it does, and no force-charge runs without one"; `armedNoLine`, a recompute of a window whose record has no line ask, "no write armed for this window carries a force-charge for it", each "so the cushion is not assured": a reserve lowered later can get its write, with no force-charge for the line. `startClosed` (a record with its ask, `armedLineStartClosed`, a run a cancel or an OFF ended too, an ON warned of on any slot, or all slots off with no re-ON left; or no record with no evening job left, `noArm`, pushed once): the key's words, on the served plan only; the ledger keeps the ask, and with no verified write standing, or a partial ON, the card leads with them. An armed night keeps its line sentence and adds a NOTE (`lineNotHeldOf`; the 21:30 log "Line NOT held") where its walk closes
   under the line, above 100% "above a full
   pool", and on a `nearFull` walk that holds "cannot hold it with its usual margin"; never "no
   force-charge". The "charge/pool caps" note needs a sizing that fell short.
-- **At run time** a night whose record carries a line ask, a cost-dominant one too, pushes when its start is held for a reason other than the clock or the pool. The causes
+- **At run time** a night whose record carries a line ask, a cost-dominant one too, pushes when something other than the clock or the pool holds its start. The causes
   (`forceChargeBlockerClass`) are the ceiling refused or not read back, Charge Now already on, the grid
-  unknown or absent, red vitals, no slot readback, no battery slot connected, and an incoherent SoC.
+  unknown or absent, red vitals, no slot readback, no slot connected, and an incoherent SoC.
   Each cause pushes once a night, after 10 minutes unbroken (`lineDeclinedPushTick`), recorded
   first (`forceChargeLineDeclinedPushed`). The push quotes the latest start that still reaches the line at
-  the rate then (`lineLatestStartMs`: ⌈L⌉ by the close with its 15-minute buffer, never in the last
+  the rate then, with no live reading from the reserve at the plan rate (`lineDeclinedLatestStartMs`: ⌈L⌉ by the close with a 15-minute buffer, never the last
   20 minutes): "If it has not started by ~04:24, the pool may close under the line". An ON that never took on any slot says that, unless it
   applies late, the add-on adds nothing above the reserve and the pool may close under the line; one
-  that failed on some slots, that the pool may close short of it (`forceChargeOnFailureNight`: the record's line ask, not the stamped mode). Both say what
-  can still lift the pool (Charge Now on for those slots in the EcoFlow app; the add-on switches it
+  that failed on some slots, that the pool may close short of it (`forceChargeOnFailureNight`). Both say what
+  can still lift the pool (Charge Now on for those slots in the app; the add-on switches it
   off at the close), never "no action needed". A reserve write that never reads back on such a night says that until the panel reads 50% it keeps its own reserve, under the line, and to set 50% in the
   app now: the last start, the close less 20 minutes, may close under the line. With no start left
   (`forceChargeStartClosed`: cancelled, too late) it and its logs say why none starts. A write missing its apply window pushes too (`missedApplyDue`): an attempt in those words (no reading: the force-charge waits on one),
   none issued naming Charge Now by hand. A write-blocked ON or ceiling sync is a held start.
-- **The line at risk** (`lineAtRiskPushDue`). After the verified ON the re-ON is the only in-night
+- **The line at risk** (`lineAtRiskPushDue`). After the verified ON the re-ON is the only
   remedy, so a line lost another way (a re-ON not applied or spent, its gates holding, a late load taking
   the grid cap, the ON-reading latch below) pushes once a night, stamped before it goes
-  (`forceChargeLineAtRiskPushedAtMs`). It needs a record with a line ask (a cost-dominant one too) and the line gate on, no OFF issued (a cost-dominant night's own stop too), more than 20 minutes before
+  (`forceChargeLineAtRiskPushedAtMs`). It needs a record with a line ask (a cost-dominant one too) and the line gate on, no OFF issued (its own stop too), over 20 minutes before
   the add-on's close OFF (`FORCE_CHARGE_LINE_AT_RISK_LEAD_MS`, the re-ON's cutoff), a fresh, coherent pool under the start target (⌈L⌉ + 5 on a cost-dominant night) and below a reading at least 10 minutes
-  older, or level with it at or under ⌈L⌉ (`FORCE_CHARGE_LINE_TREND_MS`, the two-sample trail
+  older, or level with it at or under ⌈L⌉, with no slot off only once the time left no longer covers ⌈L⌉ at the plan rate (`lineFlatPushHeld`; `FORCE_CHARGE_LINE_TREND_MS`, the two-sample trail
   `lineNightObservations` stamps first, with the panel's own stop, anew after a re-ON or a slot seen ON; `lineTrendReference`
   takes only a reading 15 minutes or more after the last ON or re-ON, past one checked not applied, or a
   slot seen ON again that no ON of ours explains, `forceChargeLineOnSeenAtMs`, or an ON verified late), and no re-ON due nor a
@@ -483,11 +483,10 @@ fixture (nameplate, 0.944), 10 and 15 of them closing near 50 (`lineForceCharge.
   rising). **The ON-reading latch** (a slot that stops importing at its ceiling and keeps reading
   ON) is unmeasured on this plant; no re-ON keys on it, so per predicted-EV cell 0-65 of 200 year nights
   close under (0-72 floored) and 52-140 of 140 at lines of 70-90% (variant `onLatch`, `PIN_ON_LATCH`).
-  The line-at-risk push reaches every one of them at least 20 minutes before the close, after the latch
-  on all but one; on the measured latch it goes on 2 (5 floored) of the 3,740 predicted-EV nights, none
-  under. With re-ONs accepted but never applied (unmeasured, `reOnInert`) it reaches 174 of 390 year nights
-  under, 2,335 of 2,615 at 70-90% (the rest checked at or inside the lead, or 25 a tick before the re-ON's
-  cutoff with a re-ON left, which holds the push). A late apply, a glitch at the check or a person's ON logs no
+  The line-at-risk push reaches every one of them at least 20 minutes before the close, after the latch;
+  on the measured latch it goes on none of the 3,740 predicted-EV nights. With re-ONs accepted but never applied (unmeasured, `reOnInert`) it reaches 174 of 390 year nights
+  under, 2,334 of 2,615 at 70-90% (the rest checked at or inside the lead, or 25 a tick before the re-ON's
+  cutoff with a re-ON left). A late apply, a glitch at the check or a person's ON log no
   shape. Of the unpredicted
   11.52 kW EV from 90 minutes it reaches 69 of 73 (70 of 82); a load that only slows the charge (7 kW from 120 minutes, an ON 5 minutes late) leaves the pool
   rising, not pushed.
