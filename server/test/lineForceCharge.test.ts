@@ -1111,7 +1111,7 @@ test('★★ T9 the declined start (L3; review): every all-night blocker is one;
   const refused = { ...night(), forceChargeCeilingAttemptedAtMs: WIN_START, forceChargeCeilingSyncRetries: 1 };
   assert.equal(cls((decideForceCharge(refused, WIN_START + H, fo({ ceilingReadbackPct: 100 })) as { why?: string }).why ?? ''), 'ceilingRefused');
   // The push: per class, once it has held FORCE_CHARGE_LINE_DECLINED_PERSIST_MS unbroken.
-  const STALE = nfc.FORCE_CHARGE_BLOCKER_WHY.incoherent;
+  const STALE = nfc.FORCE_CHARGE_BLOCKER_WHY.noReadback;
   const VITALS = nfc.FORCE_CHARGE_BLOCKER_WHY.vitals;
   assert.equal(nfc.FORCE_CHARGE_LINE_DECLINED_PERSIST_MS, 10 * M);
   let st = nfc.EMPTY_LINE_DECLINED_PUSH;
@@ -1129,7 +1129,7 @@ test('★★ T9 the declined start (L3; review): every all-night blocker is one;
   // A second, different class that persists pushes too; the same class again never does.
   for (let i = 41; i <= 60; i++) tick(T1 + i * M, STALE);
   for (let i = 61; i <= 80; i++) tick(T1 + i * M, VITALS);
-  assert.deepEqual(pushes, [[T1 + 10 * M, 'vitals'], [T1 + 51 * M, 'incoherent']]);
+  assert.deepEqual(pushes, [[T1 + 10 * M, 'vitals'], [T1 + 51 * M, 'noReadback']]);
   // A class that flickers (blocker, then not) never accumulates.
   st = nfc.EMPTY_LINE_DECLINED_PUSH; pushes.length = 0;
   for (let i = 0; i < 60; i++) tick(T0 + i * M, i % 5 === 4 ? null : STALE);
@@ -1143,7 +1143,68 @@ test('★★ T9 the declined start (L3; review): every all-night blocker is one;
   // 14 kW: 4.79 kWh ⇒ 20.5 min + 15 ⇒ 35.5 min before the close — a start well after the 03:25 timed one.
   assert.equal(nfc.lineLatestStartMs(WIN_END, 56, 50.8, 92.16, 14, null, 3), WIN_END - ((0.052 * 92.16) / 14) * H - nfc.FORCE_CHARGE_JIT_BUFFER_MS);
   assert.equal(nfc.lineLatestStartMs(WIN_END, 56, 56, 92.16, 14, null, 3), WIN_END - FORCE_CHARGE_MIN_RUN_MS, 'at the ask: the last start the tick makes');
-  assert.ok(INDEX.includes('lineLatestStartMs(endMs, state.forceChargeLineAskPct!, '), 'the push quotes the latest start for ⌈L⌉');
+  assert.ok(INDEX.includes('      const latestAt = lineDeclinedLatestStartMs({\n'), 'the push quotes the latest start for ⌈L⌉');
+});
+
+/** (Fix12) A stale panel, as index.ts builds the tick's inputs with sp null: no slot readback, no connected slot, no coherent reading. */
+const STALE_PANEL = { slotsOn: null, connectedSlots: [], slotSocPct: null, socCoherent: false, ceilingReadbackPct: null, poolSocPct: null, fullKwh: null, chargeRateKw: null } as Partial<ForceChargeOpts>;
+
+test('★★★ T9 (Fix12) a stale panel is pushed as no readback, the fact it is, never as an incoherent reading; a fresh reading that fails coherence keeps its words; nothing is started, and the check order stays', () => {
+  const W = nfc.FORCE_CHARGE_BLOCKER_WHY;
+  const s = night();
+  const t = WIN_START + H;
+  const stale = decideForceCharge(s, t, fo(STALE_PANEL));
+  assert.deepEqual(stale, { kind: 'none', why: W.noReadback });
+  assert.equal(nfc.forceChargeBlockerClass((stale as { why: string }).why), 'noReadback', 'the push class, on real inputs at last');
+  // A fresh panel whose SoC fails coherence: slots read, so the reading is there and is what fails.
+  assert.deepEqual(decideForceCharge(s, t, fo({ socCoherent: false, slotsOn: [] })), { kind: 'none', why: W.incoherent });
+  assert.deepEqual(decideForceCharge(s, t, fo({ socCoherent: false, slotsOn: [1] })), { kind: 'none', why: W.incoherent });
+  // The order stays: red vitals first, then this, then the grid; a coherent night with no slot list keeps its own check, behind the grid.
+  assert.deepEqual(decideForceCharge(s, t, fo({ ...STALE_PANEL, vitalsRed: true })), { kind: 'none', why: W.vitals });
+  assert.deepEqual(decideForceCharge(s, t, fo({ ...STALE_PANEL, gridPresent: null })), { kind: 'none', why: W.noReadback });
+  assert.deepEqual(decideForceCharge(s, t, fo({ slotsOn: null })), { kind: 'none', why: W.noReadback });
+  assert.equal((decideForceCharge(s, t, fo({ slotsOn: null, gridPresent: null })) as { why: string }).why, `${W.gridPresence}unknown`);
+  // The push, on the real step and the real body: the cause read, and no time later than the charge allows.
+  let st = nfc.EMPTY_LINE_DECLINED_PUSH;
+  const pushed: string[] = [];
+  for (let i = 0; i <= 10; i++) { const r = nfc.lineDeclinedPushStep(st, (decideForceCharge(s, t + i * M, fo(STALE_PANEL)) as { why: string }).why, t + i * M); st = r.state; if (r.push) pushed.push(r.push); }
+  assert.deepEqual(pushed, ['noReadback']);
+  const body = (notify as unknown as { buildLineForceChargeDeclinedStart: (o: unknown) => { body: string } }).buildLineForceChargeDeclinedStart({ day: '2026-09-16', linePct: 55.55, why: W.noReadback, latestStartText: '4:11 AM' }).body;
+  assert.ok(body.includes('cannot start yet — no live slot readback from the panel.'), body);
+  assert.doesNotMatch(body, /incoherent/);
+  // Only one expression moved in decideForceCharge: its kind stays 'none', and every other consumer of the why is the class, the log and the push.
+  assert.ok(readFileSync(resolve(HERE, '../src/nightForceCharge.ts'), 'utf8').includes("  if (!o.socCoherent) return { kind: 'none', why: o.slotsOn == null ? W.noReadback : W.incoherent };\n"));
+});
+
+test('★★★ T9 (Fix12) the time the declined-start push quotes: from the live reading at the rate then; with none, from the reserve at the plan rate on the frozen nameplate; the close less 20 min only with no capacity at all', () => {
+  const latest = nfc.lineDeclinedLatestStartMs;
+  const base = { closeAtMs: WIN_END, askPct: 56, poolSocPct: null, liveFullWh: null, frozenFullWh: 92_160, rateKw: null, evDisplacedKwh: null, slotCount: 0 };
+  // The finding: pool 50 to ask 56 at 10 kW: 33.2 min + the 15-min buffer: 04:11, where the fallback said 04:40.
+  const stale = latest(base)!;
+  assert.equal(stale, nfc.lineLatestStartMs(WIN_END, 56, 50, 92.16, null, null, 0));
+  assert.equal(Math.round((WIN_END - stale) / M), 48);
+  assert.ok(stale < WIN_END - nfc.FORCE_CHARGE_MIN_RUN_MS, 'earlier than the last start');
+  // A coherent reading is the pool; a live capacity is the capacity, never the frozen one.
+  assert.equal(latest({ ...base, poolSocPct: 53 }), nfc.lineLatestStartMs(WIN_END, 56, 53, 92.16, null, null, 0));
+  assert.equal(latest({ ...base, liveFullWh: 80_000 }), nfc.lineLatestStartMs(WIN_END, 56, 50, 80, null, null, 0));
+  assert.equal(latest({ ...base, liveFullWh: 0 }), stale, 'a live zero is no capacity');
+  // What the tick has: its rate, the EV it counts, its slots.
+  assert.equal(latest({ ...base, poolSocPct: 53, liveFullWh: 92_160, rateKw: 14, evDisplacedKwh: 4, slotCount: 3 }), nfc.lineLatestStartMs(WIN_END, 56, 53, 92.16, 14, 4, 3));
+  assert.notEqual(latest({ ...base, rateKw: 14 }), stale);
+  assert.notEqual(latest({ ...base, evDisplacedKwh: 4 }), stale);
+  // Past the ask a reading needs no charge: the last start, as lineLatestStartMs caps it.
+  assert.equal(latest({ ...base, poolSocPct: 60 }), WIN_END - nfc.FORCE_CHARGE_MIN_RUN_MS);
+  // No capacity at all: the last start, the one time the add-on can still name. No close: nothing.
+  for (const frozenFullWh of [null, 0]) assert.equal(latest({ ...base, frozenFullWh }), WIN_END - nfc.FORCE_CHARGE_MIN_RUN_MS);
+  assert.equal(latest({ ...base, closeAtMs: null }), null);
+  // The tick's wiring: the frozen projection reaches it, and only here.
+  assert.ok(INDEX.includes(
+    '      const latestAt = lineDeclinedLatestStartMs({\n'
+    + "        closeAtMs: writeWindowEndMs(state), askPct: state.forceChargeLineAskPct!, poolSocPct: socCoherent ? socNowPct : null,\n"
+    + "        liveFullWh: fullWh, frozenFullWh: shp2.projection?.kind === 'shp2' ? shp2.projection.backupFullCapWh : null,\n"
+    + '        rateKw: chargeRateKw, evDisplacedKwh, slotCount: connectedSlots.length,\n'
+    + '      });\n'));
+  assert.ok(INDEX.includes("latestStartText: latestAt != null ? fmtSiteClock(latestAt) : 'the window close',"));
 });
 
 test('★★ T9 the morning summary (review): "ran to the window close" only when the OFF was the window\'s; any other OFF says when and why', () => {

@@ -49,6 +49,8 @@ import * as cardText from '../../web/src/cards/nightChargeText.js';
  * back, a late apply reopens it, and a run still on with no re-ON left keeps its line and loses the re-ON's clause.
  * U8 (Fix11) the plan's walk is told a run is on: served as on, never as switching on at a time, and past the last-start gate its close
  * stays continuous, with no "not expected to start" while the panel charges. Nothing written moves, and the plan of record stays.
+ * U9 (Fix12) an ON warned of on some slots is a closed start too: its other slots may be running, so no figure is stated and no walk is
+ * told a run is on, the card leads with the words whose write stands, and a late apply reopens it.
  */
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -526,6 +528,13 @@ test('★★★ U1c the banner of a line night whose start is closed says so, ne
   assert.deepEqual(status(noAsk, past), {});
   assert.equal(banner(card(noAsk, past), '23:00', 45).text, 'Supervised write armed — reserve → 50% at 23:00.', 'a cost night, byte for byte');
   assert.equal(banner(card(noAsk, past), '23:00', 45).cancel, 'Cancel tonight');
+  // (Fix12) At a reading of the target the armed banner reads as a line night's, on a night with no line too: decideActuation has
+  // nothing to raise there, so it is true, where v1.199.1 read "reserve → 50%" for a write that does not go. It needs no ask to know:
+  // every reserveAtTarget night has none. Cancel stays. The one surface of a no-line night that differs from v1.199.1.
+  assert.equal(decideActuation(noAsk, OPEN + M, TICK(50)).kind, 'none');
+  assert.deepEqual(banner(card(noAsk, past), '23:00', 50), { text: 'Supervised write armed for 23:00 — the reserve reads 50%, so none is due while it does.', settled: false, cancel: 'Cancel tonight' });
+  assert.equal(decideActuation(noAsk, OPEN + M, TICK(49)).kind, 'apply');
+  assert.deepEqual(banner(card(noAsk, past), '23:00', 49), { text: 'Supervised write armed — reserve → 50% at 23:00.', settled: false, cancel: 'Cancel tonight' }, "under the target: v1.199.1's words");
   assert.deepEqual(status(armed(), OPEN + M), {});
   assert.deepEqual(status(applied({ forceChargeOnAtMs: OPEN + H }), CLOSE - 10 * M), {});
   assert.deepEqual(status(armed(), OPEN + M, { cost: false, line: false }), {}, "'gatedOff'");
@@ -1226,7 +1235,6 @@ test('★★★ U6 a write the panel never read back is not told as raised: the 
 const NOT_TAKEN = 'the force-charge for it was switched on and has not taken effect: unless it applies late, none runs';
 const NO_RE_ON = 'the force-charge for it reads off and the add-on does not switch it back on tonight';
 const WORDS_SPENT = 'the add-on does not switch it back on tonight';
-const WORDS_LATE = 'unless it applies late, the add-on does not switch it back on';
 const CUT = CLOSE - 20 * M;
 const WARNED = (over: Partial<NightActuationState> = {}): NightActuationState => RUN({
   forceChargeOnVerifiedAtMs: null, forceChargeOnFailedAtMs: STOP_AT - 30 * M, forceChargeOnFailedSlots: [1, 2, 3], forceChargeOnRetries: 1, ...over,
@@ -1237,7 +1245,7 @@ const SPENT = (over: Partial<NightActuationState> = {}): NightActuationState => 
 const noReOnOf = (s: NightActuationState, t: number): NoReOnInput | null => (nfc as unknown as { armedLineNoReOn: (s: NightActuationState, t: number) => NoReOnInput | null }).armedLineNoReOn(s, t);
 const reOnGone = (s: NightActuationState, t: number): boolean => (nfc as unknown as { lineReOnGone: (s: NightActuationState, t: number) => boolean }).lineReOnGone(s, t);
 
-test('★★★ U7 an ON warned of on every slot is a closed start: nothing of the add-on\'s switches it on again; a late apply reopens it; one with a slot that took stays armed', () => {
+test('★★★ U7 an ON warned of on every slot is a closed start: nothing of the add-on\'s switches it on again; a late apply reopens it', () => {
   const s = WARNED();
   const t = STOP_AT;
   assert.equal(nfc.forceChargeStartClosed(s, t, GATES), 'started', "the pushes' own key stays");
@@ -1248,7 +1256,7 @@ test('★★★ U7 an ON warned of on every slot is a closed start: nothing of t
   // A late apply is verified, and the record reads armed from the next recompute.
   assert.equal(decideForceCharge(s, t, fo({ poolSocPct: 45, slotsOn: [1, 2, 3] })).kind, 'onVerified');
   assert.equal(closedRec({ ...s, forceChargeOnVerifiedAtMs: t }, t + M), null, 'a late apply reopens it');
-  assert.equal(closedRec(WARNED({ forceChargeOnFailedSlots: [3] }), t), null, 'a partial failure: slots run');
+  assert.deepEqual(closedRec(WARNED({ forceChargeOnFailedSlots: [3] }), t), { windowStartMs: OPEN, why: 'partTaken' }, 'a partial failure: U9');
   assert.equal(closedRec(WARNED({ forceChargeOnFailedSlots: [1, 2], forceChargeSlots: [1, 2] }), t)?.why, 'notTaken', 'every slot of ours, of a list of two');
   assert.equal(closedRec(WARNED({ forceChargeOnFailedAtMs: null, forceChargeOnFailedSlots: null }), t), null, 'not warned of');
   assert.equal(closedRec(WARNED({ cancelled: true }), t)?.why, 'cancelled');
@@ -1346,17 +1354,16 @@ test('★★★ U7 the finding\'s walk, on the real chain: a night whose ON is w
   assert.doesNotMatch(cardText.outageLineRow(p as never, 50)!, /stays on|the add-on switches it back on|expected at the close/);
 });
 
-test('★★★ U7 a run with no re-ON left keeps its line and loses the clause: spent, past the cutoff, or a partial ON that has not verified; a run with one to come, and any other night, as it was', () => {
+test('★★★ U7 a run with no re-ON left keeps its line and loses the clause: spent, or past the cutoff; a run with one to come, and any other night, as it was', () => {
   const t = CLOSE - H;
   const spent = { windowStartMs: OPEN, words: WORDS_SPENT };
   assert.deepEqual(noReOnOf(SPENT({ forceChargeLineOffSlots: [] }), t), spent, 'spent, slots reading on');
   assert.deepEqual(noReOnOf(RUN(), CUT), spent, 'at the cutoff');
   assert.equal(noReOnOf(RUN(), CUT - 1), null, 'before it');
   assert.equal(noReOnOf(SPENT({ forceChargeLineReOns: 1 }), t), null, 'one left');
-  // A partial ON: slots run, a re-ON needs the ON verified, and a late apply verifies it: its words hold either way.
-  assert.deepEqual(noReOnOf(WARNED({ forceChargeOnFailedSlots: [3] }), t), { windowStartMs: OPEN, words: WORDS_LATE });
+  // (Fix12) An ON warned of on some slots is a closure's, which goes first (U9): this reads a verified run alone.
+  assert.equal(noReOnOf(WARNED({ forceChargeOnFailedSlots: [3] }), t), null);
   assert.equal(nfc.lineReOnDue(WARNED({ forceChargeOnFailedSlots: [3], forceChargeLineOffSlots: [1, 2, 3] }), t, fo({ poolSocPct: 52, slotsOn: [] }), [1, 2, 3]), null);
-  assert.equal(noReOnOf(WARNED({ forceChargeOnFailedSlots: [3], forceChargeOnVerifiedAtMs: t }), t), null, 'a late apply: re-ONs again');
   assert.equal(noReOnOf(RUN({ forceChargeOnVerifiedAtMs: null }), t), null, 'an ON no reading has judged');
   assert.equal(noReOnOf(applied(), t), null, 'no run');
   assert.equal(noReOnOf(emptyActuationState(), t), null, 'no record');
@@ -1364,7 +1371,7 @@ test('★★★ U7 a run with no re-ON left keeps its line and loses the clause:
   // The row and the rationale: the line stays claimed, the walk stays, and what the record cannot do is said.
   const base = planAt(45);
   const open = base.window!.startMs;
-  for (const words of [WORDS_SPENT, WORDS_LATE]) {
+  for (const words of [WORDS_SPENT]) {
     const p = planAt(45, { noReOn: { windowStartMs: open, words } });
     assert.deepEqual(p.forceChargeLine, base.forceChargeLine);
     assert.equal(p.cushionEnvelopeReason, undefined, 'still carried');
@@ -1577,10 +1584,10 @@ test('★★★ U8 earlier in a run: never "switches on at" an ON long past, whi
   assert.doesNotMatch(barred.rationale, /the add-on switches it back on/, barred.rationale);
 });
 
-test('★★★ U8 what is not a run on keeps its words: an ON in its grace, a partial ON, a run stopped at the ceiling with a re-ON to come', () => {
+test('★★★ U8 what is not a run on keeps its words: an ON in its grace, a run stopped at the ceiling with a re-ON to come; a partial ON is told nothing of a run (U9)', () => {
   for (const [why, s, t] of [
     ['an ON in its readback grace', armedRun({ forceChargeOnVerifiedAtMs: null, forceChargeLineOffSlots: null, forceChargeOnAtMs: WIN_CLOSE - 21 * M, forceChargeOnLastAttemptMs: WIN_CLOSE - 21 * M }), WIN_CLOSE - 15 * M],
-    ['a partial ON', armedRun({ forceChargeOnVerifiedAtMs: null, forceChargeOnFailedAtMs: WIN_CLOSE - 30 * M, forceChargeOnFailedSlots: [3] }), WIN_CLOSE - 15 * M],
+    ['a partial ON, the closure\'s', armedRun({ forceChargeOnVerifiedAtMs: null, forceChargeOnFailedAtMs: WIN_CLOSE - 30 * M, forceChargeOnFailedSlots: [3] }), WIN_CLOSE - 15 * M],
     ['a panel stop', armedRun({ forceChargeLineOffSlots: [1, 2, 3], forceChargeLinePanelOffAtMs: WIN_CLOSE - 50 * M }), WIN_CLOSE - 45 * M],
   ] as const) {
     assert.equal(runOnOf(s), null, why);
@@ -1714,6 +1721,137 @@ test('★★★ U8 the on-peak guard: the re-ON\'s cutoff runs from it and the r
   const off = { ...s, forceChargeOffAtMs: end, forceChargeOffReason: 'windowEnd' } as NightActuationState;
   assert.equal(runOnOf(off), null);
   assert.equal(closedRec(off, end + M)?.why, 'stopped');
+});
+
+/* ══ U9 — (Fix12) an ON warned of on some slots ═══════════════════════════════════════════════════════════════════════════════════ */
+
+const PART_TAKEN = 'the force-charge for it was switched on and has not taken effect on all its slots: unless it applies late, the add-on does not switch it back on';
+/** What a partial ON must never be served: its other slots may run on or stop, so no start, no run, no "armed" and no walked close. */
+const PART_CLAIMS = /switches on at|switches on just in time|runs from|runs until|is on, runs|not expected to start|no charge expected|% by the close|expected at the close|takes it to|stays on/;
+/** The real chain, a minute at a time: armed by armFromPlan, stepped by decideForceCharge with index.ts's stamps, `refused` never reading ON,
+ *  the others importing `kw` each beside a `house` kW load on a pool of `poolKwh`. Returns the record and the pool at each minute left. */
+const partialChain = (p0: number, refused: number[], { kw = 14 / 3, house = 0.9, poolKwh = 92.16 } = {}) => {
+  let s: NightActuationState = {
+    ...armFromPlan(emptyActuationState(), '2027-01-04', PLAN45, WIN_OPEN - 90 * M, 45, false, null, true)!,
+    applyAttemptedAtMs: WIN_OPEN, attemptBaselinePct: 45, appliedAtMs: WIN_OPEN, priorReservePct: 45, applyVerifiedAtMs: WIN_OPEN + 3 * M,
+  };
+  let pool = p0;
+  let onAt: number | null = null;
+  const seen: string[] = [];
+  const at = new Map<number, { s: NightActuationState; t: number; pool: number }>();
+  for (let t = WIN_OPEN + 4 * M; t < WIN_CLOSE; t += M) {
+    const slotsOn = onAt == null ? [] : [1, 2, 3].filter((n) => !refused.includes(n));
+    const a = decideForceCharge(s, t, fo({ ceilingReadbackPct: 81, poolSocPct: pool, slotsOn, slotSocPct: { 1: pool, 2: pool, 3: pool } }));
+    if (a.kind !== 'none') seen.push(a.kind);
+    if (a.kind === 'syncCeiling') s = { ...s, forceChargeCeilingPriorPct: a.prior, forceChargeCeilingAttemptedAtMs: t, forceChargeCeilingSyncedPct: a.pct };
+    else if (a.kind === 'on') { s = { ...s, ...nfc.forceChargeOnStamp(s, t, a.slots, GATES), forceChargeOnLastAttemptMs: t }; onAt = t; }
+    else if (a.kind === 'onRetry') s = { ...s, forceChargeOnRetries: s.forceChargeOnRetries + 1, forceChargeOnLastAttemptMs: t };
+    else if (a.kind === 'onFailed') s = { ...s, forceChargeOnFailedAtMs: t, forceChargeOnFailedSlots: [...a.slots] };
+    else if (a.kind === 'onVerified') s = { ...s, forceChargeOnVerifiedAtMs: t };
+    pool += (([1, 2, 3].filter((n) => !refused.includes(n)).length * (onAt == null ? 0 : kw) - house) / 60 / poolKwh) * 100;
+    at.set((WIN_CLOSE - t) / M, { s, t, pool: Number(pool.toFixed(2)) });
+  }
+  return { seen, at: (left: number) => at.get(left)! };
+};
+
+test('★★★ U9 an ON warned of on some slots is a closed start, of its own: the closure names it, its write stands but the card leads, and the words state no figure', () => {
+  const t = STOP_AT;
+  const s = WARNED({ forceChargeOnFailedSlots: [3] });
+  assert.deepEqual(nfc.partialForceChargeOnFailureSlots(s), [3]);
+  assert.equal(nfc.reserveWriteStands(s), true, 'its write does stand');
+  assert.deepEqual(closedRec(s, t), { windowStartMs: OPEN, why: 'partTaken' }, 'and is withheld: "reserve held as a floor — no charge expected" is false while two slots charge');
+  assert.equal(closedRec(WARNED(), t)?.why, 'notTaken', 'every slot');
+  assert.equal(closedRec(WARNED({ forceChargeOnFailedSlots: null }), t)?.why, 'notTaken', 'a failure kept before its slots were: whole-night');
+  assert.equal(closedRec(WARNED({ forceChargeOnFailedSlots: [2, 3] }), t)?.why, 'partTaken', 'two of three');
+  assert.equal(closedRec(WARNED({ forceChargeOnFailedSlots: [1], forceChargeSlots: [1, 2] }), t)?.why, 'partTaken', 'one of two');
+  assert.equal(closedRec(WARNED({ forceChargeOnFailedAtMs: null, forceChargeOnFailedSlots: null }), t), null, 'an ON in its grace: not warned of');
+  assert.equal(closedRec(WARNED({ forceChargeOnFailedSlots: [3], cancelled: true }), t)?.why, 'cancelled', 'a one-way stamp goes first');
+  assert.equal(closedRec(WARNED({ forceChargeOnFailedSlots: [3], forceChargeOffAtMs: t, forceChargeOffReason: 'windowEnd' }), t + M)?.why, 'stopped');
+  assert.equal(closedRec(WARNED({ forceChargeOnFailedSlots: [3], forceChargeLineAskPct: null, forceChargeLinePct: null }), t), null, 'a cost night: not a word');
+  assert.equal(nfc.lineStartClosedWords('it', 'partTaken' as never), PART_TAKEN);
+  assert.equal(nfc.lineStartClosedWords('the 55.6% outage line', 'partTaken' as never), PART_TAKEN.replace('for it', 'for the 55.6% outage line'));
+  assert.ok(!('partTaken' in nfc.FORCE_CHARGE_START_CLOSED_WHY));
+  assert.equal(nfc.forceChargeStartClosed(s, t, GATES), 'started', "the pushes' own key stays");
+  const base = planAt(45);
+  const p = planAt(45, { closed: { windowStartMs: base.window!.startMs, why: 'partTaken' } as never });
+  assert.equal(p.forceChargeLine, undefined);
+  assert.equal(p.cushionEnvelopeReason, 'startClosed');
+  assert.equal((p as unknown as { cushionStartClosedWords: string }).cushionStartClosedWords, PART_TAKEN);
+  assert.equal((p as never as { cushionStartClosedNoWrite?: boolean }).cushionStartClosedNoWrite, true, 'the card leads');
+  assert.deepEqual(cardText.startClosedLead(p as never), { headline: 'The outage line is not claimed tonight', detail: `${PART_TAKEN.charAt(0).toUpperCase()}${PART_TAKEN.slice(1)}.` });
+  assert.ok(p.rationale.includes(`, and ${PART_TAKEN}, so the cushion is not assured — residual risk remains.`), p.rationale);
+  assert.deepEqual(sizing(p), sizing(base), 'every figure a write reads stays');
+  const status = (cycle as unknown as { lineStartClosedStatus: (s: NightActuationState, t: number, g: { cost: boolean; line: boolean }) => Record<string, unknown> }).lineStartClosedStatus;
+  assert.deepEqual(status(s, t, GATES), { lineStartClosed: { text: `${PART_TAKEN.replace('for it', 'for the 55.6% outage line').charAt(0).toUpperCase()}${PART_TAKEN.replace('for it', 'for the 55.6% outage line').slice(1)}.`, cancel: true } });
+  // The tick is untouched: no re-ON, nothing more to issue, and the failure stays once a night.
+  for (let at = t; at < CLOSE - M; at += M) assert.equal(decideForceCharge(s, at, fo({ poolSocPct: 52, slotsOn: [1, 2] })).kind, 'none');
+  assert.equal(nfc.lineReOnDue(s, t, fo({ poolSocPct: 52, slotsOn: [1, 2] }), [1, 2, 3]), null);
+});
+
+test('★★★ U9 the finding, on the real chain: at T-60, T-45 and T-15, from pools 46, 48, 60 and 62, slot 2 or slots 2 and 3 refused: no start, no run, no "armed", no walked figure on the rationale, the row, the lead or the banner', () => {
+  const status = (cycle as unknown as { lineStartClosedStatus: (s: NightActuationState, t: number, g: { cost: boolean; line: boolean }) => Record<string, unknown> }).lineStartClosedStatus;
+  for (const p0 of [46, 48, 60, 62]) for (const refused of [[2], [2, 3]]) {
+    const night = partialChain(p0, refused);
+    assert.deepEqual(night.seen.filter((k) => k !== 'syncCeiling'), ['on', 'onRetry', 'onFailed'], 'and nothing after it to the close');
+    for (const left of [60, 45, 15]) {
+      const { s, t, pool } = night.at(left);
+      const name = `pool ${p0}, ${refused.join('+')} refused, T-${left}, reading ${pool}`;
+      assert.deepEqual(nfc.partialForceChargeOnFailureSlots(s), refused, name);
+      assert.equal(s.forceChargeOnVerifiedAtMs, null, name);
+      assert.equal(runOnOf(s), null, name);
+      assert.equal(noReOnOf(s, t), null, name);
+      const p = servedOf(s, t, pool);
+      assert.equal(p.chargeTonight, true, name);
+      assert.equal(p.cushionEnvelopeReason, 'startClosed', name);
+      const row = cardText.outageLineRow(p as never, 50)!;
+      const lead = cardText.startClosedLead(p as never)!;
+      const banner = (cardText.actuationBannerState as unknown as (a: unknown, d: string | null, r?: number | null) => { text: string })({ ...s, ...status(s, t, GATES) }, '23:00', 50).text;
+      assert.ok(lead != null, name);
+      assert.ok(row.includes(`not claimed tonight (${PART_TAKEN})`), row);
+      for (const [where, text] of [['rationale', p.rationale], ['row', row], ['headline', `${lead.headline} ${lead.detail}`], ['banner', banner]] as const) {
+        assert.doesNotMatch(text, PART_CLAIMS, `${name}, ${where}: ${text}`);
+      }
+      assert.equal(p.expectedForceChargeStartMs, undefined, name);
+      assert.equal(p.expectedForceChargeMode, undefined, name);
+    }
+  }
+});
+
+test('★★★ U9 a late apply reopens it: the verify stamps it, the closure goes and the run is on, as any verified run', () => {
+  const night = partialChain(60, [3]);
+  const { s, t, pool } = night.at(45);
+  assert.equal(closedRec(s, t)?.why, 'partTaken');
+  const a = decideForceCharge(s, t + M, fo({ ceilingReadbackPct: 81, poolSocPct: pool, slotsOn: [1, 2, 3], slotSocPct: { 1: pool, 2: pool, 3: pool } }));
+  assert.equal(a.kind, 'onVerified', 'a late apply still verifies');
+  const v = { ...s, forceChargeOnVerifiedAtMs: t + M };
+  assert.equal(closedRec(v, t + 2 * M), null, 'reopened');
+  assert.equal(runOnOf(v), v.windowStartMs);
+  assert.equal(servedOf(v, t + 2 * M, pool).cushionEnvelopeReason, undefined, 'carried again');
+  assert.equal(lineWords(servedOf(v, t + 2 * M, pool)).includes('the force-charge for the outage line is on'), true);
+  // Its words said so: "unless it applies late", and that is the one way back.
+  assert.ok(PART_TAKEN.includes('unless it applies late'));
+});
+
+test('★★★ U9 never a run on: told it is on, the walk takes the three-slot rate and drops a true warning: served over the 70.55 line, on a night that closes under it', () => {
+  // Measured: 5.2 kW a Core (15-2), the house on the grid, an 87 kWh pool.
+  const night = partialChain(60, [2, 3], { kw: 5.2, house: 0, poolKwh: 87 });
+  const { s, t, pool } = night.at(15);
+  assert.equal(runOnOf(s), null);
+  // What the walk would say, told: over the line, with no note. What the chain does: under it.
+  const told = planAt(45, { at: t, pool, runOn: WIN_OPEN });
+  assert.ok(told.expectedWriteLevelPct! > PLAN45.cushionLineSocPct!, `${told.expectedWriteLevelPct}`);
+  assert.ok(night.at(1).pool < PLAN45.cushionLineSocPct!, `the night reads ${night.at(1).pool} at the close`);
+  assert.deepEqual(servedOf(s, t, pool), planAt(45, { at: t, pool, closed: closedRec(s, t) }), 'the closure says it, with no figure');
+});
+
+test('★★★ U9 the unverified branch of armedLineNoReOn is gone: a closure goes first on every failure stamp, so nothing reached it', () => {
+  for (const failed of [[1, 2, 3], [3], [2, 3], null]) {
+    const s = WARNED({ forceChargeOnFailedSlots: failed });
+    assert.equal(noReOnOf(s, STOP_AT), null, String(failed));
+    assert.notEqual(closedRec(s, STOP_AT), null, String(failed));
+  }
+  const SRC = readFileSync(resolve(HERE, '../src/nightForceCharge.ts'), 'utf8');
+  assert.ok(!SRC.includes("words: 'unless it applies late, the add-on does not switch it back on'"));
 });
 
 test('★★★ U8 wiring: beside the closure and the no-re-ON, on their terms: the served plan alone reads it, and the plan of record stays', () => {

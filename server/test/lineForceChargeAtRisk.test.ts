@@ -8,6 +8,7 @@ import { decideForceCharge, type ForceChargeOpts } from '../src/nightForceCharge
 import { coerceActuationState, emptyActuationState, type NightActuationState } from '../src/nightChargeActuator.js';
 import * as notify from '../src/notify.js';
 import { buildNightChargeApplyFailure, buildNightChargeMorningSummary, buildNightForceChargeOnFailure } from '../src/notify.js';
+import { withEnv } from './golden/support/env.js';
 
 /**
  * v1.200.0 (review round 2) — A LINE NIGHT THAT LOSES ITS LINE AFTER THE START IS PUSHED WHILE A PERSON CAN
@@ -39,7 +40,9 @@ import { buildNightChargeApplyFailure, buildNightChargeMorningSummary, buildNigh
  *       TICK of margin before the cutoff and the push is judged on the hand-back's own tick: never neither while a tick reads
  *       before the cutoff after each hold; a 'reOnRefused' push may be followed by the retry, and its words say it may —
  *       or, where no tick can bring it (its spacing ends at or past the cutoff), that its next try comes after the cutoff,
- *       and then none does (reOnRetryPossible).
+ *       and then none does (reOnRetryPossible). (Fix12) A pool FLAT with every slot that counts reading ON waits until the time
+ *       left no longer covers the charge to ⌈L⌉ at the plan rate (lineFlatPushHeld): a slow charge beside an EV reads level hours
+ *       before the close.
  *  W2 — a line re-ON is readback-checked FORCE_CHARGE_ON_VERIFY_AFTER_MS after it, like the first ON. (review 4) The check
  *       keeps the latest re-ON that took effect (lineReOnCheckedStamp), across the next re-ON and a restart.
  *  W3 — the morning account of a line-ask night: under the line said so; an unread close said so; the panel's
@@ -441,7 +444,9 @@ test('★★★ W1 lineAtRiskPushDue — each condition holds it back', () => {
   none(risky({ forceChargeLinePoolSamples: [{ pct: 57, atMs: T - 15 * M }] }), onReading(), T, 'rising (58 > 57)');
   // (review 3) …also at or under ⌈L⌉, where a flat pool is pushed: a pool rising there is the charge working.
   none(risky({ forceChargeLinePoolSamples: [{ pct: 54, atMs: T - 15 * M }] }), onReading({ poolSocPct: 55, slotSocPct: at(55) }), T, 'rising under the line (54 → 55)');
-  assert.notEqual(due(risky({ forceChargeLinePoolSamples: [{ pct: 55, atMs: T - 15 * M }] }), T, onReading({ poolSocPct: 55, slotSocPct: at(55) })), null, 'flat under the line: pushed');
+  // (Fix12) …once the time left no longer covers the charge to ⌈L⌉ at the plan rate: 40.5 min before the close from 55.
+  const inGate = WIN_END - 40 * M;
+  assert.notEqual(due(risky({ forceChargeLinePoolSamples: [{ pct: 55, atMs: inGate - 15 * M }] }), inGate, onReading({ poolSocPct: 55, slotSocPct: at(55) })), null, 'flat under the line, past the gate: pushed');
   none(risky({ forceChargeLinePoolSamples: [{ pct: 62, atMs: T - 5 * M }] }), onReading(), T, 'no reading 10 min older');
   none(risky({ forceChargeLinePoolSamples: null }), onReading(), T, 'no trail');
   none(risky({ forceChargeLineReOns: 1, forceChargeLineReOnAtMs: T - 15 * M + 1, forceChargeLineReOnSlots: [1, 2, 3], forceChargeLineReOnCheckedAtMs: T - M }), onReading(), T, 'a re-ON in its readback grace is left alone');
@@ -493,17 +498,134 @@ test('★★★ W1 (review 3) the trend is judged on readings after the last ON 
   const flat = (pct: number) => risky({ forceChargeLinePoolSamples: [{ pct, atMs: T - 12 * M }, { pct, atMs: T - 2 * M }] });
   assert.equal(due(flat(59), T, charging(59)), null, 'flat at 59, above ⌈L⌉');
   assert.equal(due(flat(57), T, charging(57)), null, 'flat at 57, above ⌈L⌉');
-  // A flat pool AT ⌈L⌉ or under it is at risk (one more point lost is the line): pushed.
-  assert.equal(due(flat(56), T, charging(56))?.cause, 'onNotRising', 'flat at ⌈L⌉');
-  assert.equal(due(flat(55), T, charging(55))?.cause, 'onNotRising', 'flat under the line');
+  // A flat pool AT ⌈L⌉ or under it is at risk (one more point lost is the line): pushed, (Fix12) once the time left says so.
+  const G = WIN_END - 40 * M;
+  const flatAtG = (pct: number) => risky({ forceChargeLinePoolSamples: [{ pct, atMs: G - 12 * M }, { pct, atMs: G - 2 * M }] });
+  assert.equal(due(flatAtG(56), G, charging(56))?.cause, 'onNotRising', 'flat at ⌈L⌉');
+  assert.equal(due(flatAtG(55), G, charging(55))?.cause, 'onNotRising', 'flat under the line');
   // A FALLING pool keeps the start-target threshold: 60 against 62, above ⌈L⌉.
   assert.equal(due(risky(), T, charging(60))?.cause, 'onNotRising', 'falling, under the start target');
-  // On a cost-dominant night (ask 70): flat at 72 is not pushed; flat at 70 is.
+  // On a cost-dominant night (ask 70): flat at 72 is not pushed; flat at 70 is, past the same gate.
   const costDom = (pct: number) => risky({ forceChargeCeilingPct: 90, forceChargeLineAskPct: 70, forceChargeLinePct: 69.4, forceChargeMode: 'cost',
-    forceChargeCeilingSyncedPct: 90, forceChargeLinePoolSamples: [{ pct, atMs: T - 12 * M }] });
+    forceChargeCeilingSyncedPct: 90, forceChargeLinePoolSamples: [{ pct, atMs: G - 12 * M }] });
   const cdo = (pct: number) => fo({ enabled: true, poolSocPct: pct, slotsOn: [1, 2, 3], slotSocPct: at(pct), ceilingReadbackPct: 90 });
-  assert.equal(due(costDom(72), T, cdo(72)), null);
-  assert.equal(due(costDom(70), T, cdo(70))?.cause, 'costMode');
+  assert.equal(due(costDom(72), G, cdo(72)), null);
+  assert.equal(due(costDom(70), G, cdo(70))?.cause, 'costMode');
+});
+
+/* ── (Fix12) a flat pool with every slot reading on: a slow charge, until the time left says otherwise ──────────────────── */
+
+const ASK = 56;
+const FULL = 92.16;
+/** The flat record at `t`: the pool reads `pct` now and read it 12 min ago, every slot of ours ON, the trend past the ON's grace. */
+const flatNight = (pct: number, t: number, over: Record<string, unknown> = {}): S => onNight({
+  forceChargeOnAtMs: WIN_START + 10 * M, forceChargeOnVerifiedAtMs: WIN_START + 12 * M, forceChargeOnLastAttemptMs: WIN_START + 10 * M,
+  forceChargeLinePoolSamples: [{ pct, atMs: t - 12 * M }, { pct, atMs: t - 2 * M }], ...over,
+});
+const flatOn = (pct: number, over: Partial<ForceChargeOpts> = {}) => fo({ poolSocPct: pct, slotsOn: [1, 2, 3], slotSocPct: at(pct), ...over });
+/** The first instant the push may go on a flat pool: the line's latest start at the plan rate, less the push's own lead. */
+const gateMs = (pct: number): number => nfc.lineLatestStartMs(WIN_END, ASK, pct, FULL, null, null, 3) - nfc.FORCE_CHARGE_LINE_AT_RISK_LEAD_MS;
+
+test('★★★ W1 (Fix12) the gate: held to the instant the time left no longer covers the charge to ⌈L⌉ at the plan rate, then pushed; from 52 that is 57.1 min out, at ⌈L⌉ the last start less the lead', () => {
+  const due = nfc.lineAtRiskPushDue;
+  const g = gateMs(52);
+  // 4 points of a 92.16 kWh pool at 10 kW is 22.1 min, + the 15-min buffer, + the 20-min lead.
+  assert.ok(Math.abs((WIN_END - g) / M - (0.04 * FULL / nfc.FORCE_CHARGE_PLAN_RATE_KW * 60 + 15 + 20)) < 1e-6, String((WIN_END - g) / M));
+  assert.equal(nfc.lineFlatPushHeld(g - 1, WIN_END, ASK, 52, FULL, 3), true, 'a millisecond before');
+  assert.equal(nfc.lineFlatPushHeld(g, WIN_END, ASK, 52, FULL, 3), false, 'at it');
+  assert.equal(due(flatNight(52, g - 1), g - 1, flatOn(52)), null, 'held to the last millisecond');
+  assert.deepEqual(due(flatNight(52, g), g, flatOn(52))?.cause, 'onNotRising', 'pushed at the exact instant');
+  // At ⌈L⌉ the charge needs nothing: the last start (the close less 20 min) less the lead, 40 min out, with never a buffer past it.
+  assert.equal(gateMs(ASK), WIN_END - 40 * M);
+  assert.equal(due(flatNight(ASK, WIN_END - 40 * M - 1), WIN_END - 40 * M - 1, flatOn(ASK)), null);
+  assert.equal(due(flatNight(ASK, WIN_END - 40 * M), WIN_END - 40 * M, flatOn(ASK))?.cause, 'onNotRising');
+  // The on-peak guard's close is the close: the same gate, 30 min sooner.
+  const guard = { nextOnPeakStartMs: WIN_END + 30 * M };
+  const gg = nfc.lineLatestStartMs(WIN_END - 30 * M, ASK, 52, FULL, null, null, 3) - nfc.FORCE_CHARGE_LINE_AT_RISK_LEAD_MS;
+  assert.equal(due(flatNight(52, gg - 1, guard), gg - 1, flatOn(52)), null);
+  assert.equal(due(flatNight(52, gg, guard), gg, flatOn(52))?.closeAtMs, WIN_END - 30 * M);
+});
+
+test('★★★ W1 (Fix12) the plan rate and no EV energy, on purpose: a 3 kW live rate and an EV\'s kWh, the very nights of the false alarm, do not open the gate', () => {
+  const due = nfc.lineAtRiskPushDue;
+  const held = WIN_END - 5 * H;
+  // The false alarm: hours before the close, a pack importing 3 kW beside an EV. Timed on that rate the gate would be open at once.
+  const slow = { chargeRateKw: 3, evDisplacedKwh: 30 };
+  assert.ok(nfc.lineLatestStartMs(WIN_END, ASK, 52, FULL, 3, 30, 3) - nfc.FORCE_CHARGE_LINE_AT_RISK_LEAD_MS < held, 'the live figures would open it');
+  assert.equal(due(flatNight(52, held), held, flatOn(52, slow)), null, 'held');
+  const g = gateMs(52);
+  assert.equal(due(flatNight(52, g - 1), g - 1, flatOn(52, slow)), null, 'the live figures move nothing');
+  assert.equal(due(flatNight(52, g), g, flatOn(52, slow))?.cause, 'onNotRising');
+  assert.equal(due(flatNight(52, g - 1), g - 1, flatOn(52, { chargeRateKw: 30, evDisplacedKwh: null })), null, 'nor a live rate over the plan rate');
+  assert.equal(due(flatNight(52, g), g, flatOn(52, { chargeRateKw: 30, evDisplacedKwh: null }))?.cause, 'onNotRising');
+  assert.equal(nfc.FORCE_CHARGE_PLAN_RATE_KW, 10, 'under the ~14 kW a pack takes');
+});
+
+test('★★★ W1 (Fix12) the slot count reaches the plan rate as the start reads it: slots × FORCE_CHARGE_KW_PER_CORE where that is set, 10 kW where it is not', async () => {
+  const due = nfc.lineAtRiskPushDue;
+  await withEnv({ FORCE_CHARGE_KW_PER_CORE: '5' }, () => {
+    // 15 kW for three slots: 14.7 min of charge from 52, against 22.1 at 10 kW; 10 kW again with two connected, 7.5 kW with one... held longer on the faster rate.
+    const three = nfc.lineLatestStartMs(WIN_END, ASK, 52, FULL, null, null, 3) - nfc.FORCE_CHARGE_LINE_AT_RISK_LEAD_MS;
+    const one = nfc.lineLatestStartMs(WIN_END, ASK, 52, FULL, null, null, 1) - nfc.FORCE_CHARGE_LINE_AT_RISK_LEAD_MS;
+    assert.ok(one < three, 'fewer slots, a slower plan rate, a gate sooner');
+    assert.equal(due(flatNight(52, three - 1), three - 1, flatOn(52)), null);
+    assert.equal(due(flatNight(52, three), three, flatOn(52))?.cause, 'onNotRising');
+    assert.equal(due(flatNight(52, one), one, flatOn(52, { connectedSlots: [1], slotsOn: [1, 2, 3] }))?.cause, 'onNotRising', 'one connected: open at its own rate');
+    assert.equal(due(flatNight(52, one), one, flatOn(52)), null, 'three connected: still held there');
+  });
+});
+
+test('★★★ W1 (Fix12) only a flat pool with every slot that counts reading on is held: a slot reading off explains it, a falling pool is no slow charge, each pushed at any time', () => {
+  const due = nfc.lineAtRiskPushDue;
+  const early = WIN_END - 5 * H;
+  assert.equal(due(flatNight(52, early), early, flatOn(52)), null, 'the control: held');
+  // A slot reading off, spent or held, on a flat reading: at any time, exactly as before.
+  const spent = flatNight(52, early, { forceChargeLineReOns: 2, forceChargeLineReOnAtMs: early - 40 * M, forceChargeLineReOnSlots: [1, 2, 3], forceChargeLineReOnCheckedAtMs: early - 25 * M, forceChargeLineReOnNotAppliedSlots: [] });
+  const oneOff = flatOn(52, { slotsOn: [1, 3] });
+  assert.equal(due(spent, early, oneOff)?.cause, 'reOnSpent');
+  assert.deepEqual(due(spent, early, oneOff)?.offSlots, [2]);
+  assert.equal(due({ ...spent, forceChargeLineReOnNotAppliedSlots: [2] }, early, oneOff)?.cause, 'reOnNotApplied');
+  assert.equal(due(flatNight(52, early), early, flatOn(52, { slotsOn: [1, 3], vitalsRed: true }))?.cause, 'reOnHeld', 'a re-ON its gates hold');
+  const handed = flatNight(52, WIN_END - 30 * M, { forceChargeLineReOnAtMs: WIN_END - 30 * M - 2 * M, forceChargeLineReOnSlots: null });
+  assert.equal(due(handed, WIN_END - 30 * M, flatOn(52, { slotsOn: [] }))?.cause, 'reOnRefused');
+  // A slot off with its Core at the panel's stop does not count: every slot that counts reads on, and the flat reading waits.
+  assert.equal(due(flatNight(52, early), early, flatOn(52, { slotsOn: [1, 2], slotSocPct: { 1: 52, 2: 52, 3: 80 } })), null, 'the third at the stop');
+  // Falling, at any time, at or under ⌈L⌉ or above it.
+  const falling = (now: number, ref: number) => due(flatNight(ref, early), early, flatOn(now));
+  assert.equal(falling(51, 52)?.cause, 'onNotRising');
+  assert.equal(falling(59, 60)?.cause, 'onNotRising', 'above ⌈L⌉, under the start target');
+  // A cost-dominant night's flat pool is held like any other: its cost walk cannot tell a slow charge either.
+  const cost = { forceChargeCeilingPct: 90, forceChargeLineAskPct: 70, forceChargeLinePct: 69.4, forceChargeMode: 'cost', forceChargeCeilingSyncedPct: 90 };
+  assert.equal(due(flatNight(66, early, cost), early, flatOn(66, { enabled: true, ceilingReadbackPct: 90 })), null, 'held');
+  const cg = nfc.lineLatestStartMs(WIN_END, 70, 66, FULL, null, null, 3) - nfc.FORCE_CHARGE_LINE_AT_RISK_LEAD_MS;
+  assert.equal(due(flatNight(66, cg, cost), cg, flatOn(66, { enabled: true, ceilingReadbackPct: 90 }))?.cause, 'costMode');
+});
+
+test('★★★ W1 (Fix12) a pool size not known holds nothing: every doubt goes to the push; a flat pool above ⌈L⌉ stays out, past the gate too', () => {
+  const due = nfc.lineAtRiskPushDue;
+  const early = WIN_END - 5 * H;
+  for (const fullKwh of [null, 0, -1, Number.NaN] as Array<number | null>) {
+    assert.equal(nfc.lineFlatPushHeld(early, WIN_END, ASK, 52, fullKwh, 3), false, String(fullKwh));
+    assert.equal(due(flatNight(52, early), early, flatOn(52, { fullKwh }))?.cause, 'onNotRising', String(fullKwh));
+  }
+  assert.equal(nfc.lineFlatPushHeld(early, WIN_END, ASK, 52, undefined, 3), false);
+  assert.equal(nfc.lineFlatPushHeld(early, WIN_END, ASK, 52, FULL, 3), true, 'the control');
+  const late = WIN_END - 25 * M;
+  assert.equal(due(flatNight(57, late), late, flatOn(57)), null, 'flat above ⌈L⌉, inside the gate');
+  assert.equal(due(flatNight(57, late), late, flatOn(57, { fullKwh: null })), null, 'and with no pool size');
+});
+
+test('★★★ W1 (Fix12) a held tick spends nothing: the same night, after a held flat reading, is pushed for the real thing; a run of held ticks stamps no record', () => {
+  const due = nfc.lineAtRiskPushDue;
+  // Hours of a slow charge, read flat on every tick, the walk a person sees: nothing returned, so index.ts stamps nothing.
+  let t = WIN_END - 5 * H;
+  const s = flatNight(52, t);
+  for (; t < WIN_END - 3 * H; t += M) assert.equal(due({ ...s, forceChargeLinePoolSamples: [{ pct: 52, atMs: t - 12 * M }, { pct: 52, atMs: t - 2 * M }] }, t, flatOn(52)), null);
+  assert.equal(s.forceChargeLineAtRiskPushedAtMs, null, 'the once-a-night stamp is free');
+  // The real thing, later the same night: the pool falls, and it is pushed.
+  const fell = { ...s, forceChargeLinePoolSamples: [{ pct: 55, atMs: t - 12 * M }, { pct: 54, atMs: t - 2 * M }] };
+  assert.equal(due(fell, t, flatOn(52))?.cause, 'onNotRising');
+  assert.equal(due(fell, t, flatOn(52))?.refPct, 55, 'against its own reading');
 });
 
 test('★★★ W1 (review 4) a re-ON checked NOT APPLIED, or never written, is no ON of ours: the trend reads past it, and the night is pushed as soon as the check says so', () => {
@@ -1506,7 +1628,7 @@ test('★★★ W5 #1 a COST-DOMINANT line night\'s ON failure speaks for the li
 test('★★★ W5 #1 + #9 the declined-start push: a cost-dominant line night too; once a night per class ACROSS RESTARTS (persisted write-ahead)', () => {
   const tick = nfc.lineDeclinedPushTick;
   const VITALS = nfc.FORCE_CHARGE_BLOCKER_WHY.vitals;
-  const STALE = nfc.FORCE_CHARGE_BLOCKER_WHY.incoherent;
+  const STALE = nfc.FORCE_CHARGE_BLOCKER_WHY.noReadback;
   const T0 = WIN_END - 3 * H;
   const run = (s0: S, gates: { cost: boolean; line: boolean }, plan: Array<[number, number, string | null]>, mem0 = { day: null as string | null, st: nfc.EMPTY_LINE_DECLINED_PUSH }) => {
     let mem = mem0;
@@ -1532,7 +1654,7 @@ test('★★★ W5 #1 + #9 the declined-start push: a cost-dominant line night t
   const third = run(coerceActuationState(JSON.parse(JSON.stringify(again.s))), { cost: false, line: true }, [[91, 150, VITALS]]);
   assert.deepEqual(third.pushes, []);
   // A different class still pushes once it holds.
-  assert.deepEqual(run(restarted, { cost: false, line: true }, [[31, 50, STALE]]).pushes, [[41, 'incoherent']]);
+  assert.deepEqual(run(restarted, { cost: false, line: true }, [[31, 50, STALE]]).pushes, [[41, 'noReadback']]);
   // A COST-DOMINANT line night (cost 90, ask 70): the same push (finding 1).
   const costDom = night({ forceChargeCeilingPct: 90, forceChargeLineAskPct: 70, forceChargeLinePct: 69.4 });
   assert.equal(nfc.forceChargeModeOf(costDom, { cost: true, line: true })?.kind, 'cost');
@@ -1554,7 +1676,7 @@ test('★★★ W5 #1 + #9 the declined-start push: a cost-dominant line night t
   const persist = TICK.indexOf('persistNightActuation({ ...nightActuationMem, forceChargeLineDeclinedPushed: [...dp.mem.st.pushed] });', step);
   const send = TICK.indexOf('buildLineForceChargeDeclinedStart({', step);
   assert.ok(persist > step && send > persist, 'write-ahead');
-  assert.ok(TICK.includes('lineLatestStartMs(endMs, state.forceChargeLineAskPct!, '));
+  assert.ok(TICK.includes('lineDeclinedLatestStartMs({\n'));
 });
 
 test('★★★ W5 #6 the reserve-apply failure on a line night: until the panel reads the reserve it keeps its own, under the line, and what holds it — never "No action needed", never "will not happen" (a late apply is still verified)', () => {
