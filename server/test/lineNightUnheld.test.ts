@@ -261,13 +261,13 @@ test('★★★ U2 the missed push on a line night: no write went, so no force-c
   const m = buildNightChargeMissedApply({ ...base, reason, linePct: 55.55, targetPct: 50, attempted: false, startClosed: 'noWrite', startByText: '4:40 AM', closeText: '5:00 AM' } as never);
   assert.equal(m.severity, 'warning', 'a person can act');
   assert.match(m.body, SPAN);
-  assert.ok(m.body.endsWith(`charge did not start — ${reason}. Nothing was written; the reserve stays at 50%. No force-charge for tonight's 55.6% outage line starts: it rides a verified reserve write, and none was issued. To hold the line tonight, switch Charge Now on in the EcoFlow app, and off again by ~5:00 AM.`), m.body);
+  assert.ok(m.body.endsWith(`charge did not start — ${reason}. Nothing was written; the reserve stays at 50%. No force-charge for tonight's 55.6% outage line starts: it rides a verified reserve write, and none was issued. Charge Now switched on by hand in the EcoFlow app can still lift the pool tonight; switch it off again by ~5:00 AM.`), m.body);
   // Past the close nothing can be done by hand: no advice.
   const over = buildNightChargeMissedApply({ ...base, nowMs: CLOSE + H, reason, linePct: 55.55, targetPct: 50, attempted: false, startClosed: 'over', startByText: '4:40 AM', closeText: '5:00 AM' } as never);
   assert.ok(over.body.endsWith("No force-charge for tonight's 55.6% outage line starts: the window has closed."), over.body);
   // In the last 20 minutes Charge Now by hand still adds something.
   const late = buildNightChargeMissedApply({ ...base, reason, linePct: 55.55, targetPct: 50, attempted: false, startClosed: 'late', startByText: '4:40 AM', closeText: '5:00 AM' } as never);
-  assert.ok(late.body.includes('20 min or less of the window is left. To hold the line tonight, switch Charge Now on'), late.body);
+  assert.ok(late.body.includes('20 min or less of the window is left. Charge Now switched on by hand'), late.body);
   // No line: v1.199.1, word for word and severity (overnightTextGolden holds the words).
   const plain = buildNightChargeMissedApply({ ...base, reason });
   assert.deepEqual(buildNightChargeMissedApply({ ...base, reason, linePct: null, targetPct: 50, attempted: true, startClosed: 'noWrite', startByText: '4:40 AM', closeText: '5:00 AM' } as never), plain);
@@ -424,9 +424,9 @@ test('★★★ U3 the foreign push on a line night says what happens to the for
   const not = buildNightChargeForeignReserve({ ...base, line: { linePct: 55.55, started: false, closeText: '5:00 AM' } } as never);
   assert.equal(not.severity, 'warning');
   assert.ok(not.body.startsWith(plain.body), not.body);
-  assert.equal(not.body.slice(plain.body.length), " No force-charge for tonight's 55.6% outage line starts: the reserve was set outside the add-on, and setting it back does not change that. The pool may close under the line. To hold the line tonight, switch Charge Now on in the EcoFlow app, and off again by ~5:00 AM.");
+  assert.equal(not.body.slice(plain.body.length), " No force-charge for tonight's 55.6% outage line starts: the reserve was set outside the add-on, and setting it back does not change that. The pool may close under the line. Charge Now switched on by hand in the EcoFlow app can still lift the pool tonight; switch it off again by ~5:00 AM.");
   const on = buildNightChargeForeignReserve({ ...base, line: { linePct: 55.55, started: true, closeText: '5:00 AM' } } as never);
-  assert.equal(on.body.slice(plain.body.length), " The force-charge for tonight's 55.6% outage line rode that write, so the add-on switches it off, and it does not start again, whatever the reserve reads later. The pool may close under the line. To hold the line tonight, switch Charge Now on in the EcoFlow app, and off again by ~5:00 AM.");
+  assert.equal(on.body.slice(plain.body.length), " The force-charge for tonight's 55.6% outage line rode that write, so the add-on switches it off, and it does not start again, whatever the reserve reads later. The pool may close under the line. Charge Now switched on by hand in the EcoFlow app can still lift the pool tonight; switch it off again by ~5:00 AM.");
   // A line the reserve holds is never said to close under it.
   const at50 = buildNightChargeForeignReserve({ ...base, line: { linePct: 50, started: false, closeText: '5:00 AM' } } as never);
   assert.doesNotMatch(at50.body, /under the line/);
@@ -476,12 +476,12 @@ test('★★★ U4 the grid-loss and cancelled accounts of a line night name the
 
 test('★★★ U4 a grid loss before the close says what can still hold the line once the grid is back; a cancel, and a stop at or after the close, do not', () => {
   const base = { day: '2027-01-04', targetPct: 50, restorePct: 30, expectedKwh: 20, closePoolPct: 53, linePct: 55.55 };
-  const tail = ' To hold the line once the grid is back, switch Charge Now on in the EcoFlow app, and off again by ~5:00 AM.';
+  const tail = ' Charge Now switched on by hand in the EcoFlow app can still lift the pool once the grid is back; switch it off again by ~5:00 AM.';
   assert.ok(buildNightChargeMorningSummary({ ...base, ended: 'gridLoss', closeText: '5:00 AM' } as never).body.endsWith(`under the 55.6% outage line.${tail}`));
-  assert.ok(!buildNightChargeMorningSummary({ ...base, ended: 'gridLoss', closeText: null } as never).body.includes('To hold the line'), 'past the close');
-  assert.ok(!buildNightChargeMorningSummary({ ...base, ended: 'cancelled', closeText: '5:00 AM' } as never).body.includes('To hold the line'), 'the person\'s cancel');
+  assert.ok(!buildNightChargeMorningSummary({ ...base, ended: 'gridLoss', closeText: null } as never).body.includes('Charge Now switched on by hand'), 'past the close');
+  assert.ok(!buildNightChargeMorningSummary({ ...base, ended: 'cancelled', closeText: '5:00 AM' } as never).body.includes('Charge Now switched on by hand'), 'the person\'s cancel');
   // Held: nothing to hold.
-  assert.ok(!buildNightChargeMorningSummary({ ...base, closePoolPct: 60, ended: 'gridLoss', closeText: '5:00 AM' } as never).body.includes('To hold the line'), 'at or above the line');
+  assert.ok(!buildNightChargeMorningSummary({ ...base, closePoolPct: 60, ended: 'gridLoss', closeText: '5:00 AM' } as never).body.includes('Charge Now switched on by hand'), 'at or above the line');
   const at = INDEX.indexOf('function sendRestoreSummary(');
   const fn = INDEX.slice(at, INDEX.indexOf('\n}\n', at));
   assert.ok(fn.includes('closeText: lineNight != null && state.windowEndMs != null && nowMs < writeWindowEndMs(state)! ? fmtSiteClock(writeWindowEndMs(state)!) : null,'), fn);

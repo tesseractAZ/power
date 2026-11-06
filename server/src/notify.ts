@@ -864,10 +864,11 @@ export function buildNightChargeMorningSummary(o: {
   };
 }
 
-/** v1.200.0 (Fix9 review 1) — what a person can still do for the line by hand when no force-charge of the add-on's will: Charge Now,
- *  which rides no reserve write. Off again by the close, in the words of the push: nothing of the add-on's is left to do it. PURE. */
+/** v1.200.0 (Fix9 review 1) — what a person can still do by hand when no force-charge of the add-on's will: Charge Now, which rides no
+ *  reserve write. "Can still lift", never "holds the line": how far it gets depends on when it goes on. Off again by the close, in the
+ *  words of the push: nothing of the add-on's is left to do it. PURE. */
 function lineChargeNowByHandWords(closeText: string, when = 'tonight'): string {
-  return `To hold the line ${when}, switch Charge Now on in the EcoFlow app, and off again by ~${closeText}.`;
+  return `Charge Now switched on by hand in the EcoFlow app can still lift the pool ${when}; switch it off again by ~${closeText}.`;
 }
 
 /** v1.200.0 (Fix9 review 1) — the reserve set by hand while a start can still come (the apply failure, an attempt never confirmed).
