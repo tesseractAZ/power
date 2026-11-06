@@ -2029,7 +2029,8 @@ test('★★★ T10b the gate (A5, M3): an ARMED, disclosed, actuated row whose 
   assert.deepEqual([ranAndHeld.activeStrikes, ranAndHeld.strikesMeasurable], [0, 1], 'checked and cleared, not unmeasured');
   // A disclosed row with nothing armed, or armed and never actuated, cannot strike: still 0 (nightChargeGate.test.ts).
   assert.equal(run({ cushion_line_force_charge_pct: null }).strikesMeasurable, 0);
-  assert.equal(run({ actuated: 0 }).strikesMeasurable, 0);
+  assert.equal(run({ actuated: null }).strikesMeasurable, 0);
+  assert.equal(run({ actuated: 0 }).strikesMeasurable, 1, '(review 9) a write that never held is graded: lineNightUnheld.test.ts U2');
   // At the scorer's edge in decimal literals (a 50.35% line closing at 50.3): clean, as the rule states.
   assert.equal(run({ cushion_line_soc_pct: 50.35, cushion_line_force_charge_pct: 51, window_close_soc_pct: 50.3 }).activeStrikes, 0);
   assert.equal(run({ cushion_line_soc_pct: 50.35, cushion_line_force_charge_pct: 51, window_close_soc_pct: 50.2 }).activeStrikes, 1);
@@ -2043,8 +2044,9 @@ test('★★★ T10b the gate (A5, M3): an ARMED, disclosed, actuated row whose 
   assert.equal(run({ window_close_soc_pct: 93.57 }).activeStrikes, 1);
   // (d) a disclosure with nothing armed (advisory, the backup leg): exempt, as before.
   assert.equal(run({ cushion_line_force_charge_pct: null }).activeStrikes, 0);
-  // Not actuated (the reserve write never landed, or the night was cancelled before it): exempt.
-  assert.equal(run({ actuated: 0 }).activeStrikes, 0);
+  // (review 9) Not actuated: a write that never landed (actuated 0, or the missed push's disposition) is a run-time refusal, a strike
+  // (lineNightUnheld.test.ts U2); a night cancelled before the write, or never armed, is exempt.
+  assert.equal(run({ actuated: 0 }).activeStrikes, 1);
   assert.equal(run({ actuated: null }).activeStrikes, 0);
   // (e) no close reading: the lowest pool after the close decides where it holds the line; otherwise the stored flag (fail-closed).
   assert.equal(run({ window_close_soc_pct: null, cushion_breached: 1 }).activeStrikes, 1);
@@ -2218,9 +2220,33 @@ test('★★★ T24 (Fix8) the line texts at their edges: every text on the line
     const apply = notify.buildNightChargeApplyFailure({ day: '2026-09-16', currentReservePct: 30, targetPct: 50, applyRetries: 2, expectedKwh: 20, linePct: line });
     add(`${apply.title}\n${apply.body}`, { line, named: r1(line), where: where('apply failure') });
     // (Fix9) …with the last start named, and with no start left, for every reason.
-    for (const startClosed of [null, 'late', 'over', 'cancelled', 'reverted', 'foreign', 'noWindow', 'gatedOff', 'started']) {
+    for (const startClosed of [null, 'late', 'over', 'lateGuard', 'overGuard', 'noWrite', 'cancelled', 'reverted', 'foreign', 'noWindow', 'gatedOff', 'started']) {
       const a = notify.buildNightChargeApplyFailure({ day: '2026-09-16', currentReservePct: 30, targetPct: 50, applyRetries: 2, expectedKwh: 20, linePct: line, startClosed, startByText: '4:40 AM' } as never);
       add(`${a.title}\n${a.body}`, { line, named: r1(line), where: where(`apply failure ${startClosed ?? 'by 4:40 AM'}`) });
+    }
+    // (review 9) 12. The missed push, written and attempted; 13. the foreign push; 14. the close account; 15. the grid-loss and
+    // cancelled accounts: the line beside the reserve (and the pool it is read against); a line the reserve holds never closed under.
+    for (const [attempted, startClosed] of [[false, 'noWrite'], [false, 'late'], [false, 'over'], [true, null], [true, 'late']] as Array<[boolean, string | null]>) {
+      const m = notify.buildNightChargeMissedApply({ day: '2026-09-16', role: 'cost', windowStartMs: WIN_START, windowEndMs: WIN_END, reason: 'the pool\'s charge reading was incoherent', reservePct: 30, nowMs: WIN_START + 31 * M,
+        linePct: line, targetPct: 50, attempted, startClosed, startByText: '4:40 AM', closeText: '5:00 AM' } as never);
+      add(`${m.title}\n${m.body}`, { line, named: beside(line, 50), where: where(`missed ${attempted} ${startClosed}`) });
+      if (atReserve && /under the line|under tonight's/.test(m.body) && !attempted) errs.push(`${where('missed')}: a line the reserve holds said to close under it`);
+    }
+    for (const started of [false, true]) {
+      const f = notify.buildNightChargeForeignReserve({ day: '2026-09-16', pct: 40, targetPct: 50, restorePct: 30, line: { linePct: line, started, closeText: '5:00 AM' } } as never);
+      add(`${f.title}\n${f.body}`, { line, named: beside(line, 50), where: where(`foreign ${started}`) });
+      if (atReserve && /under the line/.test(f.body)) errs.push(`${where('foreign')}: a line the reserve holds said to close under it`);
+    }
+    for (const X of [Math.floor(line - 0.05 - 1e-9), 50, Math.ceil(line - 0.05), 100].filter((x) => x <= 100)) {
+      const acct = (notify as unknown as { buildLineNightCloseAccount: (o: unknown) => { title: string; body: string } }).buildLineNightCloseAccount({ day: '2026-09-16', linePct: line, cause: 'noWrite', closePoolPct: X });
+      add(`${acct.title}\n${acct.body}`, { line, named: beside(line, 50), where: where(`close account ${X}`) });
+      if ((X < line) !== /under the line/.test(acct.body)) errs.push(`${where('close account')}: ${X} against ${line}: ${acct.body}`);
+      for (const ended of ['gridLoss', 'cancelled'] as const) {
+        const b = buildNightChargeMorningSummary({ day: '2026-09-16', targetPct: 50, restorePct: 30, expectedKwh: 17.6, ended, closePoolPct: X, linePct: line, closeText: '5:00 AM' } as never).body;
+        for (const m of b.matchAll(/The pool reads ([\d.]+)%, (under|at or above) the ([\d.]+)% outage line/g)) {
+          if (m[2] === 'under' ? !(Number(m[1]) < Number(m[3])) : !(Number(m[1]) >= Number(m[3]))) errs.push(`${where(`${ended} ${X}`)}: ${m[0]}`);
+        }
+      }
     }
     // 11. The mid-day push's reserve-hold shape: armed for the line (no relation), named round1(L).
     const mid = middayLegPush({ ...midBase, cushionLineSocPct: line, forceChargeLine: { askPct: ask, linePct: line } } as LinePlan);
@@ -2328,16 +2354,21 @@ test('★★★ T24 (Fix9) a line night\'s force-charge "waits on" a reading of 
   for (const [why, sentence] of [
     ['late', 'No force-charge for the line starts: 20 min or less of the window is left.'],
     ['over', 'No force-charge for the line starts: the window has closed.'],
+    ['lateGuard', 'No force-charge for the line starts: 20 min or less is left before the on-peak guard (an hour before on-peak).'],
+    ['overGuard', 'No force-charge for the line starts: the on-peak guard (an hour before on-peak) has begun.'],
     ['cancelled', 'No force-charge for the line starts: the night was cancelled.'],
     ['gatedOff', 'No force-charge for the line starts while the options keep it off.'],
   ] as Array<[string, string]>) {
     const m = push({ startClosed: why, startByText: '4:40 AM' });
     assert.equal(m.body, `${head}. ${sentence} If this repeats, check the SHP2 cloud link.`, why);
     assert.equal(m.title, 'Night-charge: the reserve write has not taken effect');
-    assert.doesNotMatch(m.body, /waits on|To hold the line|as planned|No action needed|will not happen/);
+    assert.doesNotMatch(m.body, /waits on|To let it start|To hold the line|as planned|No action needed|will not happen/);
   }
   assert.equal(push({ startClosed: null, startByText: '4:40 AM' }).body, `${head}, and the force-charge for the line waits on this write. `
-    + 'To hold the line tonight, set the backup reserve to 50% in the EcoFlow app: once the panel reads it before ~4:40 AM, the add-on starts the force-charge for the line as planned. If this repeats, check the SHP2 cloud link.');
+    + 'To let it start, set the backup reserve to 50% in the EcoFlow app now: the sooner the panel reads it, the more of the line a start can reach. No force-charge starts after ~4:40 AM, and one that late may close under the line. If this repeats, check the SHP2 cloud link.');
+  // (review 9) The time is the last start, never the way to hold the line: a start that late may close under it (and, with the
+  // ceiling unsynced, a reading in its last minute starts nothing), so nothing there promises a start or the plan.
+  assert.doesNotMatch(push({ startClosed: null, startByText: '4:40 AM' }).body, /as planned|the add-on starts|To hold the line|before ~4:40/);
   // A night with no line ask: v1.199.1's push whatever the key says (COST_TEXTS-pinned in lineForceChargeAtRisk W5 #6).
   const cost = (k: unknown) => JSON.stringify(notify.buildNightChargeApplyFailure({ day: '2026-10-12', currentReservePct: 16, targetPct: 50, applyRetries: 2, expectedKwh: 20, linePct: null, startClosed: k, startByText: '4:40 AM' } as never));
   assert.equal(cost('late'), cost(null));
@@ -2387,8 +2418,13 @@ test('★★★ T24 (Fix9) a line night\'s force-charge "waits on" a reading of 
     ['applyFailed at the write end less 4 min', failed(), WIN_END - 4 * M, LINE_GATE, 'late'],
     ['the close', failed(), WIN_END, LINE_GATE, 'over'],
     ['two hours after the close', failed(), WIN_END + 2 * H, LINE_GATE, 'over'],
-    ['the on-peak guard sooner than the close: its own less 20 min', failed({ nextOnPeakStartMs: onPeak }), WIN_END - 50 * M, LINE_GATE, 'late'],
+    ['the on-peak guard sooner than the close: its own less 20 min', failed({ nextOnPeakStartMs: onPeak }), WIN_END - 50 * M, LINE_GATE, 'lateGuard'],
     ['…and a minute before that', failed({ nextOnPeakStartMs: onPeak }), WIN_END - 51 * M, LINE_GATE, null],
+    ['the on-peak guard reached, the window still open', failed({ nextOnPeakStartMs: onPeak }), WIN_END - 30 * M, LINE_GATE, 'overGuard'],
+    ['a guard that binds nothing (on-peak over an hour after the close): the window\'s words', failed({ nextOnPeakStartMs: WIN_END + 2 * H }), WIN_END, LINE_GATE, 'over'],
+    ['(review 9) no write issued, past the apply window', night({ appliedAtMs: null, applyAttemptedAtMs: null, applyVerifiedAtMs: null }), WIN_START + act.APPLY_LATE_MS + 1, LINE_GATE, 'noWrite'],
+    ['…at the end of the apply window a write may still go', night({ appliedAtMs: null, applyAttemptedAtMs: null, applyVerifiedAtMs: null }), WIN_START + act.APPLY_LATE_MS, LINE_GATE, null],
+    ['…an attempt on record may still be adopted', night({ appliedAtMs: null, applyAttemptedAtMs: WIN_START, applyVerifiedAtMs: null }), WIN_START + act.APPLY_LATE_MS + 1, LINE_GATE, null],
     ['the line gate off (NIGHT_CHARGE_MODE advisory)', failed(), WIN_START + 40 * M, { cost: false, line: false }, 'gatedOff'],
     ['a force-charge of ours already on', onNight(), WIN_START + 3 * H, LINE_GATE, 'started'],
   ];
@@ -2415,6 +2451,9 @@ test('★★★ T24 (Fix9) a line night\'s force-charge "waits on" a reading of 
     noWindow: 'no force-charge for the 55.6% outage line starts: the night has no charge window',
     over: 'no force-charge for the 55.6% outage line starts: the window has closed',
     late: 'no force-charge for the 55.6% outage line starts: 20 min or less of the window is left',
+    overGuard: 'no force-charge for the 55.6% outage line starts: the on-peak guard (an hour before on-peak) has begun',
+    lateGuard: 'no force-charge for the 55.6% outage line starts: 20 min or less is left before the on-peak guard (an hour before on-peak)',
+    noWrite: 'no force-charge for the 55.6% outage line starts: it rides a verified reserve write, and none was issued',
     gatedOff: 'no force-charge for the 55.6% outage line starts while the options keep it off',
     started: 'the force-charge for the 55.6% outage line was switched on earlier and does not start again',
   };
