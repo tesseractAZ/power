@@ -66,7 +66,7 @@ interface NightChargePlan {
   expectedForceChargeMode?: 'line';
   /** v1.200.0 (review 2) — the expected walk reaches the panel ceiling: the panel switches Charge Now off there and
    *  the add-on switches it back on under the start target before the close (nightChargeText.outageLineRow). */
-  expectedLineCeilingStop?: { ceilingPct: number; startTargetPct: number };
+  expectedLineCeilingStop?: { ceilingPct: number; startTargetPct: number; noReOnWords?: string };
   /** v1.60.0 — EV-contention disclosure. `basis: 'unavailable'` means no EVSE
    *  prediction covered the window, so contention was NOT modelled — it is not
    *  a prediction of zero, and the card must not render it as reassurance. */

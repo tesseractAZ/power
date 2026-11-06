@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { computeNightChargePlan, buildNightChargeInputs, lineForceChargeLedgerColumns, type NightChargePlan } from '../src/nightChargeAdvisor.js';
+import * as cardWalk from '../src/nightChargeAdvisor.js';
 import * as nfc from '../src/nightForceCharge.js';
 import { decideForceCharge, lineDeclinedPushTick, EMPTY_LINE_DECLINED_PUSH, type ForceChargeOpts } from '../src/nightForceCharge.js';
 import {
@@ -44,6 +45,8 @@ import * as cardText from '../../web/src/cards/nightChargeText.js';
  * U6 (Fix10 review 1) a run stopped for good is such a record too, the card leads with it where no write stands, and a window no record
  * holds with no evening job left is told; a grid-status OFF is pushed; an instruction promises no line; a late account is no close
  * reading; a write the panel never read back is not told as raised.
+ * U7 (Fix10 review 2) a run that never took, or that reads off with no re-ON left, is such a record too: nothing of the add-on's brings it
+ * back, a late apply reopens it, and a run still on with no re-ON left keeps its line and loses the re-ON's clause.
  */
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -55,7 +58,8 @@ const LABEL = '2027-01-04 21:30';
 const caseOf = (label: string) => CASES.find((c) => c.label === label)!;
 type P = NightChargePlan & { forceChargeLine?: { askPct: number; linePct: number }; cushionEnvelopeReason?: string; cushionShortfallCause?: string; expectedForceChargeMode?: string };
 type ClosedInput = { windowStartMs: number; why: string };
-const planAt = (floor: number, o: { eligible?: boolean; cost?: boolean; hours?: number; label?: string; noLineAt?: number | null; closed?: ClosedInput | null } = {}): P => {
+type NoReOnInput = { windowStartMs: number; words: string };
+const planAt = (floor: number, o: { eligible?: boolean; cost?: boolean; hours?: number; label?: string; noLineAt?: number | null; closed?: ClosedInput | null; noReOn?: NoReOnInput | null } = {}): P => {
   const deps = {
     ...caseOf(o.label ?? LABEL).deps, reserveFloorPct: floor, cushionPoolScale: MEASURED_SCALE,
     forceChargeEligible: o.cost === true, ...(o.cost === true ? { objectiveMode: 'cost', costMaxSocPct: 80 } : {}),
@@ -64,7 +68,7 @@ const planAt = (floor: number, o: { eligible?: boolean; cost?: boolean; hours?: 
     ...(o.noLineAt !== undefined ? { armedNoLineStartMs: o.noLineAt } : {}),
   } as never;
   const inputs = buildNightChargeInputs(deps);
-  return computeNightChargePlan(o.closed !== undefined ? { ...inputs, armedLineStartClosed: o.closed } as never : inputs) as P;
+  return computeNightChargePlan({ ...inputs, ...(o.closed !== undefined ? { armedLineStartClosed: o.closed } : {}), ...(o.noReOn !== undefined ? { armedLineNoReOn: o.noReOn } : {}) } as never) as P;
 };
 const SIZING = ['chargeTonight', 'buyKwh', 'buyKwhDebiased', 'requiredExtraKwh', 'targetSocPct', 'setpointSocPct', 'costCeilingSocPct', 'cushionTroughSocPct', 'cushionLineSocPct', 'bindingCap', 'minProjSocPct'] as const;
 const sizing = (p: NightChargePlan) => Object.fromEntries(SIZING.map((k) => [k, (p as never)[k] ?? null]));
@@ -432,7 +436,7 @@ test('★★★ U1c the wiring: only the plan the card and the entities serve re
   assert.ok(!deps.includes('armedLineStartClosed'), 'never in the inputs of the plan of record');
   assert.ok(fn.includes('  const plan = computeNightChargePlan(inputs);\n'), 'nor where it is computed');
   assert.ok(fn.includes('const lineClosed = shadowLeg == null && opts.arming !== true ? servedLineClosure(nightCycleView(), plan.window?.startMs ?? null, armedLineStartClosed(nightActuationMem, nowMs, forceChargeGatesOn(legRoleOf(nightActuationMem))), plan.window != null && noEveningArmLeft(plan.window.startMs, nowMs, eveningJobClock(nowMs))) : null;'), fn);
-  assert.ok(fn.includes('if (!shadowLeg) setLatestNightChargePlan(lineClosed != null ? computeNightChargePlan({ ...inputs, armedLineStartClosed: lineClosed }) : plan);'), fn);
+  assert.ok(fn.includes('if (!shadowLeg) setLatestNightChargePlan(lineClosed != null || lineNoReOn != null ? computeNightChargePlan({ ...inputs, armedLineStartClosed: lineClosed, armedLineNoReOn: lineNoReOn }) : plan);'), fn);
   assert.equal([...INDEX.matchAll(/armedLineStartClosed: lineClosed/g)].length, 1, 'that one plan');
   assert.ok(/atomicWriteFileSync\(NIGHT_CHARGE_PLANSNAP_PATH, JSON\.stringify\(\{[\s\S]{0,300}?\n\s+plan, extras,\n/.test(fn), 'the snapshot holds the plan of record');
   assert.ok(fn.trimEnd().endsWith('return { plan, extras };\n}') || fn.includes('  return { plan, extras };\n}'), 'and the callers get it');
@@ -940,7 +944,7 @@ test('★★★ U6 a run stopped for good is a closed start: every stamp behind 
   assert.equal(closedRec(RUN(), t), null, 'a verified ON still running');
   assert.equal(closedRec(RUN({ forceChargeLinePanelOffAtMs: t - 10 * M } as Partial<NightActuationState>), t), null, "the panel's own stop: the re-ON can still bring it back");
   assert.notEqual(nfc.lineReOnDue(RUN({ forceChargeLinePanelOffAtMs: t - 10 * M } as Partial<NightActuationState>), t, fo({ poolSocPct: 52, slotsOn: [] }), [1, 2, 3]), null, 'and does');
-  assert.equal(closedRec(RUN({ forceChargeOnVerifiedAtMs: null, forceChargeOnFailedAtMs: t - 5 * M }), t), null, 'an ON warned of: a late apply still verifies');
+  assert.equal(closedRec(RUN({ forceChargeOnVerifiedAtMs: null }), t), null, 'an ON no reading has judged yet: it may still verify');
   assert.equal(closedRec(RUN({ forceChargeOffAtMs: STOP_AT, forceChargeLineAskPct: null, forceChargeLinePct: null }), t), null, 'a cost night: not a word');
   assert.deepEqual([nfc.lineStartClosedWords('it', 'stopped' as never), nfc.lineStartClosedWords('the 55.6% outage line', 'stopped' as never)],
     ['the force-charge for it was switched off and does not start again', 'the force-charge for the 55.6% outage line was switched off and does not start again']);
@@ -1209,4 +1213,195 @@ test('★★★ U6 a write the panel never read back is not told as raised: the 
   assert.ok(INDEX.includes('...lineWriteUnreadStatus(nightActuationMem),'), 'the status route');
   const CARD = readFileSync(resolve(HERE, '../../web/src/cards/NightChargeCard.tsx'), 'utf8');
   assert.ok(CARD.includes('lineWriteUnread?: boolean;'), 'the field reaches the card');
+});
+
+/* ══ U7 — (Fix10 review 2) a run that never took, or that no re-ON can bring back ═════════════════════════════════════════════ */
+
+const NOT_TAKEN = 'the force-charge for it was switched on and has not taken effect: unless it applies late, none runs';
+const NO_RE_ON = 'the force-charge for it reads off and the add-on does not switch it back on tonight';
+const WORDS_SPENT = 'the add-on does not switch it back on tonight';
+const WORDS_LATE = 'unless it applies late, the add-on does not switch it back on';
+const CUT = CLOSE - 20 * M;
+const WARNED = (over: Partial<NightActuationState> = {}): NightActuationState => RUN({
+  forceChargeOnVerifiedAtMs: null, forceChargeOnFailedAtMs: STOP_AT - 30 * M, forceChargeOnFailedSlots: [1, 2, 3], forceChargeOnRetries: 1, ...over,
+});
+const SPENT = (over: Partial<NightActuationState> = {}): NightActuationState => RUN({
+  forceChargeLinePanelOffAtMs: CLOSE - 100 * M, forceChargeLineReOns: 2, forceChargeLineReOnAtMs: CLOSE - 90 * M, forceChargeLineOffSlots: [1, 2, 3], ...over,
+});
+const noReOnOf = (s: NightActuationState, t: number): NoReOnInput | null => (nfc as unknown as { armedLineNoReOn: (s: NightActuationState, t: number) => NoReOnInput | null }).armedLineNoReOn(s, t);
+const reOnGone = (s: NightActuationState, t: number): boolean => (nfc as unknown as { lineReOnGone: (s: NightActuationState, t: number) => boolean }).lineReOnGone(s, t);
+
+test('★★★ U7 an ON warned of on every slot is a closed start: nothing of the add-on\'s switches it on again; a late apply reopens it; one with a slot that took stays armed', () => {
+  const s = WARNED();
+  const t = STOP_AT;
+  assert.equal(nfc.forceChargeStartClosed(s, t, GATES), 'started', "the pushes' own key stays");
+  assert.deepEqual(closedRec(s, t), { windowStartMs: OPEN, why: 'notTaken', writeStands: true });
+  assert.equal(nfc.lineReOnDue(s, t, fo({ poolSocPct: 45, slotsOn: [] }), [1, 2, 3]), null, 'a re-ON needs a verified ON');
+  for (let at = t; at < CLOSE - M; at += M) assert.equal(decideForceCharge(s, at, fo({ poolSocPct: 45, slotsOn: [] })).kind, 'none', 'the tick has nothing left to issue');
+  assert.equal(closedRec(WARNED({ forceChargeOnFailedSlots: null }), t)?.why, 'notTaken', 'a failure kept before its slots were: whole-night, as the push reads it');
+  // A late apply is verified, and the record reads armed from the next recompute.
+  assert.equal(decideForceCharge(s, t, fo({ poolSocPct: 45, slotsOn: [1, 2, 3] })).kind, 'onVerified');
+  assert.equal(closedRec({ ...s, forceChargeOnVerifiedAtMs: t }, t + M), null, 'a late apply reopens it');
+  assert.equal(closedRec(WARNED({ forceChargeOnFailedSlots: [3] }), t), null, 'a partial failure: slots run');
+  assert.equal(closedRec(WARNED({ forceChargeOnFailedSlots: [1, 2], forceChargeSlots: [1, 2] }), t)?.why, 'notTaken', 'every slot of ours, of a list of two');
+  assert.equal(closedRec(WARNED({ forceChargeOnFailedAtMs: null, forceChargeOnFailedSlots: null }), t), null, 'not warned of');
+  assert.equal(closedRec(WARNED({ cancelled: true }), t)?.why, 'cancelled');
+  assert.equal(closedRec(WARNED({ forceChargeOffAtMs: t, forceChargeOffReason: 'windowEnd' }), t + M)?.why, 'stopped');
+  assert.equal(closedRec(WARNED({ forceChargeLineAskPct: null, forceChargeLinePct: null }), t), null, 'a cost night: not a word');
+});
+
+test('★★★ U7 every slot reading off with no re-ON left is a closed start: the budget spent or the cutoff passed, past the last re-ON\'s grace; a slot reading on, or a re-ON still to come, stays armed', () => {
+  const t = CLOSE - H;
+  const off52 = fo({ poolSocPct: 52, slotsOn: [] });
+  assert.deepEqual(closedRec(SPENT(), t), { windowStartMs: OPEN, why: 'noReOn', writeStands: true });
+  assert.equal(nfc.lineReOnDue(SPENT(), t, off52, [1, 2, 3]), null, 'the budget');
+  // The last re-ON's readback grace: it may yet take, so it is not called off.
+  const fresh = SPENT({ forceChargeLineReOnAtMs: t - 15 * M + 1 });
+  assert.equal(closedRec(fresh, t), null, 'in its grace');
+  assert.equal(closedRec(fresh, t + 1)?.why, 'noReOn', 'the grace run');
+  // The cutoff, and it runs from the on-peak guard where that is sooner.
+  const stop = RUN({ forceChargeLinePanelOffAtMs: CUT - H, forceChargeLineOffSlots: [1, 2, 3] });
+  assert.equal(closedRec(stop, CUT - 1), null, 'the re-ON can still come');
+  assert.notEqual(nfc.lineReOnDue(stop, CUT - 1, off52, [1, 2, 3]), null, 'and does');
+  assert.equal(closedRec(stop, CUT)?.why, 'noReOn');
+  assert.equal(nfc.lineReOnDue(stop, CUT, off52, [1, 2, 3]), null);
+  const guarded = { ...stop, nextOnPeakStartMs: CLOSE + 30 * M };
+  assert.equal(closedRec(guarded, CUT - 30 * M - 1), null);
+  assert.equal(closedRec(guarded, CUT - 30 * M)?.why, 'noReOn');
+  // What reopens it, or keeps it open.
+  assert.equal(closedRec(SPENT({ forceChargeLineOffSlots: [2, 3] }), t), null, 'a slot reading on: the run goes on');
+  assert.equal(closedRec(SPENT({ forceChargeLineOffSlots: null }), t), null, 'no reading on record');
+  assert.equal(closedRec(SPENT({ forceChargeLineOffSlots: [] }), t), null, 'every slot reading on');
+  assert.equal(closedRec(SPENT({ forceChargeLineReOns: 1 }), t), null, 'one left');
+  assert.notEqual(nfc.lineReOnDue(SPENT({ forceChargeLineReOns: 1 }), t, off52, [1, 2, 3]), null, 'and it comes');
+  assert.equal(closedRec(SPENT({ forceChargeSlots: [1, 2], forceChargeLineOffSlots: [1, 2] }), t)?.why, 'noReOn', 'ours only');
+  assert.equal(closedRec(SPENT({ forceChargeSlots: [1, 2], forceChargeLineOffSlots: [1] }), t), null);
+  assert.equal(closedRec(SPENT({ forceChargeSlots: null, forceChargeLineOffSlots: [1, 2] }), t), null, 'no list: every slot is ours');
+  assert.equal(closedRec(SPENT({ forceChargeOnVerifiedAtMs: null, forceChargeOnFailedAtMs: null }), t), null, 'an ON not judged yet');
+  assert.equal(closedRec(SPENT({ forceChargeOffAtMs: t }), t + M)?.why, 'stopped', 'an OFF of ours goes first');
+  assert.equal(closedRec(SPENT({ cancelled: true }), t)?.why, 'cancelled');
+  assert.equal(closedRec(SPENT({ forceChargeLineAskPct: null, forceChargeLinePct: null }), t), null, 'a cost night: not a word');
+  // lineReOnGone is lineReOnDue's own refusal: with every other gate open a re-ON comes exactly while it is false.
+  for (const spent of [0, 1, 2]) {
+    for (let at = CLOSE - 100 * M; at <= CLOSE + 5 * M; at += 5 * M) {
+      const s = RUN({ forceChargeLineReOns: spent, forceChargeLineOffSlots: [1, 2, 3] });
+      assert.equal(nfc.lineReOnDue(s, at, off52, [1, 2, 3]) == null, reOnGone(s, at), `${spent} spent, ${(CLOSE - at) / M} min to the close`);
+      if (closedRec(s, at)?.why === 'noReOn') assert.notEqual(decideForceCharge(s, Math.min(at, CLOSE - 1), off52).kind, 'lineReOn');
+    }
+  }
+  assert.equal(reOnGone(RUN({ windowEndMs: null }), t), true, 'no window: none');
+});
+
+test('★★★ U7 the words hold in every outcome: both are the plan\'s, the row\'s and the banner\'s; the reserve write they ride stands, so the card keeps its figure', () => {
+  assert.equal(nfc.lineStartClosedWords('it', 'notTaken' as never), NOT_TAKEN);
+  assert.equal(nfc.lineStartClosedWords('it', 'noReOn' as never), NO_RE_ON);
+  const base = planAt(45);
+  const open = base.window!.startMs;
+  for (const [why, words] of [['notTaken', NOT_TAKEN], ['noReOn', NO_RE_ON]] as const) {
+    const p = planAt(45, { closed: { windowStartMs: open, why, writeStands: true } as never });
+    assert.equal(p.forceChargeLine, undefined, why);
+    assert.equal(p.cushionEnvelopeReason, 'startClosed', why);
+    assert.equal((p as unknown as { cushionStartClosedWords: string }).cushionStartClosedWords, words);
+    assert.equal((p as never as { cushionStartClosedNoWrite?: boolean }).cushionStartClosedNoWrite, undefined, 'its write stands');
+    assert.ok(p.rationale.includes(`, and ${words}, so the cushion is not assured — residual risk remains.`), p.rationale);
+    assert.doesNotMatch(p.rationale, ON_CLAIM, p.rationale);
+    assert.doesNotMatch(p.rationale, /the add-on switches it back on/, p.rationale);
+    const row = cardText.outageLineRow(p as never, 50)!;
+    assert.ok(row.includes(`not claimed tonight (${words})`), row);
+    assert.doesNotMatch(row, /stays on|the add-on switches it back on|expected at the close/, row);
+    assert.deepEqual(sizing(p), sizing(base), why);
+  }
+  const status = (cycle as unknown as { lineStartClosedStatus: (s: NightActuationState, t: number, g: { cost: boolean; line: boolean }) => Record<string, unknown> }).lineStartClosedStatus;
+  assert.deepEqual(status(WARNED(), STOP_AT, GATES), { lineStartClosed: { text: 'The force-charge for the 55.6% outage line was switched on and has not taken effect: unless it applies late, none runs.', cancel: true } });
+  assert.deepEqual(status(SPENT(), STOP_AT, GATES), { lineStartClosed: { text: 'The force-charge for the 55.6% outage line reads off and the add-on does not switch it back on tonight.', cancel: true } });
+});
+
+test('★★★ U7 the finding\'s walk, on the real chain: a night whose ON is written and never reads back serves neither the start, the run nor the re-ON, from the warning on', () => {
+  const base = planAt(45);
+  const open = base.window!.startMs;
+  let s = armFromPlan(emptyActuationState(), '2027-01-04', base, OPEN - 90 * M, 45, false, null, true)!;
+  assert.equal(s.forceChargeLinePct, base.forceChargeLine!.linePct);
+  s = { ...s, applyAttemptedAtMs: OPEN, attemptBaselinePct: 45, appliedAtMs: OPEN, priorReservePct: 45, applyVerifiedAtMs: OPEN + 3 * M };
+  const onAt = CLOSE - 2 * H;
+  s = { ...s, forceChargeOnAtMs: onAt, forceChargeOnLastAttemptMs: onAt, forceChargeSlots: [1, 2, 3], forceChargeMode: 'line' };
+  const seen: string[] = [];
+  for (let at = onAt + M; at < CLOSE - M; at += M) {
+    const a = decideForceCharge(s, at, fo({ ceilingReadbackPct: 81, poolSocPct: 50, slotsOn: [] }));
+    if (a.kind === 'none') continue;
+    seen.push(a.kind);
+    if (a.kind === 'onRetry') s = { ...s, forceChargeOnRetries: s.forceChargeOnRetries + 1, forceChargeOnLastAttemptMs: at };
+    if (a.kind === 'onFailed') s = { ...s, forceChargeOnFailedAtMs: at, forceChargeOnFailedSlots: [...a.slots] };
+  }
+  assert.deepEqual(seen, ['onRetry', 'onFailed'], 'and nothing after it to the close');
+  const closure = closedRec(s, s.forceChargeOnFailedAtMs! + M);
+  assert.equal(closure?.why, 'notTaken');
+  const p = planAt(45, { closed: { ...closure!, windowStartMs: open } as never });
+  assert.doesNotMatch(p.rationale, ON_CLAIM, p.rationale);
+  assert.doesNotMatch(cardText.outageLineRow(p as never, 50)!, /stays on|the add-on switches it back on|expected at the close/);
+});
+
+test('★★★ U7 a run with no re-ON left keeps its line and loses the clause: spent, past the cutoff, or a partial ON that has not verified; a run with one to come, and any other night, as it was', () => {
+  const t = CLOSE - H;
+  const spent = { windowStartMs: OPEN, words: WORDS_SPENT };
+  assert.deepEqual(noReOnOf(SPENT({ forceChargeLineOffSlots: [] }), t), spent, 'spent, slots reading on');
+  assert.deepEqual(noReOnOf(RUN(), CUT), spent, 'at the cutoff');
+  assert.equal(noReOnOf(RUN(), CUT - 1), null, 'before it');
+  assert.equal(noReOnOf(SPENT({ forceChargeLineReOns: 1 }), t), null, 'one left');
+  // A partial ON: slots run, a re-ON needs the ON verified, and a late apply verifies it: its words hold either way.
+  assert.deepEqual(noReOnOf(WARNED({ forceChargeOnFailedSlots: [3] }), t), { windowStartMs: OPEN, words: WORDS_LATE });
+  assert.equal(nfc.lineReOnDue(WARNED({ forceChargeOnFailedSlots: [3], forceChargeLineOffSlots: [1, 2, 3] }), t, fo({ poolSocPct: 52, slotsOn: [] }), [1, 2, 3]), null);
+  assert.equal(noReOnOf(WARNED({ forceChargeOnFailedSlots: [3], forceChargeOnVerifiedAtMs: t }), t), null, 'a late apply: re-ONs again');
+  assert.equal(noReOnOf(RUN({ forceChargeOnVerifiedAtMs: null }), t), null, 'an ON no reading has judged');
+  assert.equal(noReOnOf(applied(), t), null, 'no run');
+  assert.equal(noReOnOf(emptyActuationState(), t), null, 'no record');
+  assert.equal(noReOnOf(SPENT({ forceChargeLineAskPct: null, forceChargeLinePct: null }), t), null, 'a cost night: not a word');
+  // The row and the rationale: the line stays claimed, the walk stays, and what the record cannot do is said.
+  const base = planAt(45);
+  const open = base.window!.startMs;
+  for (const words of [WORDS_SPENT, WORDS_LATE]) {
+    const p = planAt(45, { noReOn: { windowStartMs: open, words } });
+    assert.deepEqual(p.forceChargeLine, base.forceChargeLine);
+    assert.equal(p.cushionEnvelopeReason, undefined, 'still carried');
+    assert.deepEqual(sizing(p), sizing(base));
+    assert.ok(p.rationale.includes(`runs until the panel switches it off at its 81% ceiling; ${words}, ~${p.expectedWriteLevelPct}% expected at the close.`), p.rationale);
+    assert.doesNotMatch(p.rationale, /the add-on switches it back on/, p.rationale);
+    const row = cardText.outageLineRow(p as never, 50)!;
+    assert.ok(row.endsWith(`the panel's force-charge runs until the panel switches it off at its 81% ceiling, and ${words}, ~${p.expectedWriteLevelPct}% expected at the close`), row);
+    assert.doesNotMatch(row, /the add-on switches it back on|at most/, row);
+  }
+  // No re-ON is walked on such a record: the figure beside the words is the walk's without one.
+  const barred = planAt(40, { hours: 15, noReOn: { windowStartMs: open, words: WORDS_SPENT } });
+  const walked = planAt(40, { hours: 15 });
+  assert.ok(barred.expectedWriteLevelPct! < walked.expectedWriteLevelPct!, `${barred.expectedWriteLevelPct} under ${walked.expectedWriteLevelPct}`);
+  assert.deepEqual(sizing(barred), sizing(walked));
+  // Another window, an empty input, a closed start ahead of it, a night with no ceiling stop: nothing moves.
+  assert.deepEqual(planAt(45, { noReOn: { windowStartMs: open + 1, words: WORDS_SPENT } }), base, "an earlier night's record");
+  assert.deepEqual(planAt(45, { noReOn: null }), base);
+  const closed = planAt(45, { closed: { windowStartMs: open, why: 'noReOn', writeStands: true } as never, noReOn: { windowStartMs: open, words: WORDS_SPENT } });
+  assert.deepEqual(closed, planAt(45, { closed: { windowStartMs: open, why: 'noReOn', writeStands: true } as never }), 'the closure says it');
+  const noStop = planAt(30);
+  assert.equal(noStop.expectedLineCeilingStop, undefined);
+  assert.equal(planAt(30, { noReOn: { windowStartMs: open, words: WORDS_SPENT } }).rationale, noStop.rationale, 'no clause to word: "stays on" is true of a run still on');
+});
+
+test('★★★ U7 the walk books no re-ON the record cannot make', () => {
+  const nca = { expectedLineForceChargeWalk: (cardWalk as { expectedLineForceChargeWalk: (o: unknown) => { closeKwh: number; gridKwh: number; ceilingReached: boolean } }).expectedLineForceChargeWalk };
+  const hours = Array.from({ length: 8 }, (_, i) => ({ ts: OPEN + i * H, pvP10W: 0, pvP50W: 0, loadP90W: 9000, loadP50W: 9000, evP90W: 8000 }));
+  const o = { startKwh: 0.5 * 92.16, reserveKwh: 0.5 * 92.16, fullKwh: 92.16, tickPoolKwh: 92.16, startTargetPct: 61, panelCeilingPct: 80, hours, fromMs: OPEN, windowEndMs: CLOSE + 2 * H, dischargeEff: 0.94, chargeCapKw: 17, envelopeKw: 17, legEff: 0.927 };
+  const on = nca.expectedLineForceChargeWalk(o);
+  const off = nca.expectedLineForceChargeWalk({ ...o, noReOn: true });
+  assert.equal(off.ceilingReached, true);
+  assert.ok(on.closeKwh > off.closeKwh + 1 && on.gridKwh > off.gridKwh + 1, `${on.closeKwh} against ${off.closeKwh}`);
+});
+
+test('★★★ U7 wiring: the served plan alone reads it, the plan of record stays, and a night with neither keeps its one compute', () => {
+  const at = INDEX.indexOf('async function recomputeNightChargePlan(');
+  const fn = INDEX.slice(at, INDEX.indexOf('function armedExpectedBuyKwh(', at));
+  assert.ok(fn.includes('  const lineNoReOn = shadowLeg == null && opts.arming !== true && nightActuationMem.windowStartMs === plan.window?.startMs ? armedLineNoReOn(nightActuationMem, nowMs) : null;\n'), 'never an arm, a shadow leg or a later window');
+  assert.ok(fn.includes('  if (!shadowLeg) setLatestNightChargePlan(lineClosed != null || lineNoReOn != null ? computeNightChargePlan({ ...inputs, armedLineStartClosed: lineClosed, armedLineNoReOn: lineNoReOn }) : plan);\n'), fn.slice(0, 200));
+  assert.ok(fn.includes('  const inputs = buildNightChargeInputs(deps);\n  const plan = computeNightChargePlan(inputs);\n'), 'the plan of record');
+  const SRC = readFileSync(resolve(HERE, '../src/nightChargeAdvisor.ts'), 'utf8');
+  assert.ok(SRC.includes('forceChargeLine, lineForceChargeEligible: inputs.lineForceChargeEligible === true, noReOn: lineNoReOn != null, tickPoolKwh: fullKwh,'), 'the walk');
+  const CARD = readFileSync(resolve(HERE, '../../web/src/cards/NightChargeCard.tsx'), 'utf8');
+  assert.ok(CARD.includes('expectedLineCeilingStop?: { ceilingPct: number; startTargetPct: number; noReOnWords?: string };'), 'the field reaches the card');
 });

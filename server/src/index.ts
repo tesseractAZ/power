@@ -69,7 +69,7 @@ import {
   // v1.200.0 (Fix9) — a line night's force-charge "waits on" a reading of the target only while a start can still come.
   forceChargeStartClosed, lineStartClosedWords,
   // v1.200.0 (Fix9 review 2) — a recompute of a window whose armed record carries no line claims no ON the record cannot make.
-  armedNoLineStartMs, armedLineStartClosed, lineCloseReadingLate, lineGridOffPushDue, type LineClosure,
+  armedNoLineStartMs, armedLineStartClosed, armedLineNoReOn, lineCloseReadingLate, lineGridOffPushDue, type LineClosure,
   // v1.200.0 (review 4) — what a line re-ON's readback check stamps, the re-ON that took effect included.
   lineReOnCheckedStamp,
   // v1.200.0 (review 6) — the force-charge tick's cadence, which the line-at-risk push's hand-back hold counts.
@@ -4120,8 +4120,10 @@ async function recomputeNightChargePlan(
   // (Fix10 review 1) And a window no record holds, once no evening job can arm it (chargeCycle.servedLineClosure): read off the plan of
   // record's window, since a closed record of an earlier night says nothing of this one.
   const lineClosed = shadowLeg == null && opts.arming !== true ? servedLineClosure(nightCycleView(), plan.window?.startMs ?? null, armedLineStartClosed(nightActuationMem, nowMs, forceChargeGatesOn(legRoleOf(nightActuationMem))), plan.window != null && noEveningArmLeft(plan.window.startMs, nowMs, eveningJobClock(nowMs))) : null;
+  // (Fix10 review 2) And a run still claimed that no re-ON can bring back, on the same terms.
+  const lineNoReOn = shadowLeg == null && opts.arming !== true && nightActuationMem.windowStartMs === plan.window?.startMs ? armedLineNoReOn(nightActuationMem, nowMs) : null;
   // R4 — never a shadow leg: the holder is the live overnight plan the entities, card and status serve.
-  if (!shadowLeg) setLatestNightChargePlan(lineClosed != null ? computeNightChargePlan({ ...inputs, armedLineStartClosed: lineClosed }) : plan);
+  if (!shadowLeg) setLatestNightChargePlan(lineClosed != null || lineNoReOn != null ? computeNightChargePlan({ ...inputs, armedLineStartClosed: lineClosed, armedLineNoReOn: lineNoReOn }) : plan);
   if (!shadowLeg) pushLineNotArmedIfDue(getLatestNightChargePlan(), lineClosed, nowMs);
 
   // Ledger diagnostics computed over the authoritative 24 h band (where the

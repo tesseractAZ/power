@@ -244,7 +244,7 @@ export interface CushionNotePlan {
   expectedForceChargeMode?: 'line';
   /** The server's NightChargePlan.expectedLineCeilingStop (review 2): the expected walk reaches the panel ceiling,
    *  where the panel switches Charge Now off, and the add-on switches it back on under the start target. */
-  expectedLineCeilingStop?: { ceilingPct: number; startTargetPct: number };
+  expectedLineCeilingStop?: { ceilingPct: number; startTargetPct: number; noReOnWords?: string };
   expectedWriteLevelPct?: number | null;
   expectedForceChargeStartMs?: number | null;
 }
@@ -343,8 +343,7 @@ function outageLineArmedRow(plan: CushionNotePlan, max: number, r1: (n: number) 
     const stop = plan.expectedLineCeilingStop;
     if (stop != null) {
       return `outage line ${lineText(plan.forceChargeLine.linePct)}is above the ${max}% reserve — the panel's force-charge runs until the panel `
-        + `switches it off at its ${stop.ceilingPct}% ceiling, and the add-on switches it back on under ${stop.startTargetPct}% before the close `
-        + `(at most ${LINE_REON_TIMES_TEXT})${tail}`;
+        + `switches it off at its ${stop.ceilingPct}% ceiling, and ${stop.noReOnWords ?? `the add-on switches it back on under ${stop.startTargetPct}% before the close (at most ${LINE_REON_TIMES_TEXT})`}${tail}`;
     }
     return `outage line ${lineText(plan.forceChargeLine.linePct)}is above the ${max}% reserve — the panel's force-charge stays on to the window close${tail}`;
   }

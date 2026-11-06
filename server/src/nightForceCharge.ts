@@ -697,8 +697,10 @@ export function lineLatestStartMs(
 export type ForceChargeStartClosed = 'started' | 'cancelled' | 'reverted' | 'foreign' | 'noWindow' | 'over' | 'late' | 'overGuard' | 'lateGuard' | 'noWrite' | 'gatedOff';
 /** v1.200.0 (Fix10 review 1) — why a plan of a window claims no force-charge (armedLineStartClosed, chargeCycle.servedLineClosure):
  *  forceChargeStartClosed's keys less the two that are no such record ('started' may still be running, 'gatedOff' is what advisory
- *  discloses), a run stopped for good ('stopped': an OFF of ours is one-way), and a window no record holds with no evening job left. */
-export type LineStartClosed = Exclude<ForceChargeStartClosed, 'started' | 'gatedOff'> | 'stopped' | 'noArm';
+ *  discloses), a run stopped for good ('stopped': an OFF of ours is one-way), and a window no record holds with no evening job left.
+ *  (Fix10 review 2) And a run nothing of ours brings back: 'notTaken', an ON warned of on every slot; 'noReOn', every slot reading off
+ *  with no re-ON left. */
+export type LineStartClosed = Exclude<ForceChargeStartClosed, 'started' | 'gatedOff'> | 'stopped' | 'noArm' | 'notTaken' | 'noReOn';
 /** v1.200.0 (Fix10 review 1) — a closed start as a plan reads it: its window, why, and `writeStands` where a verified reserve write of
  *  the night still holds (reserveWriteStands; absent otherwise): the card's figure is true only then. */
 export interface LineClosure { windowStartMs: number; why: LineStartClosed; writeStands?: true }
@@ -741,7 +743,7 @@ export function forceChargeStartClosed(
 }
 
 /** v1.200.0 (Fix9) — each closed start's reason, in words (lineStartClosedWords). */
-export const FORCE_CHARGE_START_CLOSED_WHY: Readonly<Record<Exclude<LineStartClosed, 'stopped'>, string>> = Object.freeze({
+export const FORCE_CHARGE_START_CLOSED_WHY: Readonly<Record<Exclude<LineStartClosed, 'stopped' | 'notTaken' | 'noReOn'>, string>> = Object.freeze({
   cancelled: 'the night was cancelled',
   reverted: "the reserve's restore was sent",
   foreign: 'the reserve was set outside the add-on',
@@ -761,6 +763,9 @@ export const FORCE_CHARGE_START_CLOSED_WHY: Readonly<Record<Exclude<LineStartClo
 export function lineStartClosedWords(line: string, why: ForceChargeStartClosed | LineStartClosed): string {
   if (why === 'started') return `the force-charge for ${line} was switched on earlier and does not start again`;
   if (why === 'stopped') return `the force-charge for ${line} was switched off and does not start again`;
+  // (Fix10 review 2) True in either outcome: a late apply is verified and reopens the record, as the ON-failure push says.
+  if (why === 'notTaken') return `the force-charge for ${line} was switched on and has not taken effect: unless it applies late, none runs`;
+  if (why === 'noReOn') return `the force-charge for ${line} reads off and the add-on does not switch it back on tonight`;
   if (why === 'gatedOff') return `no force-charge for ${line} starts while the options keep it off`;
   return `no force-charge for ${line} starts: ${FORCE_CHARGE_START_CLOSED_WHY[why]}`;
 }
@@ -1394,6 +1399,15 @@ function verifyForceChargeOn(
   return { kind: 'onFailed', slots: pending };
 }
 
+/** v1.200.0 (Fix10 review 2) — PURE. No re-ON can come of a record again: the night's budget is spent, or the re-ON's cutoff has passed.
+ *  lineReOnDue's own two refusals no later tick lifts; every other one is a reading, and the one source of what the served plan says. */
+export function lineReOnGone(
+  s: Pick<NightActuationState, 'forceChargeLineReOns' | 'windowEndMs' | 'nextOnPeakStartMs'>, nowMs: number,
+): boolean {
+  return !(s.forceChargeLineReOns < FORCE_CHARGE_LINE_REON_MAX) || s.windowEndMs == null
+    || nowMs >= writeWindowEndMs(s)! - FORCE_CHARGE_ON_RETRY_CUTOFF_MS;
+}
+
 /**
  * v1.200.0 (review) — PURE. The LINE re-ON: a line night has no software stop, but the panel has one of
  * its own — it switches a slot's Charge Now OFF as the slot's Core reaches the force-charge ceiling, and
@@ -1414,10 +1428,9 @@ export function lineReOnDue(
   s: NightActuationState, nowMs: number, o: ForceChargeOpts, ours: readonly number[],
 ): Extract<ForceChargeAction, { kind: 'lineReOn' }> | null {
   if (s.forceChargeOnAtMs == null || s.forceChargeOffAtMs != null || s.forceChargeOnVerifiedAtMs == null) return null;
-  if (!(s.forceChargeLineReOns < FORCE_CHARGE_LINE_REON_MAX)) return null;
+  if (lineReOnGone(s, nowMs)) return null;
   const mode = forceChargeModeOf(s, gatesOf(o));
   if (mode?.kind !== 'line') return null;
-  if (s.windowEndMs == null || nowMs >= writeWindowEndMs(s)! - FORCE_CHARGE_ON_RETRY_CUTOFF_MS) return null;
   const last = s.forceChargeLineReOnAtMs ?? s.forceChargeOnLastAttemptMs ?? s.forceChargeOnAtMs;
   if (nowMs - last < FORCE_CHARGE_ON_VERIFY_AFTER_MS) return null;
   if (o.vitalsRed || !o.socCoherent || o.gridPresent !== true || o.gridStaLost) return null;
@@ -1571,19 +1584,59 @@ export function reserveWriteStands(
  *  (Fix10 review 1) 'started' goes first in forceChargeStartClosed and shadows the stamps behind it, so a run is read apart: one still
  *  on, or one the panel's own stop ended (the re-ON can bring it back), stays armed; a cancel, a restore, a foreign reserve or an OFF
  *  of ours ends it for good (lineReOnDue needs no OFF, and a record starts once), whatever the plan would say of the rest of the night.
- *  An ON warned of with no OFF is left: it may still apply late, and is verified then. */
+ *  (Fix10 review 2) So does a run nothing of ours brings back (lineRunGone). */
 export function armedLineStartClosed(
   s: Pick<NightActuationState, 'day' | 'forceChargeOnAtMs' | 'cancelled' | 'revertedAtMs' | 'foreignSettledAtMs' | 'windowStartMs' | 'windowEndMs'
     | 'nextOnPeakStartMs' | 'forceChargeCeilingPct' | 'forceChargeLineAskPct' | 'forceChargeLinePct' | 'appliedAtMs' | 'applyAttemptedAtMs'
-    | 'applyVerifiedAtMs' | 'forceChargeOffAtMs'>,
+    | 'applyVerifiedAtMs' | 'forceChargeOffAtMs' | 'forceChargeOnVerifiedAtMs' | 'forceChargeOnFailedAtMs' | 'forceChargeOnFailedSlots'
+    | 'forceChargeSlots' | 'forceChargeLineOffSlots' | 'forceChargeLineReOns' | 'forceChargeLineReOnAtMs'>,
   nowMs: number, gates: ForceChargeGates,
 ): LineClosure | null {
   if (s.day == null || s.windowStartMs == null || forceChargeLineNightPct(s) == null) return null;
   const key = forceChargeStartClosed(s, nowMs, gates);
   if (key == null || key === 'gatedOff') return null;
-  const why: LineStartClosed | null = key !== 'started' ? key : nightSettledKey(s) ?? (s.forceChargeOffAtMs != null ? 'stopped' : null);
+  const why: LineStartClosed | null = key !== 'started' ? key : nightSettledKey(s) ?? (s.forceChargeOffAtMs != null ? 'stopped' : lineRunGone(s, nowMs));
   if (why == null) return null;
   return { windowStartMs: s.windowStartMs, why, ...(reserveWriteStands(s) ? { writeStands: true as const } : {}) };
+}
+
+/** v1.200.0 (Fix10 review 2) — PURE. A run with no OFF that nothing of ours brings back, read off the record:
+ *  'notTaken', an ON warned of on every slot (verifyForceChargeOn issues nothing after its warning, a record starts once, and a re-ON
+ *  needs a verified ON), until a late apply verifies it; a failure on some slots is armedLineNoReOn's, they may be running;
+ *  'noReOn', a verified run every slot of which last read OFF, whatever switched them off, with no re-ON left (lineReOnGone) and the last
+ *  re-ON past its readback grace, until a slot reads ON again. null otherwise: a run still on, or one a re-ON can bring back. */
+function lineRunGone(
+  s: Pick<NightActuationState, 'forceChargeOnVerifiedAtMs' | 'forceChargeOnFailedAtMs' | 'forceChargeOnFailedSlots' | 'forceChargeSlots'
+    | 'forceChargeLineOffSlots' | 'forceChargeLineReOns' | 'forceChargeLineReOnAtMs' | 'windowEndMs' | 'nextOnPeakStartMs'>,
+  nowMs: number,
+): 'notTaken' | 'noReOn' | null {
+  if (s.forceChargeOnVerifiedAtMs == null) {
+    return s.forceChargeOnFailedAtMs != null && partialForceChargeOnFailureSlots(s) == null ? 'notTaken' : null;
+  }
+  const off = s.forceChargeLineOffSlots;
+  if (off == null || !oursOf(s).every((n) => off.includes(n)) || !lineReOnGone(s, nowMs)) return null;
+  const reOnAt = s.forceChargeLineReOnAtMs;
+  return reOnAt != null && nowMs - reOnAt < FORCE_CHARGE_ON_VERIFY_AFTER_MS ? null : 'noReOn';
+}
+
+/** v1.200.0 (Fix10 review 2) — a run on record that no re-ON can bring back, for the plan that names one (LineNoReOn.words stands in for
+ *  the re-ON's clause, a sentence of its own only where the plan's walk reaches the panel's stop). */
+export interface LineNoReOn { windowStartMs: number; words: string }
+
+/** v1.200.0 (Fix10 review 2) — PURE. A record with a line whose run stays claimed but gets no re-ON: a verified one with none left
+ *  (lineReOnGone), or an ON warned of on some slots, whose others may be running and whose re-ON needs it verified. Its words hold in
+ *  either outcome: a late apply verifies it, and a re-ON can then come. Like the closure, it reaches only the plan the card and the
+ *  entities serve, and armedLineStartClosed goes first (computeNightChargePlan). null with no run, or one a re-ON can bring back. */
+export function armedLineNoReOn(
+  s: Pick<NightActuationState, 'windowStartMs' | 'windowEndMs' | 'nextOnPeakStartMs' | 'forceChargeOnAtMs' | 'forceChargeOnVerifiedAtMs'
+    | 'forceChargeOnFailedAtMs' | 'forceChargeLineReOns' | 'forceChargeLineAskPct' | 'forceChargeLinePct'>,
+  nowMs: number,
+): LineNoReOn | null {
+  if (s.windowStartMs == null || s.forceChargeOnAtMs == null || forceChargeLineNightPct(s) == null) return null;
+  if (s.forceChargeOnVerifiedAtMs == null) {
+    return s.forceChargeOnFailedAtMs != null ? { windowStartMs: s.windowStartMs, words: 'unless it applies late, the add-on does not switch it back on' } : null;
+  }
+  return lineReOnGone(s, nowMs) ? { windowStartMs: s.windowStartMs, words: 'the add-on does not switch it back on tonight' } : null;
 }
 
 /** v1.200.0 (Fix10 review 1) — how long after the add-on's close a pool reading is still the close's: the restore's readback grace and

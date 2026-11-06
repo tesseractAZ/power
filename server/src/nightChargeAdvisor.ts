@@ -86,7 +86,7 @@ import {
   // v1.200.0 (review 2) — the re-ON budget in words, for the texts of a night whose walk reaches the ceiling.
   lineReOnTimesWords,
   // v1.200.0 (Fix10) — a closed start, in the words its pushes use.
-  lineStartClosedWords, type LineClosure,
+  lineStartClosedWords, type LineClosure, type LineNoReOn,
 } from './nightForceCharge.js';
 // R2 — the window resolver and the per-leg rules live with the cycle chooser; the taper ceiling
 // with the curtailment engine's taper band. (chargeWindows.ts imports only tariff.ts;
@@ -275,6 +275,9 @@ export interface NightChargeInputs {
    *  record holds with no evening job left (chargeCycle.servedLineClosure): a plan of that window says so ('startClosed'). Set only on the plan the card and the entities serve (index.ts): the plan of record, whose ask the ledger and
    *  its strike rule read, never reads it. Absent ⇒ no such record. */
   armedLineStartClosed?: LineClosure | null;
+  /** v1.200.0 (Fix10 review 2) — a run on record that stays claimed with no re-ON left (nightForceCharge.armedLineNoReOn): a plan of that
+   *  window walks none and says so. Set only on the plan the card and the entities serve, as armedLineStartClosed, which goes first. */
+  armedLineNoReOn?: LineNoReOn | null;
 
   // ── The cheap charge window tonight (resolved upstream via tariff.rateAt) ──
   window: { startMs: number; endMs: number } | null;
@@ -637,8 +640,8 @@ export interface NightChargePlan {
    *  OFF-reading latch, 2026-09-23 / 2026-10-02), and the tick switches it back on under `startTargetPct` before the
    *  close (lineReOnDue, at most FORCE_CHARGE_LINE_REON_MAX a night). The rationale, the push and the card then say
    *  so — never "stays on until the window closes", never "the ceiling is the backstop". Absent otherwise (that
-   *  plan's JSON is unchanged). */
-  expectedLineCeilingStop?: { ceilingPct: number; startTargetPct: number };
+   *  plan's JSON is unchanged). (Fix10 review 2) `noReOnWords`, where the record can make no re-ON (armedLineNoReOn): said in its place. */
+  expectedLineCeilingStop?: { ceilingPct: number; startTargetPct: number; noReOnWords?: string };
 
   /** v1.60.0 — EV-contention disclosure for tonight's window (see the type).
    *  null only on a null plan (no window was even resolved). */
@@ -1225,6 +1228,8 @@ export function expectedLineForceChargeWalk(o: {
   envelopeKw: number | null;
   legEff: number;
   acceptKw?: number | null;
+  /** v1.200.0 (Fix10 review 2) — the record can make no re-ON (armedLineNoReOn): none is walked. */
+  noReOn?: boolean;
 }): { closeKwh: number; startMs: number | null; startPackKwh: number; gridKwh: number; ceilingReached: boolean } | null {
   const byHour = hoursByEpoch(o.hours);
   let pack = Math.max(0, Math.min(o.fullKwh, o.startKwh));
@@ -1281,7 +1286,7 @@ export function expectedLineForceChargeWalk(o: {
       // FORCE_CHARGE_ON_RETRY_CUTOFF_MS — and the walk rises again from the next minute.
       const pv = h.pvP50W != null && Number.isFinite(h.pvP50W) ? h.pvP50W : h.pvP10W;
       pack = Math.max(floor, Math.min(o.fullKwh, pack + chargeLegStep(((pv - loadW / o.dischargeEff) / 1000) * dtH, o.legEff)));
-      if ((pack / o.fullKwh) * 100 < o.startTargetPct && reOns < FORCE_CHARGE_LINE_REON_MAX
+      if (o.noReOn !== true && (pack / o.fullKwh) * 100 < o.startTargetPct && reOns < FORCE_CHARGE_LINE_REON_MAX
         && t + EXPECTED_JIT_STEP_MS < o.windowEndMs - FORCE_CHARGE_ON_RETRY_CUTOFF_MS
         && t + EXPECTED_JIT_STEP_MS - lastOnMs >= FORCE_CHARGE_ON_VERIFY_AFTER_MS) {
         latched = false;
@@ -1333,6 +1338,8 @@ export function expectedBuyFromPlan(o: {
    *  forceChargeModeOf the tick uses. Absent ⇒ today's walk. */
   forceChargeLine?: ForceChargeLine | null;
   lineForceChargeEligible?: boolean;
+  /** v1.200.0 (Fix10 review 2) — the record can make no re-ON (armedLineNoReOn): expectedLineForceChargeWalk's. */
+  noReOn?: boolean;
   /** v1.200.0 — the pool the TICK times its start on (expectedForceChargeStart's tickPoolKwh). */
   tickPoolKwh: number;
   /** The expected pack when the window's write takes effect (expectedCarryKwh to the window
@@ -1435,7 +1442,7 @@ function expectedLineBuy(
     startTargetPct: mode.startTargetPct, panelCeilingPct: mode.panelCeilingPct,
     hours: o.window.hours, fromMs: reserveLeg.creditKwh > 0 ? reserveLeg.doneMs : o.window.fromMs, windowEndMs: o.window.windowEndMs,
     dischargeEff: o.window.dischargeEff, chargeCapKw: o.window.chargeCapKw, envelopeKw: o.window.envelopeKw, legEff: o.legEff,
-    acceptKw: o.window.acceptKw ?? null,
+    acceptKw: o.window.acceptKw ?? null, noReOn: o.noReOn,
   });
   if (walk == null) return { buyKwh: null, levelPct: floorLevel, mode: 'line', panelCeilingPct, startTargetPct };
   const out: ExpectedBuy = {
@@ -2449,11 +2456,13 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
     ? inputs.armedLineStartClosed.why : null;
   const lineArmed = lineQualifies && lineEligible === true && !lineNoWrite && !lineNotOnRecord && lineStartClosed == null;
   const forceChargeLine: ForceChargeLine | null = lineArmed ? { askPct: lineAsk, linePct: cushionLineSocPct } : null;
+  // (Fix10 review 2) A run still claimed that no re-ON can bring back: none is walked, and its clause says so. Nothing written reads this.
+  const lineNoReOn = inputs.armedLineNoReOn?.windowStartMs === window.startMs ? inputs.armedLineNoReOn : null;
 
   const expected: ExpectedBuy = chargeTonight
     ? expectedBuyFromPlan({
       setpointSocPct, costCeilingSocPct, forceChargeEligible: inputs.forceChargeEligible === true && !lineNoWrite && lineStartClosed == null,
-      forceChargeLine, lineForceChargeEligible: inputs.lineForceChargeEligible === true, tickPoolKwh: fullKwh,
+      forceChargeLine, lineForceChargeEligible: inputs.lineForceChargeEligible === true, noReOn: lineNoReOn != null, tickPoolKwh: fullKwh,
       startKwh: expectedStartKwh, deliverableKwh: expectedDeliverableKwh, fullKwh, legEff,
       window: { hours: horizon, fromMs: effChargeStartMs, windowEndMs: windowEnd, dischargeEff, chargeCapKw, envelopeKw, acceptKw },
     })
@@ -2477,7 +2486,7 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   // v1.200.0 (review 2) — the line walk starts and reaches the panel ceiling (NightChargePlan.expectedLineCeilingStop).
   const lineCeilingStop = expected.mode === 'line' && expected.ceilingStop === true && expected.forceChargeStartMs != null
     && expected.levelPct != null && expected.panelCeilingPct != null && expected.startTargetPct != null
-    ? { ceilingPct: expected.panelCeilingPct, startTargetPct: expected.startTargetPct } : null;
+    ? { ceilingPct: expected.panelCeilingPct, startTargetPct: expected.startTargetPct, ...(lineNoReOn != null ? { noReOnWords: lineNoReOn.words } : {}) } : null;
   // R2 — THE RE-ENTRY HOLD (plan §3.3), a mid-day cost leg only (middayReentryLinePct): a write whose
   // level is under floor + 25 leaves the pool, at the restore, where the panel holds it instead of
   // discharging, and the grid carries the house into on-peak. Such a leg holds.
@@ -2639,7 +2648,7 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
       // itself, and the add-on switches it back on under the start target before the close (lineReOnDue). Never
       // "stays on until the window closes" for a night expected to see the panel's own stop.
       : expected.mode === 'line' && lineCeilingStop != null
-        ? ` ${envelopeHead}, so the panel's force-charge ${lineStartText}runs until the panel switches it off at its ${lineCeilingStop.ceilingPct}% ceiling; the add-on switches it back on if the pool falls under ${lineCeilingStop.startTargetPct}% before the window closes (at most ${lineReOnTimesText}), ~${expected.levelPct}% expected at the close. After the window the reserve returns to ${round1(reserveFloorPct)}% and the house can draw the pool down as usual.`
+        ? ` ${envelopeHead}, so the panel's force-charge ${lineStartText}runs until the panel switches it off at its ${lineCeilingStop.ceilingPct}% ceiling; ${lineCeilingStop.noReOnWords ?? `the add-on switches it back on if the pool falls under ${lineCeilingStop.startTargetPct}% before the window closes (at most ${lineReOnTimesText})`}, ~${expected.levelPct}% expected at the close. After the window the reserve returns to ${round1(reserveFloorPct)}% and the house can draw the pool down as usual.`
         : expected.mode === 'line'
           ? ` ${envelopeHead}, so the panel's force-charge ${lineStartText}stays on until the window closes${expected.levelPct != null && expected.forceChargeStartMs != null ? `, taking the pool to ~${expected.levelPct}%` : ''}. After the window the reserve returns to ${round1(reserveFloorPct)}% and the house can draw the pool down as usual.`
           : null;
