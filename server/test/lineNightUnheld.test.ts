@@ -440,6 +440,12 @@ test('★★★ U1c the ledger keeps its ask: the plan of record carries it, so 
   const served = planAt(45, { closed: { windowStartMs: raw.window!.startMs, why: 'cancelled' } });
   assert.equal(lineForceChargeLedgerColumns(raw as never).cushion_line_force_charge_pct, raw.forceChargeLine!.askPct);
   assert.equal(lineForceChargeLedgerColumns(served as never).cushion_line_force_charge_pct, null, 'why the ledger never reads it');
+  // Two computes on one set of inputs, as the recompute makes them: the first is the plan of record, whatever follows it.
+  const inputs = buildNightChargeInputs({ ...caseOf(LABEL).deps, reserveFloorPct: 45, cushionPoolScale: MEASURED_SCALE, forceChargeEligible: false, lineForceChargeEligible: true } as never);
+  const first = JSON.stringify(computeNightChargePlan(inputs));
+  assert.equal(first, JSON.stringify(raw));
+  computeNightChargePlan({ ...inputs, armedLineStartClosed: { windowStartMs: raw.window!.startMs, why: 'cancelled' } } as never);
+  assert.equal(JSON.stringify(computeNightChargePlan(inputs)), first, 'the served compute leaves the inputs as it found them');
   const NOW = Date.UTC(2026, 9, 31, 4, 30);
   const row = (columns: Record<string, unknown>) => ({
     plan_date: phoenixYmd(NOW - 3 * 86_400_000), algo_version: String(CURRENT_ALGO_VERSION), confidence_tier: 'forecast',
