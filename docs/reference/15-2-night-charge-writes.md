@@ -149,7 +149,7 @@ When `NIGHT_CHARGE_MODE` is `supervised` (or `auto`), each charge night runs one
    hold read it as the raise directly on a tick before the adoption. On a settled night
    nothing more is written to the reserve, the force-charge riding the write switches OFF
    (reason `foreign`), the night is resolved for the next
-   arm, the posture no longer reads it as raised by the add-on, and an info push says what the
+   arm, the posture no longer reads it as raised by the add-on, and a push says what the
    reserve reads. A different value restarts the count; one of the add-on's own values clears
    it; a null or out-of-envelope reading is no evidence either way, and the clock-driven restore
    goes ahead blind over it. One sighting does not hold the restore. After the restore was sent,
@@ -340,16 +340,15 @@ fixture (nameplate, 0.944), 10 and 15 of them closing near 50 (`lineForceCharge.
   (`requiredExtraKwh > 0`), whose line asked to the whole percent above it, ⌈L⌉ (`askOf`, the one
   expression the reserve path's ask also reads), is above 50. A legacy-pct or disabled cushion, a hold,
   and a night whose pack already holds the line without a buy never qualify. On the year fixture 22 plans
-  qualify on nameplate and 37 at 0.944; 9 and 13 of them were already sizing shortfalls.
+  qualify on nameplate and 37 at 0.944.
 - **Armed, carried or disclosed.** Where the line force-charge is eligible (`lineForceChargeEligible`:
   supervised or auto mode, never the backup leg) the plan arms it whatever the ask (`forceChargeLine
-  { askPct: ⌈L⌉, linePct: L }`). It is **carried** only where ⌈L⌉ + 10 ≤ 100 and, with the sizing met,
+  { askPct: ⌈L⌉, linePct: L }`), unless the write has nothing to raise. It is **carried** only where ⌈L⌉ + 10 ≤ 100 and, with the sizing met,
   its own walk closes at or above L − 0.05 (`lineWalkHolds`). Otherwise it **discloses**:
-  `cushionShortfall`, cause `'envelope'` (`'envelope+caps'` with a sizing shortfall), reason `advisory` or
-  `backupLeg` (nothing armed), `nearFull` (⌈L⌉ + 10 > 100) or `closeUnder`, the last two still armed. The flag is OR-ed in **after** the cost block, so the cost ceiling and its de-bias bound
-  read the sized flag alone. `cushionTroughSocPct` stays the sized trough and is never capped. The
-  written reserve, `buyKwh`, `requiredExtraKwh`, `targetSocPct`, `setpointSocPct` and
-  `costCeilingSocPct` equal v1.199.1's for the same inputs; with no eligibility input the plan is v1.199.1's byte for byte.
+  `cushionShortfall`, cause `'envelope'` (`'envelope+caps'` with a sizing shortfall), reason `advisory`,
+  `backupLeg`, `reserveAtTarget` or `armedNoLine` (nothing armed), `nearFull` (⌈L⌉ + 10 > 100) or `closeUnder`, the last two still armed. The flag is OR-ed in **after** the cost block, so the cost ceiling and its de-bias bound
+  read the sized flag alone. `cushionTroughSocPct` stays the sized trough. The written reserve and every sizing figure
+  equal v1.199.1's for the same inputs; with no eligibility input the plan is byte for byte.
 - **The two modes** (`forceChargeModeOf`, `nightForceCharge.ts`). The armed record keeps the line's ask
   in its own field (`forceChargeLineAskPct`) beside the cost ceiling (`forceChargeCeilingPct`, whose
   meaning is unchanged). Each tick composes the mode from the **live** gates: the cost force-charge
@@ -384,22 +383,21 @@ fixture (nameplate, 0.944), 10 and 15 of them closing near 50 (`lineForceCharge.
   ceiling too (`forceChargeOnStamp`): a night whose panel already read it needed no sync, and its verify would otherwise read the cost ceiling's
   value. While ON in line mode a synced ceiling above the mode's own is lowered to it, once
   (`lineCeilingLoweringDue`): the cost gate gone off mid-run on a cost-dominant night would otherwise
-  leave the cost ceiling (90) as the only stop, ten points past the line mode's 80. It lowers only what
+  leave the cost ceiling (90) as the only stop. It lowers only what
   the panel holds, a live readback inside 80-100 above the mode's ceiling: a panel reading at or under
-  it (lowered in the app) is left alone, since the write would raise it. It only lowers, so it runs under red vitals too, as the OFFs do.
+  it is left alone. It only lowers, so it runs under red vitals too, as the OFFs do.
 - **The morning refresh** (`morningRefresh.ts`) lowers or drops the cost ceiling only; the line ask rides through unchanged.
 - **The surfaces** state one level, the expected close of the line walk (`expectedBuyFromPlan` in line
-  mode, `expectedForceChargeMode: 'line'`): the rationale, the push title and its clause, the spoken
+  mode, `expectedForceChargeMode: 'line'`): the rationale, the push, the spoken
   notice and the card. The spoken
   notice adds "The panel keeps only 50 percent in reserve." The line sentence appears only in line mode. On a window-bound walk the close stated is capped at the window's reach and floored at
-  the 50% reserve (chapter 15 part 1). A walk that reaches the panel ceiling (`expectedLineCeilingStop`, 6 of the
-  year's 39 line-mode plans) is worded by the panel's stop and the re-ON on the rationale, push and
+  the 50% reserve (chapter 15 part 1). A walk that reaches the panel ceiling (`expectedLineCeilingStop`) is worded by the panel's stop and the re-ON on the rationale, push and
   card, never "stays on until the window closes" and never the ceiling "as the backstop". A night whose pool is expected to stay at or
   above the panel ceiling says the force-charge is armed for the line "but is not expected to start". With nothing armed the plan says the line is above it "and no
-  force-charge runs in advisory mode" (the backup leg: "the outage backup leg writes the reserve only"; `reserveAtTarget`, a reserve already at the write: "no write goes, and no force-charge runs without one"),
-  "so the cushion is not fully held — residual risk remains". An armed night keeps its line sentence and,
+  force-charge runs in advisory mode" (the backup leg: "the outage backup leg writes the reserve only"),
+  "so the cushion is not fully held — residual risk remains". `reserveAtTarget` says "no write is due while it does, and no force-charge runs without one"; `armedNoLine`, a recompute of a window whose record has no line ask, "no write armed for this window carries a force-charge for it", each "so the cushion is not assured": a reserve lowered later gets its write, with no force-charge for the line. An armed night keeps its line sentence and,
   whatever its cause, adds a NOTE (`lineNotHeldOf`; the 21:30 log "Line NOT held") where its walk closes
-  under the line ("~57.3%, under tonight's 68.85% outage line"), above 100% "above a full
+  under the line, above 100% "above a full
   pool", and on a `nearFull` walk that holds "cannot hold it with its usual margin"; never "no
   force-charge". The "charge/pool caps" note appears only where the sizing itself fell short.
 - **At run time** a night whose record carries a line ask, a cost-dominant one too, pushes when its start is held for a reason other than the clock or the pool. The causes
@@ -415,7 +413,7 @@ fixture (nameplate, 0.944), 10 and 15 of them closing near 50 (`lineForceCharge.
   would hold the line tonight (Charge Now on for those slots in the EcoFlow app; the add-on switches it
   off at the close), never "no action needed". A reserve write that never reads back on such a night says that until the panel reads 50% it keeps its own reserve, under the line, and to set 50% in the
   app now: the last start, the close less 20 minutes, may close under the line. With no start left
-  (`forceChargeStartClosed`: cancelled, too late) it and its logs say why none starts. A write missing its apply window pushes too (`missedApplyDue`): an attempt in those words,
+  (`forceChargeStartClosed`: cancelled, too late) it and its logs say why none starts. A write missing its apply window pushes too (`missedApplyDue`): an attempt in those words (no reading: the force-charge waits on one),
   none issued naming Charge Now by hand. A write-blocked ON or ceiling sync is a held start.
 - **The line at risk** (`lineAtRiskPushDue`). After the verified ON the re-ON is the only in-night
   remedy, so a line lost another way (a re-ON not applied or spent, its gates holding, a late load taking
