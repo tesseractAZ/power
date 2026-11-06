@@ -4488,16 +4488,9 @@ const MUTANTS = [
   {
     id: 'F10r2-d(vi). ★★★ a cost night is told (the live plant)',
     file: NFC, tests: [T_UNHELD],
-    find: "  if (s.windowStartMs == null || s.forceChargeOnAtMs == null || forceChargeLineNightPct(s) == null) return null;\n",
-    to: "  if (s.windowStartMs == null || s.forceChargeOnAtMs == null) return null; /* MUTANT */\n",
+    find: "  if (s.windowStartMs == null || forceChargeLineNightPct(s) == null) return null;\n",
+    to: "  if (s.windowStartMs == null) return null; /* MUTANT */\n",
     why: 'A night with no line computes a second plan, and the wiring no longer proves nothing moves on it.',
-  },
-  {
-    id: 'F10r2-d(vii). ★★ a night with no run is told',
-    file: NFC, tests: [T_UNHELD],
-    find: "  if (s.windowStartMs == null || s.forceChargeOnAtMs == null || forceChargeLineNightPct(s) == null) return null;\n",
-    to: "  if (s.windowStartMs == null || forceChargeLineNightPct(s) == null) return null; /* MUTANT */\n",
-    why: 'A start still to come, past the cutoff or with a stale record, is told no re-ON comes.',
   },
   // (e) the plan and the card
   {
@@ -4532,7 +4525,7 @@ const MUTANTS = [
     id: 'F10r2-e(v). ★★★ the plan carries no words',
     file: NCA, tests: [T_UNHELD],
     find: ", ...(lineNoReOn != null ? { noReOnWords: lineNoReOn.words } : {}) } : null;\n",
-    to: " } : null; /* MUTANT */\n",
+    to: ", noReOnWords: undefined as string | undefined } : null; /* MUTANT */\n",
     why: 'The row and the rationale keep the promise.',
   },
   {

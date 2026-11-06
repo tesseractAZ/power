@@ -1628,11 +1628,11 @@ export interface LineNoReOn { windowStartMs: number; words: string }
  *  either outcome: a late apply verifies it, and a re-ON can then come. Like the closure, it reaches only the plan the card and the
  *  entities serve, and armedLineStartClosed goes first (computeNightChargePlan). null with no run, or one a re-ON can bring back. */
 export function armedLineNoReOn(
-  s: Pick<NightActuationState, 'windowStartMs' | 'windowEndMs' | 'nextOnPeakStartMs' | 'forceChargeOnAtMs' | 'forceChargeOnVerifiedAtMs'
-    | 'forceChargeOnFailedAtMs' | 'forceChargeLineReOns' | 'forceChargeLineAskPct' | 'forceChargeLinePct'>,
+  s: Pick<NightActuationState, 'windowStartMs' | 'windowEndMs' | 'nextOnPeakStartMs' | 'forceChargeOnVerifiedAtMs' | 'forceChargeOnFailedAtMs'
+    | 'forceChargeLineReOns' | 'forceChargeLineAskPct' | 'forceChargeLinePct'>,
   nowMs: number,
 ): LineNoReOn | null {
-  if (s.windowStartMs == null || s.forceChargeOnAtMs == null || forceChargeLineNightPct(s) == null) return null;
+  if (s.windowStartMs == null || forceChargeLineNightPct(s) == null) return null;
   if (s.forceChargeOnVerifiedAtMs == null) {
     return s.forceChargeOnFailedAtMs != null ? { windowStartMs: s.windowStartMs, words: 'unless it applies late, the add-on does not switch it back on' } : null;
   }
