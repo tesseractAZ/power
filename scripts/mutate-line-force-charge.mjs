@@ -2680,7 +2680,7 @@ const MUTANTS = [
     id: 'F9r1-a(iv). ★★ such a night\'s reason read as closeUnder',
     file: NCA, tests: [T_UNHELD],
     find: "lineEligible !== true ? 'advisory' : lineNoWrite ? 'reserveAtTarget' : lineNearFull ? 'nearFull' : 'closeUnder';",
-    to: "lineEligible !== true ? 'advisory' : lineNearFull ? 'nearFull' : 'closeUnder'; /* MUTANT */",
+    to: "lineEligible !== true ? 'advisory' : (lineNoWrite && (false as boolean)) ? 'reserveAtTarget' : lineNearFull ? 'nearFull' : 'closeUnder'; /* MUTANT */",
     why: 'The push and the card lose why, and the note reads like a walk that closes under.',
   },
   {
@@ -2793,7 +2793,7 @@ const MUTANTS = [
     id: 'F9r1-b(x). ★★★ the push on a line night is the info one with no line words',
     file: NTF, tests: [T_UNHELD],
     find: '  if (o.linePct == null || !Number.isFinite(o.linePct)) return plain;\n',
-    to: '  if ((true as boolean)) return plain; /* MUTANT */\n',
+    to: '  if (o.linePct == null || !Number.isFinite(o.linePct) || (true as boolean)) return plain; /* MUTANT */\n',
     why: 'The defect\'s words: "did not start", nothing of the line.',
   },
   {

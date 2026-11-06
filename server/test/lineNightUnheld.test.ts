@@ -13,7 +13,7 @@ import {
 import { asChargeLeg, missedApplyDue, missedApplyReason, promoteCycle, type ChargeLegState } from '../src/chargeCycle.js';
 import * as notify from '../src/notify.js';
 import { buildNightChargeForeignReserve, buildNightChargeMessage, buildNightChargeMissedApply, buildNightChargeMorningSummary } from '../src/notify.js';
-import { computeNightChargeReadiness, CURRENT_ALGO_VERSION, phoenixYmd } from '../src/nightChargeGate.js';
+import { computeNightChargeReadiness, CURRENT_ALGO_VERSION, MISSED_APPLY_DISPOSITION, phoenixYmd } from '../src/nightChargeGate.js';
 import { eveningAnnouncement } from '../src/chargeAnnounce.js';
 import { legacyIdentityCases } from './fixtures/legacyIdentityFixtures.js';
 import { MEASURED_SCALE } from './fixtures/measuredCushionLineFigures.js';
@@ -48,8 +48,9 @@ const caseOf = (label: string) => CASES.find((c) => c.label === label)!;
 type P = NightChargePlan & { forceChargeLine?: { askPct: number; linePct: number }; cushionEnvelopeReason?: string; cushionShortfallCause?: string; expectedForceChargeMode?: string };
 const planAt = (floor: number, o: { eligible?: boolean; cost?: boolean; hours?: number; label?: string } = {}): P => {
   const deps = {
-    ...caseOf(o.label ?? LABEL).deps, reserveFloorPct: floor, cushionPoolScale: MEASURED_SCALE, objective: 'resilience',
-    forceChargeEligible: o.cost === true, ...(o.eligible !== false ? { lineForceChargeEligible: true } : {}),
+    ...caseOf(o.label ?? LABEL).deps, reserveFloorPct: floor, cushionPoolScale: MEASURED_SCALE,
+    forceChargeEligible: o.cost === true, ...(o.cost === true ? { objectiveMode: 'cost', costMaxSocPct: 80 } : {}),
+    ...(o.eligible !== false ? { lineForceChargeEligible: true } : {}),
     ...(o.hours != null ? { outageCushionHours: o.hours } : {}),
   } as never;
   return computeNightChargePlan(buildNightChargeInputs(deps)) as P;
@@ -105,8 +106,11 @@ test('★★★ U1 no force-charge is expected on such a plan, a cost night too:
   const costOn = planAt(50, { cost: true });
   assert.equal(costOn.forceChargeLine, undefined);
   assert.equal(costOn.cushionEnvelopeReason, 'reserveAtTarget');
+  assert.ok(costOn.costCeilingSocPct! > 50, 'a cost ceiling above the reserve: on any other night the force-charge rides it');
   assert.equal(costOn.expectedForceChargeStartMs == null, true, 'no start stated');
   assert.equal(costOn.expectedForceChargeMode === 'line', false);
+  assert.equal(costOn.expectedWriteLevelPct, 50, 'the reserve alone');
+  assert.equal(costOn.expectedBuyKwh, 0);
 });
 
 test('★★★ U1 the evening surfaces of such a plan: the note names why, the supervised tail says nothing is written, no raise and no force-charge are promised; the card row says why', () => {
@@ -304,6 +308,9 @@ test('★★★ U2 the wiring: the step keys the push on the record\'s line, rea
   assert.ok(step.includes('closeText: leg.windowEndMs != null ? fmtSiteClock(writeWindowEndMs(leg)!) : null,'), step);
   assert.ok(step.includes('if (missedLinePct != null) app.log.warn(`night-charge: the ${leg.day} reserve write for the ${lineLogPct(leg)}% outage line ${leg.applyAttemptedAtMs != null ? \'has not been confirmed\' : \'was not issued\'} — ${reason}; the reserve reads ${currentReservePct ?? \'unknown\'}%, and ${missedStartClosed == null ? \'the force-charge for the line waits on a reading of the target\' : lineStartClosedWords(\'the line\', missedStartClosed)}.`);'), step);
   assert.ok(step.includes("else app.log.warn(`night-charge: the ${leg.leg} leg for ${leg.day} ("), 'the leg with no line keeps its line');
+  // The disposition is what the gate reads (lineWriteNeverHeld).
+  assert.ok(step.includes('stampLegOutcome(leg, { arm_disposition: `${MISSED_APPLY_DISPOSITION}${reason}` });'), step);
+  assert.equal(MISSED_APPLY_DISPOSITION, 'missed — ');
 });
 
 test('★★★ U2 lineCloseAccountDue: a record with a line ask and nothing to restore, once, from its close: a write that never applied, or a reserve someone else set; never a night a summary accounts for', () => {
