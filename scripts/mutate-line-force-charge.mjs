@@ -97,7 +97,7 @@
  * (Fix9 review 2) The plan's reserve is a reading: words true whichever way it goes (F9r2-a(vii), c(v), d); a recompute of a window whose
  * armed record has no line ask says so, never an ON the record cannot make (F9r2-a, b, c); no reading says nothing of what the panel holds
  * (F9r2-e); a late push names its night (F9r2-f); the line named beside the reading it is read against (F9r2-g); the card (F9r2-h).
- * A5-i, P-xii, F9r1-a(iv)-(vi), (viii), (ix) re-anchored.
+ * A5-i, P-xii, W3-i, F9r1-a(iv)-(vi), (viii), (ix) re-anchored.
  *
  *   node scripts/mutate-line-force-charge.mjs [--only <id prefix>]
  *
@@ -1163,7 +1163,7 @@ const MUTANTS = [
   {
     id: 'W3-i. ★★★ a close under the line not said so',
     file: NTF, tests: [T_RISK],
-    find: ", under the ${round1(linePct)}% outage line` : ''}`;",
+    find: ", under the ${lineBesidePct(linePct, round1(closeRead))}% outage line` : ''}`;",
     to: "` : ''}`; /* MUTANT */",
     why: 'Finding 5: "ran to the window close for the 55.6% outage line; the pool read 51% at the close" — read as held.',
   },
