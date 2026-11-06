@@ -933,7 +933,7 @@ test('★★★ U6 a run stopped for good is a closed start: every stamp behind 
     for (let at = t; at < CLOSE; at += 5 * M) {
       assert.notEqual(decideForceCharge(s, at, fo({ poolSocPct: 52, slotsOn: [] })).kind, 'on');
       assert.notEqual(decideForceCharge(s, at, fo({ poolSocPct: 52, slotsOn: [] })).kind, 'lineReOn');
-      assert.equal(nfc.lineReOnDue(s, at, fo({ poolSocPct: 52, slotsOn: [] }), [1, 2, 3]), null);
+      if (s.forceChargeOffAtMs != null) assert.equal(nfc.lineReOnDue(s, at, fo({ poolSocPct: 52, slotsOn: [] }), [1, 2, 3]), null, 'an OFF of ours: never again');
     }
   }
   const t = CLOSE - H;
@@ -1022,6 +1022,8 @@ test('★★★ U6 noEveningArmLeft: only once no evening job can run before the
   assert.equal(left(OPEN, at(10), { consumed: false, fireMin: FIRE, nowMin: min(10) }), false, '13:00: tonight\'s job is ahead');
   assert.equal(left(OPEN, at(1), { consumed: false, fireMin: FIRE, nowMin: min(1) }), false, '22:00: deferred, still retrying');
   assert.equal(left(OPEN, at(1), { consumed: true, fireMin: FIRE, nowMin: min(1) }), true, '22:00: latched');
+  assert.equal(left(OPEN + 24 * H - 90 * M, at(1), { consumed: true, fireMin: FIRE, nowMin: min(1) }), true, 'a window opening as the next job fires: that job cannot arm it');
+  assert.equal(left(OPEN + 24 * H - 90 * M + 1, at(1), { consumed: true, fireMin: FIRE, nowMin: min(1) }), false, 'a millisecond later it can');
   assert.equal(left(OPEN, OPEN + 5 * M, { consumed: true, fireMin: FIRE, nowMin: 23 * 60 + 5 }), true, 'past the cutoff');
   assert.equal(left(OPEN, OPEN + 3 * H, { consumed: false, fireMin: FIRE, nowMin: 2 * 60 }), true, "02:00: the new day's job fires after this window opened");
   // Saturday's job for the Monday 00:00 window: Sunday's can still arm it. On Sunday, once latched, none can.

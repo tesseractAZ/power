@@ -1472,13 +1472,13 @@ test('★★ a refused arm: the card leads with "not armed tonight — <reason>"
   // from a unit test).
   const card = readFileSync(new URL('../../web/src/cards/NightChargeCard.tsx', import.meta.url), 'utf8');
   assert.match(card, /const noChargeNight = noChargeExpected\(plan\);\n(\s+\/\/.*\n)*\s+const refused = status\.mode !== 'advisory' && status\.armRefusal\n\s+\? refusedArmLead\(status\.armRefusal, \{ mode: status\.mode, held: noChargeNight, reservePct: writtenReservePct\(plan, status\.reserveWriteMaxPct \?\? null\) \}\)\n\s+: null;/);
-  assert.match(card, /\{refused \? \(\n\s+<div className="mb-3 text-sm">\n\s+<div className="text-warn font-medium">\{refused\.headline\}<\/div>\n\s+<div className="text-muted mt-1 leading-relaxed">\{refused\.detail\}<\/div>\n\s+<\/div>\n\s+\) : \(\n\s+<div className="flex items-baseline gap-4 mb-3 flex-wrap">\n\s+<div className="text-4xl font-bold tabular-nums text-ink">\n\s+\{fig\.main\}/);
+  assert.match(card, /\{refused \? \(\n\s+<div className="mb-3 text-sm">\n\s+<div className="text-warn font-medium">\{refused\.headline\}<\/div>\n\s+<div className="text-muted mt-1 leading-relaxed">\{refused\.detail\}<\/div>\n\s+<\/div>\n\s+\) : closedLead \? \([\s\S]{0,300}?\) : \(\n\s+<div className="flex items-baseline gap-4 mb-3 flex-wrap">\n\s+<div className="text-4xl font-bold tabular-nums text-ink">\n\s+\{fig\.main\}/);
   // index.ts records the refusal with the evening latch, reads it back coerced, and serves it.
   const idx = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
   // v1.187.22 (recheck 3) — a refusal, or a write no channel delivered (eveningNotArmedReason).
   assert.match(idx, /\n\s+const notArmed = eveningNotArmedReason\(\{\n\s+refused: armRefused, candidate: armedCandidate, delivered: haNotifyDelivered \|\| audibleDelivered, prior: nightActuationMem,\n\s+\}\);\n\s+writeNightChargeLatch\(\{\n\s+lastNotifyDay: today,\n\s+armRefused: notArmed && plan\?\.window\n\s+\? \{ reason: notArmed, windowStartMs: plan\.window\.startMs, windowEndMs: plan\.window\.endMs \} : null,\n\s+\}\); \/\/ latch AFTER a successful send/);
-  assert.match(idx, /return \{ lastNotifyDay: typeof d === 'string' \? d : null, armRefused: coerceArmRefusalRecord\(raw\?\.armRefused\) \};/);
-  assert.match(idx, /nightChargeLatchMem = \{ lastNotifyDay: l\.lastNotifyDay, armRefused: l\.armRefused \?\? null \};/);
+  assert.match(idx, /lastNotifyDay: typeof d === 'string' \? d : null, armRefused: coerceArmRefusalRecord\(raw\?\.armRefused\),\n/);
+  assert.match(idx, /nightChargeLatchMem = \{\n\s+lastNotifyDay: l\.lastNotifyDay, armRefused: l\.armRefused \?\? null,\n/);
   const route = idx.slice(idx.indexOf("app.get('/api/night-charge/status'"), idx.indexOf("app.post('/api/night-charge/cancel'"));
   assert.match(route, /\n\s+armRefusal: servedArmRefusal\(latch\.armRefused, plan, NIGHT_CHARGE_MODE, Date\.now\(\)\),\n/);
 });

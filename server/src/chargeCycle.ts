@@ -537,8 +537,8 @@ export function lineWriteUnreadStatus(
 
 /**
  * v1.200.0 (Fix10 review 1) — no evening job can still arm a window opening at `windowStartMs`. PURE. The job fires once a site day,
- * at `fireMin`; `consumed` is today's latched, or its cutoff passed (eveningCutoffMin). Its next run is then tomorrow's, else today's,
- * and a job that runs at or after the open cannot arm that window. The weekend's shared Monday window keeps Sunday's job on Saturday
+ * at `fireMin`; `consumed` is today's latched, or its cutoff passed (eveningCutoffMin: at the open at the latest). Its next run is then
+ * tomorrow's, else today's, and a job that fires at or after the open cannot arm that window. The weekend's shared Monday window keeps Sunday's job on Saturday
  * evening; past midnight inside a window the new day's job fires after that window opened. A clock change moves a fire by an hour,
  * which this does not read: what a true here discloses, that no write is armed, holds as it is said.
  */
@@ -546,8 +546,7 @@ export function noEveningArmLeft(
   windowStartMs: number, nowMs: number, job: { consumed: boolean; fireMin: number; nowMin: number },
 ): boolean {
   const fireTodayMs = nowMs + (job.fireMin - job.nowMin) * 60_000;
-  const nextJobMs = job.consumed ? fireTodayMs + 24 * 3_600_000 : Math.max(fireTodayMs, nowMs);
-  return nextJobMs >= windowStartMs;
+  return (job.consumed ? fireTodayMs + 24 * 3_600_000 : fireTodayMs) >= windowStartMs;
 }
 
 /**
@@ -563,7 +562,7 @@ export function servedLineClosure(
   if (windowStartMs == null) return null;
   if (recordClosure?.windowStartMs === windowStartMs) return recordClosure;
   const legs = [c.active, ...c.pendingLegs, ...(c.trailing != null ? [c.trailing] : [])];
-  if (legs.some((l) => l.day != null && l.windowStartMs === windowStartMs)) return null;
+  if (legs.some((l) => l.windowStartMs === windowStartMs)) return null;
   return noArmLeft ? { windowStartMs, why: 'noArm' } : null;
 }
 
@@ -581,7 +580,7 @@ export function lineNotArmedPushDue(
   if (closure?.why !== 'noArm' || plan == null || plan.cushionEnvelopeReason !== 'startClosed') return null;
   const w = plan.window;
   const linePct = plan.cushionLineSocPct;
-  if (w == null || w.startMs !== closure.windowStartMs || linePct == null || refusal != null || pushedWindowStartMs === w.startMs) return null;
+  if (w == null || linePct == null || refusal != null || pushedWindowStartMs === w.startMs) return null;
   return { windowStartMs: w.startMs, windowEndMs: w.endMs, linePct };
 }
 

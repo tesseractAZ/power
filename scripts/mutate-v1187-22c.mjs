@@ -1093,15 +1093,15 @@ const MUTANTS = [
   {
     id: 'C-cxxxv. ★★ the latch drops the refusal in memory',
     file: IDX,
-    find: '  nightChargeLatchMem = { lastNotifyDay: l.lastNotifyDay, armRefused: l.armRefused ?? null };',
-    to: '  nightChargeLatchMem = { lastNotifyDay: l.lastNotifyDay }; /* MUTANT */',
+    find: '    lastNotifyDay: l.lastNotifyDay, armRefused: l.armRefused ?? null,\n',
+    to: '    lastNotifyDay: l.lastNotifyDay, /* MUTANT */\n',
     why: 'The refusal reaches the file but not the route, until a restart.',
   },
   {
     id: 'C-cxxxvi. ★ a restart forgets the refusal',
     file: IDX,
-    find: "    return { lastNotifyDay: typeof d === 'string' ? d : null, armRefused: coerceArmRefusalRecord(raw?.armRefused) };",
-    to: "    return { lastNotifyDay: typeof d === 'string' ? d : null, armRefused: null }; /* MUTANT */",
+    find: "      lastNotifyDay: typeof d === 'string' ? d : null, armRefused: coerceArmRefusalRecord(raw?.armRefused),\n",
+    to: "      lastNotifyDay: typeof d === 'string' ? d : null, armRefused: null, /* MUTANT */\n",
     why: 'After an add-on update mid-evening the card leads with the expected charge again.',
   },
   {

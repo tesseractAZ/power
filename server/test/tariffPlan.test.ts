@@ -573,7 +573,7 @@ test('★★ index.ts: every tariff read is the plan in effect; the MPC pair is 
   const idx = readFileSync(resolve(ROOT, 'server/src/index.ts'), 'utf8');
   assert.ok(!idx.includes('apsREvModelFromEnv'), 'no index.ts call site reads the APS-only alias');
   // v1.191.0 (S6) — plus nightScheduleNow's default argument: the schedule is the plan in effect's too.
-  assert.equal((idx.match(/tariffModelFromEnv\(\)/g) ?? []).length, 11, 'the ten index.ts call sites and the schedule\'s default');
+  assert.equal((idx.match(/tariffModelFromEnv\(\)/g) ?? []).length, 12, 'the eleven index.ts call sites and the schedule\'s default');
   assert.ok(idx.includes('function nightScheduleNow(model = tariffModelFromEnv()): NightSchedule {'));
   assert.ok(!/process\.env\.TARIFF_/.test(idx), 'no tariff setting is read from the environment in index.ts');
   // The MPC vector's fallback pair: analytics.ts mpcFallbackPair (the MPC names with their own rule while
