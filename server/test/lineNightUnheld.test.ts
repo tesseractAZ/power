@@ -36,6 +36,8 @@ import * as cardText from '../../web/src/cards/nightChargeText.js';
  *  - U3 the reserve settling as someone else's: the force-charge stops or never starts, and the push spoke only of the reserve.
  *  - U4 a grid loss (or a cancel) on a line night: the summary returned before any line or close words.
  * U5 the hand-set reserve's deadline names the last start as what it is, never as the way to hold the line.
+ * U1b (Fix9 review 2) the plan's reserve is a reading and the record is what the night can do: the words hold whichever way the reading
+ * goes, and a recompute claims no ON a record with no ask cannot make.
  */
 
 const HERE = dirname(fileURLToPath(import.meta.url));
