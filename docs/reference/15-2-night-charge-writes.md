@@ -368,7 +368,7 @@ fixture (nameplate, 0.944), 10 and 15 of them closing near 50 (`lineForceCharge.
   04:30) and 2026-10-02 (slots 2 and 1, 04:24-04:25). 2026-09-18 (90% ceiling at 03:30, 0 W import,
   90 → 86% by 05:00) is consistent with it; its slot state is the add-on's record, not a readback. Below the ceiling the house and an
   EV draw the pool again. A start pulled early by a predicted EV reaches the ceiling hours before
-  the close, and a real EV that arrives later can draw the pool under the line: emulated, 8 of 200 year
+  the close, and a real EV arriving later can draw the pool under the line: emulated, 8 of 200 year
   nights with a 20 kWh EV predicted and a 7 kW one arriving 90 minutes out. So on a line night whose ON verified, when the pool reads under the start target and
   slots of ours read OFF (connected, their Core under the ceiling), the tick switches them back ON
   (`lineReOnDue`), under the start's own gates (the grid known present, healthy vitals, a coherent pool reading, a live slot readback and a live panel ceiling the pool is
@@ -376,24 +376,24 @@ fixture (nameplate, 0.944), 10 and 15 of them closing near 50 (`lineForceCharge.
   20 minutes (a re-ON shares each slot's command cooldown with the close's OFF). The budget is counted
   write-ahead (`forceChargeLineReOns`). Each re-ON is read back 15 minutes after it, as the ON is
   (`lineReOnCheckDue`): slots still reading OFF, their Cores under the ceiling, are counted not applied (`forceChargeLineReOnsNotApplied`), and the budget's next re-ON is the retry. A
-  slot an operator switched off in the app reads the same and is switched back on within that budget. The expected walk models both.
+  slot switched off in the app reads the same and is switched back on within that budget. The expected walk models both.
 - **The panel ceiling** is `desiredForceChargeCeilingPct(max(target, ⌈L⌉ + 10))`: 80 for any ask up to
   70, then ask + 10, at most 100. The value written is kept (`forceChargeCeilingSyncedPct`) for the ON verify's
   at-the-ceiling exemption and the settings-drift own-write list. The ON stamps the mode's
-  ceiling too (`forceChargeOnStamp`): a night whose panel already read it needed no sync, and its verify would otherwise read the cost ceiling's
+  ceiling too (`forceChargeOnStamp`): a night whose panel already read it had no sync, and its verify would read the cost ceiling's
   value. While ON in line mode a synced ceiling above the mode's own is lowered to it, once
-  (`lineCeilingLoweringDue`): the cost gate gone off mid-run on a cost-dominant night would otherwise
-  leave the cost ceiling (90) as the only stop. It lowers only what
+  (`lineCeilingLoweringDue`): the cost gate gone off mid-run on a cost-dominant night would
+  leave the cost ceiling (90) the only stop. It lowers only what
   the panel holds, a live readback inside 80-100 above the mode's ceiling, so it runs under red vitals too, as the OFFs do.
 - **The morning refresh** (`morningRefresh.ts`) lowers or drops the cost ceiling only; the line ask rides through.
 - **The surfaces** state one level, the expected close of the line walk (`expectedBuyFromPlan` in line
-  mode, `expectedForceChargeMode: 'line'`): the rationale, the push, the card and the spoken
-  notice, which adds "The panel keeps only 50 percent in reserve." The line sentence appears only in line mode. On a window-bound walk the close stated is capped at the window's reach and floored at
+  mode, `expectedForceChargeMode: 'line'`): rationale, push, card and spoken
+  notice, which adds "The panel keeps only 50 percent in reserve." The line sentence appears only in line mode. A window-bound walk's close is capped at the window's reach and floored at
   the 50% reserve (chapter 15 part 1). A walk that reaches the panel ceiling (`expectedLineCeilingStop`) is worded by the panel's stop and the re-ON on the rationale, push and
-  card, never "stays on until the window closes". A night whose pool is expected to stay at or
-  above the panel ceiling says the force-charge is armed for the line "but is not expected to start". With nothing armed the plan says the line is above it "and no
+  card, never "stays on until the window closes"; a run with no re-ON left says so (`armedLineNoReOn`). A pool expected to stay at or
+  above the panel ceiling reads armed "but is not expected to start". With nothing armed the plan says the line is above it "and no
   force-charge runs in advisory mode" (the backup leg: "the outage backup leg writes the reserve only"),
-  "so the cushion is not fully held — residual risk remains". `reserveAtTarget` says "no write is due while it does, and no force-charge runs without one"; `armedNoLine`, a recompute of a window whose record has no line ask, "no write armed for this window carries a force-charge for it", each "so the cushion is not assured": a reserve lowered later can get its write, with no force-charge for the line. `startClosed` (a record with its ask, `armedLineStartClosed`, a run a cancel or an OFF ended too; or no record with no evening job left, `noArm`, pushed once): the key's words, on the served plan only; the ledger keeps the ask, and with no verified write standing the card leads with them. An armed night keeps its line sentence and,
+  "so the cushion is not fully held — residual risk remains". `reserveAtTarget` says "no write is due while it does, and no force-charge runs without one"; `armedNoLine`, a recompute of a window whose record has no line ask, "no write armed for this window carries a force-charge for it", each "so the cushion is not assured": a reserve lowered later can get its write, with no force-charge for the line. `startClosed` (a record with its ask, `armedLineStartClosed`, a run a cancel or an OFF ended too, an ON warned of on every slot, or all slots off with no re-ON left; or no record with no evening job left, `noArm`, pushed once): the key's words, on the served plan only; the ledger keeps the ask, and with no verified write standing the card leads with them. An armed night keeps its line sentence and,
   whatever its cause, adds a NOTE (`lineNotHeldOf`; the 21:30 log "Line NOT held") where its walk closes
   under the line, above 100% "above a full
   pool", and on a `nearFull` walk that holds "cannot hold it with its usual margin"; never "no
