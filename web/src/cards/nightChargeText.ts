@@ -73,7 +73,7 @@ export interface BannerState {
 /**
  * v1.189.0 — the actuation banner, by the write's state, in this order: a restore the panel has
  * not confirmed (never "Completed", never muted; nothing left to cancel — the actuator is retrying
- * it), completed, cancelled, applied ("Cancel & revert") or armed ("Cancel tonight"). The card
+ * it), completed, cancelled, applied ("Cancel & revert"), a line night's closed start (the server's words) or armed ("Cancel tonight"). The card
  * renders the button whenever `cancel` is set, in every shape it has: a recompute that holds, an
  * incomplete basis or a stale plan does not disarm the write (writeStands), so none of them may
  * hide its Cancel. `deadline` is the cancel deadline as HH:MM, or null.

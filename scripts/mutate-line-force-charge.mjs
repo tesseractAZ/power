@@ -3556,6 +3556,13 @@ const MUTANTS = [
     to: "  const why = s.cancelled ? 'cancelled' as ForceChargeStartClosed : null; /* MUTANT */\n  return why == null",
     why: "The noWrite night, the review's probe: the push says none starts, and the plan says one runs.",
   },
+  {
+    id: 'F10-a(vii). ★★ a record with no window reads as closed',
+    file: NFC, tests: [T_UNHELD],
+    find: "  if (s.day == null || s.windowStartMs == null || forceChargeLineNightPct(s) == null) return null;\n  const why = forceChargeStartClosed(s, nowMs, gates);\n  return why == null || why === 'started' || why === 'gatedOff' ? null : { windowStartMs: s.windowStartMs, why };",
+    to: "  if (s.day == null || forceChargeLineNightPct(s) == null) return null; /* MUTANT */\n  const why = forceChargeStartClosed(s, nowMs, gates);\n  return why == null || why === 'started' || why === 'gatedOff' ? null : { windowStartMs: s.windowStartMs!, why };",
+    why: 'No window to name: a plan has none to match, and the key is not one the plan can say.',
+  },
   // (b) the plan
   {
     id: 'F10-b(i). ★★★ the plan reads no closed record (the finding)',
@@ -3584,6 +3591,13 @@ const MUTANTS = [
     find: '  const lineStartClosed = lineQualifies && lineEligible === true && !lineNoWrite && inputs.armedLineStartClosed?.windowStartMs',
     to: '  const lineStartClosed = lineQualifies && !lineNoWrite && inputs.armedLineStartClosed?.windowStartMs /* MUTANT */',
     why: "'gatedOff' stays what advisory discloses; no eligibility input is v1.199.1 byte for byte.",
+  },
+  {
+    id: 'F10-b(xiv). ★★★ a plan with no line above the reserve reads the record',
+    file: NCA, tests: [T_UNHELD],
+    find: '  const lineStartClosed = lineQualifies && lineEligible === true && !lineNoWrite && inputs.armedLineStartClosed?.windowStartMs',
+    to: '  const lineStartClosed = lineEligible === true && !lineNoWrite && inputs.armedLineStartClosed?.windowStartMs /* MUTANT */',
+    why: 'A line under the reserve, or a hold, reads "above the 50%": a night nothing here reaches.',
   },
   {
     id: 'F10-b(v). ★★★ the line stays armed on a closed start',
