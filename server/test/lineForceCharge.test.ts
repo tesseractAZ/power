@@ -1196,7 +1196,7 @@ test('★★★ T9 (Fix12) the time the declined-start push quotes: from the liv
   // Past the ask a reading needs no charge: the last start, as lineLatestStartMs caps it.
   assert.equal(latest({ ...base, poolSocPct: 60 }), WIN_END - nfc.FORCE_CHARGE_MIN_RUN_MS);
   // No capacity at all: the last start, the one time the add-on can still name. No close: nothing.
-  for (const frozenFullWh of [null, 0]) assert.equal(latest({ ...base, frozenFullWh }), WIN_END - nfc.FORCE_CHARGE_MIN_RUN_MS);
+  for (const frozenFullWh of [null, 0, Number.NaN]) assert.equal(latest({ ...base, frozenFullWh }), WIN_END - nfc.FORCE_CHARGE_MIN_RUN_MS, String(frozenFullWh));
   assert.equal(latest({ ...base, closeAtMs: null }), null);
   // The tick's wiring: the frozen projection reaches it, and only here.
   assert.ok(INDEX.includes(

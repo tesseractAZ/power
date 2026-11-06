@@ -4899,11 +4899,11 @@ const MUTANTS = [
     why: 'A zero capacity needs no charge: the last start, quoted over a reachable pool size.',
   },
   {
-    id: 'F12-b(ix). ★★★ a zero frozen capacity is a capacity',
+    id: 'F12-b(ix). ★★★ a capacity that is no number is a capacity',
     file: NFC, tests: [T_LINE],
     find: "  const fullWh = o.liveFullWh != null && o.liveFullWh > 0 ? o.liveFullWh : o.frozenFullWh != null && o.frozenFullWh > 0 ? o.frozenFullWh : null;\n",
     to: "  const fullWh = o.liveFullWh != null && o.liveFullWh > 0 ? o.liveFullWh : o.frozenFullWh; /* MUTANT */\n",
-    why: 'The buffer alone, 15 min, where the close less 20 is the one time left to name.',
+    why: 'A frozen projection with no number: a push reading "by ~Invalid Date". Zero and less come to the last start either way.',
   },
   {
     id: 'F12-b(x). ★★★ the live reading is ignored',
