@@ -2691,6 +2691,13 @@ const MUTANTS = [
     why: 'A supervised plan says "no force-charge runs in advisory mode".',
   },
   {
+    id: 'F9r1-a(v-b). ★ the rationale\'s walk still says tonight\'s write',
+    file: NCA, tests: [T_UNHELD],
+    find: "    if (lineNoWrite && level <= writtenPct) return start < level ? `, and the panel's own reserve charges it ${to}${asFar}` : `, already at or above the ${level}% reserve`;\n",
+    to: '    /* MUTANT */\n',
+    why: 'Beside "no write goes".',
+  },
+  {
     id: 'F9r1-a(vi). ★★ the push\'s note falls to its generic words',
     file: NTF, tests: [T_UNHELD],
     find: "      : plan.cushionEnvelopeReason === 'reserveAtTarget' ? `and the reserve already reads ${round1(plan.reserveFloorPct)}%: no write goes, and no force-charge runs without one`\n        : 'and no force-charge carries it to the window close';",

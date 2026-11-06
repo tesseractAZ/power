@@ -2507,6 +2507,8 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   const expectedWriteNote = (start: number, level: number): string => {
     const to = expected.deliverableBound ? `toward ${level}%` : `to ${level}%`;
     const asFar = expected.deliverableBound ? ', as far as the window can deliver' : '';
+    // (Fix9 review 1) No write goes on such a night (lineNoWrite): the reserve the panel already holds does what the write would.
+    if (lineNoWrite && level <= writtenPct) return start < level ? `, and the panel's own reserve charges it ${to}${asFar}` : `, already at or above the ${level}% reserve`;
     if (level <= writtenPct) {
       return start < level
         ? `, and tonight's write charges it ${to}${asFar}`

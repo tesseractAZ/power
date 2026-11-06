@@ -90,7 +90,7 @@ test('★★★ U1 a reserve already at the write: the plan neither claims nor a
   assert.deepEqual(sizing(p), sizing(absent), 'I-A1: no sizing figure moves');
   assert.notEqual(p.expectedForceChargeMode, 'line');
   assert.ok(p.rationale.includes(`The reserve is set to 50%, the most the panel accepts as a backup reserve; tonight's ${p.cushionLineSocPct}% outage line is above it and the reserve already reads 50%: no write goes, and no force-charge runs without one, so the cushion is not fully held — residual risk remains.`), p.rationale);
-  assert.doesNotMatch(p.rationale, /switches on at|stays on until the window closes/);
+  assert.doesNotMatch(p.rationale, /switches on at|stays on until the window closes|tonight's write/);
   // The ledger: the ask is not recorded, the disclosure is.
   assert.deepEqual(lineForceChargeLedgerColumns(p as never), { cushion_line_force_charge_pct: null, cushion_envelope_shortfall: 1 });
   // One point under the write: the write goes, and the line arms as ever.
@@ -151,7 +151,10 @@ test('★★★ U1 the year at a standing 50: every line that armed and could ne
     if (!p.chargeTonight) continue;
     charge++;
     if (p.forceChargeLine != null) isArmed++;
-    if (p.cushionEnvelopeReason === 'reserveAtTarget') disclosed++;
+    if (p.cushionEnvelopeReason === 'reserveAtTarget') {
+      disclosed++;
+      assert.doesNotMatch(p.rationale, /tonight's write/, c.label);
+    }
   }
   assert.deepEqual({ charge, armed: isArmed, disclosed }, PIN_U1_YEAR);
   assert.ok(CASES.some((c) => planAt(49, { label: c.label, hours: 4 }).forceChargeLine != null), 'one point under, lines arm');
