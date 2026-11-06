@@ -564,7 +564,7 @@ test('★★★ W1 (Fix12) the plan rate and no EV energy, on purpose: a 3 kW li
 test('★★★ W1 (Fix12) the slot count reaches the plan rate as the start reads it: slots × FORCE_CHARGE_KW_PER_CORE where that is set, 10 kW where it is not', async () => {
   const due = nfc.lineAtRiskPushDue;
   await withEnv({ FORCE_CHARGE_KW_PER_CORE: '5' }, () => {
-    // 15 kW for three slots: 14.7 min of charge from 52, against 22.1 at 10 kW; 10 kW again with two connected, 7.5 kW with one... held longer on the faster rate.
+    // 15 kW for three slots: 14.7 min of charge from 52, against 22.1 at 10 kW. 5 kW with one connected, a gate sooner.
     const three = nfc.lineLatestStartMs(WIN_END, ASK, 52, FULL, null, null, 3) - nfc.FORCE_CHARGE_LINE_AT_RISK_LEAD_MS;
     const one = nfc.lineLatestStartMs(WIN_END, ASK, 52, FULL, null, null, 1) - nfc.FORCE_CHARGE_LINE_AT_RISK_LEAD_MS;
     assert.ok(one < three, 'fewer slots, a slower plan rate, a gate sooner');

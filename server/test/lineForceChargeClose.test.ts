@@ -997,7 +997,10 @@ const PIN_EV_ENDS_SUM = { nights: 32000, under: 3, reached: 3, heldPushes: 100 }
 /** (Fix12) …the nights the timed-night check reads: a pool at or under the ask at the ON. */
 const PIN_STUCK_GATE_CHECKED = 2040;
 /** (Fix12) An early 11.52 kW session from the open, then an 11.52 kW load from 60-150 min before the close: 32,000 nights a shape, the
- *  under nights with their one push after the load came, before it, or none. */
+ *  under nights with their one push after the load came, before it, or none. Before lineFlatPushHeld: real 189 / 0 / 45, onLatch
+ *  3,595 / 10,429 / 45, reOnInert 2,036 / 10,429 / 1,604. The push no longer spends itself before the cause, and a night it reached only
+ *  that way may now get none: of reOnInert's 6,179, 5,891 have their last check at or inside the lead, 241 on the tick before the
+ *  re-ON's cutoff, 47 no check; of real's and onLatch's 47, the 2 more are PIN_KNOWN_PUSHED's L 59.1 night, with its session 60 or 90 min long. */
 const PIN_SESSION_THEN_LOAD = {
   real: { under: 234, afterCause: 187, beforeCause: 0, none: 47 },
   onLatch: { under: 14069, afterCause: 14006, beforeCause: 16, none: 47 },

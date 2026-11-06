@@ -1918,8 +1918,9 @@ export interface LineAtRisk {
  *    of the false alarm (3 kW live beside an EV opens the gate at once at a 70% line). FORCE_CHARGE_PLAN_RATE_KW, 10 kW, sits under the
  *    ~14 kW a pack takes, so the gate opens early enough to act on.
  *  - Timed nights lose nothing: with no EV the start is timed to ⌈L⌉ + 5 by the close less 20 min, so this gate opens BEFORE the ON's
- *    first trend reading (ON + 25 min): L 52.6 at T-52 against T-42, L 70.55 at T-151 against T-113, L 55.55 from pool 45 at T-96
- *    against T-73, and a stuck charge is pushed when it always was. Only a start a load pulled early is held.
+ *    first trend reading (ON + 25 min): at a 2 kW house, on minute ticks, L 52.62 at T-51 against T-41, L 70.55 at T-151 against T-113,
+ *    L 55.55 from pool 45 at T-95 against T-73, and a stuck charge is pushed when it always was (the close test's 2,040 nights, ON + 31
+ *    min on each). Only a start a load pulled early is held.
  *  - Only with no slot reading off (lineAtRiskPushDue): a slot off EXPLAINS a flat pool, and its pushes (reOnHeld, reOnRefused, reOnSpent,
  *    reOnNotApplied) are real on a flat reading. Nor on a FALLING reading: neither is a slow charge. A flat pool above the ask stays out.
  *  - A pool size not known holds nothing: as lineAtRiskPushDue's hand-back hold, every doubt goes to the push.
