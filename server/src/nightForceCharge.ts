@@ -1614,10 +1614,29 @@ function lineRunGone(
   if (s.forceChargeOnVerifiedAtMs == null) {
     return s.forceChargeOnFailedAtMs != null && partialForceChargeOnFailureSlots(s) == null ? 'notTaken' : null;
   }
-  const off = s.forceChargeLineOffSlots;
-  if (off == null || !oursOf(s).every((n) => off.includes(n)) || !lineReOnGone(s, nowMs)) return null;
+  if (!everySlotReadsOff(s) || !lineReOnGone(s, nowMs)) return null;
   const reOnAt = s.forceChargeLineReOnAtMs;
   return reOnAt != null && nowMs - reOnAt < FORCE_CHARGE_ON_VERIFY_AFTER_MS ? null : 'noReOn';
+}
+
+/** v1.200.0 (Fix11) — PURE. The last live readback showed every slot of ours OFF. No reading on record is no such reading. */
+function everySlotReadsOff(s: Pick<NightActuationState, 'forceChargeSlots' | 'forceChargeLineOffSlots'>): boolean {
+  const off = s.forceChargeLineOffSlots;
+  return off != null && oursOf(s).every((n) => off.includes(n));
+}
+
+/** v1.200.0 (Fix11) — PURE. The window open of a record with a line whose run is on: a verified ON, no OFF of ours, no one-way stamp, and
+ *  not every slot of ours reading off. The plan walks forward from a pool reading and knows no record, so it told a run long on that it
+ *  "switches on at" a time, and from the last-start gate on that it is armed and not expected to start (NightChargeInputs.armedLineRunOnStartMs).
+ *  An ON in its readback grace, or one warned of in whole or in part, has no verified stamp, and a run every slot of which reads off is
+ *  not on: each keeps its words (armedLineStartClosed, armedLineNoReOn). A closed start and a run on are never one record. Like the
+ *  closure, it reaches only the plan the card and the entities serve, and nothing written reads it. null otherwise. */
+export function armedLineRunOn(
+  s: Pick<NightActuationState, 'windowStartMs' | 'forceChargeLineAskPct' | 'forceChargeLinePct' | 'forceChargeOnVerifiedAtMs' | 'forceChargeOffAtMs'
+    | 'cancelled' | 'revertedAtMs' | 'foreignSettledAtMs' | 'forceChargeSlots' | 'forceChargeLineOffSlots'>,
+): number | null {
+  const on = s.forceChargeOnVerifiedAtMs != null && s.forceChargeOffAtMs == null && nightSettledKey(s) == null && !everySlotReadsOff(s);
+  return on && forceChargeLineNightPct(s) != null ? s.windowStartMs : null;
 }
 
 /** v1.200.0 (Fix10 review 2) — a run on record that no re-ON can bring back, for the plan that names one (LineNoReOn.words stands in for

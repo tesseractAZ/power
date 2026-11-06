@@ -278,6 +278,10 @@ export interface NightChargeInputs {
   /** v1.200.0 (Fix10 review 2) — a run on record that stays claimed with no re-ON left (nightForceCharge.armedLineNoReOn): a plan of that
    *  window walks none and says so. Set only on the plan the card and the entities serve, as armedLineStartClosed, which goes first. */
   armedLineNoReOn?: LineNoReOn | null;
+  /** v1.200.0 (Fix11) — the window open of a record with a line whose run is on (nightForceCharge.armedLineRunOn): a plan of that window
+   *  walks from the run and names it as on, never as switching on at a time. Set only on the plan the card and the entities serve, as
+   *  armedLineStartClosed, which goes first. */
+  armedLineRunOnStartMs?: number | null;
 
   // ── The cheap charge window tonight (resolved upstream via tariff.rateAt) ──
   window: { startMs: number; endMs: number } | null;
@@ -560,7 +564,8 @@ export interface NightChargePlan {
    *  at or near the stop). Absent on a reserve-only night, with no P50 basis, on a hold and on
    *  plans issued before it. Read by the supervised push, which says when force-charge is expected
    *  to switch on, and by chargeLevelPct: with no start expected the night is expected to reach the
-   *  reserve, not the stop, and every line states the reserve. Disclosure only. */
+   *  reserve, not the stop, and every line states the reserve. Disclosure only. (Fix11) On a served plan
+   *  whose run is on (armedLineRunOnStartMs), the plan's own now: the walk starts from the run. */
   expectedForceChargeStartMs?: number | null;
   /** PREDICTION: the pack SoC % the window is expected to actually REACH by its
    *  close, given every cap — including the v1.60.0 EV-contention derate. This
@@ -1230,13 +1235,15 @@ export function expectedLineForceChargeWalk(o: {
   acceptKw?: number | null;
   /** v1.200.0 (Fix10 review 2) — the record can make no re-ON (armedLineNoReOn): none is walked. */
   noReOn?: boolean;
+  /** v1.200.0 (Fix11) — the run is on (armedLineRunOn): started at fromMs, past the timed start and the last-start gate. */
+  runOn?: boolean;
 }): { closeKwh: number; startMs: number | null; startPackKwh: number; gridKwh: number; ceilingReached: boolean } | null {
   const byHour = hoursByEpoch(o.hours);
   let pack = Math.max(0, Math.min(o.fullKwh, o.startKwh));
   const floor = Math.min(Math.max(0, o.reserveKwh), pack);
   const capKwh = (Math.min(100, o.panelCeilingPct) / 100) * o.fullKwh;
   const lineLastStartMs = o.windowEndMs - FORCE_CHARGE_MIN_RUN_MS;
-  let startMs: number | null = null;
+  let startMs: number | null = o.runOn === true ? o.fromMs : null;
   let startPackKwh = pack;
   let gridKwh = 0;
   // v1.200.0 (review) — the panel's latch at its ceiling, and the tick's re-ONs (lineReOnDue).
@@ -1340,6 +1347,8 @@ export function expectedBuyFromPlan(o: {
   lineForceChargeEligible?: boolean;
   /** v1.200.0 (Fix10 review 2) — the record can make no re-ON (armedLineNoReOn): expectedLineForceChargeWalk's. */
   noReOn?: boolean;
+  /** v1.200.0 (Fix11) — the run is on (armedLineRunOn): expectedLineForceChargeWalk's. */
+  runOn?: boolean;
   /** v1.200.0 — the pool the TICK times its start on (expectedForceChargeStart's tickPoolKwh). */
   tickPoolKwh: number;
   /** The expected pack when the window's write takes effect (expectedCarryKwh to the window
@@ -1442,7 +1451,7 @@ function expectedLineBuy(
     startTargetPct: mode.startTargetPct, panelCeilingPct: mode.panelCeilingPct,
     hours: o.window.hours, fromMs: reserveLeg.creditKwh > 0 ? reserveLeg.doneMs : o.window.fromMs, windowEndMs: o.window.windowEndMs,
     dischargeEff: o.window.dischargeEff, chargeCapKw: o.window.chargeCapKw, envelopeKw: o.window.envelopeKw, legEff: o.legEff,
-    acceptKw: o.window.acceptKw ?? null, noReOn: o.noReOn,
+    acceptKw: o.window.acceptKw ?? null, noReOn: o.noReOn, runOn: o.runOn,
   });
   if (walk == null) return { buyKwh: null, levelPct: floorLevel, mode: 'line', panelCeilingPct, startTargetPct };
   const out: ExpectedBuy = {
@@ -2458,11 +2467,14 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   const forceChargeLine: ForceChargeLine | null = lineArmed ? { askPct: lineAsk, linePct: cushionLineSocPct } : null;
   // (Fix10 review 2) A run still claimed that no re-ON can bring back: none is walked, and its clause says so. Nothing written reads this.
   const lineNoReOn = inputs.armedLineNoReOn?.windowStartMs === window.startMs ? inputs.armedLineNoReOn : null;
+  // (Fix11) A run on: the walk starts from it. Only a line walk reads this, so a closure, a cost-dominant night and a night with no line
+  // read no word of it, and nothing written does.
+  const lineRunOn = inputs.armedLineRunOnStartMs === window.startMs;
 
   const expected: ExpectedBuy = chargeTonight
     ? expectedBuyFromPlan({
       setpointSocPct, costCeilingSocPct, forceChargeEligible: inputs.forceChargeEligible === true && !lineNoWrite && lineStartClosed == null,
-      forceChargeLine, lineForceChargeEligible: inputs.lineForceChargeEligible === true, noReOn: lineNoReOn != null, tickPoolKwh: fullKwh,
+      forceChargeLine, lineForceChargeEligible: inputs.lineForceChargeEligible === true, noReOn: lineNoReOn != null, runOn: lineRunOn, tickPoolKwh: fullKwh,
       startKwh: expectedStartKwh, deliverableKwh: expectedDeliverableKwh, fullKwh, legEff,
       window: { hours: horizon, fromMs: effChargeStartMs, windowEndMs: windowEnd, dischargeEff, chargeCapKw, envelopeKw, acceptKw },
     })
@@ -2569,9 +2581,9 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
     if (expected.mode === 'line') {
       // v1.200.0 (review 2) — unless the walk reaches the panel ceiling, where the panel switches it off itself.
       if (lineCeilingStop != null) {
-        return `${start < writtenPct ? `, and tonight's write charges it to the ${writtenPct}% reserve` : `, above the ${writtenPct}% reserve`}; the force-charge for the outage line switches on at ~${at} and the panel switches it off at its ${lineCeilingStop.ceilingPct}% ceiling, ~${level}% expected at the close`;
+        return `${start < writtenPct ? `, and tonight's write charges it to the ${writtenPct}% reserve` : `, above the ${writtenPct}% reserve`}; the force-charge for the outage line ${lineRunOn ? 'is on' : `switches on at ~${at}`} and the panel switches it off at its ${lineCeilingStop.ceilingPct}% ceiling, ~${level}% expected at the close`;
       }
-      return `${start < writtenPct ? `, and tonight's write charges it to the ${writtenPct}% reserve` : `, above the ${writtenPct}% reserve`}; the force-charge for the outage line runs from ~${at} to the window close and takes it ${to}${asFar}`;
+      return `${start < writtenPct ? `, and tonight's write charges it to the ${writtenPct}% reserve` : `, above the ${writtenPct}% reserve`}; the force-charge for the outage line ${lineRunOn ? 'is on, runs' : `runs from ~${at}`} to the window close and takes it ${to}${asFar}`;
     }
     if (start < writtenPct) return `, and tonight's write charges it ${to} (the ${writtenPct}% reserve, then force-charge from ~${at})${asFar}`;
     return fcAt <= effChargeStartMs
@@ -2625,7 +2637,8 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   // and the rationale said nothing of the 50% write). A cost-dominant carried night keeps today's sentence.
   const lineText = `tonight's ${cushionLineSocPct}% outage line is above it`;
   const envelopeHead = `The reserve is set to ${writtenPct}%, the most the panel accepts as a backup reserve; ${lineText}`;
-  const lineStartText = expected.forceChargeStartMs != null ? `switches on at ~${fmtSiteDayHm(expected.forceChargeStartMs, nowMs)} and ` : 'switches on just in time and ';
+  const lineStartText = lineRunOn ? 'is on and '
+    : expected.forceChargeStartMs != null ? `switches on at ~${fmtSiteDayHm(expected.forceChargeStartMs, nowMs)} and ` : 'switches on just in time and ';
   const lineReOnTimesText = lineReOnTimesWords(FORCE_CHARGE_LINE_REON_MAX);
   // A5 — what an ARMED night's own walk cannot hold (lineNotHeldOf, the one predicate every surface words by), after
   // its line-mode sentence: under the line (whatever the reason or cause), above a full pool, or held without the margin.

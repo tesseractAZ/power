@@ -47,6 +47,8 @@ import * as cardText from '../../web/src/cards/nightChargeText.js';
  * reading; a write the panel never read back is not told as raised.
  * U7 (Fix10 review 2) a run that never took, or that reads off with no re-ON left, is such a record too: nothing of the add-on's brings it
  * back, a late apply reopens it, and a run still on with no re-ON left keeps its line and loses the re-ON's clause.
+ * U8 (Fix11) the plan's walk is told a run is on: served as on, never as switching on at a time, and past the last-start gate its close
+ * stays continuous, with no "not expected to start" while the panel charges. Nothing written moves, and the plan of record stays.
  */
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -59,16 +61,20 @@ const caseOf = (label: string) => CASES.find((c) => c.label === label)!;
 type P = NightChargePlan & { forceChargeLine?: { askPct: number; linePct: number }; cushionEnvelopeReason?: string; cushionShortfallCause?: string; expectedForceChargeMode?: string };
 type ClosedInput = { windowStartMs: number; why: string };
 type NoReOnInput = { windowStartMs: number; words: string };
-const planAt = (floor: number, o: { eligible?: boolean; cost?: boolean; hours?: number; label?: string; noLineAt?: number | null; closed?: ClosedInput | null; noReOn?: NoReOnInput | null } = {}): P => {
+const planAt = (floor: number, o: { eligible?: boolean; cost?: boolean; hours?: number; label?: string; noLineAt?: number | null; closed?: ClosedInput | null; noReOn?: NoReOnInput | null; runOn?: number | null; at?: number; pool?: number; fullKwh?: number; noP50?: boolean } = {}): P => {
   const deps = {
     ...caseOf(o.label ?? LABEL).deps, reserveFloorPct: floor, cushionPoolScale: MEASURED_SCALE,
+    ...(o.at != null ? { nowMs: o.at } : {}), ...(o.pool != null ? { socNowPct: o.pool } : {}), ...(o.fullKwh != null ? { fullKwh: o.fullKwh } : {}),
     forceChargeEligible: o.cost === true, ...(o.cost === true ? { objectiveMode: 'cost', costMaxSocPct: 80 } : {}),
     ...(o.eligible !== false ? { lineForceChargeEligible: true } : {}),
     ...(o.hours != null ? { outageCushionHours: o.hours } : {}),
     ...(o.noLineAt !== undefined ? { armedNoLineStartMs: o.noLineAt } : {}),
   } as never;
   const inputs = buildNightChargeInputs(deps);
-  return computeNightChargePlan({ ...inputs, ...(o.closed !== undefined ? { armedLineStartClosed: o.closed } : {}), ...(o.noReOn !== undefined ? { armedLineNoReOn: o.noReOn } : {}) } as never) as P;
+  return computeNightChargePlan({
+    ...inputs, ...(o.noP50 === true ? { horizon: inputs!.horizon.map((h) => ({ ...h, loadP50W: null })) } : {}), ...(o.closed !== undefined ? { armedLineStartClosed: o.closed } : {}), ...(o.noReOn !== undefined ? { armedLineNoReOn: o.noReOn } : {}),
+    ...(o.runOn !== undefined ? { armedLineRunOnStartMs: o.runOn } : {}),
+  } as never) as P;
 };
 const SIZING = ['chargeTonight', 'buyKwh', 'buyKwhDebiased', 'requiredExtraKwh', 'targetSocPct', 'setpointSocPct', 'costCeilingSocPct', 'cushionTroughSocPct', 'cushionLineSocPct', 'bindingCap', 'minProjSocPct'] as const;
 const sizing = (p: NightChargePlan) => Object.fromEntries(SIZING.map((k) => [k, (p as never)[k] ?? null]));
@@ -436,7 +442,7 @@ test('★★★ U1c the wiring: only the plan the card and the entities serve re
   assert.ok(!deps.includes('armedLineStartClosed'), 'never in the inputs of the plan of record');
   assert.ok(fn.includes('  const plan = computeNightChargePlan(inputs);\n'), 'nor where it is computed');
   assert.ok(fn.includes('const lineClosed = shadowLeg == null && opts.arming !== true ? servedLineClosure(nightCycleView(), plan.window?.startMs ?? null, armedLineStartClosed(nightActuationMem, nowMs, forceChargeGatesOn(legRoleOf(nightActuationMem))), plan.window != null && noEveningArmLeft(plan.window.startMs, nowMs, eveningJobClock(nowMs))) : null;'), fn);
-  assert.ok(fn.includes('if (!shadowLeg) setLatestNightChargePlan(lineClosed != null || lineNoReOn != null ? computeNightChargePlan({ ...inputs, armedLineStartClosed: lineClosed, armedLineNoReOn: lineNoReOn }) : plan);'), fn);
+  assert.ok(fn.includes('if (!shadowLeg) setLatestNightChargePlan(lineClosed != null || lineNoReOn != null || lineRunOn != null ? computeNightChargePlan({ ...inputs, armedLineStartClosed: lineClosed, armedLineNoReOn: lineNoReOn, armedLineRunOnStartMs: lineRunOn }) : plan);'), fn);
   assert.equal([...INDEX.matchAll(/armedLineStartClosed: lineClosed/g)].length, 1, 'that one plan');
   assert.ok(/atomicWriteFileSync\(NIGHT_CHARGE_PLANSNAP_PATH, JSON\.stringify\(\{[\s\S]{0,300}?\n\s+plan, extras,\n/.test(fn), 'the snapshot holds the plan of record');
   assert.ok(fn.trimEnd().endsWith('return { plan, extras };\n}') || fn.includes('  return { plan, extras };\n}'), 'and the callers get it');
@@ -1398,10 +1404,318 @@ test('★★★ U7 wiring: the served plan alone reads it, the plan of record st
   const at = INDEX.indexOf('async function recomputeNightChargePlan(');
   const fn = INDEX.slice(at, INDEX.indexOf('function armedExpectedBuyKwh(', at));
   assert.ok(fn.includes('  const lineNoReOn = shadowLeg == null && opts.arming !== true && nightActuationMem.windowStartMs === plan.window?.startMs ? armedLineNoReOn(nightActuationMem, nowMs) : null;\n'), 'never an arm, a shadow leg or a later window');
-  assert.ok(fn.includes('  if (!shadowLeg) setLatestNightChargePlan(lineClosed != null || lineNoReOn != null ? computeNightChargePlan({ ...inputs, armedLineStartClosed: lineClosed, armedLineNoReOn: lineNoReOn }) : plan);\n'), fn.slice(0, 200));
+  assert.ok(fn.includes('  if (!shadowLeg) setLatestNightChargePlan(lineClosed != null || lineNoReOn != null || lineRunOn != null ? computeNightChargePlan({ ...inputs, armedLineStartClosed: lineClosed, armedLineNoReOn: lineNoReOn, armedLineRunOnStartMs: lineRunOn }) : plan);\n'), fn.slice(0, 200));
   assert.ok(fn.includes('  const inputs = buildNightChargeInputs(deps);\n  const plan = computeNightChargePlan(inputs);\n'), 'the plan of record');
   const SRC = readFileSync(resolve(HERE, '../src/nightChargeAdvisor.ts'), 'utf8');
-  assert.ok(SRC.includes('forceChargeLine, lineForceChargeEligible: inputs.lineForceChargeEligible === true, noReOn: lineNoReOn != null, tickPoolKwh: fullKwh,'), 'the walk');
+  assert.ok(SRC.includes('forceChargeLine, lineForceChargeEligible: inputs.lineForceChargeEligible === true, noReOn: lineNoReOn != null, runOn: lineRunOn, tickPoolKwh: fullKwh,'), 'the walk');
   const CARD = readFileSync(resolve(HERE, '../../web/src/cards/NightChargeCard.tsx'), 'utf8');
   assert.ok(CARD.includes('expectedLineCeilingStop?: { ceilingPct: number; startTargetPct: number; noReOnWords?: string };'), 'the field reaches the card');
+});
+
+/* ══ U8 — (Fix11) the plan's walk is told a run is on ═════════════════════════════════════════════════════════════════════════════ */
+
+const runOnOf = (s: NightActuationState): number | null => (nfc as unknown as { armedLineRunOn: (s: NightActuationState) => number | null }).armedLineRunOn(s);
+const PLAN45 = planAt(45);
+const WIN_OPEN = PLAN45.window!.startMs;
+const WIN_CLOSE = PLAN45.window!.endMs;
+/** The record the real arm builds, its write verified, and its ON verified with every slot reading on. */
+const armedRun = (over: Partial<NightActuationState> = {}): NightActuationState => {
+  const onAt = WIN_CLOSE - 110 * M;
+  return {
+    ...armFromPlan(emptyActuationState(), '2027-01-04', PLAN45, WIN_OPEN - 90 * M, 45, false, null, true)!,
+    applyAttemptedAtMs: WIN_OPEN, attemptBaselinePct: 45, appliedAtMs: WIN_OPEN, priorReservePct: 45, applyVerifiedAtMs: WIN_OPEN + 3 * M,
+    forceChargeOnAtMs: onAt, forceChargeOnLastAttemptMs: onAt, forceChargeSlots: [1, 2, 3], forceChargeMode: 'line', forceChargeOnVerifiedAtMs: onAt + 2 * M, forceChargeLineOffSlots: [],
+    ...over,
+  };
+};
+/** The plan served for a record, read through the wiring's own three record readers. */
+const servedOf = (s: NightActuationState, t: number, pool: number): P => planAt(45, { at: t, pool, closed: closedRec(s, t), noReOn: noReOnOf(s, t), runOn: runOnOf(s) });
+const CEILING_CLAIM = /at or above|not expected to start|no charge expected/;
+const START_CLAIM = /switches on at|switches on just in time|runs from ~/;
+const lineWords = (p: P): string => p.rationale.split(' The cushion is')[0]!;
+
+test('★★★ U8 armedLineRunOn: a verified ON, no OFF of ours, no one-way stamp, and not every slot of ours reading off', () => {
+  assert.equal(runOnOf(RUN()), OPEN, 'no reading of the slots yet: none reads off');
+  assert.equal(runOnOf(RUN({ forceChargeLineOffSlots: [] })), OPEN, 'every slot reading on');
+  assert.equal(runOnOf(RUN({ forceChargeLineOffSlots: [1, 2] })), OPEN, 'a slot reading on: the run goes on');
+  assert.equal(runOnOf(RUN({ forceChargeLineOffSlots: [1, 2, 3] })), null, 'every slot reading off: the panel stopped it, or something did');
+  assert.equal(runOnOf(RUN({ forceChargeSlots: [1, 2], forceChargeLineOffSlots: [1, 2] })), null, 'ours only');
+  assert.equal(runOnOf(RUN({ forceChargeSlots: [1, 2], forceChargeLineOffSlots: [1] })), OPEN);
+  assert.equal(runOnOf(RUN({ forceChargeSlots: null, forceChargeLineOffSlots: [1, 2] })), OPEN, 'no list: every slot is ours');
+  // Not verified: an ON in its readback grace, or one warned of, wholly or in part.
+  assert.equal(runOnOf(RUN({ forceChargeOnVerifiedAtMs: null })), null, 'in its grace');
+  assert.equal(runOnOf(WARNED()), null, 'warned of on every slot');
+  assert.equal(runOnOf(WARNED({ forceChargeOnFailedSlots: [3] })), null, 'a partial ON');
+  assert.equal(runOnOf(WARNED({ forceChargeOnFailedSlots: [3], forceChargeOnVerifiedAtMs: STOP_AT })), OPEN, 'a late apply verifies it');
+  // Ended.
+  assert.equal(runOnOf(RUN({ forceChargeOffAtMs: STOP_AT })), null, 'an OFF of ours');
+  for (const over of [{ cancelled: true }, { revertedAtMs: STOP_AT }, { foreignSettledAtMs: STOP_AT }]) assert.equal(runOnOf(RUN(over)), null, JSON.stringify(over));
+  // No run, no line, no record.
+  assert.equal(runOnOf(applied()), null, 'no ON');
+  assert.equal(runOnOf(emptyActuationState()), null, 'no record');
+  assert.equal(runOnOf(RUN({ windowStartMs: null })), null, 'no window');
+  assert.equal(runOnOf(RUN({ forceChargeLineAskPct: null, forceChargeLinePct: null })), null, 'a cost night: not a word');
+  assert.equal(runOnOf(SPENT({ forceChargeLineOffSlots: [] })), OPEN, 'a run with no re-ON left, still on');
+  // A closure and a run on are never one record.
+  for (const t of [STOP_AT, CUT - M, CUT, CLOSE - 5 * M]) {
+    for (const s of [RUN(), SPENT(), WARNED(), RUN({ forceChargeLineOffSlots: [1, 2, 3] }), ...STOPPED_CASES().map(([, over]) => RUN(over))]) {
+      assert.equal(closedRec(s, t) != null && runOnOf(s) != null, false, `${(CLOSE - t) / M} min to the close`);
+    }
+  }
+});
+
+test('★★★ U8 the walk: a run on rises from fromMs, past the last-start gate and the timed start; the latch, the re-ON and noReOn stay as they are', () => {
+  const nca = { walk: (cardWalk as { expectedLineForceChargeWalk: (o: unknown) => { closeKwh: number; startMs: number | null; startPackKwh: number; gridKwh: number; ceilingReached: boolean } }).expectedLineForceChargeWalk };
+  const hours = Array.from({ length: 8 }, (_, i) => ({ ts: OPEN + i * H, pvP10W: 0, pvP50W: 0, loadP90W: 1000, loadP50W: 1000, evP90W: 0 }));
+  const full = 92.16;
+  const o = (pct: number, fromMs: number, over: Record<string, unknown> = {}) => ({
+    startKwh: (pct / 100) * full, reserveKwh: 0.5 * full, fullKwh: full, tickPoolKwh: full, startTargetPct: 76, panelCeilingPct: 81, hours, fromMs, windowEndMs: CLOSE,
+    dischargeEff: 0.94, chargeCapKw: 17, envelopeKw: 17, legEff: 0.927, ...over,
+  });
+  // Past the last start: no start can be walked, and the run is on all the same.
+  const late = nca.walk(o(72, CLOSE - 15 * M));
+  assert.equal(late.startMs, null, 'nothing to start, on a walk told nothing');
+  assert.ok(late.closeKwh < (72 / 100) * full);
+  const on = nca.walk(o(72, CLOSE - 15 * M, { runOn: true }));
+  assert.equal(on.startMs, CLOSE - 15 * M, 'started at fromMs');
+  assert.equal(on.startPackKwh, (72 / 100) * full);
+  assert.ok(on.closeKwh > (72 / 100) * full + 2, String(on.closeKwh));
+  assert.ok(on.gridKwh > 2);
+  // The timed start: a pool that needs no start yet.
+  const timed = nca.walk(o(75, CLOSE - 2 * H));
+  assert.ok(timed.startMs != null && timed.startMs > CLOSE - 2 * H, 'the timed start, later');
+  const running = nca.walk(o(75, CLOSE - 2 * H, { runOn: true }));
+  assert.equal(running.startMs, CLOSE - 2 * H);
+  assert.ok(running.startPackKwh > timed.startPackKwh, 'no drain to a start already past');
+  // At the ceiling already: the panel's latch, the house draws it, and the walk's own re-ON stays.
+  const atCeiling = nca.walk(o(81, CLOSE - 2 * H, { runOn: true }));
+  assert.equal(atCeiling.ceilingReached, true);
+  assert.equal(atCeiling.startMs, CLOSE - 2 * H);
+  // A re-ON still walks, and noReOn still bars it.
+  const heavy = { startTargetPct: 61, panelCeilingPct: 80, hours: hours.map((h) => ({ ...h, loadP50W: 9000, loadP90W: 9000, evP90W: 8000 })), fromMs: OPEN, windowEndMs: CLOSE + 2 * H };
+  const free = nca.walk(o(50, OPEN, { ...heavy, runOn: true }));
+  const barred = nca.walk(o(50, OPEN, { ...heavy, runOn: true, noReOn: true }));
+  assert.equal(barred.ceilingReached, true);
+  assert.ok(free.gridKwh > barred.gridKwh + 1 && free.closeKwh > barred.closeKwh + 1, `${free.closeKwh} against ${barred.closeKwh}`);
+});
+
+test('★★★ U8 the finding: a run on at T-21, T-20, T-15 and T-5 is served as on, its close continuous; no "not expected to start", no "no charge expected", no ceiling claim', () => {
+  const s = armedRun();
+  for (const pool of [66, 68, 70, 72]) {
+    const levels: number[] = [];
+    for (const toClose of [21, 20, 15, 5]) {
+      const t = WIN_CLOSE - toClose * M;
+      const p = servedOf(s, t, pool);
+      const where = `pool ${pool}, T-${toClose}`;
+      assert.equal(p.chargeTonight, true, where);
+      assert.equal(p.expectedForceChargeStartMs, t, where);
+      assert.equal(p.expectedForceChargeMode, 'line', where);
+      assert.ok(p.expectedBuyKwh! > 0.05, `${where}: ${p.expectedBuyKwh}`);
+      assert.ok(p.expectedWriteLevelPct! > pool, `${where}: ${p.expectedWriteLevelPct}`);
+      levels.push(p.expectedWriteLevelPct!);
+      assert.doesNotMatch(p.rationale, CEILING_CLAIM, where);
+      assert.doesNotMatch(p.rationale, START_CLAIM, where);
+      assert.ok(p.rationale.includes(`the pool is at ~${pool}% now, above the 50% reserve; the force-charge for the outage line is on, runs to the window close and takes it to ${p.expectedWriteLevelPct}%`), p.rationale);
+      assert.ok(p.rationale.includes(`so the panel's force-charge is on and stays on until the window closes, taking the pool to ~${p.expectedWriteLevelPct}%.`), p.rationale);
+      const row = cardText.outageLineRow(p as never, 50)!;
+      assert.ok(row.includes(`the panel's force-charge stays on to the window close, ~${p.expectedWriteLevelPct}% expected at the close`), row);
+      assert.doesNotMatch(row, CEILING_CLAIM, row);
+      const fig = cardText.chargeFigureParts(p as never, 50);
+      assert.equal(fig.unit, 'kWh', where);
+      assert.ok(fig.label.includes(`expected charge to ~${p.expectedWriteLevelPct}%`), fig.label);
+    }
+    assert.ok(levels[0]! > levels[1]! && levels[1]! > levels[2]! && levels[2]! > levels[3]!, `${pool}: ${levels}`);
+  }
+});
+
+test('★★★ U8 no step in the stated close at the cutoff: it moves by what one minute of the walk moves, minute by minute through it', () => {
+  const s = armedRun();
+  for (const pool of [66, 70, 72]) {
+    const level = (toClose: number): number => servedOf(s, WIN_CLOSE - toClose * M, pool).expectedWriteLevelPct!;
+    const minute = level(26) - level(25);
+    assert.ok(minute > 0.1 && minute < 0.5, `one minute of the walk: ${minute}`);
+    for (let toClose = 25; toClose > 4; toClose -= 1) {
+      const step = level(toClose) - level(toClose - 1);
+      assert.ok(step > 0 && step <= minute + 0.11, `pool ${pool}, T-${toClose}: ${step} against ${minute}`);
+    }
+    assert.ok(Math.abs((level(21) - level(20)) - (level(22) - level(21))) <= 0.11, 'the cutoff is no step');
+  }
+});
+
+test('★★★ U8 a close under the line is the run\'s own, not a drain walk: a slow run behind it says so, one that gets there does not', () => {
+  const s = armedRun();
+  const line = PLAN45.forceChargeLine!.linePct;
+  const under = servedOf(s, WIN_CLOSE - 5 * M, 66);
+  assert.ok(under.expectedWriteLevelPct! < line && under.expectedWriteLevelPct! > 66, String(under.expectedWriteLevelPct));
+  assert.ok(under.rationale.includes(`NOTE: on the median load the pool is expected to close at ~${under.expectedWriteLevelPct}%, under tonight's ${under.cushionLineSocPct}% outage line`), under.rationale);
+  assert.ok(cardText.outageLineRow(under as never, 50)!.endsWith('expected at the close — under the line; residual risk remains'));
+  const over = servedOf(s, WIN_CLOSE - 15 * M, 70);
+  assert.ok(over.expectedWriteLevelPct! > line, String(over.expectedWriteLevelPct));
+  assert.equal(over.cushionShortfall, false, 'a run that gets there is not under the line, where the drain walk read it so');
+  assert.equal(over.cushionEnvelopeReason, undefined);
+  assert.doesNotMatch(over.rationale, /under tonight's|residual risk/);
+  assert.equal(cardText.outageLineRow(over as never, 50)!.includes('under the line'), false);
+});
+
+test('★★★ U8 earlier in a run: never "switches on at" an ON long past, whichever the walk: to the close, or to the ceiling with no re-ON left, or with one to come', () => {
+  const t = WIN_CLOSE - 60 * M;
+  const s = armedRun();
+  const toClose = servedOf(s, t, 60);
+  assert.equal(toClose.expectedLineCeilingStop, undefined);
+  assert.doesNotMatch(lineWords(toClose), START_CLAIM, toClose.rationale);
+  assert.ok(lineWords(toClose).includes('the force-charge for the outage line is on, runs to the window close'), toClose.rationale);
+  const stop = servedOf(s, t, 72);
+  assert.deepEqual(stop.expectedLineCeilingStop, { ceilingPct: 81, startTargetPct: 76 });
+  assert.doesNotMatch(lineWords(stop), START_CLAIM, stop.rationale);
+  assert.ok(lineWords(stop).includes(`the force-charge for the outage line is on and the panel switches it off at its 81% ceiling, ~${stop.expectedWriteLevelPct}% expected at the close`), stop.rationale);
+  assert.ok(lineWords(stop).includes(`so the panel's force-charge is on and runs until the panel switches it off at its 81% ceiling; the add-on switches it back on if the pool falls under 76% before the window closes (at most twice), ~${stop.expectedWriteLevelPct}% expected at the close.`), stop.rationale);
+  const spent = armedRun({ forceChargeLineReOns: 2, forceChargeLineReOnAtMs: t - 40 * M });
+  const barred = servedOf(spent, t, 72);
+  assert.equal((barred.expectedLineCeilingStop as { noReOnWords?: string }).noReOnWords, WORDS_SPENT);
+  assert.doesNotMatch(lineWords(barred), START_CLAIM, barred.rationale);
+  assert.ok(lineWords(barred).includes(`so the panel's force-charge is on and runs until the panel switches it off at its 81% ceiling; ${WORDS_SPENT}, ~${barred.expectedWriteLevelPct}% expected at the close.`), barred.rationale);
+  assert.doesNotMatch(barred.rationale, /the add-on switches it back on/, barred.rationale);
+});
+
+test('★★★ U8 what is not a run on keeps its words: an ON in its grace, a partial ON, a run stopped at the ceiling with a re-ON to come', () => {
+  for (const [why, s, t] of [
+    ['an ON in its readback grace', armedRun({ forceChargeOnVerifiedAtMs: null, forceChargeLineOffSlots: null, forceChargeOnAtMs: WIN_CLOSE - 21 * M, forceChargeOnLastAttemptMs: WIN_CLOSE - 21 * M }), WIN_CLOSE - 15 * M],
+    ['a partial ON', armedRun({ forceChargeOnVerifiedAtMs: null, forceChargeOnFailedAtMs: WIN_CLOSE - 30 * M, forceChargeOnFailedSlots: [3] }), WIN_CLOSE - 15 * M],
+    ['a panel stop', armedRun({ forceChargeLineOffSlots: [1, 2, 3], forceChargeLinePanelOffAtMs: WIN_CLOSE - 50 * M }), WIN_CLOSE - 45 * M],
+  ] as const) {
+    assert.equal(runOnOf(s), null, why);
+    const pool = 72;
+    assert.deepEqual(servedOf(s, t, pool), planAt(45, { at: t, pool, closed: closedRec(s, t), noReOn: noReOnOf(s, t) }), why);
+  }
+});
+
+test('★★★ U8 what stays: another window, an empty input and a closure leave the plan as it was; a night with no ask, a cost night and a cost-dominant night read no word of it; the plan of record is a pure first compute', () => {
+  const t = WIN_CLOSE - 15 * M;
+  const on = { at: t, pool: 72 };
+  const base = planAt(45, on);
+  assert.notDeepEqual(planAt(45, { ...on, runOn: WIN_OPEN }), base, 'the input moves the plan it is for');
+  assert.deepEqual(planAt(45, { ...on, runOn: WIN_OPEN + 1 }), base, "an earlier night's record");
+  assert.deepEqual(planAt(45, { ...on, runOn: null }), base);
+  const closed = { closed: { windowStartMs: WIN_OPEN, why: 'stopped', writeStands: true } as never };
+  assert.deepEqual(planAt(45, { ...on, ...closed, runOn: WIN_OPEN }), planAt(45, { ...on, ...closed }), 'a closure goes first');
+  // A cost-dominant night keeps its cost words: a record with an ask and a walk of the cost force-charge.
+  const cost = { at: WIN_CLOSE - 40 * M, pool: 50, cost: true };
+  const costPlan = planAt(27, cost);
+  assert.ok(costPlan.forceChargeLine != null && costPlan.expectedForceChargeMode !== 'line', JSON.stringify(costPlan.forceChargeLine));
+  assert.ok(costPlan.costCeilingSocPct! >= costPlan.forceChargeLine!.askPct + 10, 'cost-dominant at ⌈L⌉ + 10');
+  assert.deepEqual(planAt(27, { ...cost, runOn: WIN_OPEN }), costPlan);
+  // A night of the cost force-charge with no line at all.
+  const noAsk = { at: WIN_CLOSE - 40 * M, pool: 60, cost: true };
+  assert.equal(planAt(30, noAsk).forceChargeLine, undefined);
+  assert.deepEqual(planAt(30, { ...noAsk, runOn: WIN_OPEN }), planAt(30, noAsk));
+  // A floor at the write and an advisory plan arm no line.
+  assert.deepEqual(planAt(50, { ...on, runOn: WIN_OPEN }), planAt(50, on));
+  assert.deepEqual(planAt(45, { ...on, eligible: false, runOn: WIN_OPEN }), planAt(45, { ...on, eligible: false }));
+  // The sizing, and what a tick reads off the served plan: nothing written moves.
+  const served = planAt(45, { ...on, runOn: WIN_OPEN, noReOn: { windowStartMs: WIN_OPEN, words: WORDS_SPENT } });
+  assert.deepEqual(sizing(served), sizing(base));
+  assert.deepEqual(served.evContention, base.evContention, 'decideForceCharge reads the EV displacement off the served plan');
+  assert.deepEqual(served.window, base.window, 'nextForceChargeOpenMs reads its window');
+  assert.deepEqual(served.forceChargeLine, base.forceChargeLine);
+  // A pure compute: the inputs and the first plan are as they were.
+  const deps = { ...caseOf(LABEL).deps, reserveFloorPct: 45, cushionPoolScale: MEASURED_SCALE, forceChargeEligible: false, lineForceChargeEligible: true, nowMs: t, socNowPct: 72 } as never;
+  const inputs = buildNightChargeInputs(deps);
+  const first = computeNightChargePlan(inputs);
+  const before = JSON.stringify([inputs, first]);
+  computeNightChargePlan({ ...inputs, armedLineRunOnStartMs: WIN_OPEN } as never);
+  assert.equal(JSON.stringify([inputs, first]), before);
+  assert.deepEqual(first, computeNightChargePlan(inputs), 'the plan of record');
+});
+
+test('★★★ U8 past the cutoff the ceiling\'s words are reached: a pool the rest of the run takes to the panel\'s stop, with no re-ON left, says so, and walks none', () => {
+  const t = WIN_CLOSE - 20 * M;
+  const on = { at: t, pool: 71, fullKwh: 61, runOn: WIN_OPEN };
+  const words = { windowStartMs: WIN_OPEN, words: WORDS_SPENT };
+  const p = planAt(30, { ...on, noReOn: words });
+  const line = p.forceChargeLine!.linePct;
+  assert.ok(line > 50);
+  assert.deepEqual(p.expectedLineCeilingStop, { ceilingPct: 80, startTargetPct: 74, noReOnWords: WORDS_SPENT });
+  assert.ok(p.rationale.includes(`so the panel's force-charge is on and runs until the panel switches it off at its 80% ceiling; ${WORDS_SPENT}, ~${p.expectedWriteLevelPct}% expected at the close.`), p.rationale);
+  assert.ok(p.rationale.includes(`the force-charge for the outage line is on and the panel switches it off at its 80% ceiling, ~${p.expectedWriteLevelPct}% expected at the close`), p.rationale);
+  assert.doesNotMatch(p.rationale, /the add-on switches it back on|at most/, p.rationale);
+  assert.doesNotMatch(p.rationale, CEILING_CLAIM, p.rationale);
+  const row = cardText.outageLineRow(p as never, 50)!;
+  assert.ok(row.endsWith(`the panel's force-charge runs until the panel switches it off at its 80% ceiling, and ${WORDS_SPENT}, ~${p.expectedWriteLevelPct}% expected at the close`), row);
+  // The same run with no word of the record: the plan the finding read, past the walk's last start.
+  const told = planAt(30, { at: t, pool: 71, fullKwh: 61, noReOn: words });
+  assert.equal(told.expectedForceChargeStartMs, null, 'a start the walk can no longer make');
+  assert.equal(told.expectedLineCeilingStop, undefined);
+});
+
+test('★★★ U8 a walk with no P50 basis keeps the run on: never "switches on just in time"', () => {
+  const on = { at: WIN_CLOSE - 15 * M, pool: 72, noP50: true };
+  const before = planAt(45, on);
+  assert.equal(before.expectedForceChargeStartMs, undefined, 'no walk');
+  assert.ok(before.rationale.includes("so the panel's force-charge switches on just in time and stays on until the window closes."), before.rationale);
+  const p = planAt(45, { ...on, runOn: WIN_OPEN });
+  assert.equal(p.expectedForceChargeStartMs, undefined);
+  assert.ok(p.rationale.includes("so the panel's force-charge is on and stays on until the window closes."), p.rationale);
+  assert.doesNotMatch(p.rationale, START_CLAIM, p.rationale);
+});
+
+test('★★★ U8 two whole runs through the cutoff on the real chain: a slow one and a normal one, each minute served as on or as the sizing\'s own hold, and the tick unmoved', () => {
+  const s = armedRun();
+  const line = PLAN45.forceChargeLine!.linePct;
+  // pool(toClose): a slow run holds under the sizing's hold to the close; a normal one rises through it.
+  for (const [name, poolAt] of [['slow', (m: number) => 72 - 0.3 * (m - 4)], ['normal', (m: number) => 80 - 0.24 * m]] as const) {
+    let held = 0;
+    for (let toClose = 40; toClose >= 1; toClose -= 1) {
+      const t = WIN_CLOSE - toClose * M;
+      const pool = Math.round(poolAt(toClose) * 10) / 10;
+      const where = `${name}, T-${toClose}, pool ${pool}`;
+      const p = servedOf(s, t, pool);
+      assert.equal(decideForceCharge(s, t, fo({ poolSocPct: pool, slotsOn: [1, 2, 3], ceilingReadbackPct: 81 })).kind, 'none', `${where}: the run stays on`);
+      assert.doesNotMatch(p.rationale, /not expected to start|no charge expected/, where);
+      assert.doesNotMatch(p.rationale, START_CLAIM, where);
+      if (p.chargeTonight) {
+        assert.equal(p.expectedForceChargeStartMs, t, where);
+        assert.ok(p.expectedWriteLevelPct! > pool, where);
+        assert.ok(lineWords(p).includes('the force-charge for the outage line is on'), where);
+      } else {
+        held += 1;
+        assert.equal(p.forceChargeLine, undefined, where);
+        assert.deepEqual(p, planAt(45, { at: t, pool, noReOn: noReOnOf(s, t) }), `${where}: a hold reads no word of it`);
+      }
+      if (p.chargeTonight && p.expectedWriteLevelPct! >= line) assert.equal(cardText.outageLineRow(p as never, 50)!.includes('under the line'), false, where);
+    }
+    assert.ok(held > 0, `${name}: the sizing's own hold comes at the end, a true word`);
+  }
+});
+
+test('★★★ U8 the on-peak guard: the re-ON\'s cutoff runs from it and the run is still on there; its OFF ends the run', () => {
+  const peak = WIN_CLOSE + 30 * M;
+  const s = armedRun({ nextOnPeakStartMs: peak });
+  const end = peak - H;
+  assert.equal(end, WIN_CLOSE - 30 * M);
+  const cut = end - 20 * M;
+  assert.equal(noReOnOf(s, cut - 1), null);
+  assert.deepEqual(noReOnOf(s, cut), { windowStartMs: WIN_OPEN, words: WORDS_SPENT });
+  for (const at of [cut - M, cut, cut + 10 * M]) {
+    assert.equal(runOnOf(s), WIN_OPEN);
+    const p = servedOf(s, at, 70);
+    assert.equal(p.expectedForceChargeStartMs, at);
+    assert.doesNotMatch(p.rationale, CEILING_CLAIM);
+    assert.doesNotMatch(p.rationale, START_CLAIM);
+  }
+  const a = decideForceCharge(s, end, fo({ poolSocPct: 70, slotsOn: [1, 2, 3], ceilingReadbackPct: 81 }));
+  assert.equal(a.kind, 'off', 'the guard ends the write window');
+  const off = { ...s, forceChargeOffAtMs: end, forceChargeOffReason: 'windowEnd' } as NightActuationState;
+  assert.equal(runOnOf(off), null);
+  assert.equal(closedRec(off, end + M)?.why, 'stopped');
+});
+
+test('★★★ U8 wiring: beside the closure and the no-re-ON, on their terms: the served plan alone reads it, and the plan of record stays', () => {
+  const at = INDEX.indexOf('async function recomputeNightChargePlan(');
+  const fn = INDEX.slice(at, INDEX.indexOf('function armedExpectedBuyKwh(', at));
+  assert.ok(fn.includes('  const lineRunOn = shadowLeg == null && opts.arming !== true && nightActuationMem.windowStartMs === plan.window?.startMs ? armedLineRunOn(nightActuationMem) : null;\n'), 'never an arm, a shadow leg or a later window');
+  assert.ok(fn.includes('  if (!shadowLeg) setLatestNightChargePlan(lineClosed != null || lineNoReOn != null || lineRunOn != null ? computeNightChargePlan({ ...inputs, armedLineStartClosed: lineClosed, armedLineNoReOn: lineNoReOn, armedLineRunOnStartMs: lineRunOn }) : plan);\n'), 'the second compute');
+  assert.ok(fn.includes('  const inputs = buildNightChargeInputs(deps);\n  const plan = computeNightChargePlan(inputs);\n'), 'the plan of record');
+  assert.equal(fn.indexOf('return { plan, extras') > 0 || fn.includes('plan, extras'), true, 'the caller gets the first compute');
+  const SRC = readFileSync(resolve(HERE, '../src/nightChargeAdvisor.ts'), 'utf8');
+  assert.ok(SRC.includes('noReOn: lineNoReOn != null, runOn: lineRunOn, tickPoolKwh: fullKwh,'), 'the walk');
 });
