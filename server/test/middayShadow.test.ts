@@ -843,7 +843,7 @@ test('★★★ index.ts: a shadow leg is returned only — no plan holder, no s
   const fn = INDEX.slice(INDEX.indexOf('async function recomputeNightChargePlan('), INDEX.indexOf('function armedExpectedBuyKwh('));
   assert.match(fn, /\n\s+const shadowLeg = opts\.shadowLeg \?\? null;\n/);
   assert.match(fn, /const legRole: ChargeLegRole = shadowLeg\?\.spec\.role \?\? opts\.role \?\? 'cost';/);
-  assert.match(fn, /\n\s+if \(!shadowLeg\) setLatestNightChargePlan\(plan\);\n/);
+  assert.match(fn, /\n\s+if \(!shadowLeg\) setLatestNightChargePlan\(lineClosed != null \? computeNightChargePlan\(\{ \.\.\.inputs, armedLineStartClosed: lineClosed \}\) : plan\);\n/);
   assert.equal(fn.split('setLatestNightChargePlan(').length - 1, 1);
   assert.match(fn, /if \(!shadowLeg && plan\.window && nowMs < plan\.window\.startMs\) \{\n\s+try \{\n\s+atomicWriteFileSync\(NIGHT_CHARGE_PLANSNAP_PATH/);
   assert.match(fn, /if \(!shadowLeg && buyDebiasCal\.basis === 'measured'/);

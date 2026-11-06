@@ -54,7 +54,7 @@ test('★★★ recomputeNightChargePlan gates on the verdict BEFORE it reads th
   assert.ok(gate > 0);
   assert.ok(b.indexOf("if (!panel.use) return 'panelStale';") > gate);
   assert.ok(gate < b.indexOf('const sp: any = shp2.projection;'));
-  assert.ok(b.indexOf('if (!panel.fresh) {') < b.indexOf('setLatestNightChargePlan(plan);'), 'a stale-sized plan says so before anyone reads it');
+  assert.ok(b.indexOf('if (!panel.fresh) {') < b.indexOf('if (!shadowLeg) setLatestNightChargePlan('), 'a stale-sized plan says so before anyone reads it');
   assert.ok(b.includes('panelSampleAgeS: panel.ageMs != null ? Math.round(panel.ageMs / 1000) : null,'));
 });
 
