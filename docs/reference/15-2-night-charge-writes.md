@@ -390,14 +390,13 @@ fixture (nameplate, 0.944), 10 and 15 of them closing near 50 (`lineForceCharge.
   mode, `expectedForceChargeMode: 'line'`): rationale, push, card and spoken
   notice, which adds "The panel keeps only 50 percent in reserve." The line sentence appears only in line mode. A window-bound walk's close is capped at the window's reach and floored at
   the 50% reserve (chapter 15 part 1). A walk that reaches the panel ceiling (`expectedLineCeilingStop`) is worded by the panel's stop and the re-ON on the rationale, push and
-  card, never "stays on until the window closes"; a run with no re-ON left says so (`armedLineNoReOn`). A pool expected to stay at or
-  above the panel ceiling reads armed "but is not expected to start". With nothing armed the plan says the line is above it "and no
+  card, never "stays on until the window closes"; a run with no re-ON left says so (`armedLineNoReOn`); a run on (`armedLineRunOn`, served plan) walks from now, named as on. A pool expected at or
+  above the panel ceiling reads armed "but is not expected to start". Nothing armed reads "and no
   force-charge runs in advisory mode" (the backup leg: "the outage backup leg writes the reserve only"),
-  "so the cushion is not fully held — residual risk remains". `reserveAtTarget` says "no write is due while it does, and no force-charge runs without one"; `armedNoLine`, a recompute of a window whose record has no line ask, "no write armed for this window carries a force-charge for it", each "so the cushion is not assured": a reserve lowered later can get its write, with no force-charge for the line. `startClosed` (a record with its ask, `armedLineStartClosed`, a run a cancel or an OFF ended too, an ON warned of on every slot, or all slots off with no re-ON left; or no record with no evening job left, `noArm`, pushed once): the key's words, on the served plan only; the ledger keeps the ask, and with no verified write standing the card leads with them. An armed night keeps its line sentence and,
-  whatever its cause, adds a NOTE (`lineNotHeldOf`; the 21:30 log "Line NOT held") where its walk closes
+  "so the cushion is not fully held — residual risk remains". `reserveAtTarget` says "no write is due while it does, and no force-charge runs without one"; `armedNoLine`, a recompute of a window whose record has no line ask, "no write armed for this window carries a force-charge for it", each "so the cushion is not assured": a reserve lowered later can get its write, with no force-charge for the line. `startClosed` (a record with its ask, `armedLineStartClosed`, a run a cancel or an OFF ended too, an ON warned of on every slot, or all slots off with no re-ON left; or no record with no evening job left, `noArm`, pushed once): the key's words, on the served plan only; the ledger keeps the ask, and with no verified write standing the card leads with them. An armed night keeps its line sentence and adds a NOTE (`lineNotHeldOf`; the 21:30 log "Line NOT held") where its walk closes
   under the line, above 100% "above a full
   pool", and on a `nearFull` walk that holds "cannot hold it with its usual margin"; never "no
-  force-charge". The "charge/pool caps" note appears only where the sizing itself fell short.
+  force-charge". The "charge/pool caps" note needs a sizing that fell short.
 - **At run time** a night whose record carries a line ask, a cost-dominant one too, pushes when its start is held for a reason other than the clock or the pool. The causes
   (`forceChargeBlockerClass`) are the ceiling refused or not read back, Charge Now already on, the grid
   unknown or absent, red vitals, no slot readback, no battery slot connected, and an incoherent SoC.
