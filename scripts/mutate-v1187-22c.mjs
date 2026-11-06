@@ -111,14 +111,14 @@ const MUTANTS = [
   {
     id: 'C-vi. ★★★ the expected level ignores force-charge',
     file: NCA,
-    find: '      setpointSocPct, costCeilingSocPct, forceChargeEligible: inputs.forceChargeEligible === true,',
+    find: '      setpointSocPct, costCeilingSocPct, forceChargeEligible: inputs.forceChargeEligible === true && !lineNoWrite,',
     to: '      setpointSocPct, costCeilingSocPct, forceChargeEligible: false, /* MUTANT */',
     why: 'A force-charge night (10-12: to 80%) states only the reserve leg, ~5 kWh, for a ~34 kWh draw.',
   },
   {
     id: 'C-vii. ★★ the expected level assumes force-charge on every night',
     file: NCA,
-    find: '      setpointSocPct, costCeilingSocPct, forceChargeEligible: inputs.forceChargeEligible === true,',
+    find: '      setpointSocPct, costCeilingSocPct, forceChargeEligible: inputs.forceChargeEligible === true && !lineNoWrite,',
     to: '      setpointSocPct, costCeilingSocPct, forceChargeEligible: true, /* MUTANT */',
     why: 'An advisory or resilience night, where only the reserve is written, states a force-charge draw that never happens.',
   },

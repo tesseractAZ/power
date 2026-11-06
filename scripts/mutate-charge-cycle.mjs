@@ -534,14 +534,14 @@ const MUTANTS = [
   {
     id: 'M-i. ★★★ a silent missed apply',
     file: CYC,
-    find: "  return leg.leg === 'backup' || leg.windowKind !== 'overnight';",
+    find: "  return line || leg.leg === 'backup' || leg.windowKind !== 'overnight';",
     to: '  return false; /* MUTANT */',
     why: 'Today\'s 10am–3pm charge does not start and nothing says so.',
   },
   {
     id: 'M-ii. ★★★ the overnight cost leg pushes a missed apply',
     file: CYC,
-    find: "  return leg.leg === 'backup' || leg.windowKind !== 'overnight';",
+    find: "  return line || leg.leg === 'backup' || leg.windowKind !== 'overnight';",
     to: '  return true; /* MUTANT */',
     why: 'One leg: a push the overnight cycle never sent.',
   },
