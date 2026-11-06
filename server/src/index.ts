@@ -68,6 +68,8 @@ import {
   forceChargeLineNightPct, forceChargeOnFailureNight, lineLogPct, lineCloseAccountDue, FORCE_CHARGE_BLOCKER_WHY, type ForceChargeOpts,
   // v1.200.0 (Fix9) — a line night's force-charge "waits on" a reading of the target only while a start can still come.
   forceChargeStartClosed, lineStartClosedWords,
+  // v1.200.0 (Fix9 review 2) — a recompute of a window whose armed record carries no line claims no ON the record cannot make.
+  armedNoLineStartMs,
   // v1.200.0 (review 4) — what a line re-ON's readback check stamps, the re-ON that took effect included.
   lineReOnCheckedStamp,
   // v1.200.0 (review 6) — the force-charge tick's cadence, which the line-at-risk push's hand-back hold counts.
@@ -3695,7 +3697,8 @@ function round1(n: number): number { return Math.round(n * 10) / 10; }
  * update() — buildInputs there is synchronous, but we need awaited analytics).
  */
 async function recomputeNightChargePlan(
-  opts: { allowStalePanel?: boolean; role?: ChargeLegRole; shadowLeg?: ShadowLegSizing; maxWeatherAgeMs?: number } = {},
+  /** `arming`: the evening job's plan, which replaces the record it would otherwise read (armedNoLineStartMs, below). */
+  opts: { allowStalePanel?: boolean; role?: ChargeLegRole; shadowLeg?: ShadowLegSizing; maxWeatherAgeMs?: number; arming?: boolean } = {},
 ): Promise<{ plan: NightChargePlan; extras: NightPlanExtras } | 'panelStale' | null> {
   const nowMs = Date.now();
   // R4 — a mid-day cycle's leg sized in SHADOW (middayShadow.ts): its window, horizon end and PV
@@ -4088,6 +4091,9 @@ async function recomputeNightChargePlan(
     // (forceChargeLine; (A5) carried, or disclosed beside it) or, the gate off, disclosed (cushionShortfall, cause
     // 'envelope'). Never absent on a live plan.
     lineForceChargeEligible: lineForceChargeOn(legRole),
+    // v1.200.0 (Fix9 review 2) — the armed record with no line ask: a recompute of its window claims no ON the record cannot make. Not
+    // the plan the evening job arms from: a Saturday record sharing Sunday's window must not stop Sunday's arm carrying its ask.
+    armedNoLineStartMs: shadowLeg == null && opts.arming !== true ? armedNoLineStartMs(nightActuationMem) : null,
     // R2 — the leg: the overnight window (resolved above) for every live plan, its role the caller's.
     // R4 — a shadow leg's own spec (its pinned window, taper line and backup hold).
     windowSpec: shadowLeg ? shadowLeg.spec : legRole === 'cost' ? OVERNIGHT_WINDOW_SPEC : { kind: 'overnight', role: legRole },
@@ -4975,7 +4981,7 @@ async function runNightChargeEveningJobInner(): Promise<void> {
     // sized on the last reading instead (disclosed on the plan), so staleness alone
     // never costs the night. Only a genuinely missing basis (null) reaches
     // 'insufficient_basis' below.
-    const result = await recomputeNightChargePlan({ allowStalePanel: nowMin >= deferUntilMin });
+    const result = await recomputeNightChargePlan({ allowStalePanel: nowMin >= deferUntilMin, arming: true });
     if (result === 'panelStale') {
       if (nightPlanStaleDeferLoggedDay !== today) {
         nightPlanStaleDeferLoggedDay = today;
@@ -6079,8 +6085,9 @@ function gridInputCapKwFromEnv(): number | null {
  *  (forceChargeModeOf on the armed record and the gates now) says so, with its timed start; (A5) and, where the plan's
  *  own walk cannot hold the line (lineNotHeldOf), "Line NOT held". */
 function forceChargeArmNote(armed: NightActuationState, plan: NightChargePlan | null): string {
-  // (Fix9 review 1) A reserve already at the write: no apply, so nothing rides it (the plan's own disclosure, reason 'reserveAtTarget').
-  if (plan?.cushionEnvelopeReason === 'reserveAtTarget') return `Force-charge: none tonight — the reserve already reads ${plan.reserveFloorPct}%, so no write goes and no force-charge runs without one; tonight's outage line is not held.`;
+  // (Fix9 review 1) A reserve at the write when the plan read it: no apply while it does, so nothing rides it (the plan's own disclosure,
+  // reason 'reserveAtTarget'). (Fix9 review 2) A reading, not a promise: a write that goes anyway rides a cost ceiling beside it.
+  if (plan?.cushionEnvelopeReason === 'reserveAtTarget') return `Force-charge: none for the line — the reserve reads ${plan.reserveFloorPct}%, so no write is due while it does, and no force-charge runs without one; the plan does not claim tonight's outage line.`;
   const mode = forceChargeModeOf(armed, forceChargeGatesOn());
   if (mode?.kind === 'line' && armed.windowEndMs != null) {
     const endMs = writeWindowEndMs(armed)!;

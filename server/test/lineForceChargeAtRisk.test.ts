@@ -1591,6 +1591,9 @@ test('★★★ W3 a line night: a close under the line is said; an unread close
   assert.ok(sum(ran, { closePoolPct: 63 }).includes('force-charge ran to the window close for the 55.6% outage line; the pool read 63% at the close'));
   assert.doesNotMatch(sum(ran, { closePoolPct: 56 }), /under the/, 'at ⌈L⌉: not under');
   assert.match(sum(ran, { closePoolPct: 55 }), /the pool read 55% at the close, under the 55\.6% outage line/);
+  // (Fix9 review 2) The close as read and the line beside it, so the order shows: never a close rounded over the line it is under.
+  assert.match(sum(ran, { closePoolPct: 55.5, linePct: 55.56 }), /the pool read 55\.5% at the close, under the 55\.6% outage line/);
+  assert.match(sum(ran, { closePoolPct: 55.58, linePct: 55.64 }), /the pool read 55\.6% at the close, under the 55\.64% outage line/);
   assert.ok(sum(ran, { closePoolPct: null }).includes('force-charge ran to the window close for the 55.6% outage line; the pool was not read at the close (no fresh panel reading)'), sum(ran, { closePoolPct: null }));
   assert.ok(sum(ran).includes('the pool was not read at the close'), 'omitted is unread, never silence');
   // The other outcomes of a line night say where it closed too.

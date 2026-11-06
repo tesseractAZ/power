@@ -59,7 +59,7 @@ interface NightChargePlan {
    *  whether the expected walk ran it (nightChargeText.outageLineRow). Absent on older plans. */
   cushionShortfallCause?: 'envelope' | 'envelope+caps';
   /** v1.200.0 (A5) — why the plan does not claim the line (nightChargeText.CushionNotePlan). */
-  cushionEnvelopeReason?: 'advisory' | 'backupLeg' | 'reserveAtTarget' | 'nearFull' | 'closeUnder';
+  cushionEnvelopeReason?: 'advisory' | 'backupLeg' | 'reserveAtTarget' | 'armedNoLine' | 'nearFull' | 'closeUnder';
   forceChargeLine?: { askPct: number; linePct: number } | null;
   expectedForceChargeMode?: 'line';
   /** v1.200.0 (review 2) — the expected walk reaches the panel ceiling: the panel switches Charge Now off there and
@@ -235,7 +235,7 @@ export const NightChargeCard = memo(function NightChargeCard() {
   const actuation = withConfirmedCancel(status.actuation ?? null, cancelledKey);
   const onCancelled = () => setCancelledKey(actuationKey(actuation));
   const banner = (spacing: 'mt-3' | 'mb-3') => (
-    <ActuationBanner mode={status.mode} actuation={actuation} onCancelled={onCancelled} spacing={spacing} hhmm={hhmm} />
+    <ActuationBanner mode={status.mode} actuation={actuation} onCancelled={onCancelled} spacing={spacing} hhmm={hhmm} reservePct={status.reserveFloorPercent} />
   );
   const stands = writeStands(actuation, status.mode, Date.now());
 
@@ -417,7 +417,7 @@ export const NightChargeCard = memo(function NightChargeCard() {
  * v1.189.0 — rendered in every card shape; its words and its Cancel come from
  * actuationBannerState.
  */
-function ActuationBanner({ mode, actuation, onCancelled, spacing, hhmm }: {
+function ActuationBanner({ mode, actuation, onCancelled, spacing, hhmm, reservePct }: {
   mode: NightChargeStatus['mode'];
   /** The site-zone clock formatter (siteHHMM). */
   hhmm: ClockFmt;
@@ -425,12 +425,14 @@ function ActuationBanner({ mode, actuation, onCancelled, spacing, hhmm }: {
   onCancelled: () => void;
   /** Its margin in the shape it sits in: above the stats (mb-3), or under the shape's text (mt-3). */
   spacing: 'mt-3' | 'mb-3';
+  /** The panel's reserve now (status.reserveFloorPercent): an armed write it already reads says so. */
+  reservePct: number | null;
 }) {
   const [busy, setBusy] = useState(false);
   const [cancelErr, setCancelErr] = useState<string | null>(null);
   if (mode === 'advisory' || !actuation || !actuationBannerVisible(actuation, Date.now())) return null;
 
-  const state = actuationBannerState(actuation, hhmm(actuation.cancelDeadlineMs));
+  const state = actuationBannerState(actuation, hhmm(actuation.cancelDeadlineMs), reservePct);
   const doCancel = async () => {
     setBusy(true);
     setCancelErr(null);

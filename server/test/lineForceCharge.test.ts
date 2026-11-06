@@ -2237,10 +2237,13 @@ test('★★★ T24 (Fix8) the line texts at their edges: every text on the line
       add(`${f.title}\n${f.body}`, { line, named: beside(line, 50), where: where(`foreign ${started}`) });
       if (atReserve && /under the line/.test(f.body)) errs.push(`${where('foreign')}: a line the reserve holds said to close under it`);
     }
-    for (const X of [Math.floor(line - 0.05 - 1e-9), 50, Math.ceil(line - 0.05), 100].filter((x) => x <= 100)) {
+    // (Fix9 review 2) …and a reading to one decimal: the line named beside it too, or "the 55.6% outage line. The pool reads 55.6%, under the line."
+    for (const X of [Math.floor(line - 0.05 - 1e-9), 50, Math.ceil(line - 0.05), 100, r1(line - 0.03), r1(line + 0.03)].filter((x) => x <= 100)) {
       const acct = (notify as unknown as { buildLineNightCloseAccount: (o: unknown) => { title: string; body: string } }).buildLineNightCloseAccount({ day: '2026-09-16', linePct: line, cause: 'noWrite', closePoolPct: X });
-      add(`${acct.title}\n${acct.body}`, { line, named: beside(line, 50), where: where(`close account ${X}`) });
+      add(`${acct.title}\n${acct.body}`, { line, named: beside(line, 50, X), where: where(`close account ${X}`) });
       if ((X < line) !== /under the line/.test(acct.body)) errs.push(`${where('close account')}: ${X} against ${line}: ${acct.body}`);
+      const printed = /the ([\d.]+)% outage line/.exec(acct.body);
+      if (printed == null || (Number(printed[1]) === X && X !== line)) errs.push(`${where('close account')}: the order does not show: ${acct.body}`);
       for (const ended of ['gridLoss', 'cancelled'] as const) {
         const b = buildNightChargeMorningSummary({ day: '2026-09-16', targetPct: 50, restorePct: 30, expectedKwh: 17.6, ended, closePoolPct: X, linePct: line, closeText: '5:00 AM' } as never).body;
         for (const m of b.matchAll(/The pool reads ([\d.]+)%, (under|at or above) the ([\d.]+)% outage line/g)) {

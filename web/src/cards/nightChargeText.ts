@@ -75,7 +75,7 @@ export interface BannerState {
  * incomplete basis or a stale plan does not disarm the write (writeStands), so none of them may
  * hide its Cancel. `deadline` is the cancel deadline as HH:MM, or null.
  */
-export function actuationBannerState(a: BannerTextActuation, deadline: string | null): BannerState {
+export function actuationBannerState(a: BannerTextActuation, deadline: string | null, reservePct: number | null = null): BannerState {
   const prior = a.priorReservePct ?? '—';
   // v1.189.0 — first: once the reserve has settled as someone else's, nothing of ours holds it and
   // the server answers a cancel with 409, so the banner offers none ("Cancel & revert" over a
@@ -94,6 +94,11 @@ export function actuationBannerState(a: BannerTextActuation, deadline: string | 
   const target = a.targetPct ?? '—';
   if (a.appliedAtMs != null) {
     return { text: `Reserve raised to ${target}% (was ${prior}%); auto-restores after the window closes.`, settled: false, cancel: 'Cancel & revert' };
+  }
+  // v1.200.0 (Fix9 review 2) — the panel already reads the write (decideActuation: nothing to raise): armed, and none is due while it does.
+  // Cancel stays: a reading under the target lets the write go.
+  if (a.targetPct != null && reservePct != null && reservePct >= a.targetPct) {
+    return { text: `Supervised write armed${deadline ? ` for ${deadline}` : ''} — the reserve reads ${reservePct}%, so none is due while it does.`, settled: false, cancel: 'Cancel tonight' };
   }
   return { text: `Supervised write armed — reserve → ${target}%${deadline ? ` at ${deadline}` : ''}.`, settled: false, cancel: 'Cancel tonight' };
 }
@@ -214,8 +219,8 @@ export interface CushionNotePlan {
   /** The server's NightChargePlan.cushionShortfallCause: the 50% reserve envelope contributes. */
   cushionShortfallCause?: 'envelope' | 'envelope+caps';
   /** The server's NightChargePlan.cushionEnvelopeReason: why the plan does not claim the line (review; A5: armed
-   *  'nearFull' / 'closeUnder', or nothing armed 'advisory' / 'backupLeg' / 'reserveAtTarget'). */
-  cushionEnvelopeReason?: 'advisory' | 'backupLeg' | 'reserveAtTarget' | 'nearFull' | 'closeUnder';
+   *  'nearFull' / 'closeUnder', or nothing armed 'advisory' / 'backupLeg' / 'reserveAtTarget' / 'armedNoLine'). */
+  cushionEnvelopeReason?: 'advisory' | 'backupLeg' | 'reserveAtTarget' | 'armedNoLine' | 'nearFull' | 'closeUnder';
   /** The reserve the plan read: what 'reserveAtTarget' names. */
   reserveFloorPct?: number;
   cushionLineSocPct?: number | null;
@@ -281,7 +286,8 @@ export function outageLineRow(plan: CushionNotePlan, maxPct: number | null = nul
     const l = plan.cushionLineSocPct;
     const why = plan.cushionEnvelopeReason === 'backupLeg' ? 'not held tonight (the backup leg writes the reserve only)'
       : plan.cushionEnvelopeReason === 'advisory' ? 'not held tonight (advisory mode)'
-        : plan.cushionEnvelopeReason === 'reserveAtTarget' ? `not held tonight (the reserve already reads ${plan.reserveFloorPct ?? max}%: no write, no force-charge)` : 'not held tonight';
+        : plan.cushionEnvelopeReason === 'reserveAtTarget' ? `not claimed tonight (the reserve reads ${plan.reserveFloorPct ?? max}%: no write while it does, no force-charge without one)`
+          : plan.cushionEnvelopeReason === 'armedNoLine' ? 'not claimed tonight (no write armed for this window carries a force-charge for it)' : 'not held tonight';
     return `outage line ${lineText(l)}is above the ${max}% the panel accepts as a reserve — ${why}; residual risk remains`;
   }
   // A5 — an ARMED night: the force-charge's row (what it does), then what its walk cannot hold. Never "not held tonight".

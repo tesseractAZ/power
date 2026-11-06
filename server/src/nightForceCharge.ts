@@ -1537,6 +1537,15 @@ export function forceChargeLineNightPct(
   return line != null && Number.isFinite(line) ? line : ask;
 }
 
+/** v1.200.0 (Fix9 review 2) — PURE. The window open of a record with no line (forceChargeLineNightPct null): nothing re-arms a record, so
+ *  no force-charge for a line can come of it, whatever the reserve or the line does next, and a live recompute of that window says so
+ *  (NightChargeInputs.armedNoLineStartMs). null with no record, or one that carries its line. */
+export function armedNoLineStartMs(
+  s: Pick<NightActuationState, 'day' | 'windowStartMs' | 'forceChargeLineAskPct' | 'forceChargeLinePct'>,
+): number | null {
+  return s.day != null && forceChargeLineNightPct(s) == null ? s.windowStartMs : null;
+}
+
 /** v1.200.0 (review 2) — PURE. The ON-failure push's night fields (notify.buildNightForceChargeOnFailure): a
  *  night whose record carries a line names the line (never "toward" a stop, never "no action needed") — in line
  *  mode AND on a cost-dominant night; any other night its cost ceiling, as v1.199.1. Keyed on the record, never

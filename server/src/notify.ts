@@ -628,10 +628,13 @@ export function buildNightChargeMessage(
       + `taking the pool ${to} ${levelText}; the panel's ${l.panelCeilingPct}% force-charge ceiling is the backstop. `
       + `After the window the reserve returns to ${round1(plan.reserveFloorPct)}% and the house uses the pool as usual. `;
   };
-  // v1.200.0 (Fix9 review 1) — a plan whose reserve already reads the write (cushionEnvelopeReason 'reserveAtTarget'): nothing goes, so no
-  // raise and no force-charge are promised, a cost ceiling armed beside it included (each rides the verified write).
+  // v1.200.0 (Fix9 review 1) — a plan whose reserve reads the write (cushionEnvelopeReason 'reserveAtTarget'): none is due, so no raise and
+  // no force-charge are promised, a cost ceiling armed beside it included (each rides the verified write). (Fix9 review 2) That is the
+  // plan's reading: the record stands armed, with no line ask, so a reserve lowered before the apply lets the write go, and a cost
+  // ceiling ride it: true whichever way it goes, and what a lowered reserve does not do is said.
   const tail = supervised && plan.cushionEnvelopeReason === 'reserveAtTarget'
-    ? `SUPERVISED: the backup reserve already reads ${round1(plan.reserveFloorPct)}%, so the add-on writes nothing tonight and no force-charge runs.`
+    ? `SUPERVISED: the backup reserve reads ${round1(plan.reserveFloorPct)}% now, so no write is due while it does, and no force-charge runs without one. `
+      + `A reading under ${supervised.targetPct}% when the window opens lets the armed write go, and it carries no force-charge for the outage line.`
     : supervised
     ? `SUPERVISED: ${supervised.cancelDeadlineText} the add-on raises the backup reserve to `
       + `${supervised.targetPct}% (bounded write; auto-restores after the charge window closes). `
@@ -651,8 +654,12 @@ export function buildNightChargeMessage(
   // v1.187.22 — no EV-contention note on a night expected to charge nothing: "leaving ~2.5 kW for
   // the packs while the car charges" (or "the packs will receive less than planned") describes a
   // pack charge the night is not expected to make.
+  // (Fix9 review 2) A reserve reading the write: no write to price, and the figure "with" is the sized buy, which no write is due to make.
+  const lowSoc = plan.cushionEnvelopeReason === 'reserveAtTarget'
+    ? `with no charge, ~${pct(plan.minProjSocPct)} with the plan's full buy`
+    : `without ${held ? "tonight's write" : 'this charge'}, ~${pct(plan.minProjSocPct)} with it`;
   const projection = `Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~${pct(plan.baselineMinSocPct)} `
-    + `without ${held ? "tonight's write" : 'this charge'}, ~${pct(plan.minProjSocPct)} with it; the floor+cushion line is ${pct(line)}. `
+    + `${lowSoc}; the floor+cushion line is ${pct(line)}. `
     + `Confidence: ${plan.confidenceTier}.${shortfallNote}${overBuyNote}${economicNote}${held ? '' : evNote} `;
   // v1.198.0 — a plan sized on the provisional solar band says so, after its confidence tier.
   const provisionalNote = plan.pvBandWiden != null ? `${provisionalBandText(plan.pvBandWiden).trim()} ` : '';
@@ -746,10 +753,10 @@ export function buildNightChargeMorningSummary(o: {
     // night stopped early): "reads", and the line named so the order shows. A night with no line: v1.199.1's words.
     const stopLine = o.linePct != null && Number.isFinite(o.linePct) ? o.linePct : null;
     const stopRead = o.closePoolPct != null && Number.isFinite(o.closePoolPct) ? round1(o.closePoolPct) : null;
-    const stopNamed = stopLine != null ? lineBesidePct(stopLine, stopRead ?? RESERVE_WRITE_MAX_PCT) : null;
+    const stopNamed = stopLine != null ? lineBesidePct(stopLine, RESERVE_WRITE_MAX_PCT, stopRead ?? RESERVE_WRITE_MAX_PCT) : null;
     const under = stopLine != null && stopRead != null && stopRead < stopLine;
     const stopClose = stopLine == null ? ''
-      : stopRead == null ? ` The pool was not read (no fresh panel reading); tonight's outage line is ${stopNamed}%.`
+      : stopRead == null ? ` The pool was not read (no fresh panel reading); the outage line is ${stopNamed}%.`
         : ` The pool reads ${stopRead}%, ${under ? 'under' : 'at or above'} the ${stopNamed}% outage line.`;
     const hand = stopLine != null && !cancelled && o.closeText != null && (stopRead == null || under)
       ? ` ${lineChargeNowByHandWords(o.closeText, 'once the grid is back')}` : '';
@@ -795,7 +802,8 @@ export function buildNightChargeMorningSummary(o: {
     const closeRead = o.closePoolPct != null && Number.isFinite(o.closePoolPct) ? o.closePoolPct : null;
     const close = linePct == null ? ''
       : closeRead == null ? '; the pool was not read at the close (no fresh panel reading)'
-        : `; the pool read ${Math.round(closeRead)}% at the close${closeRead < linePct - 0.05 ? `, under the ${round1(linePct)}% outage line` : ''}`;
+        // (Fix9 review 2) As read, and the line beside it: rounded to the whole percent a close of 55.5 read "56%, under the 55.6% outage line".
+        : `; the pool read ${round1(closeRead)}% at the close${closeRead < linePct - 0.05 ? `, under the ${lineBesidePct(linePct, round1(closeRead))}% outage line` : ''}`;
     // v1.187.22 — a PARTIAL failure (the other slots took the ON) is not "did not take effect":
     // the slots, as the ON-failure push named them ("will not happen on those slot(s)").
     const failedOn = fc.kind === 'failed' && fc.partialSlots != null
@@ -964,14 +972,21 @@ export function buildNightChargeMissedApply(o: {
   const what = o.role === 'backup' ? 'outage backup' : 'charge';
   const span = `${phxShortClock(o.windowStartMs)}–${phxShortClock(o.windowEndMs)}`;
   const reserve = o.reservePct != null ? `the reserve stays at ${o.reservePct}%` : 'the reserve was not changed';
+  const titled = (w: string, today: boolean): string => `Charge plan: ${today ? w.toLowerCase() : w} ${what} did not start`;
+  const told = (w: string): string => `${w} ${span} ${what} did not start — ${o.reason}. Nothing was written; ${reserve}.`;
   const plain: NotifyMessage = {
     severity: 'info',
     dedupId: `night_charge_missed_apply_${o.role}`,
-    title: `Charge plan: ${sameDay ? when.toLowerCase() : when} ${what} did not start`,
-    body: `${when} ${span} ${what} did not start — ${o.reason}. Nothing was written; ${reserve}.`,
+    title: titled(when, sameDay),
+    body: told(when),
   };
   if (o.linePct == null || !Number.isFinite(o.linePct)) return plain;
-  const named = `tonight's ${lineBesidePct(o.linePct, RESERVE_WRITE_MAX_PCT)}% outage line`;
+  // (Fix9 review 2) A restart past the close sends this late, and "tonight" would read as the coming night, whose plan is unrelated: a
+  // night past its close, or past its calendar day, goes by its weekday. The weekend's Monday 00:00 window keeps sameDay all that morning.
+  const pastClose = o.startClosed === 'over' || o.startClosed === 'overGuard';
+  const today = sameDay && !pastClose;
+  const lineWhen = today ? when : `${start.weekday}'s`;
+  const named = `${today ? lineWhen.toLowerCase() : lineWhen} ${lineBesidePct(o.linePct, RESERVE_WRITE_MAX_PCT)}% outage line`;
   const closed = o.startClosed != null ? lineStartClosedWords(named, o.startClosed) : null;
   const closedSentence = closed != null ? `${closed.charAt(0).toUpperCase()}${closed.slice(1)}.` : '';
   const target = o.targetPct ?? RESERVE_WRITE_MAX_PCT;
@@ -981,16 +996,20 @@ export function buildNightChargeMissedApply(o: {
       ...plain,
       severity: 'warning',
       title: 'Night-charge: the reserve write has not been confirmed',
-      body: `${when} ${span} ${what} has not started: ${o.reason}, and ${reads}. `
+      body: `${lineWhen} ${span} ${what} has not started: ${o.reason}, and ${reads}. `
         + (closed != null ? `${closedSentence} `
-          : `Until the panel reads ${target}%, it keeps its normal reserve, under ${named}, and the force-charge for the line waits on this write. `
+          // (Fix9 review 2) An attempt never confirmed may have landed: with no reading nothing is said of the reserve the panel holds. With
+          // one, not "its normal reserve" either: a write the panel granted in part reads neither that nor the target.
+          : (o.reservePct != null
+            ? `Until the panel reads ${target}%, the reserve stays under ${named}, and the force-charge for the line waits on this write. `
+            : `The force-charge for ${named} waits on a reading of ${target}%. `)
             + lineReserveByHandWords(target, o.startByText))
         + 'If this repeats, check the SHP2 cloud link.',
     };
   }
   // The close passed (a restart past it): nothing is left to hold, by hand or otherwise.
   const hand = o.startClosed !== 'over' && o.startClosed !== 'overGuard' && o.closeText != null ? ` ${lineChargeNowByHandWords(o.closeText)}` : '';
-  return { ...plain, severity: 'warning', body: `${plain.body} ${closedSentence}${hand}` };
+  return { ...plain, severity: 'warning', title: titled(lineWhen, today), body: `${told(lineWhen)} ${closedSentence}${hand}` };
 }
 
 /**
@@ -1046,8 +1065,9 @@ export function buildLineNightCloseAccount(o: {
   offAtMs?: number | null;
   offReason?: string | null;
 }): NotifyMessage {
-  const lineName = lineBesidePct(o.linePct, RESERVE_WRITE_MAX_PCT);
   const read = o.closePoolPct != null && Number.isFinite(o.closePoolPct) ? round1(o.closePoolPct) : null;
+  // (Fix9 review 2) Named beside the reading too: "the 55.6% outage line. The pool reads 55.6%, under the line." shows no order.
+  const lineName = lineBesidePct(o.linePct, RESERVE_WRITE_MAX_PCT, read ?? RESERVE_WRITE_MAX_PCT);
   const pool = read == null ? 'The pool was not read (no fresh panel reading).'
     : `The pool reads ${read}%, ${read < o.linePct ? 'under' : 'at or above'} the line.`;
   const ran = o.onAtMs != null && Number.isFinite(o.onAtMs);
@@ -1306,7 +1326,7 @@ function sizingShortfall(plan: Pick<NightChargePlan, 'cushionShortfall' | 'cushi
 
 /** v1.200.0 — the envelope note: the line is above the 50% the panel accepts as a reserve and the plan does not
  *  claim it tonight. Nothing armed (plan.cushionShortfallCause; review: worded by plan.cushionEnvelopeReason): the
- *  backup leg, advisory mode, a reserve that already reads the write. (A5) ARMED (plan.forceChargeLine): the force-charge runs — the line clause says how — and
+ *  backup leg, advisory mode, a reserve that reads the write. (A5) ARMED (plan.forceChargeLine): the force-charge runs — the line clause says how — and
  *  the note says what its own walk cannot hold (lineNotHeldOf, the predicate every surface words by: under the line,
  *  whatever the reason or cause; above a full pool; held without its usual margin), on a carried night whose sizing
  *  fell short too (cause null, beside the caps note). Never "no force-charge" on an armed night. '' otherwise. PURE. */
@@ -1333,7 +1353,7 @@ function envelopeShortfallNote(plan: Pick<NightChargePlan, 'cushionShortfallCaus
   if (plan.cushionShortfallCause == null) return '';
   const why = plan.cushionEnvelopeReason === 'backupLeg' ? 'and the outage backup leg writes the reserve only'
     : plan.cushionEnvelopeReason === 'advisory' ? 'and no force-charge runs in advisory mode'
-      : plan.cushionEnvelopeReason === 'reserveAtTarget' ? `and the reserve already reads ${round1(plan.reserveFloorPct)}%: no write goes, and no force-charge runs without one`
+      : plan.cushionEnvelopeReason === 'reserveAtTarget' ? `and the reserve reads ${round1(plan.reserveFloorPct)}%: no write is due while it does, and no force-charge runs without one`
         : 'and no force-charge carries it to the window close';
   return ` NOTE: ${line} is above the ${RESERVE_WRITE_MAX_PCT}% the panel accepts as a reserve, ${why} — residual risk remains.`;
 }

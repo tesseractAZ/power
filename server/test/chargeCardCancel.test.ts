@@ -267,7 +267,7 @@ test('★★★ the banner shows its Cancel whenever its state offers one, gated
   // Shown on writeStands' own conditions…
   assert.match(fn, /\n\s+if \(mode === 'advisory' \|\| !actuation \|\| !actuationBannerVisible\(actuation, Date\.now\(\)\)\) return null;\n/);
   // v1.191.0 (T16) — the deadline is formatted in the payload's site zone (hhmm = siteHHMM(status.siteTimeZone)).
-  assert.match(fn, /const state = actuationBannerState\(actuation, hhmm\(actuation\.cancelDeadlineMs\)\);/);
+  assert.match(fn, /const state = actuationBannerState\(actuation, hhmm\(actuation\.cancelDeadlineMs\), reservePct\);/);
   // …with the button on `state.cancel` alone.
   assert.match(fn, /\n\s+\{state\.cancel && <CancelButton label=\{state\.cancel\} busy=\{busy\} onClick=\{doCancel\} \/>\}\n/);
   assert.match(fn, /<span className=\{state\.settled \? 'text-muted' : 'text-warn'\}>\{state\.text\}<\/span>/);
@@ -284,7 +284,7 @@ test('★★★ the banner shows its Cancel whenever its state offers one, gated
   assert.match(blind, /\{!out\?\.done && <CancelButton label="Cancel tonight" busy=\{busy\} onClick=\{doCancel\} \/>\}/);
   assert.match(card, /const r = await fetch\(apiUrl\('api\/night-charge\/cancel'\), cancelRequestInit\(leg\)\);\n\s+let body: unknown = null;\n\s+try \{ body = await r\.json\(\); \} catch \{[^}]*\}\n\s+return cancelOutcome\(r\.status, body\);/);
   // The pure rules live in one place.
-  assert.match(web, /\nexport function actuationBannerState\(a: BannerTextActuation, deadline: string \| null\): BannerState \{\n/);
+  assert.match(web, /\nexport function actuationBannerState\(a: BannerTextActuation, deadline: string \| null, reservePct: number \| null = null\): BannerState \{\n/);
 });
 
 test('★★ the status route serves the actuation whatever the plan, so a shape with no plan still has its banner', () => {

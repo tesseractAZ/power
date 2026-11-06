@@ -265,6 +265,10 @@ export interface NightChargeInputs {
    *  where its own walk holds the line, else disclosed beside it; false ⇒ DISCLOSED, nothing armed
    *  (cushionShortfall, cause 'envelope'). Absent (undefined) ⇒ neither: today's plan byte for byte. */
   lineForceChargeEligible?: boolean;
+  /** v1.200.0 (Fix9 review 2) — the window open of an armed record with no line ask (nightForceCharge.armedNoLineStartMs): a plan of
+   *  that window cannot arm one, since nothing re-arms the record, so it discloses its line ('armedNoLine') rather than claim an ON
+   *  the record will not make. Never on the plan the evening job arms from, nor a shadow leg (index.ts). Absent ⇒ no such record. */
+  armedNoLineStartMs?: number | null;
 
   // ── The cheap charge window tonight (resolved upstream via tariff.rateAt) ──
   window: { startMs: number; endMs: number } | null;
@@ -344,12 +348,13 @@ export function lineWalkHolds(closePct: number | null, linePct: number): boolean
 /** v1.200.0 — NightChargePlan.cushionShortfallCause. */
 export type CushionShortfallCause = 'envelope' | 'envelope+caps';
 /** v1.200.0 (review; A5) — NightChargePlan.cushionEnvelopeReason: why the plan does not claim a line above the 50%
- *  envelope. Nothing armed: advisory mode, the outage backup leg (it writes the reserve only), or (Fix9 review 1) a reserve
- *  that already reads the write ('reserveAtTarget': decideActuation has nothing to raise, so no write goes, and the
- *  force-charge rides only a verified one). ARMED, the force-charge runs: a line within 10 points of a full pool or above
+ *  envelope. Nothing armed: advisory mode, the outage backup leg (it writes the reserve only), (Fix9 review 1) a reserve
+ *  that reads the write when the plan reads it ('reserveAtTarget': decideActuation has nothing to raise while it does, and
+ *  the force-charge rides only a verified write), or (Fix9 review 2) a recompute of a window whose armed record carries no
+ *  line ask ('armedNoLine': the evening arm is the only one, so a write that goes carries none). ARMED, the force-charge runs: a line within 10 points of a full pool or above
  *  it (⌈L⌉ + 10 > 100, 'nearFull': the close guarantee was shown only with a panel ceiling ⌈L⌉ + 10 or more), or a night
  *  whose own line walk closes under the line ('closeUnder'). */
-export type CushionEnvelopeReason = 'advisory' | 'backupLeg' | 'reserveAtTarget' | 'nearFull' | 'closeUnder';
+export type CushionEnvelopeReason = 'advisory' | 'backupLeg' | 'reserveAtTarget' | 'armedNoLine' | 'nearFull' | 'closeUnder';
 /** v1.200.0 (A5) — what an ARMED line-mode night's own walk cannot hold (lineNotHeldOf): every surface words its
  *  disclosure by this one value, whatever the reason or cause. */
 export type LineNotHeld = 'closeUnder' | 'aboveFull' | 'nearFull';
@@ -2421,7 +2426,11 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   // night then waited on a write that never goes, on every charge night of a plant whose reserve is 50. Riding a standing reserve
   // would add an ON to what is written, which the evidence rule leaves to the owner.
   const lineNoWrite = lineQualifies && lineEligible === true && writtenPct <= reserveFloorPct;
-  const lineArmed = lineQualifies && lineEligible === true && !lineNoWrite;
+  // (Fix9 review 2) That reading is the plan's, and the evening job arms once: a record armed with no ask (at a reserve of 50, or with no
+  // line yet) stays so if the reserve moves or the line rises, and a write it makes carries no force-charge for the line. A recompute of
+  // that window says so, never an ON the record cannot make. Which of the two a night gets is left as it was armed: no write changes.
+  const lineNotOnRecord = lineQualifies && lineEligible === true && !lineNoWrite && inputs.armedNoLineStartMs === window.startMs;
+  const lineArmed = lineQualifies && lineEligible === true && !lineNoWrite && !lineNotOnRecord;
   const forceChargeLine: ForceChargeLine | null = lineArmed ? { askPct: lineAsk, linePct: cushionLineSocPct } : null;
 
   const expected: ExpectedBuy = chargeTonight
@@ -2447,7 +2456,7 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   const planCushionShortfall = cushionShortfall || lineDisclosed;
   const cushionShortfallCause: CushionShortfallCause | null = lineDisclosed ? (cushionShortfall ? 'envelope+caps' : 'envelope') : null;
   const cushionEnvelopeReason: CushionEnvelopeReason | null = !lineDisclosed ? null
-    : backupLeg ? 'backupLeg' : lineEligible !== true ? 'advisory' : lineNoWrite ? 'reserveAtTarget' : lineNearFull ? 'nearFull' : 'closeUnder';
+    : backupLeg ? 'backupLeg' : lineEligible !== true ? 'advisory' : lineNoWrite ? 'reserveAtTarget' : lineNotOnRecord ? 'armedNoLine' : lineNearFull ? 'nearFull' : 'closeUnder';
   // v1.200.0 (review 2) — the line walk starts and reaches the panel ceiling (NightChargePlan.expectedLineCeilingStop).
   const lineCeilingStop = expected.mode === 'line' && expected.ceilingStop === true && expected.forceChargeStartMs != null
     && expected.levelPct != null && expected.panelCeilingPct != null && expected.startTargetPct != null
@@ -2507,7 +2516,7 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   const expectedWriteNote = (start: number, level: number): string => {
     const to = expected.deliverableBound ? `toward ${level}%` : `to ${level}%`;
     const asFar = expected.deliverableBound ? ', as far as the window can deliver' : '';
-    // (Fix9 review 1) No write goes on such a night (lineNoWrite): the reserve the panel already holds does what the write would.
+    // (Fix9 review 1) No write is due on such a night (lineNoWrite): the reserve the panel already holds does what the write would.
     if (lineNoWrite && level <= writtenPct) return start < level ? `, and the panel's own reserve charges it ${to}${asFar}` : `, already at or above the ${level}% reserve`;
     if (level <= writtenPct) {
       return start < level
@@ -2613,8 +2622,12 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
           : null;
   // Nothing armed (advisory, the backup leg): the disclosed sentence. Armed in line mode: what the force-charge does,
   // then what it cannot hold. (The tooHigh wording of the review rounds never shipped.)
+  // (Fix9 review 2) A reserve is a reading and a write the record makes may carry a cost force-charge: words true whichever way it goes.
   const envelopeNote: string | null = lineDisclosed && !lineArmed
-    ? ` ${envelopeHead} and ${cushionEnvelopeReason === 'backupLeg' ? 'the outage backup leg writes the reserve only' : cushionEnvelopeReason === 'reserveAtTarget' ? `the reserve already reads ${round1(reserveFloorPct)}%: no write goes, and no force-charge runs without one` : 'no force-charge runs in advisory mode'}, so the cushion is not fully held — residual risk remains.`
+    ? ` ${envelopeHead} and ${cushionEnvelopeReason === 'backupLeg' ? 'the outage backup leg writes the reserve only, so the cushion is not fully held'
+      : cushionEnvelopeReason === 'reserveAtTarget' ? `the reserve reads ${round1(reserveFloorPct)}%: no write is due while it does, and no force-charge runs without one, so the cushion is not assured`
+        : cushionEnvelopeReason === 'armedNoLine' ? 'no write armed for this window carries a force-charge for it, so the cushion is not assured'
+          : 'no force-charge runs in advisory mode, so the cushion is not fully held'} — residual risk remains.`
     : lineModeNote != null ? `${lineModeNote}${lineNotHeldNote}` : lineNotHeldNote !== '' ? lineNotHeldNote : null;
   const reserveNote = envelopeNote ?? setpointNote;
   const holdReason = starved
@@ -2997,6 +3010,8 @@ export interface NightChargeInputDeps {
   forceChargeEligible?: boolean;
   /** v1.200.0 — forwarded per leg (see NightChargeInputs): never eligible on a backup leg. */
   lineForceChargeEligible?: boolean;
+  /** v1.200.0 (Fix9 review 2) — forwarded verbatim (see NightChargeInputs). */
+  armedNoLineStartMs?: number | null;
 }
 
 /** v1.169.0 — PURE. The fraction of the window hour starting at `hourTs` that is still
@@ -3233,6 +3248,7 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     // v1.200.0 — the outage-line force-charge's gate (the same hazard as below: not copied, it is
     // undefined and every line above the envelope stays uncarried and undisclosed).
     lineForceChargeEligible,
+    armedNoLineStartMs,
     // v1.125.0 — the islanded-outage cushion inputs. Destructuring here is not
     // decoration: NightChargeInputs is built field-by-field below, so a field
     // added to the deps interface and to the inputs interface but NOT copied
@@ -3514,6 +3530,8 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     forceChargeEligible: forceChargeEligible === undefined ? undefined : legForceChargeEligible(legRole, forceChargeEligible),
     // v1.200.0 — the line too: a backup leg is never eligible, so its line above the envelope is disclosed.
     lineForceChargeEligible: lineForceChargeEligible === undefined ? undefined : legForceChargeEligible(legRole, lineForceChargeEligible),
+    // v1.200.0 (Fix9 review 2) — forwarded verbatim; absent on every caller with no armed record to read.
+    ...(armedNoLineStartMs !== undefined ? { armedNoLineStartMs } : {}),
     confidenceTier,
     basisComplete,
     minBuyKwh,
