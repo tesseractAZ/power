@@ -105,6 +105,9 @@
  * closed start no write stands behind (F10r1-b); a window no record holds, once no evening job is left: served, pushed once, kept on the
  * latch (F10r1-c, d, e); a grid-status OFF no abort reports (F10r1-f); no instruction promises the line (F10r1-g); a late account is no
  * close reading (F10r1-h); an unread write is not told as raised (F10r1-i); a missed night keeps its disposition (F10r1-j).
+ * (Fix10 review 2) An ON warned of on every slot, and every slot off with no re-ON left, are closed starts, a reading reopens them
+ * (F10r2-a, b); the re-ON's refusals that no tick lifts are one source, and the words hold in every outcome (F10r2-c); a run still on with
+ * none left keeps its line and loses the clause (F10r2-d), walking none (F10r2-e), on the served plan alone (F10r2-f).
  * W1-xxiii, F9-i(b)-(e), F9r2-g(iii)-(v), F10-a(iii)-(vii), F10-c(i)-(iv) re-anchored.
  *
  *   node scripts/mutate-line-force-charge.mjs [--only <id prefix>]
