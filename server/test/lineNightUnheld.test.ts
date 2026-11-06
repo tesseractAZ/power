@@ -1722,7 +1722,7 @@ test('★★★ U8 wiring: beside the closure and the no-re-ON, on their terms: 
   assert.ok(fn.includes('  const lineRunOn = shadowLeg == null && opts.arming !== true && nightActuationMem.windowStartMs === plan.window?.startMs ? armedLineRunOn(nightActuationMem) : null;\n'), 'never an arm, a shadow leg or a later window');
   assert.ok(fn.includes('  if (!shadowLeg) setLatestNightChargePlan(lineClosed != null || lineNoReOn != null || lineRunOn != null ? computeNightChargePlan({ ...inputs, armedLineStartClosed: lineClosed, armedLineNoReOn: lineNoReOn, armedLineRunOnStartMs: lineRunOn }) : plan);\n'), 'the second compute');
   assert.ok(fn.includes('  const inputs = buildNightChargeInputs(deps);\n  const plan = computeNightChargePlan(inputs);\n'), 'the plan of record');
-  assert.equal(fn.indexOf('return { plan, extras') > 0 || fn.includes('plan, extras'), true, 'the caller gets the first compute');
+  assert.ok(fn.includes('  return { plan, extras };\n}'), 'the caller gets the first compute');
   const SRC = readFileSync(resolve(HERE, '../src/nightChargeAdvisor.ts'), 'utf8');
   assert.ok(SRC.includes('noReOn: lineNoReOn != null, runOn: lineRunOn, tickPoolKwh: fullKwh,'), 'the walk');
 });
