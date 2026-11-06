@@ -97,6 +97,9 @@
  * (Fix9 review 2) The plan's reserve is a reading: words true whichever way it goes (F9r2-a(vii), c(v), d); a recompute of a window whose
  * armed record has no line ask says so, never an ON the record cannot make (F9r2-a, b, c); no reading says nothing of what the panel holds
  * (F9r2-e); a late push names its night (F9r2-f); the line named beside the reading it is read against (F9r2-g); the card (F9r2-h).
+ * (Fix10) A record WITH its ask whose start is closed: forceChargeStartClosed the one source, every key but 'started' and 'gatedOff'
+ * (F10-a); the plan the card and the entities serve claims no ON, of either mode, and says why (F10-b), and only that plan reads it
+ * (F10-c); the banner says so, with its Cancel only while a write can come of it (F10-d, e); the reserveAtTarget tail's Cancel (F10-f).
  * A5-i, P-xii, W3-i, F9r1-a(iv)-(vi), (viii), (ix) re-anchored.
  *
  *   node scripts/mutate-line-force-charge.mjs [--only <id prefix>]
@@ -192,8 +195,8 @@ const MUTANTS = [
   {
     id: 'P-ix. ★★★ the envelope sentence gated on setpoint > target (2026-10-29 silent again)',
     file: NCA, tests: [T_LINE],
-    find: '  const envelopeNote: string | null = lineDisclosed',
-    to: '  const envelopeNote: string | null = !(setpointSocPct > targetSocPct + 0.05) ? null : lineDisclosed /* MUTANT */',
+    find: '    : lineDisclosed && !lineArmed\n',
+    to: '    : !(setpointSocPct > targetSocPct + 0.05) ? null : lineDisclosed && !lineArmed /* MUTANT */\n',
     why: 'On a night whose setpoint equals its arrival the rationale says nothing of the 50% write.',
   },
 
@@ -221,7 +224,7 @@ const MUTANTS = [
   {
     id: 'P-xii. ★★ the envelope reason always "advisory" (an armed near-full or close-under night recorded as nothing armed)',
     file: NCA, tests: [T_LINE],
-    find: "    : backupLeg ? 'backupLeg' : lineEligible !== true ? 'advisory' : lineNoWrite ? 'reserveAtTarget' : lineNotOnRecord ? 'armedNoLine' : lineNearFull ? 'nearFull' : 'closeUnder';",
+    find: "    : backupLeg ? 'backupLeg' : lineEligible !== true ? 'advisory' : lineNoWrite ? 'reserveAtTarget' : lineNotOnRecord ? 'armedNoLine' : lineStartClosed != null ? 'startClosed' : lineNearFull ? 'nearFull' : 'closeUnder';",
     to: "    : 'advisory' as CushionEnvelopeReason; /* MUTANT */",
     why: 'An armed 92% line, its force-charge running to ~99.6%, is recorded as advisory: the margin NOTE goes, and the push and the card lose why.',
   },
@@ -1603,8 +1606,8 @@ const MUTANTS = [
   {
     id: 'A5-i. ★★★ the cut restored: a line within 10 points of full is not armed',
     file: NCA, tests: [T_LINE, T_YEAR],
-    find: '  const lineArmed = lineQualifies && lineEligible === true && !lineNoWrite && !lineNotOnRecord;',
-    to: '  const lineArmed = lineQualifies && lineEligible === true && !lineNoWrite && !lineNotOnRecord && lineAsk + 2 * FORCE_CHARGE_LINE_HEADROOM_PCT <= 100; /* MUTANT */',
+    find: '  const lineArmed = lineQualifies && lineEligible === true && !lineNoWrite && !lineNotOnRecord && lineStartClosed == null;',
+    to: '  const lineArmed = lineQualifies && lineEligible === true && !lineNoWrite && !lineNotOnRecord && lineStartClosed == null && lineAsk + 2 * FORCE_CHARGE_LINE_HEADROOM_PCT <= 100; /* MUTANT */',
     why: 'More cushion switches the force-charge off: 2026-10-29 at 15 h stores ~43 kWh less than at 14 h (ITEM 5).',
   },
   {
@@ -1687,8 +1690,8 @@ const MUTANTS = [
   {
     id: 'A5-ix. ★★ an armed, disclosed night\'s rationale gets the not-armed sentence',
     file: NCA, tests: [T_LINE],
-    find: '  const envelopeNote: string | null = lineDisclosed && !lineArmed',
-    to: '  const envelopeNote: string | null = lineDisclosed /* MUTANT */',
+    find: '    : lineDisclosed && !lineArmed\n',
+    to: '    : lineDisclosed /* MUTANT */\n',
     why: 'A night whose force-charge runs to ~99.6% reads "no force-charge runs in advisory mode".',
   },
   {
@@ -2676,8 +2679,8 @@ const MUTANTS = [
   {
     id: 'F9r1-a(iii). ★★ the expected walk still rides a cost force-charge on such a night',
     file: NCA, tests: [T_UNHELD],
-    find: '      setpointSocPct, costCeilingSocPct, forceChargeEligible: inputs.forceChargeEligible === true && !lineNoWrite,',
-    to: '      setpointSocPct, costCeilingSocPct, forceChargeEligible: inputs.forceChargeEligible === true, /* MUTANT */',
+    find: '      setpointSocPct, costCeilingSocPct, forceChargeEligible: inputs.forceChargeEligible === true && !lineNoWrite && lineStartClosed == null,',
+    to: '      setpointSocPct, costCeilingSocPct, forceChargeEligible: inputs.forceChargeEligible === true && lineStartClosed == null, /* MUTANT */',
     why: 'The plan states a force-charge start nothing will ride.',
   },
   {
@@ -3204,8 +3207,8 @@ const MUTANTS = [
   {
     id: 'F9r2-a(iii). ★★ such a plan reads as a walk that closes under',
     file: NCA, tests: [T_UNHELD],
-    find: "lineNotOnRecord ? 'armedNoLine' : lineNearFull ? 'nearFull' : 'closeUnder';",
-    to: "(lineNotOnRecord && (false as boolean)) ? 'armedNoLine' : lineNearFull ? 'nearFull' : 'closeUnder'; /* MUTANT */",
+    find: "lineNotOnRecord ? 'armedNoLine' : lineStartClosed != null ? 'startClosed' : lineNearFull ? 'nearFull' : 'closeUnder';",
+    to: "(lineNotOnRecord && (false as boolean)) ? 'armedNoLine' : lineStartClosed != null ? 'startClosed' : lineNearFull ? 'nearFull' : 'closeUnder'; /* MUTANT */",
     why: 'The card loses why the line is not carried.',
   },
   {
@@ -3225,8 +3228,8 @@ const MUTANTS = [
   {
     id: 'F9r2-a(vi). ★★★ disclosed, and armed all the same',
     file: NCA, tests: [T_UNHELD],
-    find: '  const lineArmed = lineQualifies && lineEligible === true && !lineNoWrite && !lineNotOnRecord;',
-    to: '  const lineArmed = lineQualifies && lineEligible === true && !lineNoWrite; /* MUTANT */',
+    find: '  const lineArmed = lineQualifies && lineEligible === true && !lineNoWrite && !lineNotOnRecord && lineStartClosed == null;',
+    to: '  const lineArmed = lineQualifies && lineEligible === true && !lineNoWrite && lineStartClosed == null; /* MUTANT */',
     why: 'The plan states the start and the line walk the record cannot run.',
   },
   {
@@ -3298,14 +3301,14 @@ const MUTANTS = [
   {
     id: 'F9r2-d(i). ★★★ the tail says the add-on writes nothing (the finding)',
     file: NTF, tests: [T_UNHELD],
-    find: "    ? `SUPERVISED: the backup reserve reads ${round1(plan.reserveFloorPct)}% now, so no write is due while it does, and no force-charge runs without one. `\n      + `A reading under ${supervised.targetPct}% when the window opens lets the armed write go, and it carries no force-charge for the outage line.`\n",
+    find: "    ? `SUPERVISED: the backup reserve reads ${round1(plan.reserveFloorPct)}% now, so no write is due while it does, and no force-charge runs without one. `\n      + `A reading under ${supervised.targetPct}% when the window opens lets the armed write go, and it carries no force-charge for the outage line. `\n      + `Cancel from the night-charge card on the panel before ${supervised.cancelDeadlineText}.`\n",
     to: "    ? `SUPERVISED: the backup reserve already reads ${round1(plan.reserveFloorPct)}%, so the add-on writes nothing tonight and no force-charge runs.`\n",
     why: 'decideActuation applies at a reserve lowered before the window.',
   },
   {
     id: 'F9r2-d(ii). ★★ the tail keeps silent about the write that can go',
     file: NTF, tests: [T_UNHELD],
-    find: "      + `A reading under ${supervised.targetPct}% when the window opens lets the armed write go, and it carries no force-charge for the outage line.`\n",
+    find: "      + `A reading under ${supervised.targetPct}% when the window opens lets the armed write go, and it carries no force-charge for the outage line. `\n",
     to: "      + '' /* MUTANT */\n",
     why: 'A person reading "no force-charge runs without one" lowers the reserve, and gets the write and no line force-charge.',
   },
@@ -3456,8 +3459,8 @@ const MUTANTS = [
   {
     id: 'F9r2-h(i). ★★ the card row names no reason',
     file: CARD, tests: [T_UNHELD],
-    find: "          : plan.cushionEnvelopeReason === 'armedNoLine' ? 'not claimed tonight (no write armed for this window carries a force-charge for it)' : 'not held tonight';",
-    to: "          : 'not held tonight'; /* MUTANT */",
+    find: "          : plan.cushionEnvelopeReason === 'armedNoLine' ? 'not claimed tonight (no write armed for this window carries a force-charge for it)'\n            : plan.cushionEnvelopeReason === 'startClosed' ?",
+    to: "          : (false as boolean) ? 'x' /* MUTANT */\n            : plan.cushionEnvelopeReason === 'startClosed' ?",
     why: 'The card says the line is not held, and not why.',
   },
   {
@@ -3508,6 +3511,314 @@ const MUTANTS = [
     find: 'const state = actuationBannerState(actuation, hhmm(actuation.cancelDeadlineMs), reservePct);',
     to: 'const state = actuationBannerState(actuation, hhmm(actuation.cancelDeadlineMs), null);',
     why: 'See F9r2-h(iii).',
+  },
+  /* ── F10: a record with its ask whose start is closed ── */
+  // (a) the one source
+  {
+    id: 'F10-a(i). ★★★ a record with no line reads as closed',
+    file: NFC, tests: [T_UNHELD],
+    find: '  if (s.day == null || s.windowStartMs == null || forceChargeLineNightPct(s) == null) return null;\n',
+    to: '  if (s.day == null || s.windowStartMs == null) return null; /* MUTANT */\n',
+    why: 'A no-ask night takes the words of a line it does not have: armedNoLine is its reason, and the banner of a cost night changes.',
+  },
+  {
+    id: 'F10-a(ii). ★★ an empty record reads as closed',
+    file: NFC, tests: [T_UNHELD],
+    find: '  if (s.day == null || s.windowStartMs == null || forceChargeLineNightPct(s) == null) return null;\n',
+    to: '  if (s.windowStartMs == null || forceChargeLineNightPct(s) == null) return null; /* MUTANT */\n',
+    why: 'Nothing armed is not a record that cannot start.',
+  },
+  {
+    id: "F10-a(iii). ★★ 'started' reads as closed",
+    file: NFC, tests: [T_UNHELD],
+    find: "  return why == null || why === 'started' || why === 'gatedOff' ? null : { windowStartMs: s.windowStartMs, why };",
+    to: "  return why == null || why === 'gatedOff' ? null : { windowStartMs: s.windowStartMs, why }; /* MUTANT */",
+    why: 'A night whose force-charge is running reads "no force-charge starts".',
+  },
+  {
+    id: "F10-a(iv). ★★ 'gatedOff' reads as closed",
+    file: NFC, tests: [T_UNHELD],
+    find: "  return why == null || why === 'started' || why === 'gatedOff' ? null : { windowStartMs: s.windowStartMs, why };",
+    to: "  return why == null || why === 'started' ? null : { windowStartMs: s.windowStartMs, why }; /* MUTANT */",
+    why: 'Advisory already discloses it, in its own words.',
+  },
+  {
+    id: 'F10-a(v). ★★★ a start still to come reads as closed',
+    file: NFC, tests: [T_UNHELD],
+    find: "  return why == null || why === 'started' || why === 'gatedOff' ? null : { windowStartMs: s.windowStartMs, why };",
+    to: "  return why === 'started' || why === 'gatedOff' ? null : { windowStartMs: s.windowStartMs, why: why ?? 'noWrite' }; /* MUTANT */",
+    why: 'Every armed night says no force-charge starts.',
+  },
+  {
+    id: 'F10-a(vi). ★★★ a parallel test beside forceChargeStartClosed (cancelled alone: the finding)',
+    file: NFC, tests: [T_UNHELD],
+    find: '  const why = forceChargeStartClosed(s, nowMs, gates);\n  return why == null',
+    to: "  const why = s.cancelled ? 'cancelled' as ForceChargeStartClosed : null; /* MUTANT */\n  return why == null",
+    why: "The noWrite night, the review's probe: the push says none starts, and the plan says one runs.",
+  },
+  // (b) the plan
+  {
+    id: 'F10-b(i). ★★★ the plan reads no closed record (the finding)',
+    file: NCA, tests: [T_UNHELD],
+    find: '  const lineStartClosed = lineQualifies && lineEligible === true && !lineNoWrite && inputs.armedLineStartClosed?.windowStartMs === window.startMs\n',
+    to: '  const lineStartClosed = (false as boolean) && lineQualifies && lineEligible === true && !lineNoWrite && inputs.armedLineStartClosed?.windowStartMs === window.startMs /* MUTANT */\n',
+    why: 'The card and the rationale say the force-charge runs, after the push said none starts.',
+  },
+  {
+    id: 'F10-b(ii). ★★ any window of the record',
+    file: NCA, tests: [T_UNHELD],
+    find: '!lineNoWrite && inputs.armedLineStartClosed?.windowStartMs === window.startMs\n',
+    to: '!lineNoWrite && inputs.armedLineStartClosed != null /* MUTANT */\n',
+    why: "Last night's record disclaims tonight's line.",
+  },
+  {
+    id: 'F10-b(iii). ★★ a reserve reading the write takes the closed words',
+    file: NCA, tests: [T_UNHELD],
+    find: '  const lineStartClosed = lineQualifies && lineEligible === true && !lineNoWrite && inputs.armedLineStartClosed?.windowStartMs',
+    to: '  const lineStartClosed = lineQualifies && lineEligible === true && inputs.armedLineStartClosed?.windowStartMs /* MUTANT */',
+    why: 'reserveAtTarget keeps its reason and its words.',
+  },
+  {
+    id: 'F10-b(iv). ★★ an advisory plan reads the record',
+    file: NCA, tests: [T_UNHELD],
+    find: '  const lineStartClosed = lineQualifies && lineEligible === true && !lineNoWrite && inputs.armedLineStartClosed?.windowStartMs',
+    to: '  const lineStartClosed = lineQualifies && !lineNoWrite && inputs.armedLineStartClosed?.windowStartMs /* MUTANT */',
+    why: "'gatedOff' stays what advisory discloses; no eligibility input is v1.199.1 byte for byte.",
+  },
+  {
+    id: 'F10-b(v). ★★★ the line stays armed on a closed start',
+    file: NCA, tests: [T_UNHELD],
+    find: '  const lineArmed = lineQualifies && lineEligible === true && !lineNoWrite && !lineNotOnRecord && lineStartClosed == null;',
+    to: '  const lineArmed = lineQualifies && lineEligible === true && !lineNoWrite && !lineNotOnRecord; /* MUTANT */',
+    why: 'forceChargeLine, its walk and its row: an ON the record cannot make.',
+  },
+  {
+    id: 'F10-b(vi). ★★★ the cost walk rides a closed start',
+    file: NCA, tests: [T_UNHELD],
+    find: 'forceChargeEligible: inputs.forceChargeEligible === true && !lineNoWrite && lineStartClosed == null,',
+    to: 'forceChargeEligible: inputs.forceChargeEligible === true && !lineNoWrite, /* MUTANT */',
+    why: 'A cost ceiling beside the line states a force-charge no start can make.',
+  },
+  {
+    id: 'F10-b(vii). ★★ the reason is lost',
+    file: NCA, tests: [T_UNHELD],
+    find: "lineStartClosed != null ? 'startClosed' : lineNearFull ? 'nearFull' : 'closeUnder';",
+    to: "lineNearFull ? 'nearFull' : 'closeUnder'; /* MUTANT */",
+    why: 'Recorded as an armed night whose walk closes under.',
+  },
+  {
+    id: "F10-b(viii). ★★ the plan carries no words for the card's row",
+    file: NCA, tests: [T_UNHELD],
+    find: '    ...(cushionStartClosedWords != null ? { cushionStartClosedWords } : {}),\n',
+    to: ' /* MUTANT */\n',
+    why: 'The row says none starts, and not why.',
+  },
+  {
+    id: 'F10-b(ix). ★★★ the rationale keeps its charge headline',
+    file: NCA, tests: [T_UNHELD],
+    find: '  const chargeHeadline = cushionStartClosedWords != null\n',
+    to: '  const chargeHeadline = (false as boolean) /* MUTANT */\n',
+    why: 'The push says no write was issued, and the plan says "Hold the reserve at 50%".',
+  },
+  {
+    id: "F10-b(x). ★★★ the rationale keeps tonight's write",
+    file: NCA, tests: [T_UNHELD],
+    find: "    if (lineStartClosed != null) return ''; // (Fix10) See chargeHeadline.\n",
+    to: ' /* MUTANT */\n',
+    why: '"tonight\'s write charges it" beside "none was issued".',
+  },
+  {
+    id: 'F10-b(xi). ★★★ the reserve sentence stands beside it',
+    file: NCA, tests: [T_UNHELD],
+    find: "  const envelopeNote: string | null = cushionStartClosedWords != null ? '' // (Fix10) Its headline, and no reserve sentence.\n",
+    to: "  const envelopeNote: string | null = (false as boolean) ? '' /* MUTANT */\n",
+    why: '"The reserve is set to 50%" on a night whose write never went, and advisory\'s words on a write mode.',
+  },
+  {
+    id: 'F10-b(xii). ★★★ every key takes one key\'s words',
+    file: NCA, tests: [T_UNHELD],
+    find: "lineStartClosedWords('it', lineStartClosed)",
+    to: "lineStartClosedWords('it', 'noWrite' as ForceChargeStartClosed) /* MUTANT */",
+    why: 'A cancelled night says none was issued: the words must be true of each key.',
+  },
+  {
+    id: 'F10-b(xiii). ★★ no residual risk said',
+    file: NCA, tests: [T_UNHELD],
+    find: 'and ${cushionStartClosedWords}, so the cushion is not assured — residual risk remains.`',
+    to: 'and ${cushionStartClosedWords}.` /* MUTANT */',
+    why: 'Every disclosed line says what it leaves.',
+  },
+  // (c) only the served plan reads it
+  {
+    id: 'F10-c(i). ★★★ the plan the evening job arms from reads the closed record',
+    file: IDX, tests: [T_UNHELD],
+    find: '  const lineClosed = shadowLeg == null && opts.arming !== true ? armedLineStartClosed(',
+    to: '  const lineClosed = shadowLeg == null ? armedLineStartClosed( /* MUTANT */',
+    why: "A Saturday record's cancel, read on Sunday's arm: the holder disagrees with the plan just announced.",
+  },
+  {
+    id: 'F10-c(ii). ★★★ a shadow leg reads it',
+    file: IDX, tests: [T_UNHELD],
+    find: '  const lineClosed = shadowLeg == null && opts.arming !== true ? armedLineStartClosed(',
+    to: '  const lineClosed = opts.arming !== true ? armedLineStartClosed( /* MUTANT */',
+    why: 'A shadow leg sizes itself on the record of a night it is not.',
+  },
+  {
+    id: 'F10-c(iii). ★★★ the status reads no closed record',
+    file: IDX, tests: [T_UNHELD],
+    find: '  const lineClosed = shadowLeg == null && opts.arming !== true ? armedLineStartClosed(nightActuationMem, nowMs, forceChargeGatesOn(legRoleOf(nightActuationMem))) : null;',
+    to: '  const lineClosed = null as ReturnType<typeof armedLineStartClosed>; /* MUTANT */',
+    why: 'The finding, through the wiring.',
+  },
+  {
+    id: 'F10-c(iv). ★★ the live gates ignored',
+    file: IDX, tests: [T_UNHELD],
+    find: 'armedLineStartClosed(nightActuationMem, nowMs, forceChargeGatesOn(legRoleOf(nightActuationMem))) : null;',
+    to: 'armedLineStartClosed(nightActuationMem, nowMs, { cost: true, line: true }) : null; /* MUTANT */',
+    why: 'forceChargeStartClosed reads them, every other caller passes them.',
+  },
+  {
+    id: 'F10-c(v). ★★★ the holder keeps the plan of record',
+    file: IDX, tests: [T_UNHELD],
+    find: '  if (!shadowLeg) setLatestNightChargePlan(lineClosed != null ? computeNightChargePlan({ ...inputs, armedLineStartClosed: lineClosed }) : plan);',
+    to: '  if (!shadowLeg) setLatestNightChargePlan(plan); /* MUTANT */',
+    why: 'The card and the entities never see it.',
+  },
+  {
+    id: 'F10-c(vi). ★★★ the plan of record reads it: the ledger loses the ask (invariant b)',
+    file: IDX, tests: [T_UNHELD],
+    find: '  const inputs = buildNightChargeInputs(deps);\n  const plan = computeNightChargePlan(inputs);\n',
+    to: '  const inputs = buildNightChargeInputs(deps);\n  const plan = computeNightChargePlan({ ...inputs, armedLineStartClosed: shadowLeg == null && opts.arming !== true ? armedLineStartClosed(nightActuationMem, nowMs, forceChargeGatesOn(legRoleOf(nightActuationMem))) : null }); /* MUTANT */\n',
+    why: "The pre-window snapshot's row carries no ask, and a missed night's strike is silently lost.",
+  },
+  {
+    id: 'F10-c(vii). ★★★ the status route carries no words',
+    file: IDX, tests: [T_UNHELD],
+    find: '      ...lineStartClosedStatus(nightActuationMem, Date.now(), forceChargeGatesOn(legRoleOf(nightActuationMem))),\n',
+    to: ' /* MUTANT */\n',
+    why: '"Supervised write armed" past an apply window no write came of.',
+  },
+  // (d) the status words
+  {
+    id: 'F10-d(i). ★★★ Cancel stays with nothing to cancel, and the write "stands"',
+    file: CYC, tests: [T_UNHELD],
+    find: "cancel: legStatusState(s, nowMs) !== 'missed' } };",
+    to: 'cancel: true } }; /* MUTANT */',
+    why: 'writeStands: "the armed write stands" on a night whose apply window passed.',
+  },
+  {
+    id: 'F10-d(ii). ★★★ Cancel goes while a write can still come of it',
+    file: CYC, tests: [T_UNHELD],
+    find: "cancel: legStatusState(s, nowMs) !== 'missed' } };",
+    to: 'cancel: false } }; /* MUTANT */',
+    why: 'An attempt that reads back later is restored only if cancelled; a short window can still write.',
+  },
+  {
+    id: 'F10-d(iii). ★★ the line is not named',
+    file: CYC, tests: [T_UNHELD],
+    find: "lineStartClosedWords(lineAboveReserveWords(forceChargeLineNightPct(s)!, 'the ', ' outage line'), closed.why);",
+    to: "lineStartClosedWords('the outage line', closed.why); /* MUTANT */",
+    why: 'Every other surface names it.',
+  },
+  {
+    id: 'F10-d(iv). ★★ a line stated at the reserve reads as the reserve',
+    file: CYC, tests: [T_UNHELD],
+    find: "lineStartClosedWords(lineAboveReserveWords(forceChargeLineNightPct(s)!, 'the ', ' outage line'), closed.why);",
+    to: 'lineStartClosedWords(`the ${Math.round(forceChargeLineNightPct(s)! * 10) / 10}% outage line`, closed.why); /* MUTANT */',
+    why: '"the 50% outage line" above a 50% reserve (Fix8).',
+  },
+  {
+    id: 'F10-d(v). ★★ the ask ignored where the line is unknown',
+    file: CYC, tests: [T_UNHELD],
+    find: "lineAboveReserveWords(forceChargeLineNightPct(s)!, 'the ', ' outage line')",
+    to: "lineAboveReserveWords(s.forceChargeLinePct ?? 0, 'the ', ' outage line') /* MUTANT */",
+    why: 'forceChargeLineNightPct is the record\'s one reading of it.',
+  },
+  {
+    id: 'F10-d(vi). ★ the banner opens in lower case',
+    file: CYC, tests: [T_UNHELD],
+    find: 'text: `${words.charAt(0).toUpperCase()}${words.slice(1)}.`',
+    to: 'text: `${words}.` /* MUTANT */',
+    why: 'Its own sentence, on the banner.',
+  },
+  // (e) the card
+  {
+    id: 'F10-e(i). ★★★ the banner ignores it (the finding)',
+    file: CARD, tests: [T_UNHELD],
+    find: "  if (a.lineStartClosed != null) return { text: a.lineStartClosed.text, settled: false, cancel: a.lineStartClosed.cancel ? 'Cancel tonight' : null };\n",
+    to: ' /* MUTANT */\n',
+    why: '"Supervised write armed — reserve → 50% at 23:00" beside the push saying none was issued.',
+  },
+  {
+    id: 'F10-e(ii). ★★★ the banner keeps its Cancel with nothing to cancel',
+    file: CARD, tests: [T_UNHELD],
+    find: "cancel: a.lineStartClosed.cancel ? 'Cancel tonight' : null };",
+    to: "cancel: 'Cancel tonight' }; /* MUTANT */",
+    why: 'writeStands reads it.',
+  },
+  {
+    id: 'F10-e(iii). ★★★ the banner drops its Cancel while a write can come of it',
+    file: CARD, tests: [T_UNHELD],
+    find: "cancel: a.lineStartClosed.cancel ? 'Cancel tonight' : null };",
+    to: 'cancel: null }; /* MUTANT */',
+    why: 'See F10-d(ii).',
+  },
+  {
+    id: 'F10-e(iv). ★★ the banner reads as settled',
+    file: CARD, tests: [T_UNHELD],
+    find: 'return { text: a.lineStartClosed.text, settled: false,',
+    to: 'return { text: a.lineStartClosed.text, settled: true, /* MUTANT */',
+    why: 'Muted, for a line nothing carries: a warning, as the push.',
+  },
+  {
+    id: 'F10-e(v). ★★★ the reading of the target goes first',
+    file: CARD, tests: [T_UNHELD],
+    find: '  if (a.lineStartClosed != null) return {',
+    to: '  if (a.lineStartClosed != null && !(a.targetPct != null && reservePct != null && reservePct >= a.targetPct)) return { /* MUTANT */',
+    why: '"Supervised write armed for 23:00" past a window no write came of, the panel reading 50.',
+  },
+  {
+    id: 'F10-e(vi). ★★ the card row says not held',
+    file: CARD, tests: [T_UNHELD],
+    find: "            : plan.cushionEnvelopeReason === 'startClosed' ? `not claimed tonight (${plan.cushionStartClosedWords ?? 'no force-charge for it starts'})` : 'not held tonight';\n",
+    to: "            : 'not held tonight'; /* MUTANT */\n",
+    why: 'The card says the line is not held, and not why.',
+  },
+  {
+    id: 'F10-e(vii). ★★ the card row ignores the words',
+    file: CARD, tests: [T_UNHELD],
+    find: "`not claimed tonight (${plan.cushionStartClosedWords ?? 'no force-charge for it starts'})`",
+    to: "'not claimed tonight (no force-charge for it starts)' /* MUTANT */",
+    why: 'See F10-b(viii).',
+  },
+  {
+    id: 'F10-e(viii). ★ an older server\'s plan prints a blank',
+    file: CARD, tests: [T_UNHELD],
+    find: "`not claimed tonight (${plan.cushionStartClosedWords ?? 'no force-charge for it starts'})`",
+    to: '`not claimed tonight (${plan.cushionStartClosedWords})` /* MUTANT */',
+    why: '"not claimed tonight (undefined)".',
+  },
+  {
+    id: 'F10-e(ix). ★★ the card types drop the field',
+    file: CARDX, tests: [T_UNHELD],
+    find: '(lineStartClosedStatus): absent on any other night. */\n  lineStartClosed?: { text: string; cancel: boolean };\n',
+    to: '(lineStartClosedStatus): absent on any other night. */\n /* MUTANT */\n',
+    why: 'The status interface is what the card reads the record through.',
+  },
+  // (f) the reserveAtTarget tail
+  {
+    id: 'F10-f(i). ★★★ the tail gives no way to stop the write it admits (the finding)',
+    file: NTF, tests: [T_UNHELD],
+    find: '      + `Cancel from the night-charge card on the panel before ${supervised.cancelDeadlineText}.`\n',
+    to: ' /* MUTANT */\n',
+    why: 'A night planned at a standing 50 and lowered before the window: every other armed-write push names the Cancel.',
+  },
+  {
+    id: 'F10-f(ii). ★★ the tail names no deadline',
+    file: NTF, tests: [T_UNHELD],
+    find: '      + `Cancel from the night-charge card on the panel before ${supervised.cancelDeadlineText}.`\n',
+    to: "      + 'Cancel from the night-charge card on the panel.' /* MUTANT */\n",
+    why: 'The contract at the docblock: its cancel deadline.',
   },
   /* ── R: the ledger ── */
   {

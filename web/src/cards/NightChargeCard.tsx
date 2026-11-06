@@ -59,7 +59,8 @@ interface NightChargePlan {
    *  whether the expected walk ran it (nightChargeText.outageLineRow). Absent on older plans. */
   cushionShortfallCause?: 'envelope' | 'envelope+caps';
   /** v1.200.0 (A5) — why the plan does not claim the line (nightChargeText.CushionNotePlan). */
-  cushionEnvelopeReason?: 'advisory' | 'backupLeg' | 'reserveAtTarget' | 'armedNoLine' | 'nearFull' | 'closeUnder';
+  cushionEnvelopeReason?: 'advisory' | 'backupLeg' | 'reserveAtTarget' | 'armedNoLine' | 'startClosed' | 'nearFull' | 'closeUnder';
+  cushionStartClosedWords?: string;
   forceChargeLine?: { askPct: number; linePct: number } | null;
   expectedForceChargeMode?: 'line';
   /** v1.200.0 (review 2) — the expected walk reaches the panel ceiling: the panel switches Charge Now off there and
@@ -118,6 +119,8 @@ interface NightActuation {
   /** v1.189.0 — the reserve settled as someone else's (the foreign rule): nothing left to cancel. */
   foreignSettledAtMs?: number | null;
   foreignReservePct?: number | null;
+  /** v1.200.0 (Fix10) — a line night whose start is closed (lineStartClosedStatus): absent on any other night. */
+  lineStartClosed?: { text: string; cancel: boolean };
 }
 
 interface NightChargeStatus {

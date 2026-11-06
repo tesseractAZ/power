@@ -111,14 +111,14 @@ const MUTANTS = [
   {
     id: 'C-vi. ★★★ the expected level ignores force-charge',
     file: NCA,
-    find: '      setpointSocPct, costCeilingSocPct, forceChargeEligible: inputs.forceChargeEligible === true && !lineNoWrite,',
+    find: '      setpointSocPct, costCeilingSocPct, forceChargeEligible: inputs.forceChargeEligible === true && !lineNoWrite && lineStartClosed == null,',
     to: '      setpointSocPct, costCeilingSocPct, forceChargeEligible: false, /* MUTANT */',
     why: 'A force-charge night (10-12: to 80%) states only the reserve leg, ~5 kWh, for a ~34 kWh draw.',
   },
   {
     id: 'C-vii. ★★ the expected level assumes force-charge on every night',
     file: NCA,
-    find: '      setpointSocPct, costCeilingSocPct, forceChargeEligible: inputs.forceChargeEligible === true && !lineNoWrite,',
+    find: '      setpointSocPct, costCeilingSocPct, forceChargeEligible: inputs.forceChargeEligible === true && !lineNoWrite && lineStartClosed == null,',
     to: '      setpointSocPct, costCeilingSocPct, forceChargeEligible: true, /* MUTANT */',
     why: 'An advisory or resilience night, where only the reserve is written, states a force-charge draw that never happens.',
   },
@@ -893,8 +893,8 @@ const MUTANTS = [
   {
     id: 'C-cviii. ★★ the rationale headlines a no-charge night as a charge of ~0 kWh',
     file: NCA,
-    find: '  const chargeHeadline = isNoChargeKwh(expected.buyKwh)',
-    to: '  const chargeHeadline = (expected.buyKwh as number | null) === -1 /* MUTANT */',
+    find: '    : isNoChargeKwh(expected.buyKwh)\n',
+    to: '    : (expected.buyKwh as number | null) === -1 /* MUTANT */\n',
     why: '"Charge to ~50% in the 00:00–05:00 window: ~0 kWh expected."',
   },
   {

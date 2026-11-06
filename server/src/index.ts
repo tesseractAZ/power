@@ -69,7 +69,7 @@ import {
   // v1.200.0 (Fix9) — a line night's force-charge "waits on" a reading of the target only while a start can still come.
   forceChargeStartClosed, lineStartClosedWords,
   // v1.200.0 (Fix9 review 2) — a recompute of a window whose armed record carries no line claims no ON the record cannot make.
-  armedNoLineStartMs,
+  armedNoLineStartMs, armedLineStartClosed,
   // v1.200.0 (review 4) — what a line re-ON's readback check stamps, the re-ON that took effect included.
   lineReOnCheckedStamp,
   // v1.200.0 (review 6) — the force-charge tick's cadence, which the line-at-risk push's hand-back hold counts.
@@ -320,7 +320,7 @@ import {
 // v1.189.0 — the charge cycle: the legs one evening arms (chargeCycle.ts).
 import {
   coerceCycle, serializeCycle, emptyCycle, asChargeLeg, legRoleOf, armCycle, promoteCycle, cancelLeg, parseCancelLeg,
-  cycleLegsStatus, cycleDriftLeg, missedApplyDue, missedApplyReason, legLedgerFields, supersededLegs, trailingResolved,
+  cycleLegsStatus, lineStartClosedStatus, cycleDriftLeg, missedApplyDue, missedApplyReason, legLedgerFields, supersededLegs, trailingResolved,
   departedAfterStep, forceChargeDriftLeg, type DepartedLeg,
   nextForceChargeOpenMs, withLiveTrailing, MISSED_APPLY_FALLBACK_REASON,
   type ChargeCycleState, type ChargeLegState,
@@ -4105,8 +4105,13 @@ async function recomputeNightChargePlan(
   if (!panel.fresh) {
     plan.rationale += ` NOTE: sized on a panel reading ${panel.ageMs != null ? `~${Math.round(panel.ageMs / 60_000)} min old` : 'of unknown age'} (${panel.why}) — it did not recover before the deferral deadline. The reserve write and force-charge still wait for a live readback.`;
   }
+  // v1.200.0 (Fix10) — a record WITH its ask whose start is closed: the plan the card and the entities serve says so, computed apart, so
+  // `plan` stays the plan of record. The snapshot, the ledger row and its strike rule read that one: disclosing here must never take
+  // the ask off a night whose record carries it. As armedNoLineStartMs, never an arm or a shadow leg. (A stale panel's note above is the
+  // evening job's and a shadow leg's only: this plan has none to carry.)
+  const lineClosed = shadowLeg == null && opts.arming !== true ? armedLineStartClosed(nightActuationMem, nowMs, forceChargeGatesOn(legRoleOf(nightActuationMem))) : null;
   // R4 — never a shadow leg: the holder is the live overnight plan the entities, card and status serve.
-  if (!shadowLeg) setLatestNightChargePlan(plan);
+  if (!shadowLeg) setLatestNightChargePlan(lineClosed != null ? computeNightChargePlan({ ...inputs, armedLineStartClosed: lineClosed }) : plan);
 
   // Ledger diagnostics computed over the authoritative 24 h band (where the
   // P10/P50/P90 percentiles are actually defined).
@@ -7686,6 +7691,8 @@ app.get('/api/night-charge/status', async () => {
       // v1.186.0 — beside forceChargeOnAtMs (and forceChargeOnVerifiedAtMs /
       // forceChargeOnFailedAtMs, spread above): did the ON actually take?
       forceChargeOnVerify: forceChargeOnReadbackStatus(nightActuationMem),
+      // v1.200.0 (Fix10) — a line night whose start is closed: the banner's words (absent on any other night).
+      ...lineStartClosedStatus(nightActuationMem, Date.now(), forceChargeGatesOn(legRoleOf(nightActuationMem))),
     },
     // v1.189.0 — the charge cycle's legs, in order: a trailing leg, the active one (the record
     // above), the pending ones (chargeCycle.cycleLegsStatus). One entry with one leg.

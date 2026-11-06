@@ -634,7 +634,8 @@ export function buildNightChargeMessage(
   // ceiling ride it: true whichever way it goes, and what a lowered reserve does not do is said.
   const tail = supervised && plan.cushionEnvelopeReason === 'reserveAtTarget'
     ? `SUPERVISED: the backup reserve reads ${round1(plan.reserveFloorPct)}% now, so no write is due while it does, and no force-charge runs without one. `
-      + `A reading under ${supervised.targetPct}% when the window opens lets the armed write go, and it carries no force-charge for the outage line.`
+      + `A reading under ${supervised.targetPct}% when the window opens lets the armed write go, and it carries no force-charge for the outage line. `
+      + `Cancel from the night-charge card on the panel before ${supervised.cancelDeadlineText}.`
     : supervised
     ? `SUPERVISED: ${supervised.cancelDeadlineText} the add-on raises the backup reserve to `
       + `${supervised.targetPct}% (bounded write; auto-restores after the charge window closes). `

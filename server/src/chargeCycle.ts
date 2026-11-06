@@ -41,7 +41,11 @@ import {
   armFromPlan, armOpenItem, armRefusalReason, coerceActuationState, emptyActuationState, onPeakGuardActive,
   type ArmablePlan, type NightActuationState,
 } from './nightChargeActuator.js';
-import { forceChargeInFlight, forceChargeLineNightPct, FORCE_CHARGE_CEILING_RESTORE_ATTEMPTS } from './nightForceCharge.js';
+import {
+  forceChargeInFlight, forceChargeLineNightPct, FORCE_CHARGE_CEILING_RESTORE_ATTEMPTS,
+  // v1.200.0 (Fix10) — a line night whose start is closed, in the status route's words.
+  armedLineStartClosed, lineStartClosedWords, lineAboveReserveWords, type ForceChargeGates,
+} from './nightForceCharge.js';
 import type { ChargeLegRole, ChargeWindowKind } from './chargeWindows.js';
 
 /** What names a leg, beside its per-night actuation record. */
@@ -498,6 +502,18 @@ export function legStatusState(s: NightActuationState, nowMs: number): LegStatus
   if (s.cancelled) return 'cancelled';
   if (s.applyAttemptedAtMs == null && s.windowStartMs != null && nowMs > s.windowStartMs + APPLY_LATE_MS) return 'missed';
   return 'armed';
+}
+
+/** v1.200.0 (Fix10) — the status route's words for a line night whose start is closed (armedLineStartClosed): the banner names why in
+ *  place of "write armed", and keeps its Cancel only while something can still come of the write (a leg 'missed' has neither a write
+ *  to stop nor an attempt to adopt). `{}` on any other night, so its status is as it was. PURE. */
+export function lineStartClosedStatus(
+  s: NightActuationState, nowMs: number, gates: ForceChargeGates,
+): { lineStartClosed?: { text: string; cancel: boolean } } {
+  const closed = armedLineStartClosed(s, nowMs, gates);
+  if (closed == null) return {};
+  const words = lineStartClosedWords(lineAboveReserveWords(forceChargeLineNightPct(s)!, 'the ', ' outage line'), closed.why);
+  return { lineStartClosed: { text: `${words.charAt(0).toUpperCase()}${words.slice(1)}.`, cancel: legStatusState(s, nowMs) !== 'missed' } };
 }
 
 /** The cycle's legs in order — trailing (if any), active, pending — for the status route. PURE. */

@@ -1546,6 +1546,20 @@ export function armedNoLineStartMs(
   return s.day != null && forceChargeLineNightPct(s) == null ? s.windowStartMs : null;
 }
 
+/** v1.200.0 (Fix10) — PURE. The window open of a record WITH a line whose start is closed (forceChargeStartClosed, the one source),
+ *  and why: no force-charge for its line can come of it. 'started' ran, and 'gatedOff' is what advisory already discloses; neither
+ *  is such a record. null with no record, no line (armedNoLineStartMs has that one) or a start still to come. It reaches only the
+ *  plan the card and the entities serve (index.ts), never a plan an arm or the ledger reads, and nothing written reads it. */
+export function armedLineStartClosed(
+  s: Pick<NightActuationState, 'day' | 'forceChargeOnAtMs' | 'cancelled' | 'revertedAtMs' | 'foreignSettledAtMs' | 'windowStartMs' | 'windowEndMs'
+    | 'nextOnPeakStartMs' | 'forceChargeCeilingPct' | 'forceChargeLineAskPct' | 'forceChargeLinePct' | 'appliedAtMs' | 'applyAttemptedAtMs'>,
+  nowMs: number, gates: ForceChargeGates,
+): { windowStartMs: number; why: ForceChargeStartClosed } | null {
+  if (s.day == null || s.windowStartMs == null || forceChargeLineNightPct(s) == null) return null;
+  const why = forceChargeStartClosed(s, nowMs, gates);
+  return why == null || why === 'started' || why === 'gatedOff' ? null : { windowStartMs: s.windowStartMs, why };
+}
+
 /** v1.200.0 (review 2) — PURE. The ON-failure push's night fields (notify.buildNightForceChargeOnFailure): a
  *  night whose record carries a line names the line (never "toward" a stop, never "no action needed") — in line
  *  mode AND on a cost-dominant night; any other night its cost ceiling, as v1.199.1. Keyed on the record, never

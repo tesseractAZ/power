@@ -10,6 +10,7 @@ import {
   APPLY_LATE_MS, APPLY_VERIFY_AFTER_MS, armFromPlan, coerceActuationState, decideActuation, emptyActuationState,
   restoreSummaryDue, type NightActuationState,
 } from '../src/nightChargeActuator.js';
+import * as cycle from '../src/chargeCycle.js';
 import { asChargeLeg, missedApplyDue, missedApplyReason, promoteCycle, type ChargeLegState } from '../src/chargeCycle.js';
 import * as notify from '../src/notify.js';
 import { buildNightChargeForeignReserve, buildNightChargeMessage, buildNightChargeMissedApply, buildNightChargeMorningSummary } from '../src/notify.js';
@@ -38,6 +39,8 @@ import * as cardText from '../../web/src/cards/nightChargeText.js';
  * U5 the hand-set reserve's deadline names the last start as what it is, never as the way to hold the line.
  * U1b (Fix9 review 2) the plan's reserve is a reading and the record is what the night can do: the words hold whichever way the reading
  * goes, and a recompute claims no ON a record with no ask cannot make.
+ * U1c (Fix10) neither does one with an ask whose start is closed (forceChargeStartClosed, its one source): the plan the card and the
+ * entities serve discloses it, the banner stops saying a write is armed, and nothing written and no ledger row moves.
  */
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -48,7 +51,8 @@ const CASES = legacyIdentityCases();
 const LABEL = '2027-01-04 21:30';
 const caseOf = (label: string) => CASES.find((c) => c.label === label)!;
 type P = NightChargePlan & { forceChargeLine?: { askPct: number; linePct: number }; cushionEnvelopeReason?: string; cushionShortfallCause?: string; expectedForceChargeMode?: string };
-const planAt = (floor: number, o: { eligible?: boolean; cost?: boolean; hours?: number; label?: string; noLineAt?: number | null } = {}): P => {
+type ClosedInput = { windowStartMs: number; why: string };
+const planAt = (floor: number, o: { eligible?: boolean; cost?: boolean; hours?: number; label?: string; noLineAt?: number | null; closed?: ClosedInput | null } = {}): P => {
   const deps = {
     ...caseOf(o.label ?? LABEL).deps, reserveFloorPct: floor, cushionPoolScale: MEASURED_SCALE,
     forceChargeEligible: o.cost === true, ...(o.cost === true ? { objectiveMode: 'cost', costMaxSocPct: 80 } : {}),
@@ -56,7 +60,8 @@ const planAt = (floor: number, o: { eligible?: boolean; cost?: boolean; hours?: 
     ...(o.hours != null ? { outageCushionHours: o.hours } : {}),
     ...(o.noLineAt !== undefined ? { armedNoLineStartMs: o.noLineAt } : {}),
   } as never;
-  return computeNightChargePlan(buildNightChargeInputs(deps)) as P;
+  const inputs = buildNightChargeInputs(deps);
+  return computeNightChargePlan(o.closed !== undefined ? { ...inputs, armedLineStartClosed: o.closed } as never : inputs) as P;
 };
 const SIZING = ['chargeTonight', 'buyKwh', 'buyKwhDebiased', 'requiredExtraKwh', 'targetSocPct', 'setpointSocPct', 'costCeilingSocPct', 'cushionTroughSocPct', 'cushionLineSocPct', 'bindingCap', 'minProjSocPct'] as const;
 const sizing = (p: NightChargePlan) => Object.fromEntries(SIZING.map((k) => [k, (p as never)[k] ?? null]));
@@ -121,8 +126,8 @@ test('★★★ U1 the evening surfaces of such a plan: the note names why, the 
   const sup = { cancelDeadlineText: 'tonight at 11:00 PM', targetPct: 50, forceChargeTargetPct: null, forceChargeLine: null };
   const body = buildNightChargeMessage(p as never, 'charge', sup as never).body;
   assert.ok(body.includes(`NOTE: tonight's ${Math.round(p.cushionLineSocPct! * 10) / 10}% outage line is above the 50% the panel accepts as a reserve, and the reserve reads 50%: no write is due while it does, and no force-charge runs without one — residual risk remains.`), body);
-  assert.ok(body.includes('SUPERVISED: the backup reserve reads 50% now, so no write is due while it does, and no force-charge runs without one. A reading under 50% when the window opens lets the armed write go, and it carries no force-charge for the outage line.'), body);
-  assert.doesNotMatch(body, /raises the backup reserve|switches the panel's force-charge ON|Cancel from the night-charge card/);
+  assert.ok(body.includes('SUPERVISED: the backup reserve reads 50% now, so no write is due while it does, and no force-charge runs without one. A reading under 50% when the window opens lets the armed write go, and it carries no force-charge for the outage line. Cancel from the night-charge card on the panel before tonight at 11:00 PM.'), body);
+  assert.doesNotMatch(body, /raises the backup reserve|switches the panel's force-charge ON/);
   // A cost ceiling armed beside it rides nothing either.
   const cost = planAt(50, { cost: true });
   const costBody = buildNightChargeMessage(cost as never, 'charge', { ...sup, forceChargeTargetPct: 80 } as never).body;
@@ -296,6 +301,222 @@ test('★★★ U1b the armed banner says the reserve reads the target, while th
   const CARD_SRC = readFileSync(resolve(HERE, '../../web/src/cards/NightChargeCard.tsx'), 'utf8');
   assert.ok(CARD_SRC.includes('const state = actuationBannerState(actuation, hhmm(actuation.cancelDeadlineMs), reservePct);'), 'the live reading reaches it');
   assert.ok(CARD_SRC.includes('reservePct={status.reserveFloorPercent}'), 'the panel\'s live reading (status.reserveFloorPercent)');
+});
+
+/* ══ U1c — a record with an ask whose start is closed ══════════════════════════════════════════════════════════════════════ */
+
+const GATES = { cost: false, line: true };
+const closedRec = (s: NightActuationState, t: number, g: { cost: boolean; line: boolean } = GATES): ClosedInput | null =>
+  (nfc as unknown as { armedLineStartClosed: (s: NightActuationState, t: number, g: { cost: boolean; line: boolean }) => ClosedInput | null }).armedLineStartClosed(s, t, g);
+const WHY = nfc.FORCE_CHARGE_START_CLOSED_WHY as unknown as Record<string, string>;
+const ON_CLAIM = /switches on at|stays on until the window closes|runs until the panel|force-charge for the outage line|just-in-time|force-charge \(~/;
+const CLOSED_CASES = (): Array<[string, NightActuationState, number]> => [
+  ['cancelled', armed({ cancelled: true }), OPEN - H],
+  ['cancelled', applied({ cancelled: true }), OPEN + H],
+  ['reverted', applied({ revertedAtMs: OPEN + H }), OPEN + H],
+  ['foreign', armed({ foreignSettledAtMs: OPEN + M }), OPEN + 2 * M],
+  ['noWrite', armed(), OPEN + APPLY_LATE_MS + 1],
+  ['late', armed(), CLOSE - 20 * M],
+  ['late', applied(), CLOSE - 20 * M],
+  ['over', armed(), CLOSE],
+  ['lateGuard', armed({ nextOnPeakStartMs: CLOSE + 30 * M }), CLOSE - 50 * M],
+  ['overGuard', armed({ nextOnPeakStartMs: CLOSE + 30 * M }), CLOSE - 30 * M],
+];
+
+test('★★★ U1c armedLineStartClosed: forceChargeStartClosed is its one source; every key but "started" and "gatedOff" is a record with an ask that cannot start one', () => {
+  for (const [why, s, t] of CLOSED_CASES()) {
+    assert.equal(nfc.forceChargeStartClosed(s, t, GATES), why, why);
+    assert.deepEqual(closedRec(s, t), { windowStartMs: OPEN, why }, why);
+    assert.equal(closedRec({ ...s, forceChargeLineAskPct: null, forceChargeLinePct: null }, t), null, `${why}: no ask, no line to disclose (armedNoLine has it)`);
+    assert.equal(closedRec({ ...s, forceChargeLineAskPct: 50, forceChargeLinePct: 50 }, t), null, `${why}: an ask at the reserve is no line`);
+    assert.equal(closedRec({ ...s, forceChargeOnAtMs: OPEN + H, forceChargeLineAskPct: 56 }, t), null, `${why}: it ran: 'started' is no record that cannot`);
+  }
+  assert.equal(nfc.forceChargeStartClosed(armed(), OPEN + M, { cost: false, line: false }), 'gatedOff');
+  assert.equal(closedRec(armed(), OPEN + M, { cost: false, line: false }), null, "'gatedOff': what advisory already discloses");
+  for (const [what, s, t] of [
+    ['before the window', armed(), OPEN - H],
+    ['the last instant of the apply window', armed(), OPEN + APPLY_LATE_MS],
+    ['an attempt on record: a reading of the target still starts one', armed({ applyAttemptedAtMs: OPEN, attemptBaselinePct: 30 }), OPEN + H],
+    ['a write applied', applied(), OPEN + H],
+  ] as Array<[string, NightActuationState, number]>) assert.equal(closedRec(s, t), null, what);
+  assert.equal(closedRec(armed({ day: null, cancelled: true }), OPEN), null, 'nothing armed');
+  assert.equal(closedRec(armed({ windowStartMs: null, cancelled: true }), OPEN), null, 'no window to name');
+});
+
+test('★★★ U1c a recompute of a window whose record can no longer start one claims no ON, for every key: the line is disclosed, every figure a write reads stands, and it says why', () => {
+  const armedPlan = planAt(45);
+  assert.ok(armedPlan.forceChargeLine != null);
+  assert.match(armedPlan.rationale, /switches on at|stays on until the window closes|runs until the panel/);
+  const open = armedPlan.window!.startMs;
+  for (const [why, words] of Object.entries(WHY)) {
+    const q = planAt(45, { closed: { windowStartMs: open, why } });
+    assert.equal(q.forceChargeLine, undefined, why);
+    assert.equal(q.cushionEnvelopeReason, 'startClosed', why);
+    assert.equal(q.cushionShortfall, true, why);
+    assert.deepEqual(sizing(q), sizing(armedPlan), `${why}: no sizing figure moves`);
+    assert.deepEqual([q.window, q.evContention, q.setpointSocPct, q.chargeTonight], [armedPlan.window, armedPlan.evContention, armedPlan.setpointSocPct, armedPlan.chargeTonight], `${why}: what the tick reads off the served plan`);
+    assert.notEqual(q.expectedForceChargeMode, 'line', why);
+    assert.equal(q.expectedForceChargeStartMs == null, true, `${why}: no start stated`);
+    assert.doesNotMatch(q.rationale, ON_CLAIM, q.rationale);
+    assert.doesNotMatch(q.rationale, /no write armed for this window/, 'false of a record with an ask');
+    assert.doesNotMatch(q.rationale, /tonight's write|The reserve is set to|Charge to|Hold the reserve/, `${why}: no write is claimed: none may stand`);
+    assert.ok(q.rationale.startsWith(`Tonight's ${q.cushionLineSocPct}% outage line is above the 50% the panel accepts as a reserve, and no force-charge for it starts: ${words}, so the cushion is not assured — residual risk remains. Expected: the pool should open the window near ~${q.expectedStartSocPct}% with the grid present (median load and PV, never below the 45% reserve). Sized on `), q.rationale);
+    assert.equal(q.rationale.split('no force-charge for it starts').length, 2, 'said once');
+    const row = (cardText as unknown as { outageLineRow: (p: unknown) => string | null }).outageLineRow(q)!;
+    assert.ok(row.includes(`not claimed tonight (no force-charge for it starts: ${words})`), row);
+    assert.doesNotMatch(row, /force-charge runs|switches|expected at the close|no write armed/, row);
+    assert.ok((cardText as unknown as { outageLineRow: (p: unknown) => string | null }).outageLineRow({ ...q, cushionStartClosedWords: undefined })!.includes('not claimed tonight (no force-charge for it starts)'), 'never a blank from an older server');
+  }
+  // Only that window, only a live gate; a reserve reading the write keeps its reason.
+  const noWrite = { windowStartMs: open, why: 'noWrite' };
+  assert.equal(JSON.stringify(planAt(45, { closed: { ...noWrite, windowStartMs: open + 24 * H } })), JSON.stringify(armedPlan), 'another window');
+  assert.equal(JSON.stringify(planAt(45, { closed: null })), JSON.stringify(armedPlan), 'none');
+  const atWrite = planAt(50, { closed: noWrite });
+  assert.equal(atWrite.cushionEnvelopeReason, 'reserveAtTarget');
+  assert.equal(atWrite.rationale, planAt(50).rationale, 'and its words');
+  assert.equal(JSON.stringify(planAt(45, { eligible: false, closed: noWrite })), JSON.stringify(planAt(45, { eligible: false })), 'no eligibility: v1.199.1, byte for byte');
+});
+
+test('★★★ U1c no force-charge is expected on such a plan, a cost ceiling beside it included: no ON rides a closed start, of either mode', () => {
+  const a = planAt(45, { cost: true });
+  assert.ok(a.forceChargeLine != null && a.costCeilingSocPct! > 50);
+  const q = planAt(45, { cost: true, closed: { windowStartMs: a.window!.startMs, why: 'noWrite' } });
+  assert.deepEqual(sizing(q), sizing(a));
+  assert.equal(q.expectedForceChargeStartMs == null, true);
+  assert.equal(q.expectedWriteLevelPct, 50, 'the reserve alone');
+  assert.doesNotMatch(q.rationale, ON_CLAIM, q.rationale);
+  assert.doesNotMatch(q.rationale, /the force-charge (is due|from)/, q.rationale);
+});
+
+test('★★★ U1c a night with no ask, and a plan with no line above the reserve, are byte for byte: nothing here reaches a cost night', () => {
+  const low = planAt(45, { hours: 1 });
+  assert.ok(low.cushionLineSocPct! <= 50 && low.forceChargeLine == null);
+  assert.equal(JSON.stringify(planAt(45, { hours: 1, closed: { windowStartMs: low.window!.startMs, why: 'noWrite' } })), JSON.stringify(low));
+  const q = planAt(45);
+  const rec = armFromPlan(emptyActuationState(), '2027-01-04', planAt(50) as never, q.window!.startMs - 90 * M, 50, true, null, true)!;
+  assert.equal(rec.forceChargeLineAskPct, null);
+  assert.equal(closedRec({ ...rec, cancelled: true }, rec.windowStartMs! + H), null);
+  assert.equal(closedRec(rec, rec.windowStartMs! + H), null);
+  assert.equal(planAt(45, { noLineAt: noLineStart(rec), closed: closedRec(rec, rec.windowStartMs! + H) }).cushionEnvelopeReason, 'armedNoLine', 'its own reason, its own words');
+  assert.ok(planAt(45, { noLineAt: noLineStart(rec) }).rationale.includes('no write armed for this window carries a force-charge for it'));
+});
+
+test('★★★ U1c the real path: an evening arm at 45, an apply window lost to red vitals, and no start can come: the recompute says what the push says', () => {
+  const p = planAt(45);
+  const open = p.window!.startMs;
+  const rec = armFromPlan(emptyActuationState(), '2027-01-04', p as never, open - 90 * M, 45, false, null, true)!;
+  assert.ok(rec.forceChargeLineAskPct != null);
+  for (let t = open; t <= open + APPLY_LATE_MS; t += M) assert.equal(decideActuation(rec, t, { ...TICK(45), vitalsRed: true }).kind, 'none');
+  const at = open + APPLY_LATE_MS + M;
+  assert.equal(decideActuation(rec, at, TICK(45)).kind, 'none');
+  for (let t = at; t < rec.windowEndMs!; t += 10 * M) assert.equal(decideForceCharge(rec, t, fo({ poolSocPct: 55 })).kind, 'none');
+  const closed = closedRec(rec, at);
+  assert.deepEqual(closed, { windowStartMs: open, why: 'noWrite' });
+  const q = planAt(45, { closed });
+  assert.equal(q.cushionEnvelopeReason, 'startClosed');
+  const push = buildNightChargeMissedApply({ day: '2027-01-04', role: 'cost', windowStartMs: open, windowEndMs: rec.windowEndMs, reservePct: 45, nowMs: at, reason: 'x', linePct: rec.forceChargeLinePct, targetPct: 50, attempted: false, startClosed: 'noWrite', startByText: '4:40 AM', closeText: '5:00 AM' } as never);
+  assert.ok(push.body.includes(WHY.noWrite!), push.body);
+  assert.ok(q.rationale.includes(WHY.noWrite!), q.rationale);
+  // The record is what it was: a recompute reads it and stamps nothing.
+  assert.deepEqual(rec, armFromPlan(emptyActuationState(), '2027-01-04', p as never, open - 90 * M, 45, false, null, true));
+});
+
+test('★★★ U1c the wiring: only the plan the card and the entities serve reads the closed record; the plan of record (the ledger, the snapshot, the callers) never, an arm and a shadow leg no plan at all', () => {
+  const at = INDEX.indexOf('async function recomputeNightChargePlan(');
+  const fn = INDEX.slice(at, INDEX.indexOf('function armedExpectedBuyKwh(', at));
+  const deps = fn.slice(0, fn.indexOf('const inputs = buildNightChargeInputs(deps);'));
+  assert.ok(!deps.includes('armedLineStartClosed'), 'never in the inputs of the plan of record');
+  assert.ok(fn.includes('  const plan = computeNightChargePlan(inputs);\n'), 'nor where it is computed');
+  assert.ok(fn.includes('const lineClosed = shadowLeg == null && opts.arming !== true ? armedLineStartClosed(nightActuationMem, nowMs, forceChargeGatesOn(legRoleOf(nightActuationMem))) : null;'), fn);
+  assert.ok(fn.includes('if (!shadowLeg) setLatestNightChargePlan(lineClosed != null ? computeNightChargePlan({ ...inputs, armedLineStartClosed: lineClosed }) : plan);'), fn);
+  assert.equal([...INDEX.matchAll(/armedLineStartClosed: lineClosed/g)].length, 1, 'that one plan');
+  assert.ok(/atomicWriteFileSync\(NIGHT_CHARGE_PLANSNAP_PATH, JSON\.stringify\(\{[\s\S]{0,300}?\n\s+plan, extras,\n/.test(fn), 'the snapshot holds the plan of record');
+  assert.ok(fn.trimEnd().endsWith('return { plan, extras };\n}') || fn.includes('  return { plan, extras };\n}'), 'and the callers get it');
+  assert.ok(INDEX.includes('...lineStartClosedStatus(nightActuationMem, Date.now(), forceChargeGatesOn(legRoleOf(nightActuationMem))),'), 'the status route');
+});
+
+test('★★★ U1c the ledger keeps its ask: the plan of record carries it, so a night missed by the evening job still strikes; the served plan could not', () => {
+  const raw = planAt(45);
+  const served = planAt(45, { closed: { windowStartMs: raw.window!.startMs, why: 'cancelled' } });
+  assert.equal(lineForceChargeLedgerColumns(raw as never).cushion_line_force_charge_pct, raw.forceChargeLine!.askPct);
+  assert.equal(lineForceChargeLedgerColumns(served as never).cushion_line_force_charge_pct, null, 'why the ledger never reads it');
+  const NOW = Date.UTC(2026, 9, 31, 4, 30);
+  const row = (columns: Record<string, unknown>) => ({
+    plan_date: phoenixYmd(NOW - 3 * 86_400_000), algo_version: String(CURRENT_ALGO_VERSION), confidence_tier: 'forecast',
+    issued_at_ms: NOW - 3 * 86_400_000, outcome_captured_at_ms: NOW - 2 * 86_400_000,
+    scored: 1, actuated: null, cushion_shortfall: 0, plan_traj_floor_breached: 0, cushion_breached: 1,
+    buy_err_kwh: 0.5, pv_err_frac: 0.05, load_err_frac: -0.05, pv_in_band: 1, load_in_band: 1, grid_home_coverage_frac: 0.95,
+    reserve_floor_pct: 30, cushion_pct: 15, cushion_line_soc_pct: 55.55, cushion_trough_soc_pct: 55.55, window_kind: 'overnight',
+    force_charge_on_at_ms: null, window_close_soc_pct: 41, actual_min_soc_pct: 40, arm_disposition: 'missed — no write', ...columns,
+  });
+  const strikes = (columns: Record<string, unknown>) => computeNightChargeReadiness([row(columns)] as never, NOW).metrics.lineForceChargeStrikes;
+  assert.equal(strikes(lineForceChargeLedgerColumns(raw as never)), 1);
+  assert.equal(strikes(lineForceChargeLedgerColumns(served as never)), 0, 'the strike the widening must not lose');
+});
+
+/** The year's plans that arm at 45 with no armed record, each served against a record with its ask whose apply window passed: measured with the fix. */
+const PIN_U1C_YEAR = { armed: 0, disclosed: 628 };
+
+test('★★★ U1c the year: no plan of the window of a closed record arms or states a start, and none moves a sizing figure', () => {
+  let isArmed = 0;
+  let disclosed = 0;
+  for (const c of CASES) {
+    const a = planAt(45, { label: c.label, hours: 4 });
+    if (a.forceChargeLine == null) continue;
+    const p = planAt(45, { label: c.label, hours: 4, closed: { windowStartMs: a.window!.startMs, why: 'noWrite' } });
+    if (p.forceChargeLine != null) isArmed++;
+    if (p.cushionEnvelopeReason === 'startClosed') disclosed++;
+    assert.deepEqual(sizing(p), sizing(a), c.label);
+    assert.doesNotMatch(p.rationale, ON_CLAIM, c.label);
+    assert.doesNotMatch(p.rationale, /tonight's write/, c.label);
+  }
+  assert.deepEqual({ armed: isArmed, disclosed }, PIN_U1C_YEAR);
+});
+
+test('★★★ U1c the banner of a line night whose start is closed says so, never "write armed"; Cancel stays while a write can still go; a night with no ask, or one a start can still reach, keeps its words', () => {
+  const status = (s: NightActuationState, t: number, g: { cost: boolean; line: boolean } = GATES): Record<string, unknown> =>
+    (cycle as unknown as { lineStartClosedStatus: (s: NightActuationState, t: number, g: { cost: boolean; line: boolean }) => Record<string, unknown> }).lineStartClosedStatus(s, t, g);
+  const banner = cardText.actuationBannerState as unknown as (a: unknown, d: string | null, r?: number | null) => { text: string; settled: boolean; cancel: string | null };
+  const card = (s: NightActuationState, t: number) => ({ ...s, cancelDeadlineMs: s.windowStartMs, ...status(s, t) });
+  const past = OPEN + APPLY_LATE_MS + M;
+  const NO_WRITE = 'No force-charge for the 55.6% outage line starts: it rides a verified reserve write, and none was issued.';
+  // Past the apply window with no write: at any reading, nothing left to cancel, and no write "stands".
+  assert.deepEqual(status(armed(), past), { lineStartClosed: { text: NO_WRITE, cancel: false } });
+  for (const reading of [45, 50, null]) assert.deepEqual(banner(card(armed(), past), '23:00', reading), { text: NO_WRITE, settled: false, cancel: null });
+  assert.equal(cardText.writeStands(card(armed(), past) as never, 'supervised', past), false, 'the hold shape says nothing will be charged');
+  // The late keys with no attempt: the same, in their words; the guard's own.
+  assert.deepEqual(banner(card(armed(), CLOSE - 20 * M), '23:00', 45), { text: 'No force-charge for the 55.6% outage line starts: 20 min or less of the window is left.', settled: false, cancel: null });
+  assert.deepEqual(status(armed({ nextOnPeakStartMs: CLOSE + 30 * M }), CLOSE - 30 * M), { lineStartClosed: { text: 'No force-charge for the 55.6% outage line starts: the on-peak guard (an hour before on-peak) has begun.', cancel: false } });
+  // An attempt not confirmed: a reading of the target still adopts it and its restore goes, so Cancel means something; a start can come until the close less 20 min.
+  const attempt = armed({ applyAttemptedAtMs: OPEN, attemptBaselinePct: 30 });
+  assert.deepEqual(status(attempt, OPEN + H), {}, 'a start can still come');
+  assert.equal(banner(card(attempt, OPEN + H), '23:00', 45).text, 'Supervised write armed — reserve → 50% at 23:00.');
+  assert.deepEqual(status(attempt, CLOSE - 20 * M), { lineStartClosed: { text: 'No force-charge for the 55.6% outage line starts: 20 min or less of the window is left.', cancel: true } });
+  assert.equal(banner(card(attempt, CLOSE - 20 * M), '23:00', 45).cancel, 'Cancel tonight');
+  assert.equal(cardText.writeStands(card(attempt, CLOSE - 20 * M) as never, 'supervised', CLOSE - 20 * M), true);
+  // A window so short that its last 20 minutes open inside the apply window: the write can still go, so its Cancel stays.
+  const short = armed({ windowEndMs: OPEN + 40 * M });
+  assert.deepEqual(status(short, OPEN + 25 * M), { lineStartClosed: { text: 'No force-charge for the 55.6% outage line starts: 20 min or less of the window is left.', cancel: true } });
+  assert.equal(decideActuation(short, OPEN + 25 * M, TICK(45)).kind, 'apply');
+  // A line stated at the reserve, unnumbered, and the ask where the line is unknown.
+  assert.match((status(armed({ forceChargeLinePct: 50.003, forceChargeLineAskPct: 51 }), past).lineStartClosed as { text: string }).text, /^No force-charge for the outage line starts: /);
+  assert.match((status(armed({ forceChargeLinePct: null }), past).lineStartClosed as { text: string }).text, /^No force-charge for the 56% outage line starts: /);
+  // No ask, a start still to come, a force-charge that ran, the gate off: not a word.
+  const noAsk = armed({ forceChargeLineAskPct: null, forceChargeLinePct: null });
+  assert.deepEqual(status(noAsk, past), {});
+  assert.equal(banner(card(noAsk, past), '23:00', 45).text, 'Supervised write armed — reserve → 50% at 23:00.', 'a cost night, byte for byte');
+  assert.equal(banner(card(noAsk, past), '23:00', 45).cancel, 'Cancel tonight');
+  assert.deepEqual(status(armed(), OPEN + M), {});
+  assert.deepEqual(status(applied({ forceChargeOnAtMs: OPEN + H }), CLOSE - 10 * M), {});
+  assert.deepEqual(status(armed(), OPEN + M, { cost: false, line: false }), {}, "'gatedOff'");
+  // Every state ahead of it keeps its own words, whatever a stale poll carried: nothing is added to an applied, cancelled, foreign or restored night.
+  const carried = { ...armed(), cancelDeadlineMs: OPEN, lineStartClosed: { text: NO_WRITE, cancel: false } };
+  assert.equal(banner({ ...carried, cancelled: true }, '23:00', 45).text, 'Cancelled — no write tonight.');
+  assert.equal(banner({ ...carried, appliedAtMs: OPEN, priorReservePct: 30 }, '23:00', 50).text, 'Reserve raised to 50% (was 30%); auto-restores after the window closes.');
+  assert.equal(banner({ ...carried, foreignSettledAtMs: OPEN, foreignReservePct: 40 }, '23:00', 40).settled, true);
+  assert.equal(banner({ ...carried, appliedAtMs: OPEN, revertedAtMs: OPEN, priorReservePct: 30, revertVerifiedAtMs: OPEN }, '23:00', 30).text, 'Completed — reserve restored to 30%.');
+  const CARD_SRC = readFileSync(resolve(HERE, '../../web/src/cards/NightChargeCard.tsx'), 'utf8');
+  assert.ok(CARD_SRC.includes('lineStartClosed?: { text: string; cancel: boolean };'), 'the status field reaches the card');
 });
 
 /* ══ U2 — a write that does not land in its apply window ══════════════════════════════════════════════════════════════════ */
