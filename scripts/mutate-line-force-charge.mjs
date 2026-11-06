@@ -109,6 +109,9 @@
  * (F10r2-a, b); the re-ON's refusals that no tick lifts are one source, and the words hold in every outcome (F10r2-c); a run still on with
  * none left keeps its line and loses the clause (F10r2-d), walking none (F10r2-e), on the served plan alone (F10r2-f).
  * W1-xxiii, F9-i(b)-(e), F9r2-g(iii)-(v), F10-a(iii)-(vii), F10-c(i)-(iv) re-anchored.
+ * (Fix11) The plan's walk is told a run is on: what a run on is, read off the record (F11-a); the walk starts from it, past the timed start
+ * and the last-start gate, on its own night only (F11-b); the texts name it as on (F11-c); on the served plan alone (F11-d).
+ * F10-c(v), F10r2-b(iv)-(vii), e(ii), e(iii), f(i), f(ii) re-anchored.
  *
  *   node scripts/mutate-line-force-charge.mjs [--only <id prefix>]
  *
@@ -3702,7 +3705,7 @@ const MUTANTS = [
   {
     id: 'F10-c(v). ★★★ the holder keeps the plan of record',
     file: IDX, tests: [T_UNHELD],
-    find: '  if (!shadowLeg) setLatestNightChargePlan(lineClosed != null || lineNoReOn != null ? computeNightChargePlan({ ...inputs, armedLineStartClosed: lineClosed, armedLineNoReOn: lineNoReOn }) : plan);',
+    find: '  if (!shadowLeg) setLatestNightChargePlan(lineClosed != null || lineNoReOn != null || lineRunOn != null ? computeNightChargePlan({ ...inputs, armedLineStartClosed: lineClosed, armedLineNoReOn: lineNoReOn, armedLineRunOnStartMs: lineRunOn }) : plan);',
     to: '  if (!shadowLeg) setLatestNightChargePlan(plan); /* MUTANT */',
     why: 'The card and the entities never see it.',
   },
@@ -4391,29 +4394,29 @@ const MUTANTS = [
   {
     id: 'F10r2-b(iv). ★★★ a slot still on reads as a run over',
     file: NFC, tests: [T_UNHELD],
-    find: "  if (off == null || !oursOf(s).every((n) => off.includes(n)) || !lineReOnGone(s, nowMs)) return null;\n",
-    to: "  if (off == null || !oursOf(s).some((n) => off.includes(n)) || !lineReOnGone(s, nowMs)) return null; /* MUTANT */\n",
+    find: "  return off != null && oursOf(s).every((n) => off.includes(n));\n",
+    to: "  return off != null && oursOf(s).some((n) => off.includes(n)); /* MUTANT */\n",
     why: 'A run going on is served as no force-charge.',
   },
   {
     id: 'F10r2-b(v). ★★★ a re-ON still to come reads as a run over',
     file: NFC, tests: [T_UNHELD],
-    find: "  if (off == null || !oursOf(s).every((n) => off.includes(n)) || !lineReOnGone(s, nowMs)) return null;\n",
-    to: "  if (off == null || !oursOf(s).every((n) => off.includes(n))) return null; /* MUTANT */\n",
+    find: "  if (!everySlotReadsOff(s) || !lineReOnGone(s, nowMs)) return null;\n",
+    to: "  if (!everySlotReadsOff(s)) return null; /* MUTANT */\n",
     why: "Every panel stop says it does not come back on, on the night it does.",
   },
   {
     id: 'F10r2-b(vi). ★★ no reading on record reads as every slot off',
     file: NFC, tests: [T_UNHELD],
-    find: "  const off = s.forceChargeLineOffSlots;\n  if (off == null || !oursOf(s).every(",
-    to: "  const off = s.forceChargeLineOffSlots ?? oursOf(s); /* MUTANT */\n  if (off == null || !oursOf(s).every(",
+    find: "  const off = s.forceChargeLineOffSlots;\n  return off != null && oursOf(s).every(",
+    to: "  const off = s.forceChargeLineOffSlots ?? oursOf(s); /* MUTANT */\n  return off != null && oursOf(s).every(",
     why: 'No reading says every slot reads off.',
   },
   {
     id: 'F10r2-b(vii). ★★ a record with no slot list counts none of ours',
     file: NFC, tests: [T_UNHELD],
-    find: "  if (off == null || !oursOf(s).every((n) => off.includes(n)) || !lineReOnGone(s, nowMs)) return null;\n",
-    to: "  if (off == null || !(s.forceChargeSlots ?? []).every((n) => off.includes(n)) || !lineReOnGone(s, nowMs)) return null; /* MUTANT */\n",
+    find: "  return off != null && oursOf(s).every((n) => off.includes(n));\n",
+    to: "  return off != null && (s.forceChargeSlots ?? []).every((n) => off.includes(n)); /* MUTANT */\n",
     why: 'A list lost on a restart means all three, as everywhere else on the record.',
   },
   // (c) the one source, and the words
@@ -4506,15 +4509,15 @@ const MUTANTS = [
   {
     id: 'F10r2-e(ii). ★★★ the plan walks a re-ON the record cannot make (the finding: ~80.1%)',
     file: NCA, tests: [T_UNHELD],
-    find: "lineForceChargeEligible: inputs.lineForceChargeEligible === true, noReOn: lineNoReOn != null, tickPoolKwh: fullKwh,\n",
-    to: "lineForceChargeEligible: inputs.lineForceChargeEligible === true, tickPoolKwh: fullKwh, /* MUTANT */\n",
+    find: "lineForceChargeEligible: inputs.lineForceChargeEligible === true, noReOn: lineNoReOn != null, runOn: lineRunOn, tickPoolKwh: fullKwh,\n",
+    to: "lineForceChargeEligible: inputs.lineForceChargeEligible === true, runOn: lineRunOn, tickPoolKwh: fullKwh, /* MUTANT */\n",
     why: 'The words say none comes, and the figure beside them counts one.',
   },
   {
     id: 'F10r2-e(iii). ★★★ the line walk is not told',
     file: NCA, tests: [T_UNHELD],
-    find: "    acceptKw: o.window.acceptKw ?? null, noReOn: o.noReOn,\n",
-    to: "    acceptKw: o.window.acceptKw ?? null, /* MUTANT */\n",
+    find: "    acceptKw: o.window.acceptKw ?? null, noReOn: o.noReOn, runOn: o.runOn,\n",
+    to: "    acceptKw: o.window.acceptKw ?? null, runOn: o.runOn, /* MUTANT */\n",
     why: 'The same, one call down.',
   },
   {
@@ -4549,15 +4552,15 @@ const MUTANTS = [
   {
     id: 'F10r2-f(i). ★★★ the holder is not told',
     file: IDX, tests: [T_UNHELD],
-    find: "computeNightChargePlan({ ...inputs, armedLineStartClosed: lineClosed, armedLineNoReOn: lineNoReOn }) : plan);\n",
-    to: "computeNightChargePlan({ ...inputs, armedLineStartClosed: lineClosed }) : plan); /* MUTANT */\n",
+    find: "computeNightChargePlan({ ...inputs, armedLineStartClosed: lineClosed, armedLineNoReOn: lineNoReOn, armedLineRunOnStartMs: lineRunOn }) : plan);\n",
+    to: "computeNightChargePlan({ ...inputs, armedLineStartClosed: lineClosed, armedLineRunOnStartMs: lineRunOn }) : plan); /* MUTANT */\n",
     why: 'The card and the entities keep the clause.',
   },
   {
     id: 'F10r2-f(ii). ★★★ no second compute on such a night',
     file: IDX, tests: [T_UNHELD],
-    find: "setLatestNightChargePlan(lineClosed != null || lineNoReOn != null ? computeNightChargePlan(",
-    to: "setLatestNightChargePlan(lineClosed != null /* MUTANT */ ? computeNightChargePlan(",
+    find: "setLatestNightChargePlan(lineClosed != null || lineNoReOn != null || lineRunOn != null ? computeNightChargePlan(",
+    to: "setLatestNightChargePlan(lineClosed != null || lineRunOn != null /* MUTANT */ ? computeNightChargePlan(",
     why: 'The same, on every night with no closure.',
   },
   {
@@ -4573,6 +4576,165 @@ const MUTANTS = [
     find: "  const lineNoReOn = shadowLeg == null && opts.arming !== true && nightActuationMem.windowStartMs === plan.window?.startMs ? armedLineNoReOn(nightActuationMem, nowMs) : null;\n",
     to: "  const lineNoReOn = shadowLeg == null && opts.arming !== true ? armedLineNoReOn(nightActuationMem, nowMs) : null; /* MUTANT */\n",
     why: 'Every recompute of the next day computes a second plan for nothing.',
+  },
+  /* ── F11 (Fix11): the plan's walk is told a run is on ── */
+  // (a) what a run on is
+  {
+    id: 'F11-a(i). ★★★ an ON in its readback grace, or one warned of, reads as a run on',
+    file: NFC, tests: [T_UNHELD],
+    find: "  const on = s.forceChargeOnVerifiedAtMs != null && s.forceChargeOffAtMs == null && nightSettledKey(s) == null && !everySlotReadsOff(s);\n",
+    to: "  const on = s.forceChargeOffAtMs == null && nightSettledKey(s) == null && !everySlotReadsOff(s); /* MUTANT */\n",
+    why: 'A record with no ON of any kind is told it is charging.',
+  },
+  {
+    id: 'F11-a(ii). ★★★ an OFF of ours is still a run on',
+    file: NFC, tests: [T_UNHELD],
+    find: "  const on = s.forceChargeOnVerifiedAtMs != null && s.forceChargeOffAtMs == null && nightSettledKey(s) == null && !everySlotReadsOff(s);\n",
+    to: "  const on = s.forceChargeOnVerifiedAtMs != null && nightSettledKey(s) == null && !everySlotReadsOff(s); /* MUTANT */\n",
+    why: 'A run the add-on stopped for good is served as on to the close.',
+  },
+  {
+    id: 'F11-a(iii). ★★★ a cancel, a restore or a foreign reserve is still a run on',
+    file: NFC, tests: [T_UNHELD],
+    find: "  const on = s.forceChargeOnVerifiedAtMs != null && s.forceChargeOffAtMs == null && nightSettledKey(s) == null && !everySlotReadsOff(s);\n",
+    to: "  const on = s.forceChargeOnVerifiedAtMs != null && s.forceChargeOffAtMs == null && !everySlotReadsOff(s); /* MUTANT */\n",
+    why: 'The same, on the one-way stamps.',
+  },
+  {
+    id: 'F11-a(iv). ★★★ every slot reading off is still a run on',
+    file: NFC, tests: [T_UNHELD],
+    find: "  const on = s.forceChargeOnVerifiedAtMs != null && s.forceChargeOffAtMs == null && nightSettledKey(s) == null && !everySlotReadsOff(s);\n",
+    to: "  const on = s.forceChargeOnVerifiedAtMs != null && s.forceChargeOffAtMs == null && nightSettledKey(s) == null; /* MUTANT */\n",
+    why: 'A panel stop waiting on its re-ON is served as charging, and walked as rising.',
+  },
+  {
+    id: 'F11-a(v). ★★★ a night with no line reads as a run on',
+    file: NFC, tests: [T_UNHELD],
+    find: "  return on && forceChargeLineNightPct(s) != null ? s.windowStartMs : null;\n",
+    to: "  return on ? s.windowStartMs : null; /* MUTANT */\n",
+    why: 'A cost night computes a second plan, and the wiring no longer proves it reads no word of it.',
+  },
+  // (b) the walk
+  {
+    id: 'F11-b(i). ★★★ the walk is not told (the finding: 7 points in a minute at the cutoff)',
+    file: NCA, tests: [T_UNHELD],
+    find: "  let startMs: number | null = o.runOn === true ? o.fromMs : null;\n",
+    to: "  let startMs: number | null = null; /* MUTANT */\n",
+    why: 'A run on past the last start is armed and not expected to start.',
+  },
+  {
+    id: 'F11-b(ii). ★★ the run starts a step late',
+    file: NCA, tests: [T_UNHELD],
+    find: "  let startMs: number | null = o.runOn === true ? o.fromMs : null;\n",
+    to: "  let startMs: number | null = o.runOn === true ? o.fromMs + 60_000 : null; /* MUTANT */\n",
+    why: 'The stated start is not the walk\'s, and nothing states it but the plan.',
+  },
+  {
+    id: 'F11-b(iii). ★★★ every walk is a run on',
+    file: NCA, tests: [T_UNHELD, T_LINE],
+    find: "  let startMs: number | null = o.runOn === true ? o.fromMs : null;\n",
+    to: "  let startMs: number | null = o.fromMs; /* MUTANT */\n",
+    why: 'The evening plan is told a start at the window open.',
+  },
+  {
+    id: 'F11-b(iv). ★★★ the line walk is not told, one call up',
+    file: NCA, tests: [T_UNHELD],
+    find: "    acceptKw: o.window.acceptKw ?? null, noReOn: o.noReOn, runOn: o.runOn,\n",
+    to: "    acceptKw: o.window.acceptKw ?? null, noReOn: o.noReOn, /* MUTANT */\n",
+    why: 'The same, one call up.',
+  },
+  {
+    id: 'F11-b(v). ★★★ the plan does not pass it',
+    file: NCA, tests: [T_UNHELD],
+    find: "noReOn: lineNoReOn != null, runOn: lineRunOn, tickPoolKwh: fullKwh,\n",
+    to: "noReOn: lineNoReOn != null, tickPoolKwh: fullKwh, /* MUTANT */\n",
+    why: 'The texts say on, the walk does not start: "is on" beside a drain to the close.',
+  },
+  {
+    id: "F11-b(vi). ★★★ an earlier night's record words this one",
+    file: NCA, tests: [T_UNHELD],
+    find: "  const lineRunOn = inputs.armedLineRunOnStartMs === window.startMs;\n",
+    to: "  const lineRunOn = inputs.armedLineRunOnStartMs != null; /* MUTANT */\n",
+    why: 'Last night\'s run is served on tonight\'s window.',
+  },
+  // (c) the texts
+  {
+    id: 'F11-c(i). ★★★ the expected note: "switches on at" an ON long past, to the ceiling',
+    file: NCA, tests: [T_UNHELD],
+    find: "the force-charge for the outage line ${lineRunOn ? 'is on' : `switches on at ~${at}`} and the panel switches it off",
+    to: "the force-charge for the outage line ${`switches on at ~${at}`} and the panel switches it off",
+    why: 'The time is the plan\'s own now, stated of an ON hours past.',
+  },
+  {
+    id: 'F11-c(ii). ★★★ the expected note: "runs from" a time, to the close',
+    file: NCA, tests: [T_UNHELD],
+    find: "the force-charge for the outage line ${lineRunOn ? 'is on, runs' : `runs from ~${at}`} to the window close",
+    to: "the force-charge for the outage line ${`runs from ~${at}`} to the window close",
+    why: 'The same, to the close.',
+  },
+  {
+    id: 'F11-c(iii). ★★★ the expected note names a run on any night',
+    file: NCA, tests: [T_UNHELD, T_LINE],
+    find: "the force-charge for the outage line ${lineRunOn ? 'is on, runs' : `runs from ~${at}`} to the window close",
+    to: "the force-charge for the outage line ${'is on, runs'} to the window close",
+    why: 'An evening plan says on before any ON.',
+  },
+  {
+    id: 'F11-c(iv). ★★★ the reserve sentence: "switches on at" (the finding, earlier in a run)',
+    file: NCA, tests: [T_UNHELD],
+    find: "  const lineStartText = lineRunOn ? 'is on and '\n    : expected.forceChargeStartMs != null ?",
+    to: "  const lineStartText = expected.forceChargeStartMs != null ? /* MUTANT */",
+    why: 'The sentence says the ON is to come, with no walk behind it "just in time".',
+  },
+  {
+    id: 'F11-c(v). ★★★ the reserve sentence names a run on any night',
+    file: NCA, tests: [T_UNHELD, T_LINE],
+    find: "  const lineStartText = lineRunOn ? 'is on and '\n    : expected.forceChargeStartMs != null ?",
+    to: "  const lineStartText = expected.mode === 'line' ? 'is on and ' /* MUTANT */\n    : expected.forceChargeStartMs != null ?",
+    why: 'The same, in the sentence the entities carry.',
+  },
+  {
+    id: 'F11-c(vi). ★★★ the ceiling note names a run on any night',
+    file: NCA, tests: [T_UNHELD],
+    find: "the force-charge for the outage line ${lineRunOn ? 'is on' : `switches on at ~${at}`} and the panel switches it off",
+    to: "the force-charge for the outage line ${'is on'} and the panel switches it off",
+    why: 'An evening plan says on before any ON.',
+  },
+  // (d) the wiring
+  {
+    id: 'F11-d(i). ★★★ an arm or a shadow leg reads it',
+    file: IDX, tests: [T_UNHELD],
+    find: "  const lineRunOn = shadowLeg == null && opts.arming !== true && nightActuationMem.windowStartMs === plan.window?.startMs ? armedLineRunOn(nightActuationMem) : null;\n",
+    to: "  const lineRunOn = nightActuationMem.windowStartMs === plan.window?.startMs ? armedLineRunOn(nightActuationMem) : null; /* MUTANT */\n",
+    why: 'A plan a later leg or an evening job works from is told of a run.',
+  },
+  {
+    id: 'F11-d(ii). ★★ a later window computes it again',
+    file: IDX, tests: [T_UNHELD],
+    find: "  const lineRunOn = shadowLeg == null && opts.arming !== true && nightActuationMem.windowStartMs === plan.window?.startMs ? armedLineRunOn(nightActuationMem) : null;\n",
+    to: "  const lineRunOn = shadowLeg == null && opts.arming !== true ? armedLineRunOn(nightActuationMem) : null; /* MUTANT */\n",
+    why: 'Every recompute of the next day computes a second plan for nothing.',
+  },
+  {
+    id: 'F11-d(iii). ★★★ no second compute on a run with neither of the others',
+    file: IDX, tests: [T_UNHELD],
+    find: "setLatestNightChargePlan(lineClosed != null || lineNoReOn != null || lineRunOn != null ? computeNightChargePlan(",
+    to: "setLatestNightChargePlan(lineClosed != null || lineNoReOn != null /* MUTANT */ ? computeNightChargePlan(",
+    why: 'The finding, earlier in a run: the holder keeps "switches on at".',
+  },
+  {
+    id: 'F11-d(iv). ★★★ the holder is not told',
+    file: IDX, tests: [T_UNHELD],
+    find: "armedLineNoReOn: lineNoReOn, armedLineRunOnStartMs: lineRunOn }) : plan);\n",
+    to: "armedLineNoReOn: lineNoReOn }) : plan); /* MUTANT */\n",
+    why: 'The same, past the cutoff.',
+  },
+  {
+    id: 'F11-d(v). ★★★ the plan of record reads it: the ledger and the snapshot take a walk from a run (invariant b)',
+    file: IDX, tests: [T_UNHELD],
+    find: "  const inputs = buildNightChargeInputs(deps);\n  const plan = computeNightChargePlan(inputs);\n",
+    to: "  const inputs = { ...buildNightChargeInputs(deps), armedLineRunOnStartMs: armedLineRunOn(nightActuationMem) }; /* MUTANT */\n  const plan = computeNightChargePlan(inputs);\n",
+    why: 'The evening plan a person cancels on, and the row the gate grades, move with a record of another night.',
   },
   /* ── R: the ledger ── */
   {

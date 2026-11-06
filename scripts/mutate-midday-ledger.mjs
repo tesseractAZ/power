@@ -292,8 +292,8 @@ const MUTANTS = [
   {
     id: 'S-i. ★★★ a shadow leg becomes the latest plan',
     file: IDX,
-    find: '  if (!shadowLeg) setLatestNightChargePlan(lineClosed != null || lineNoReOn != null ? computeNightChargePlan({ ...inputs, armedLineStartClosed: lineClosed, armedLineNoReOn: lineNoReOn }) : plan);',
-    to: '  setLatestNightChargePlan(lineClosed != null || lineNoReOn != null ? computeNightChargePlan({ ...inputs, armedLineStartClosed: lineClosed, armedLineNoReOn: lineNoReOn }) : plan); /* MUTANT */',
+    find: '  if (!shadowLeg) setLatestNightChargePlan(lineClosed != null || lineNoReOn != null || lineRunOn != null ? computeNightChargePlan({ ...inputs, armedLineStartClosed: lineClosed, armedLineNoReOn: lineNoReOn, armedLineRunOnStartMs: lineRunOn }) : plan);',
+    to: '  setLatestNightChargePlan(lineClosed != null || lineNoReOn != null || lineRunOn != null ? computeNightChargePlan({ ...inputs, armedLineStartClosed: lineClosed, armedLineNoReOn: lineNoReOn, armedLineRunOnStartMs: lineRunOn }) : plan); /* MUTANT */',
     why: 'The night-charge entities, the card and an advisory automation read the mid-day plan as tonight\'s.',
   },
   {

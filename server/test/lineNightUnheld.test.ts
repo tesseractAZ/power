@@ -1611,6 +1611,13 @@ test('★★★ U8 what stays: another window, an empty input and a closure leav
   // A floor at the write and an advisory plan arm no line.
   assert.deepEqual(planAt(50, { ...on, runOn: WIN_OPEN }), planAt(50, on));
   assert.deepEqual(planAt(45, { ...on, eligible: false, runOn: WIN_OPEN }), planAt(45, { ...on, eligible: false }));
+  // A plan told of no run keeps its times, to the close and to the ceiling.
+  const evening = planAt(30);
+  assert.equal(evening.expectedLineCeilingStop, undefined);
+  assert.match(evening.rationale, /the force-charge for the outage line runs from ~\S+ to the window close and takes it to /, evening.rationale);
+  assert.match(evening.rationale, /so the panel's force-charge switches on at ~\S+ and stays on until the window closes/, evening.rationale);
+  assert.match(PLAN45.rationale, /the force-charge for the outage line switches on at ~\S+ and the panel switches it off at its 81% ceiling/, PLAN45.rationale);
+  assert.match(PLAN45.rationale, /so the panel's force-charge switches on at ~\S+ and runs until the panel switches it off/, PLAN45.rationale);
   // The sizing, and what a tick reads off the served plan: nothing written moves.
   const served = planAt(45, { ...on, runOn: WIN_OPEN, noReOn: { windowStartMs: WIN_OPEN, words: WORDS_SPENT } });
   assert.deepEqual(sizing(served), sizing(base));
