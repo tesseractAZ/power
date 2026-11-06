@@ -6818,7 +6818,7 @@ function sendRestoreSummary(state: ChargeLegState, restore: RestoreSummaryKind, 
       // read, is said so.
       closePoolPct: lineNight != null ? freshPoolSocPct(nowMs) : null,
       linePct: lineNight,
-      // (Fix9 review 1) While the add-on's close has not passed: a grid loss's push says what can still hold the line.
+      // (Fix9 review 1) While the add-on's close has not passed: a grid loss's push says what can still lift the pool.
       closeText: lineNight != null && state.windowEndMs != null && nowMs < writeWindowEndMs(state)! ? fmtSiteClock(writeWindowEndMs(state)!) : null,
       // (Fix10 review 1) Sent hours after the close (a process down across it, a restore refused): that reading is not the close's.
       closeReadLate: lineNight != null && lineCloseReadingLate(state, nowMs),

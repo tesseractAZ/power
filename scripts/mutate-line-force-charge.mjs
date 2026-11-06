@@ -4222,8 +4222,8 @@ const MUTANTS = [
   {
     id: 'F10r1-h(iii). ★★ the edge of the reading',
     file: NFC, tests: [T_UNHELD],
-    find: '  return s.windowEndMs != null && closeMs != null && nowMs - closeMs > LINE_CLOSE_READING_MAX_MS;\n',
-    to: '  return s.windowEndMs != null && closeMs != null && nowMs - closeMs >= LINE_CLOSE_READING_MAX_MS; /* MUTANT */\n',
+    find: '  return closeMs != null && nowMs - closeMs > LINE_CLOSE_READING_MAX_MS;\n',
+    to: '  return closeMs != null && nowMs - closeMs >= LINE_CLOSE_READING_MAX_MS; /* MUTANT */\n',
     why: 'The longest a prompt summary waits is still the close\'s.',
   },
   {
@@ -4232,13 +4232,6 @@ const MUTANTS = [
     find: 'export const LINE_CLOSE_READING_MAX_MS = REVERT_VERIFY_AFTER_MS + REVERT_DEADLINE_HOLD_MAX_MS;\n',
     to: 'export const LINE_CLOSE_READING_MAX_MS = REVERT_VERIFY_AFTER_MS; /* MUTANT */\n',
     why: 'A prompt night after a restart loses its verdict.',
-  },
-  {
-    id: 'F10r1-h(v). ★★ no window reads as late',
-    file: NFC, tests: [T_UNHELD],
-    find: '  return s.windowEndMs != null && closeMs != null && nowMs - closeMs > LINE_CLOSE_READING_MAX_MS;\n',
-    to: '  return closeMs != null && nowMs - closeMs > LINE_CLOSE_READING_MAX_MS; /* MUTANT */\n',
-    why: 'A record with no window has no close, only its guard.',
   },
   // (i) an unread write
   {

@@ -1595,7 +1595,7 @@ export const LINE_CLOSE_READING_MAX_MS = REVERT_VERIFY_AFTER_MS + REVERT_DEADLIN
  *  says what the pool reads now, with no verdict on the line (the ledger's window_close_soc_pct is the close's, at close + 16 h). */
 export function lineCloseReadingLate(s: Pick<NightActuationState, 'windowEndMs' | 'nextOnPeakStartMs'>, nowMs: number): boolean {
   const closeMs = writeWindowEndMs(s);
-  return s.windowEndMs != null && closeMs != null && nowMs - closeMs > LINE_CLOSE_READING_MAX_MS;
+  return closeMs != null && nowMs - closeMs > LINE_CLOSE_READING_MAX_MS;
 }
 
 /** v1.200.0 (Fix10 review 1) — PURE. The line to push at an OFF of ours nothing else reports while a person can act: 'gridLoss' fires on a

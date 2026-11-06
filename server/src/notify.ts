@@ -1065,7 +1065,7 @@ export function buildNightChargeMissedApply(o: {
  *
  * v1.200.0 (Fix9 review 1) — on a record with a line ask, before the add-on's close, with no OFF of ours sent (`line`): a warning, since
  * the settle also ends the force-charge for the line (offReason 'foreign', or its start closed for good: foreignSettledAtMs is
- * one-way, so a reserve set back to the target restarts nothing). What still holds the line is Charge Now by hand.
+ * one-way, so a reserve set back to the target restarts nothing). What can still lift the pool is Charge Now by hand.
  */
 export function buildNightChargeForeignReserve(o: {
   day: string | null;

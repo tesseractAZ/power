@@ -271,8 +271,8 @@ export interface NightChargeInputs {
    *  that window cannot arm one, since nothing re-arms the record, so it discloses its line ('armedNoLine') rather than claim an ON
    *  the record will not make. Never on the plan the evening job arms from, nor a shadow leg (index.ts). Absent ⇒ no such record. */
   armedNoLineStartMs?: number | null;
-  /** v1.200.0 (Fix10) — a record WITH a line whose start is closed (nightForceCharge.armedLineStartClosed): a plan of that window says
-   *  so ('startClosed'). Set only on the plan the card and the entities serve (index.ts): the plan of record, whose ask the ledger and
+  /** v1.200.0 (Fix10) — a record WITH a line whose start is closed (nightForceCharge.armedLineStartClosed), or (review 1) a window no
+   *  record holds with no evening job left (chargeCycle.servedLineClosure): a plan of that window says so ('startClosed'). Set only on the plan the card and the entities serve (index.ts): the plan of record, whose ask the ledger and
    *  its strike rule read, never reads it. Absent ⇒ no such record. */
   armedLineStartClosed?: LineClosure | null;
 
@@ -358,7 +358,7 @@ export type CushionShortfallCause = 'envelope' | 'envelope+caps';
  *  that reads the write when the plan reads it ('reserveAtTarget': decideActuation has nothing to raise while it does, and
  *  the force-charge rides only a verified write), or (Fix9 review 2) a recompute of a window whose armed record carries no
  *  line ask ('armedNoLine': the evening arm is the only one, so a write that goes carries none), or (Fix10) one whose record has its ask
- *  and can no longer start one ('startClosed', cushionStartClosedWords says why). ARMED, the force-charge runs: a line within 10 points of a full pool or above
+ *  and can no longer start one, or (review 1) that no record holds with no evening job left ('startClosed', cushionStartClosedWords says why). ARMED, the force-charge runs: a line within 10 points of a full pool or above
  *  it (⌈L⌉ + 10 > 100, 'nearFull': the close guarantee was shown only with a panel ceiling ⌈L⌉ + 10 or more), or a night
  *  whose own line walk closes under the line ('closeUnder'). */
 export type CushionEnvelopeReason = 'advisory' | 'backupLeg' | 'reserveAtTarget' | 'armedNoLine' | 'startClosed' | 'nearFull' | 'closeUnder';
