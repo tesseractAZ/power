@@ -3205,7 +3205,7 @@ const MUTANTS = [
     id: 'F9r2-a(iii). ★★ such a plan reads as a walk that closes under',
     file: NCA, tests: [T_UNHELD],
     find: "lineNotOnRecord ? 'armedNoLine' : lineNearFull ? 'nearFull' : 'closeUnder';",
-    to: "lineNearFull ? 'nearFull' : 'closeUnder'; /* MUTANT */",
+    to: "(lineNotOnRecord && (false as boolean)) ? 'armedNoLine' : lineNearFull ? 'nearFull' : 'closeUnder'; /* MUTANT */",
     why: 'The card loses why the line is not carried.',
   },
   {
