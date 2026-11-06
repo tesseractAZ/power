@@ -112,6 +112,10 @@
  * (Fix11) The plan's walk is told a run is on: what a run on is, read off the record (F11-a); the walk starts from it, past the timed start
  * and the last-start gate, on its own night only (F11-b); the texts name it as on (F11-c); on the served plan alone (F11-d).
  * F10-c(v), F10r2-b(iv)-(vii), e(ii), e(iii), f(i), f(ii) re-anchored.
+ * (Fix12) A flat pool with every slot reading on waits for the time left, at the plan rate, its one branch and each choice (F12-a); a stale
+ * panel is no readback, and its quoted time comes from the reserve on the frozen nameplate (F12-b); a partial ON is a closed start with no
+ * figure, whose write stands and whose card leads, never a run on (F12-c, F10r2-a, F10r2-d(iii), (iv), (v), all re-anchored there: the
+ * unverified branch of armedLineNoReOn went). T-xi, F10r1-a(viii), F10r2-d(vi) re-anchored.
  *
  *   node scripts/mutate-line-force-charge.mjs [--only <id prefix>]
  *
@@ -1487,9 +1491,9 @@ const MUTANTS = [
   {
     id: 'T-xi. ★★ the push quotes the timed start, not the latest start that reaches the line',
     file: IDX, tests: [T_LINE],
-    // v1.200.0 (review 2) — anchor moved: the record's ⌈L⌉ (a cost-dominant night has no line mode to read it from).
-    find: 'lineLatestStartMs(endMs, state.forceChargeLineAskPct!, ',
-    to: 'lineLatestStartMs(endMs, state.forceChargeLineAskPct! + 5, /* MUTANT */ ',
+    // v1.200.0 (review 2) — anchor moved: the record's ⌈L⌉ (a cost-dominant night has no line mode to read it from). (Fix12) Into the helper's call.
+    find: 'closeAtMs: writeWindowEndMs(state), askPct: state.forceChargeLineAskPct!, poolSocPct: socCoherent ? socNowPct : null,',
+    to: 'closeAtMs: writeWindowEndMs(state), askPct: state.forceChargeLineAskPct! + 5, /* MUTANT */ poolSocPct: socCoherent ? socNowPct : null,',
     why: '"If it has not started by ~03:25 the pool closes under the line" — a start at 04:20 still holds it.',
   },
   {
@@ -3899,7 +3903,7 @@ const MUTANTS = [
   {
     id: 'F10r1-a(viii). ★★★ the closure never says a write stands',
     file: NFC, tests: [T_UNHELD],
-    find: "  return { windowStartMs: s.windowStartMs, why, ...(reserveWriteStands(s) ? { writeStands: true as const } : {}) };",
+    find: "  return { windowStartMs: s.windowStartMs, why, ...(why !== 'partTaken' && reserveWriteStands(s) ? { writeStands: true as const } : {}) };",
     to: '  return { windowStartMs: s.windowStartMs, why }; /* MUTANT */',
     why: 'An applied night in its last 20 minutes loses a figure that is true.',
   },
@@ -4344,29 +4348,29 @@ const MUTANTS = [
   {
     id: 'F10r2-a(i). ★★★ an ON warned of on every slot stays armed (the finding)',
     file: NFC, tests: [T_UNHELD],
-    find: "    return s.forceChargeOnFailedAtMs != null && partialForceChargeOnFailureSlots(s) == null ? 'notTaken' : null;\n",
+    find: "    if (s.forceChargeOnFailedAtMs == null) return null;\n    return partialForceChargeOnFailureSlots(s) == null ? 'notTaken' : 'partTaken';\n",
     to: "    return null; /* MUTANT */\n",
     why: 'Every recompute to the close says it switches on, runs and comes back on, against the ON-failure push.',
   },
   {
     id: 'F10r2-a(ii). ★★★ a partial failure reads as none running',
     file: NFC, tests: [T_UNHELD],
-    find: "    return s.forceChargeOnFailedAtMs != null && partialForceChargeOnFailureSlots(s) == null ? 'notTaken' : null;\n",
-    to: "    return s.forceChargeOnFailedAtMs != null ? 'notTaken' : null; /* MUTANT */\n",
+    find: "    return partialForceChargeOnFailureSlots(s) == null ? 'notTaken' : 'partTaken';\n",
+    to: "    return 'notTaken'; /* MUTANT */\n",
     why: 'Slots that took are charging, and the plan says none runs.',
   },
   {
     id: 'F10r2-a(iii). ★★★ an ON no reading has judged reads as not taken',
     file: NFC, tests: [T_UNHELD],
-    find: "    return s.forceChargeOnFailedAtMs != null && partialForceChargeOnFailureSlots(s) == null ? 'notTaken' : null;\n",
-    to: "    return partialForceChargeOnFailureSlots(s) == null ? 'notTaken' : null; /* MUTANT */\n",
+    find: "    if (s.forceChargeOnFailedAtMs == null) return null;\n    return partialForceChargeOnFailureSlots(s) == null ? 'notTaken' : 'partTaken';\n",
+    to: "    return partialForceChargeOnFailureSlots(s) == null ? 'notTaken' : 'partTaken'; /* MUTANT */\n",
     why: 'Every ON reads as failed from the moment it is written.',
   },
   {
     id: 'F10r2-a(iv). ★★★ a late apply stays not taken',
     file: NFC, tests: [T_UNHELD],
-    find: "  if (s.forceChargeOnVerifiedAtMs == null) {\n    return s.forceChargeOnFailedAtMs != null && partialForceChargeOnFailureSlots(s) == null",
-    to: "  if (s.forceChargeOnFailedAtMs != null) { /* MUTANT */\n    return s.forceChargeOnFailedAtMs != null && partialForceChargeOnFailureSlots(s) == null",
+    find: "  if (s.forceChargeOnVerifiedAtMs == null) {\n    if (s.forceChargeOnFailedAtMs == null) return null;\n",
+    to: "  if (s.forceChargeOnFailedAtMs != null) { /* MUTANT */\n    if (s.forceChargeOnFailedAtMs == null) return null;\n",
     why: 'The run the add-on verified is served as none running until the close.',
   },
   // (b) 'noReOn'
@@ -4471,31 +4475,32 @@ const MUTANTS = [
     why: 'Every verified night says no re-ON comes, and one does.',
   },
   {
-    id: 'F10r2-d(iii). ★★★ a partial ON keeps the clause',
+    // (Fix12) A closure's now, so the anchor moved there: no closure, and the record keeps every claim of an armed night.
+    id: 'F10r2-d(iii). ★★★ a partial ON keeps the clause (the Fix12 finding: "switches on at" an ON long past, "not expected to start" with two slots charging)',
     file: NFC, tests: [T_UNHELD],
-    find: "    return s.forceChargeOnFailedAtMs != null ? { windowStartMs: s.windowStartMs, words: 'unless it applies late, the add-on does not switch it back on' } : null;\n",
-    to: "    return null; /* MUTANT */\n",
+    find: "    return partialForceChargeOnFailureSlots(s) == null ? 'notTaken' : 'partTaken';\n",
+    to: "    return partialForceChargeOnFailureSlots(s) == null ? 'notTaken' : null; /* MUTANT */\n",
     why: 'lineReOnDue needs the ON verified: the same promise, on a record that cannot make it.',
   },
   {
     id: 'F10r2-d(iv). ★★★ a partial ON promises none, a late apply or not',
     file: NFC, tests: [T_UNHELD],
-    find: "words: 'unless it applies late, the add-on does not switch it back on' } : null;\n",
-    to: "words: 'the add-on does not switch it back on tonight' } : null; /* MUTANT */\n",
+    find: "has not taken effect on all its slots: unless it applies late, the add-on does not switch it back on`;\n",
+    to: "has not taken effect on all its slots, and the add-on does not switch it back on tonight`; /* MUTANT */\n",
     why: 'A late apply verifies it, and a re-ON can then come.',
   },
   {
     id: 'F10r2-d(v). ★★★ an ON no reading has judged loses the clause',
     file: NFC, tests: [T_UNHELD],
-    find: "    return s.forceChargeOnFailedAtMs != null ? { windowStartMs: s.windowStartMs, words: 'unless it applies late,",
-    to: "    return (true as boolean /* MUTANT */) ? { windowStartMs: s.windowStartMs, words: 'unless it applies late,",
-    why: 'Every ON, in its first 15 minutes, says no re-ON comes.',
+    find: "  if (s.windowStartMs == null || forceChargeLineNightPct(s) == null || s.forceChargeOnVerifiedAtMs == null) return null;\n",
+    to: "  if (s.windowStartMs == null || forceChargeLineNightPct(s) == null) return null; /* MUTANT */\n",
+    why: 'An ON in its readback grace, past the budget or the cutoff, says no re-ON comes before any reading has judged it.',
   },
   {
     id: 'F10r2-d(vi). ★★★ a cost night is told (the live plant)',
     file: NFC, tests: [T_UNHELD],
-    find: "  if (s.windowStartMs == null || forceChargeLineNightPct(s) == null) return null;\n",
-    to: "  if (s.windowStartMs == null) return null; /* MUTANT */\n",
+    find: "  if (s.windowStartMs == null || forceChargeLineNightPct(s) == null || s.forceChargeOnVerifiedAtMs == null) return null;\n",
+    to: "  if (s.windowStartMs == null || s.forceChargeOnVerifiedAtMs == null) return null; /* MUTANT */\n",
     why: 'A night with no line computes a second plan, and the wiring no longer proves nothing moves on it.',
   },
   // (e) the plan and the card
@@ -4735,6 +4740,241 @@ const MUTANTS = [
     find: "  const inputs = buildNightChargeInputs(deps);\n  const plan = computeNightChargePlan(inputs);\n",
     to: "  const inputs = { ...buildNightChargeInputs(deps), armedLineRunOnStartMs: armedLineRunOn(nightActuationMem) }; /* MUTANT */\n  const plan = computeNightChargePlan(inputs);\n",
     why: 'The evening plan a person cancels on, and the row the gate grades, move with a record of another night.',
+  },
+  /* ── (Fix12) a flat pool, a stale panel, a partial ON ── */
+  // (a) the flat push waits for the time left
+  {
+    id: 'F12-a(i). ★★★ no hold (the finding: "not rising" hours before a close of 74, and the night\'s one push spent)',
+    file: NFC, tests: [T_RISK, T_CLOSE],
+    find: "  if (!(o.poolSocPct < ref.pct) && offSlots.length === 0 && lineFlatPushHeld(nowMs, closeAtMs, s.forceChargeLineAskPct!, o.poolSocPct, o.fullKwh, o.connectedSlots.length)) return null;\n",
+    to: "/* MUTANT */\n",
+    why: 'A person is told to switch Charge Now off and on for nothing, on a healthy night.',
+  },
+  {
+    id: 'F12-a(ii). ★★★ the gate on the live rate',
+    file: NFC, tests: [T_RISK],
+    find: "  if (!(o.poolSocPct < ref.pct) && offSlots.length === 0 && lineFlatPushHeld(nowMs, closeAtMs, s.forceChargeLineAskPct!, o.poolSocPct, o.fullKwh, o.connectedSlots.length)) return null;\n",
+    to: "  if (!(o.poolSocPct < ref.pct) && offSlots.length === 0 && o.fullKwh != null && o.fullKwh > 0 && nowMs < lineLatestStartMs(closeAtMs, s.forceChargeLineAskPct!, o.poolSocPct, o.fullKwh, o.chargeRateKw, null, o.connectedSlots.length) - FORCE_CHARGE_LINE_AT_RISK_LEAD_MS) return null; /* MUTANT */\n",
+    why: 'A 3 kW live rate beside an EV opens the gate at once at a 70% line: the false alarm back, on exactly its nights.',
+  },
+  {
+    id: 'F12-a(iii). ★★★ the gate with the EV\'s energy',
+    file: NFC, tests: [T_RISK],
+    find: "  if (!(o.poolSocPct < ref.pct) && offSlots.length === 0 && lineFlatPushHeld(nowMs, closeAtMs, s.forceChargeLineAskPct!, o.poolSocPct, o.fullKwh, o.connectedSlots.length)) return null;\n",
+    to: "  if (!(o.poolSocPct < ref.pct) && offSlots.length === 0 && o.fullKwh != null && o.fullKwh > 0 && nowMs < lineLatestStartMs(closeAtMs, s.forceChargeLineAskPct!, o.poolSocPct, o.fullKwh, null, o.evDisplacedKwh, o.connectedSlots.length) - FORCE_CHARGE_LINE_AT_RISK_LEAD_MS) return null; /* MUTANT */\n",
+    why: 'The predicted EV that pulled the start early opens the gate too.',
+  },
+  {
+    id: 'F12-a(iv). ★★★ a slot reading off is held too',
+    file: NFC, tests: [T_RISK],
+    find: "  if (!(o.poolSocPct < ref.pct) && offSlots.length === 0 && lineFlatPushHeld(nowMs, closeAtMs, s.forceChargeLineAskPct!, o.poolSocPct, o.fullKwh, o.connectedSlots.length)) return null;\n",
+    to: "  if (!(o.poolSocPct < ref.pct) && lineFlatPushHeld(nowMs, closeAtMs, s.forceChargeLineAskPct!, o.poolSocPct, o.fullKwh, o.connectedSlots.length)) return null; /* MUTANT */\n",
+    why: 'reOnSpent and reOnNotApplied are real on a flat reading: a slot off explains the flat pool, and it waits.',
+  },
+  {
+    id: 'F12-a(v). ★★★ a falling pool is held too',
+    file: NFC, tests: [T_RISK],
+    find: "  if (!(o.poolSocPct < ref.pct) && offSlots.length === 0 && lineFlatPushHeld(nowMs, closeAtMs, s.forceChargeLineAskPct!, o.poolSocPct, o.fullKwh, o.connectedSlots.length)) return null;\n",
+    to: "  if (offSlots.length === 0 && lineFlatPushHeld(nowMs, closeAtMs, s.forceChargeLineAskPct!, o.poolSocPct, o.fullKwh, o.connectedSlots.length)) return null; /* MUTANT */\n",
+    why: 'The real thing, a pool the house is drawing down, waits for a gate meant for a slow charge.',
+  },
+  {
+    id: 'F12-a(vi). ★★★ a pool size not known holds',
+    file: NFC, tests: [T_RISK],
+    find: "  if (fullKwh == null || !(fullKwh > 0)) return false;\n",
+    to: "  if (fullKwh == null || !(fullKwh > 0)) return true; /* MUTANT */\n",
+    why: 'A doubt goes to silence, against this function\'s whole rule.',
+  },
+  {
+    id: 'F12-a(vii). ★★ a zero pool size is a size',
+    file: NFC, tests: [T_RISK],
+    find: "  if (fullKwh == null || !(fullKwh > 0)) return false;\n",
+    to: "  if (fullKwh == null) return false; /* MUTANT */\n",
+    why: 'No charge to do reads as hours of time left.',
+  },
+  {
+    id: 'F12-a(viii). ★★★ the gate with no lead',
+    file: NFC, tests: [T_RISK],
+    find: "  return nowMs < lineLatestStartMs(closeAtMs, askPct, poolSocPct, fullKwh, null, null, slotCount) - FORCE_CHARGE_LINE_AT_RISK_LEAD_MS;\n",
+    to: "  return nowMs < lineLatestStartMs(closeAtMs, askPct, poolSocPct, fullKwh, null, null, slotCount); /* MUTANT */\n",
+    why: 'The push goes at the latest start itself, with no time for a person to act on it.',
+  },
+  {
+    id: 'F12-a(ix). ★★ the boundary tick',
+    file: NFC, tests: [T_RISK],
+    find: "  return nowMs < lineLatestStartMs(closeAtMs, askPct, poolSocPct, fullKwh, null, null, slotCount) - FORCE_CHARGE_LINE_AT_RISK_LEAD_MS;\n",
+    to: "  return nowMs <= lineLatestStartMs(closeAtMs, askPct, poolSocPct, fullKwh, null, null, slotCount) - FORCE_CHARGE_LINE_AT_RISK_LEAD_MS; /* MUTANT */\n",
+    why: 'Off by the boundary the test pins to the millisecond.',
+  },
+  {
+    id: 'F12-a(x). ★★★ the gate timed to the start target, not the ask',
+    file: NFC, tests: [T_RISK],
+    find: "  if (!(o.poolSocPct < ref.pct) && offSlots.length === 0 && lineFlatPushHeld(nowMs, closeAtMs, s.forceChargeLineAskPct!, o.poolSocPct, o.fullKwh, o.connectedSlots.length)) return null;\n",
+    to: "  if (!(o.poolSocPct < ref.pct) && offSlots.length === 0 && lineFlatPushHeld(nowMs, closeAtMs, thresholdPct, o.poolSocPct, o.fullKwh, o.connectedSlots.length)) return null; /* MUTANT */\n",
+    why: 'Five points more charge in the sum: the gate opens early, and the false alarm goes on nights that reach the line.',
+  },
+  {
+    id: 'F12-a(xi). ★★ the slot count dropped',
+    file: NFC, tests: [T_RISK],
+    find: "  if (!(o.poolSocPct < ref.pct) && offSlots.length === 0 && lineFlatPushHeld(nowMs, closeAtMs, s.forceChargeLineAskPct!, o.poolSocPct, o.fullKwh, o.connectedSlots.length)) return null;\n",
+    to: "  if (!(o.poolSocPct < ref.pct) && offSlots.length === 0 && lineFlatPushHeld(nowMs, closeAtMs, s.forceChargeLineAskPct!, o.poolSocPct, o.fullKwh, 0)) return null; /* MUTANT */\n",
+    why: 'FORCE_CHARGE_KW_PER_CORE stops reaching the plan rate here, as the start reads it.',
+  },
+  {
+    id: 'F12-a(xii). ★★★ the gate counts no charge to do',
+    file: NFC, tests: [T_RISK],
+    find: "  if (!(o.poolSocPct < ref.pct) && offSlots.length === 0 && lineFlatPushHeld(nowMs, closeAtMs, s.forceChargeLineAskPct!, o.poolSocPct, o.fullKwh, o.connectedSlots.length)) return null;\n",
+    to: "  if (!(o.poolSocPct < ref.pct) && offSlots.length === 0 && lineFlatPushHeld(nowMs, closeAtMs, s.forceChargeLineAskPct!, s.forceChargeLineAskPct!, o.fullKwh, o.connectedSlots.length)) return null; /* MUTANT */\n",
+    why: 'No charge left to count: every flat pool waits to 40 min out, however far under the ask.',
+  },
+  {
+    id: 'F12-a(xiii). ★★★ a flat pool above the ask is no longer out, past the gate',
+    file: NFC, tests: [T_RISK],
+    find: "  if (!(o.poolSocPct < ref.pct) && o.poolSocPct > s.forceChargeLineAskPct!) return null;\n",
+    to: "/* MUTANT */\n",
+    why: 'The gate does not stand in for review 3\'s rule: a pool above the ask that reads flat in the last hour is a slow pack, over the line.',
+  },
+  {
+    id: 'F12-a(xiv). ★★★ the gate never opens',
+    file: NFC, tests: [T_RISK, T_CLOSE],
+    find: "  return nowMs < lineLatestStartMs(closeAtMs, askPct, poolSocPct, fullKwh, null, null, slotCount) - FORCE_CHARGE_LINE_AT_RISK_LEAD_MS;\n",
+    to: "  return nowMs < closeAtMs; /* MUTANT */\n",
+    why: 'A stuck charge, slots reading on, is never pushed (the timed-night pin).',
+  },
+  // (b) a stale panel
+  {
+    id: 'F12-b(i). ★★★ a stale panel pushed as incoherent (the finding)',
+    file: NFC, tests: [T_LINE],
+    find: "  if (!o.socCoherent) return { kind: 'none', why: o.slotsOn == null ? W.noReadback : W.incoherent };\n",
+    to: "  if (!o.socCoherent) return { kind: 'none', why: W.incoherent }; /* MUTANT */\n",
+    why: 'The push states a fact never read: no reading exists, none is incoherent.',
+  },
+  {
+    id: 'F12-b(ii). ★★★ a fresh reading that fails coherence pushed as no readback',
+    file: NFC, tests: [T_LINE],
+    find: "  if (!o.socCoherent) return { kind: 'none', why: o.slotsOn == null ? W.noReadback : W.incoherent };\n",
+    to: "  if (!o.socCoherent) return { kind: 'none', why: W.noReadback }; /* MUTANT */\n",
+    why: 'The sensor fault loses its name.',
+  },
+  {
+    id: 'F12-b(iii). ★★★ keyed on the pool, which a fresh incoherent reading has none of',
+    file: NFC, tests: [T_LINE],
+    find: "  if (!o.socCoherent) return { kind: 'none', why: o.slotsOn == null ? W.noReadback : W.incoherent };\n",
+    to: "  if (!o.socCoherent) return { kind: 'none', why: o.poolSocPct == null ? W.noReadback : W.incoherent }; /* MUTANT */\n",
+    why: 'index.ts nulls the pool on any incoherent tick: every one reads as no readback.',
+  },
+  {
+    id: 'F12-b(iv). ★★★ a start on a stale panel (kind moved)',
+    file: NFC, tests: [T_LINE],
+    find: "  if (!o.socCoherent) return { kind: 'none', why: o.slotsOn == null ? W.noReadback : W.incoherent };\n",
+    to: "  if (!o.socCoherent && o.slotsOn != null) return { kind: 'none', why: W.incoherent }; /* MUTANT */\n",
+    why: 'The check falls through to the grid and the readback below it: the order the decision reads moves.',
+  },
+  {
+    id: 'F12-b(v). ★★★ the frozen capacity does not reach the helper (the finding: close less 20 min, a time that closes under the line)',
+    file: IDX, tests: [T_LINE],
+    find: "        liveFullWh: fullWh, frozenFullWh: shp2.projection?.kind === 'shp2' ? shp2.projection.backupFullCapWh : null,\n",
+    to: "        liveFullWh: fullWh, frozenFullWh: null, /* MUTANT */\n",
+    why: '04:40 quoted where a start after about 04:11 closes under the line.',
+  },
+  {
+    id: 'F12-b(vi). ★★★ the helper ignores the frozen capacity',
+    file: NFC, tests: [T_LINE],
+    find: "  const fullWh = o.liveFullWh != null && o.liveFullWh > 0 ? o.liveFullWh : o.frozenFullWh != null && o.frozenFullWh > 0 ? o.frozenFullWh : null;\n",
+    to: "  const fullWh = o.liveFullWh != null && o.liveFullWh > 0 ? o.liveFullWh : null; /* MUTANT */\n",
+    why: 'The same, one level down.',
+  },
+  {
+    id: 'F12-b(vii). ★★★ the frozen capacity beats the live one',
+    file: NFC, tests: [T_LINE],
+    find: "  const fullWh = o.liveFullWh != null && o.liveFullWh > 0 ? o.liveFullWh : o.frozenFullWh != null && o.frozenFullWh > 0 ? o.frozenFullWh : null;\n",
+    to: "  const fullWh = o.frozenFullWh != null && o.frozenFullWh > 0 ? o.frozenFullWh : o.liveFullWh != null && o.liveFullWh > 0 ? o.liveFullWh : null; /* MUTANT */\n",
+    why: 'A live reading loses to a stale one.',
+  },
+  {
+    id: 'F12-b(viii). ★★ a zero live capacity is a capacity',
+    file: NFC, tests: [T_LINE],
+    find: "  const fullWh = o.liveFullWh != null && o.liveFullWh > 0 ? o.liveFullWh : o.frozenFullWh != null && o.frozenFullWh > 0 ? o.frozenFullWh : null;\n",
+    to: "  const fullWh = o.liveFullWh != null ? o.liveFullWh : o.frozenFullWh != null && o.frozenFullWh > 0 ? o.frozenFullWh : null; /* MUTANT */\n",
+    why: 'A zero capacity needs no charge: the last start, quoted over a reachable pool size.',
+  },
+  {
+    id: 'F12-b(ix). ★★★ a zero frozen capacity is a capacity',
+    file: NFC, tests: [T_LINE],
+    find: "  const fullWh = o.liveFullWh != null && o.liveFullWh > 0 ? o.liveFullWh : o.frozenFullWh != null && o.frozenFullWh > 0 ? o.frozenFullWh : null;\n",
+    to: "  const fullWh = o.liveFullWh != null && o.liveFullWh > 0 ? o.liveFullWh : o.frozenFullWh; /* MUTANT */\n",
+    why: 'The buffer alone, 15 min, where the close less 20 is the one time left to name.',
+  },
+  {
+    id: 'F12-b(x). ★★★ the live reading is ignored',
+    file: NFC, tests: [T_LINE],
+    find: "  return lineLatestStartMs(o.closeAtMs, o.askPct, o.poolSocPct ?? RESERVE_WRITE_MAX_PCT, fullWh / 1000, o.rateKw, o.evDisplacedKwh, o.slotCount);\n",
+    to: "  return lineLatestStartMs(o.closeAtMs, o.askPct, RESERVE_WRITE_MAX_PCT, fullWh / 1000, o.rateKw, o.evDisplacedKwh, o.slotCount); /* MUTANT */\n",
+    why: 'A pool at 70 is told a start time from 50.',
+  },
+  {
+    id: 'F12-b(xi). ★★★ no reading reads as the ask (the time from the later end)',
+    file: NFC, tests: [T_LINE],
+    find: "  return lineLatestStartMs(o.closeAtMs, o.askPct, o.poolSocPct ?? RESERVE_WRITE_MAX_PCT, fullWh / 1000, o.rateKw, o.evDisplacedKwh, o.slotCount);\n",
+    to: "  return lineLatestStartMs(o.closeAtMs, o.askPct, o.poolSocPct ?? o.askPct, fullWh / 1000, o.rateKw, o.evDisplacedKwh, o.slotCount); /* MUTANT */\n",
+    why: 'The later, less safe time, on the one night with no reading.',
+  },
+  {
+    id: 'F12-b(xii). ★★★ the rate the tick has is dropped',
+    file: NFC, tests: [T_LINE],
+    find: "  return lineLatestStartMs(o.closeAtMs, o.askPct, o.poolSocPct ?? RESERVE_WRITE_MAX_PCT, fullWh / 1000, o.rateKw, o.evDisplacedKwh, o.slotCount);\n",
+    to: "  return lineLatestStartMs(o.closeAtMs, o.askPct, o.poolSocPct ?? RESERVE_WRITE_MAX_PCT, fullWh / 1000, null, o.evDisplacedKwh, o.slotCount); /* MUTANT */\n",
+    why: '"At the rate then" stops being true of a live panel.',
+  },
+  {
+    id: 'F12-b(xiii). ★★★ the EV the tick counts is dropped',
+    file: NFC, tests: [T_LINE],
+    find: "  return lineLatestStartMs(o.closeAtMs, o.askPct, o.poolSocPct ?? RESERVE_WRITE_MAX_PCT, fullWh / 1000, o.rateKw, o.evDisplacedKwh, o.slotCount);\n",
+    to: "  return lineLatestStartMs(o.closeAtMs, o.askPct, o.poolSocPct ?? RESERVE_WRITE_MAX_PCT, fullWh / 1000, o.rateKw, null, o.slotCount); /* MUTANT */\n",
+    why: 'A predicted EV stops moving the time, as it moved it before.',
+  },
+  {
+    id: 'F12-b(xiv). ★★★ no capacity quotes nothing',
+    file: NFC, tests: [T_LINE],
+    find: "  if (fullWh == null) return o.closeAtMs - FORCE_CHARGE_MIN_RUN_MS;\n",
+    to: "  if (fullWh == null) return null; /* MUTANT */\n",
+    why: '"By ~the window close", 20 min past the last start the add-on makes.',
+  },
+  {
+    id: 'F12-b(xv). ★★★ the tick passes a reading that is not coherent',
+    file: IDX, tests: [T_LINE],
+    find: "askPct: state.forceChargeLineAskPct!, poolSocPct: socCoherent ? socNowPct : null,\n",
+    to: "askPct: state.forceChargeLineAskPct!, poolSocPct: socNowPct, /* MUTANT */\n",
+    why: 'The quoted time rests on the reading the push says is incoherent.',
+  },
+  // (c) a partial ON
+  {
+    id: 'F12-c(i). ★★★ the write stands beside it (the finding: "reserve held as a floor — no charge expected" with two slots charging)',
+    file: NFC, tests: [T_UNHELD],
+    find: "...(why !== 'partTaken' && reserveWriteStands(s) ? { writeStands: true as const } : {}) };",
+    to: "...(reserveWriteStands(s) ? { writeStands: true as const } : {}) }; /* MUTANT */",
+    why: 'The card keeps a figure that is false while slots charge, with the words buried under it.',
+  },
+  {
+    id: 'F12-c(ii). ★★★ the words read as no slot taking',
+    file: NFC, tests: [T_UNHELD],
+    find: "has not taken effect on all its slots: unless it applies late, the add-on does not switch it back on`;\n",
+    to: "has not taken effect: unless it applies late, the add-on does not switch it back on`; /* MUTANT */\n",
+    why: 'Two slots are charging.',
+  },
+  {
+    id: 'F12-c(iii). ★★★ a partial ON told it is on (the fix the verifier refuted)',
+    file: NFC, tests: [T_UNHELD],
+    find: "  const on = s.forceChargeOnVerifiedAtMs != null && s.forceChargeOffAtMs == null && nightSettledKey(s) == null && !everySlotReadsOff(s);\n",
+    to: "  const on = (s.forceChargeOnVerifiedAtMs != null || (s as NightActuationState).forceChargeOnFailedAtMs != null) && s.forceChargeOffAtMs == null && nightSettledKey(s) == null && !everySlotReadsOff(s); /* MUTANT */\n",
+    why: 'The walk takes the three-slot rate and drops a true under-the-line warning.',
+  },
+  {
+    id: 'F12-c(iv). ★★★ the words say no force-charge starts',
+    file: NFC, tests: [T_UNHELD],
+    find: "  if (why === 'partTaken') return `the force-charge for ${line} was switched on and has not taken effect on all its slots: unless it applies late, the add-on does not switch it back on`;\n",
+    to: "  if (why === 'partTaken') return `no force-charge for ${line} starts: the force-charge was switched on and has not taken effect on all its slots`; /* MUTANT */\n",
+    why: 'A start did come, and running slots may run on: "no force-charge starts" is false of the night.',
   },
   /* ── R: the ledger ── */
   {

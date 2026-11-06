@@ -1850,6 +1850,8 @@ test('★★★ U9 the unverified branch of armedLineNoReOn is gone: a closure g
     assert.equal(noReOnOf(s, STOP_AT), null, String(failed));
     assert.notEqual(closedRec(s, STOP_AT), null, String(failed));
   }
+  assert.equal(noReOnOf(SPENT({ forceChargeOnVerifiedAtMs: null }), STOP_AT), null, 'no reading has judged it: the budget says nothing of it yet');
+  assert.equal(noReOnOf(RUN({ forceChargeOnVerifiedAtMs: null }), CUT), null, 'nor the cutoff');
   const SRC = readFileSync(resolve(HERE, '../src/nightForceCharge.ts'), 'utf8');
   assert.ok(!SRC.includes("words: 'unless it applies late, the add-on does not switch it back on'"));
 });

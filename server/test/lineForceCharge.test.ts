@@ -1159,6 +1159,7 @@ test('★★★ T9 (Fix12) a stale panel is pushed as no readback, the fact it i
   // A fresh panel whose SoC fails coherence: slots read, so the reading is there and is what fails.
   assert.deepEqual(decideForceCharge(s, t, fo({ socCoherent: false, slotsOn: [] })), { kind: 'none', why: W.incoherent });
   assert.deepEqual(decideForceCharge(s, t, fo({ socCoherent: false, slotsOn: [1] })), { kind: 'none', why: W.incoherent });
+  assert.deepEqual(decideForceCharge(s, t, fo({ socCoherent: false, slotsOn: [], poolSocPct: null })), { kind: 'none', why: W.incoherent }, 'index.ts nulls the pool on an incoherent tick');
   // The order stays: red vitals first, then this, then the grid; a coherent night with no slot list keeps its own check, behind the grid.
   assert.deepEqual(decideForceCharge(s, t, fo({ ...STALE_PANEL, vitalsRed: true })), { kind: 'none', why: W.vitals });
   assert.deepEqual(decideForceCharge(s, t, fo({ ...STALE_PANEL, gridPresent: null })), { kind: 'none', why: W.noReadback });
