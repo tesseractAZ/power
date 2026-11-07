@@ -269,7 +269,15 @@ const PIN_T6_STOP_FALLS = [
   'write|mk|12 2026-11-30 +1 01:30', 'fixture|m|8 2027-02-10 +1 01:30',
 ];
 
-test('★★★ T6 THE COST ROOM AT v1.201.0\'s PERCENT: COST55\'s 40.3% and the reference plant\'s 80.4% ceilings; against v1.201.0 no cost write falls, and every stop that does is the de-bias\'s gate (pinned); every cost write at or above ⌈line⌉', () => {
+/** Measured against c692f30e over 4-20 h in a write mode with 270 W: the cost writes the same gate lowers, all on a
+ *  substitute scale (v1.201.0's writes 50, 50, 45). */
+const PIN_T6_WRITE_FALLS: ReadonlyArray<{ label: string; h: number; basis: CushionPoolScale['basis']; scale: number; written: number }> = [
+  { label: '2026-10-13 +1 01:30', h: 6, basis: 'held', scale: 0.92, written: 43 },
+  { label: '2026-10-13 +1 01:30', h: 6, basis: 'min-known', scale: 0.9, written: 44 },
+  { label: '2027-07-12 +1 01:30', h: 7, basis: 'min-known', scale: 0.9, written: 43 },
+];
+
+test('★★★ T6 THE COST ROOM AT v1.201.0\'s PERCENT: COST55\'s 40.3% and the reference plant\'s 80.4% ceilings; against v1.201.0 in its figures no cost write falls, and every stop that does is the de-bias\'s gate (pinned), as are the substitute scales\' three cost write falls; every cost write at or above ⌈line⌉', () => {
   const i = (o: Partial<NightChargeInputs> = {}): NightChargeInputs => ({
     nowMs: Date.UTC(2026, 9, 20, 4), fullKwh: N, socNowPct: 25, reserveFloorPct: 10, cushionPct: 15, socCoherent: true,
     islandedLoadKw: 1.445, outageCushionHours: 8, islandedLoadSafety: 1.5, legEff: 0.927, dischargeEff: 0.92, chargeCapKw: 10, gridInputCapKw: null,
@@ -308,6 +316,17 @@ test('★★★ T6 THE COST ROOM AT v1.201.0\'s PERCENT: COST55\'s 40.3% and the
   }
   assert.ok(costWrites > 1000, `${costWrites} cost writes`);
   assert.deepEqual(falls, PIN_T6_STOP_FALLS);
+  // The same gate between the figures' hours: on a held or lowest-known scale it lowers three cost writes of the 4-20 h
+  // year (none at ×0.944 measured, none of a resilience night), each to ⌈line⌉. v1.201.0's writes, measured on c692f30e
+  // in a write mode with 270 W: 50, 50 and 45.
+  for (const f of PIN_T6_WRITE_FALLS) {
+    const p = yearPlan(caseOf(f.label).deps, { scale: { scale: f.scale, basis: f.basis }, w: 270, st: 'write', h: f.h });
+    const at = `${f.label} ${f.h} h ${f.basis}`;
+    assert.equal(p.objective, 'cost_arbitrage', at);
+    assert.equal(written(p), f.written, at);
+    assert.equal(written(p), Math.ceil(p.cushionLineSocPct! - 1e-9), `${at}: the write is ⌈line⌉`);
+    assert.ok(!p.cushionShortfall && p.costCeilingSurplusKwh! > p.costCeilingSurplusRawKwh! + 0.005, `${at}: the de-bias applied on a night that holds its line`);
+  }
 });
 
 /* ══ T7 — the tick's mirror ═════════════════════════════════════════════════════════════════════════════ */
