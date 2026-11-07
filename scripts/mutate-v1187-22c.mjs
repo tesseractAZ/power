@@ -509,7 +509,7 @@ const MUTANTS = [
     id: 'C-lvi. ★★ the sizing sentence drops the calibration',
     file: NCA,
     find: '  const sizingNote = ` ${sizingBasisText(buyKwhDebiased, calNote, walkStandbyW)}${projSocAtWindowStartPct != null',
-    to: '  const sizingNote = ` ${sizingBasisText(buyKwhDebiased, '', walkStandbyW)}${projSocAtWindowStartPct != null /* MUTANT */',
+    to: '  const sizingNote = ` ${sizingBasisText(buyKwhDebiased, \'\', walkStandbyW)}${projSocAtWindowStartPct != null /* MUTANT */',
     why: 'With a learned de-bias the worst case is named at ×1.66 with nothing saying so.',
   },
   // ── what is spoken and pushed: the charge the write arms ──
