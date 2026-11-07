@@ -88,6 +88,21 @@ test('★★★ ... and with the overnight spec passed explicitly (what index.ts
   assert.deepEqual(moved, []);
 });
 
+test('★★★ v1.201.0 — ... and with the Cores\' standby passed explicitly as 0 W: every digest less the key is the golden, and the key is only where the cushion is energy', () => {
+  // index.ts now passes the runway's standby figure (cushionStandbyW). A figure of 0 W (both overhead options
+  // set to 0) is the cushion without it: no number and no word moves; the plan states the 0 W it counted.
+  let n = 0;
+  for (const c of legacyIdentityCases()) {
+    const p = plan({ ...c.deps, cushionStandbyW: 0 } as Parameters<typeof buildNightChargeInputs>[0]) as NightChargePlan & { cushionStandby?: unknown };
+    const { cushionStandby, ...rest } = p;
+    assert.equal(planDigest(rest as NightChargePlan), GOLDEN.digests[c.label], c.label);
+    if (p.cushionBasis === 'islanded-outage') assert.deepEqual(cushionStandby, { w: 0, kwh: 0, basis: 'runway-overhead' }, c.label);
+    else assert.equal('cushionStandby' in p, false, `${c.label}: a key off the islanded-outage basis`);
+    n += 1;
+  }
+  assert.equal(n, 1104);
+});
+
 test('★★ ... and with a spec that pins the window the resolver finds, carries the default acceptance and no backup', () => {
   // The PV terms are evaluated, not skipped: an explicit acceptance (the default value), a pinned
   // window, an explicit null hold. With no sun in the window they change nothing.

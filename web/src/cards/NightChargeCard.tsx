@@ -86,6 +86,10 @@ interface NightChargePlan {
   cushionTroughSocPct?: number | null;
   cushionLineSocPct?: number | null;
   cushionBasis?: string | null;
+  /** v1.201.0 — the Cores' standby the islanded-outage cushion counts: the runway's figure (W), its energy over
+   *  the cushion's hours (kWh, inside the cushion) and its basis ('implausible': a figure that was no reading,
+   *  counted as 0 W). Not shown: the rationale names it. Absent on other bases and on older plans. */
+  cushionStandby?: { w: number; kwh: number; basis: 'runway-overhead' | 'implausible' };
   confidenceTier: 'forecast' | 'mixed' | 'climatology';
   window: { startMs: number; endMs: number } | null;
   reserveFloorPct: number;

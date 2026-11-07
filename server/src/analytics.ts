@@ -3965,6 +3965,12 @@ export const RUNWAY_CHARGE_EFFICIENCY = Math.sqrt(DISPATCH_ROUND_TRIP_EFFICIENCY
 // RUNWAY_POOL_OVERHEAD_FLOOR_W / RUNWAY_CORE_OVERHEAD_W options (limits.ts; schema ranges equal
 // these clamps). The overhead is deliberately NOT derived as 90 W × connected Cores: with fewer
 // than three Cores connected that would shed overhead the remaining Cores still burn.
+// v1.201.0 — a SECOND consumer: the night-charge planner's islanded-outage cushion counts this
+// overhead for its hours (nightChargeAdvisor.ts cushionStandbyKwh), as one number from index.ts's
+// second runway-basis door (cushionStandbyOverheadW: this rule, for the Cores the house panel's
+// cushion tracker counts). Setting both options to 0 removes it from the runway and the cushion
+// alike (the cushion then is the load leg alone, never less). The marginal efficiency is the
+// runway's only: the cushion's load leg keeps the planner's discharge efficiency.
 export const RUNWAY_POOL_OVERHEAD_FLOOR_W = limits.runwayPoolOverheadFloorW;
 export const RUNWAY_CORE_OVERHEAD_W = limits.runwayCoreOverheadW;
 export const RUNWAY_DRAIN_MARGINAL_EFFICIENCY = limits.runwayDrainMarginalEfficiency;

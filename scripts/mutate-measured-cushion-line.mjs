@@ -184,8 +184,9 @@ const MUTANTS = [
   {
     id: 'A-x. ★★★ the plan carries an undefined scale key where none applied',
     file: NCA, tests: [T_LINE],
-    find: '    ...(cushionLine.applied != null ? { cushionPoolScale: cushionLine.applied } : {}),\n    cushionOutageHours: inputs.outageCushionHours ?? DEFAULT_OUTAGE_CUSHION_HOURS,\n    // R2',
-    to: '    cushionPoolScale: cushionLine.applied ?? undefined, /* MUTANT */\n    cushionOutageHours: inputs.outageCushionHours ?? DEFAULT_OUTAGE_CUSHION_HOURS,\n    // R2',
+    // v1.201.0 — re-anchored: the charge plan's spread is followed by the standby's (the Cores' standby in the cushion).
+    find: "    ...(cushionLine.applied != null ? { cushionPoolScale: cushionLine.applied } : {}),\n    // v1.201.0 — the Cores' standby the cushion counted, only where a figure was passed (islanded-outage).\n    ...(standby != null ? { cushionStandby: standby } : {}),\n    cushionOutageHours: inputs.outageCushionHours ?? DEFAULT_OUTAGE_CUSHION_HOURS,\n    // R2",
+    to: "    cushionPoolScale: cushionLine.applied ?? undefined, /* MUTANT */\n    // v1.201.0 — the Cores' standby the cushion counted, only where a figure was passed (islanded-outage).\n    ...(standby != null ? { cushionStandby: standby } : {}),\n    cushionOutageHours: inputs.outageCushionHours ?? DEFAULT_OUTAGE_CUSHION_HOURS,\n    // R2",
     why: 'Every plan without a scale gains a key: no plan reproduces its digest (the persisted JSON\'s key list).',
   },
   {
