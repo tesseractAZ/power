@@ -265,6 +265,9 @@ export interface CushionNotePlan {
   expectedLineCeilingStop?: { ceilingPct: number; startTargetPct: number; noReOnWords?: string };
   expectedWriteLevelPct?: number | null;
   expectedForceChargeStartMs?: number | null;
+  /** v1.202.0 — a line night the cost force-charge carries whose walk past its stop closes under the line: that close
+   *  (NightChargePlan.expectedCloseAfterStopPct). Absent otherwise. */
+  expectedCloseAfterStopPct?: number;
 }
 
 /** v1.200.0 (review 2) — the server's FORCE_CHARGE_LINE_REON_MAX in words (nightForceCharge.lineReOnTimesWords): the
@@ -283,11 +286,17 @@ export function capsShortfallShown(plan: CushionNotePlan): boolean {
  *  scorer's 0.05, whatever the reason or cause), 'nearFull' (held, within 10 points of full) — or null. The server's
  *  lineForceChargeYear.test.ts holds the two equal on every plan of the year, and lineForceCharge.test.ts T20 at the
  *  edge: a close exactly at L − 0.05 holds (1e-9 of float slack, the server's LINE_CLOSE_EDGE_EPS: in binary 50.35 −
- *  0.05 is 50.300000000000004). */
+ *  0.05 is 50.300000000000004). v1.202.0 — and, on a night the cost force-charge carries, 'closeUnder' where its walk past
+ *  the stop closes under the line (expectedCloseAfterStopPct). */
 export function lineNotHeldOfCard(plan: CushionNotePlan): 'closeUnder' | 'aboveFull' | 'nearFull' | null {
-  if (plan.forceChargeLine == null || plan.expectedForceChargeMode !== 'line') return null;
+  if (plan.forceChargeLine == null) return null;
   const l = plan.cushionLineSocPct;
   if (l == null || !Number.isFinite(l)) return null;
+  // v1.202.0 — a night the cost force-charge carries: its close past the stop, where under the line.
+  if (plan.expectedForceChargeMode !== 'line') {
+    const c = plan.expectedCloseAfterStopPct;
+    return c != null && Number.isFinite(c) && c < l - 0.05 - 1e-9 ? 'closeUnder' : null;
+  }
   if (l > 100) return 'aboveFull';
   const e = plan.expectedWriteLevelPct;
   if (e != null && e < l - 0.05 - 1e-9) return 'closeUnder';
@@ -330,7 +339,8 @@ export function outageLineRow(plan: CushionNotePlan, maxPct: number | null = nul
       : kind === 'nearFull' ? ' — within 10 points of a full pool, not held with its usual margin; residual risk remains' : '';
   const row = outageLineArmedRow(plan, max, r1, lineText);
   if (row == null && armed && plan.cushionShortfallCause != null) {
-    // Never silent on a disclosed night, whatever the walk's mode (a plan this build does not make).
+    // Never silent on a disclosed night, whatever the walk's mode: v1.202.0, a night the cost force-charge carries whose walk
+    // past its stop closes under the line.
     const l = plan.cushionLineSocPct;
     return `outage line ${lineText(l)}is above the ${max}% the panel accepts as a reserve — its force-charge runs, but the line is not claimed; residual risk remains`;
   }

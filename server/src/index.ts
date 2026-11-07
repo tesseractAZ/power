@@ -6199,7 +6199,11 @@ function forceChargeArmNote(armed: NightActuationState, plan: NightChargePlan | 
   if (c <= RESERVE_WRITE_MAX_PCT) {
     return `Force-charge: none tonight — the ${c}% target is at or below the ${RESERVE_WRITE_MAX_PCT}% reserve, which reaches it alone.`;
   }
-  return `Force-charge: ELIGIBLE — just in time to reach ~${c}% by the window close (from the open, if the pack needs the whole window); OFF when it gets there (software stop; panel ceiling ${desiredForceChargeCeilingPct(c)}% as backstop).`;
+  // v1.202.0 — a line night this force-charge carries, whose walk past the stop closes under the line (lineNotHeldOf): said
+  // as the line-mode sentence says it.
+  const closeAfter = lineNotHeldOf(plan) === 'closeUnder' ? plan?.expectedCloseAfterStopPct : null;
+  return `Force-charge: ELIGIBLE — just in time to reach ~${c}% by the window close (from the open, if the pack needs the whole window); OFF when it gets there (software stop; panel ceiling ${desiredForceChargeCeilingPct(c)}% as backstop).`
+    + (closeAfter != null ? ` Line NOT held: ~${round1(closeAfter)}% expected at the close.` : '');
 }
 
 /**

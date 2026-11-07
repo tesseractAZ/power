@@ -398,8 +398,10 @@ export type CushionEnvelopeReason = 'advisory' | 'backupLeg' | 'reserveAtTarget'
  *  disclosure by this one value, whatever the reason or cause. */
 export type LineNotHeld = 'closeUnder' | 'aboveFull' | 'nearFull';
 /**
- * v1.200.0 (A5) — PURE. What an armed night's line walk cannot hold, or null where it holds (or nothing is armed, or the
- * walk is not in line mode — a cost-dominant night's stop is ⌈L⌉ + 10 or more):
+ * v1.200.0 (A5) — PURE. What an armed night's line walk cannot hold, or null where it holds (or nothing is armed).
+ * v1.202.0 — a night the COST force-charge carries (its stop ⌈L⌉ + 10 or more, so no line-mode walk) is 'closeUnder' where
+ * its walk past the stop closes under the line (expectedCloseAfterStopPct, the close the texts then name); null otherwise.
+ * On a line-mode walk:
  *  - 'aboveFull' — the line is above a full pool: no charge can hold it;
  *  - 'closeUnder' — the walk's expected close (capped at the window's reach) is under L − the tolerance, whatever the
  *    reason: near-full, the plan's own walk, or a carried night whose sizing already fell short (its caps note stands);
@@ -409,10 +411,15 @@ export type LineNotHeld = 'closeUnder' | 'aboveFull' | 'nearFull';
  * lineForceChargeYear.test.ts).
  */
 export function lineNotHeldOf(p: Pick<NightChargePlan, 'forceChargeLine' | 'expectedForceChargeMode'
-  | 'expectedWriteLevelPct' | 'cushionLineSocPct' | 'cushionEnvelopeReason'> | null | undefined): LineNotHeld | null {
-  if (p == null || p.forceChargeLine == null || p.expectedForceChargeMode !== 'line') return null;
+  | 'expectedWriteLevelPct' | 'cushionLineSocPct' | 'cushionEnvelopeReason' | 'expectedCloseAfterStopPct'> | null | undefined): LineNotHeld | null {
+  if (p == null || p.forceChargeLine == null) return null;
   const l = p.cushionLineSocPct;
   if (l == null || !Number.isFinite(l)) return null;
+  // v1.202.0 — a night the COST force-charge carries: its close past the stop (expectedCloseAfterStopPct), where under the line.
+  if (p.expectedForceChargeMode !== 'line') {
+    const c = p.expectedCloseAfterStopPct;
+    return c != null && Number.isFinite(c) && !lineWalkHolds(c, l) ? 'closeUnder' : null;
+  }
   if (l > 100) return 'aboveFull';
   if (!lineWalkHolds(p.expectedWriteLevelPct ?? null, l)) return 'closeUnder';
   return p.cushionEnvelopeReason === 'nearFull' ? 'nearFull' : null;
@@ -676,6 +683,12 @@ export interface NightChargePlan {
    *  so — never "stays on until the window closes", never "the ceiling is the backstop". Absent otherwise (that
    *  plan's JSON is unchanged). (Fix10 review 2) `noReOnWords`, where the record can make no re-ON (armedLineNoReOn): said in its place. */
   expectedLineCeilingStop?: { ceilingPct: number; startTargetPct: number; noReOnWords?: string };
+  /** v1.202.0 — an armed line night the COST force-charge carries (its stop ⌈L⌉ + 10 or more, so no expectedForceChargeMode),
+   *  whose walk past the stop closes under the line: the close, % (round1). expectedWriteLevelPct is the stop the pool reaches
+   *  first; from there the cost force-charge is off for the night (no re-ON in cost mode) and the house, the EV included, draws
+   *  the pool on the median basis, held at the written reserve, to the window close (expectedBuyFromPlan). Present only beside
+   *  cushionEnvelopeReason 'closeUnder' (lineNotHeldOf), so a cost-carried night that holds its line keeps its JSON. */
+  expectedCloseAfterStopPct?: number;
 
   /** v1.60.0 — EV-contention disclosure for tonight's window (see the type).
    *  null only on a null plan (no window was even resolved). */
@@ -1257,6 +1270,9 @@ export interface ExpectedBuy {
    *  by itself (the measured OFF-reading latch). The texts then say so, never "stays on until the window closes"
    *  and never "the ceiling is the backstop". Absent on a walk that stays under it. */
   ceilingStop?: true;
+  /** v1.202.0 — on a line night the COST force-charge carries (forceChargeModeOf 'cost' with the line gate): the close the
+   *  walk past its stop reaches, % (`levelPct` is the stop). Absent otherwise, and with no P50 basis. */
+  closePct?: number;
 }
 
 /**
@@ -1462,6 +1478,22 @@ export function expectedBuyFromPlan(o: {
       // R2 — the P50 PV that lands in the pack during the force-charge is not bought (0 with no PV).
       const fcLiftKwh = Math.max(0, levelKwh - jit.packKwh);
       liftKwh += fcLiftKwh - pvWalk(fcLiftKwh, jit.startMs).creditKwh;
+    }
+    // ★ v1.202.0 — A LINE NIGHT THE COST FORCE-CHARGE CARRIES (its stop ⌈L⌉ + 10 or more): the walk past the stop. The level
+    // above is the stop the pool reaches; the cost force-charge then switches off for the night (its software stop, no re-ON
+    // in cost mode), and the house — the EV included, on the median basis — draws the pool, held at the written reserve, to
+    // the window close. Walked as the line walk walks a run that is on: from the start (or, with none expected, from the last
+    // possible start) up to the stop at the hour's median contended rate and PV, latched there with no re-ON, to the close.
+    // Disclosure only: nothing written, armed or bought reads it (the sizing reads closePct for the line claim alone).
+    if (mode?.kind === 'cost') {
+      const after = expectedLineForceChargeWalk({
+        startKwh: jit.packKwh, reserveKwh, fullKwh: o.fullKwh, tickPoolKwh: o.tickPoolKwh,
+        startTargetPct: levelPct, panelCeilingPct: levelPct, hours: o.window.hours,
+        fromMs: jit.startMs ?? o.window.windowEndMs - FORCE_CHARGE_MIN_RUN_MS, windowEndMs: o.window.windowEndMs,
+        dischargeEff: o.window.dischargeEff, chargeCapKw: o.window.chargeCapKw, envelopeKw: o.window.envelopeKw, legEff: o.legEff,
+        acceptKw: o.window.acceptKw ?? null, noReOn: true, runOn: jit.startMs != null, standbyW: o.window.standbyW,
+      });
+      if (after != null) out.closePct = round1(Math.max(reservePct, (after.closeKwh / o.fullKwh) * 100));
     }
   }
   const deliverableKwh = Math.max(0, o.deliverableKwh);
@@ -2609,7 +2641,10 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   // AFTER the cost block: the cost ceiling and its de-bias bound (debiasedCostSurplusKwh) read the sized flag alone. The
   // trough stays the sized one (never capped). Above the mid-day re-entry hold, which reads only `expected`.
   const lineNearFull = lineAsk + 2 * FORCE_CHARGE_LINE_HEADROOM_PCT > 100;
-  const lineCloseUnder = lineArmed && !lineNearFull && !cushionShortfall && !lineWalkHolds(expected.levelPct, cushionLineSocPct);
+  // v1.202.0 — a night the COST force-charge carries is judged on its close past the stop (expected.closePct), not the stop.
+  const lineCloseAfterStopPct = expected.mode !== 'line' ? expected.closePct ?? null : null;
+  const lineCloseUnder = lineArmed && !lineNearFull && !cushionShortfall
+    && !lineWalkHolds(lineCloseAfterStopPct ?? expected.levelPct, cushionLineSocPct);
   const lineCarried = lineArmed && !lineNearFull && !lineCloseUnder;
   const lineDisclosed = lineQualifies && lineEligible !== undefined && !lineCarried;
   const planCushionShortfall = cushionShortfall || lineDisclosed;
@@ -2768,12 +2803,14 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   const lineReOnTimesText = lineReOnTimesWords(FORCE_CHARGE_LINE_REON_MAX);
   // A5 — what an ARMED night's own walk cannot hold (lineNotHeldOf, the one predicate every surface words by), after
   // its line-mode sentence: under the line (whatever the reason or cause), above a full pool, or held without the margin.
+  // v1.202.0 — the close a cost-carried night's walk past its stop reaches, only where it is under the line (the plan's field).
+  const closeAfterStopField = lineCloseUnder && lineCloseAfterStopPct != null ? { expectedCloseAfterStopPct: lineCloseAfterStopPct } : {};
   const lineNotHeld = lineNotHeldOf({
     ...(forceChargeLine != null ? { forceChargeLine } : {}), expectedForceChargeMode: expected.mode, expectedWriteLevelPct: expected.levelPct,
-    cushionLineSocPct, ...(cushionEnvelopeReason != null ? { cushionEnvelopeReason } : {}),
+    cushionLineSocPct, ...(cushionEnvelopeReason != null ? { cushionEnvelopeReason } : {}), ...closeAfterStopField,
   });
   const lineNotHeldNote = lineNotHeld === 'closeUnder'
-    ? ` NOTE: on the median load the pool is expected to close at ~${expected.levelPct}%, under tonight's ${cushionLineSocPct}% outage line, so the cushion is not fully held — residual risk remains.`
+    ? ` NOTE: on the median load the pool is expected to close at ~${closeAfterStopField.expectedCloseAfterStopPct ?? expected.levelPct}%, under tonight's ${cushionLineSocPct}% outage line, so the cushion is not fully held — residual risk remains.`
     : lineNotHeld === 'aboveFull'
       ? ` NOTE: tonight's ${cushionLineSocPct}% outage line is above a full pool, so no charge can hold it — residual risk remains.`
       : lineNotHeld === 'nearFull'
@@ -2800,7 +2837,7 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
       : cushionEnvelopeReason === 'reserveAtTarget' ? `the reserve reads ${round1(reserveFloorPct)}%: no write is due while it does, and no force-charge runs without one, so the cushion is not assured`
         : cushionEnvelopeReason === 'armedNoLine' ? 'no write armed for this window carries a force-charge for it, so the cushion is not assured'
           : 'no force-charge runs in advisory mode, so the cushion is not fully held'} — residual risk remains.`
-    : lineModeNote != null ? `${lineModeNote}${lineNotHeldNote}` : lineNotHeldNote !== '' ? lineNotHeldNote : null;
+    : lineModeNote != null ? `${lineModeNote}${lineNotHeldNote}` : null;
   // v1.187.22 — the third quantity ("the window is only expected to reach ~X%") was the
   // islanded worst case's arrival, already stated once as such by the sizing sentence just
   // before; called "expected" it contradicted the Expected: sentence (~5 kWh to 50%, then
@@ -2808,7 +2845,9 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   const setpointNote = setpointSocPct > targetSocPct + 0.05
     ? ` The reserve ${lineStanding ? 'reads' : 'is set to'} ${writtenPct}%${truncated ? ` — ${askName} asks for ${setpointSocPct}%, but the panel only accepts a backup reserve up to ${RESERVE_WRITE_MAX_PCT}%` : ` (${askName})`}.`
     : '';
-  const reserveNote = envelopeNote ?? setpointNote;
+  // v1.202.0 — a night the cost force-charge carries keeps the reserve sentence, and adds what its walk past the stop cannot
+  // hold (lineNotHeldNote: under the line at the close).
+  const reserveNote = envelopeNote ?? `${setpointNote}${lineNotHeldNote}`;
   const holdReason = starved
     ? `this window can deliver only ~${round1(buyKwh)} kWh, under the ${round1(minBuyKwh)} kWh minimum-buy threshold${holdCapName} — against a requirement of ${meetable ? `~${round1(requiredExtraKwh)} kWh` : 'more than the pool can hold'}. The window cannot serve the need; this is not a night with little worth buying.`
     : `the buy this window would make (~${round1(buyKwh)} kWh) is under the ${round1(minBuyKwh)} kWh minimum-buy threshold — the projected need is genuinely small.`;
@@ -2847,6 +2886,8 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
     ...(lineStanding && forceChargeLine != null ? { lineReserveStands: true as const } : {}),
     ...(expected.mode === 'line' ? { expectedForceChargeMode: 'line' as const } : {}),
     ...(lineCeilingStop != null ? { expectedLineCeilingStop: lineCeilingStop } : {}),
+    // v1.202.0 — only where a cost-carried night's walk past its stop closes under its line.
+    ...closeAfterStopField,
     evContention,
     minProjSocPct,
     minProjSocTsMs: houseWithBuy.minTs,   // v1.125.0 — matches the disclosed house trough
