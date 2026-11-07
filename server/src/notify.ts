@@ -898,7 +898,7 @@ export function buildNightChargeMorningSummary(o: {
       ? (line != null
         ? `${reserve}, and force-charge ${ranLine}${readOffText}${reOnText}${close}${note}; ${restored}`
         : `${reserve}, and force-charge ran${toward}${close}${note}; ${restored}`)
-      : `${reserve}${note}; force-charge${toward} ${fc.kind === 'neverStarted' ? `never started${o.gridLost === true ? ' (the grid was lost during the window)' : ''}`
+      : `${reserve}${note}; force-charge${toward} ${fc.kind === 'neverStarted' ? `never started${o.gridLost === true ? ' (the grid read as lost)' : ''}`
         : fc.kind === 'failed' ? failedOn
           : 'was switched ON but the panel never confirmed it'}${close}; ${restored}`;
   }

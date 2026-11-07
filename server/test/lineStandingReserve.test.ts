@@ -295,7 +295,7 @@ test('★★★ S4 a grid lost is one-way: the same blip as a written night, no 
   assert.equal(dfc(lost, startTick, { gridPresent: false, ceilingReadbackPct: 66 }).kind, 'none');
   const stamped = { ...lost, gridLostAtMs: startTick } as Rec;
   assert.deepEqual(dfc(stamped, startTick + 10 * M, { ceilingReadbackPct: 66 }), { kind: 'restoreCeiling', pct: 100, lastAttempt: false }, 'the grid back: no ON, the ceiling goes back');
-  assert.deepEqual(dfc({ ...stamped, forceChargeCeilingPriorPct: null } as Rec, startTick + 10 * M, { ceilingReadbackPct: 66 }), { kind: 'none', why: 'the grid was lost during the window' });
+  assert.deepEqual(dfc({ ...stamped, forceChargeCeilingPriorPct: null } as Rec, startTick + 10 * M, { ceilingReadbackPct: 66 }), { kind: 'none', why: 'the grid read as lost' });
   // A written night, the same blip: for comparison.
   assert.deepEqual(dac(written(), startTick, { gridPresent: false }), { kind: 'revert', restorePct: 30, gridLossAbort: true });
   // An ON on the record goes off on the stamp alone, the grid reading true again.
@@ -328,7 +328,7 @@ test('★★★ S5 forceChargeStartClosed: a stamp is no "noWrite"; the grid-los
   assert.equal(nfc.forceChargeStartClosed(stood({ cancelled: true }), t, G), 'cancelled');
   assert.equal(nfc.forceChargeStartClosed(stood(), CLOSE - 20 * M, G), 'late');
   assert.equal(nfc.forceChargeStartClosed(stood(), CLOSE, G), 'over');
-  assert.equal(nfc.lineStartClosedWords('the 55.6% outage line', 'gridLost'), 'no force-charge for the 55.6% outage line starts: the grid was lost during the window');
+  assert.equal(nfc.lineStartClosedWords('the 55.6% outage line', 'gridLost'), 'no force-charge for the 55.6% outage line starts: the grid read as lost');
   assert.equal(nfc.lineStartClosedWords('the 55.6% outage line', 'noWrite'), 'no force-charge for the 55.6% outage line starts: no verified reserve write, and no reading of the target with every check clear, came in the apply window');
   assert.equal(nfc.lineStartClosedWords('the 55.6% outage line', 'foreign'), 'no force-charge for the 55.6% outage line starts: the reserve was changed');
   const closure = nfc.armedLineStartClosed(stood({ gridLostAtMs: t, forceChargeOnAtMs: t - M, forceChargeOffAtMs: t }), t, G);
@@ -509,7 +509,7 @@ test('★★★ S7 the close of a stood night: what ran, the close against the l
   const never = sum({ forceCharge: { kind: 'neverStarted', stopPct: null, expectedLeg: true, line: { askPct: 56, linePct: 55.55 } }, closePoolPct: 52 });
   assert.ok(never.body.includes('the reserve stood at 50%; force-charge for the 55.6% outage line never started; the pool read 52% at the close, under the 55.6% outage line; no restore was due.'), never.body);
   const lost = sum({ forceCharge: { kind: 'neverStarted', stopPct: null, expectedLeg: true, line: { askPct: 56, linePct: 55.55 } }, closePoolPct: 52, gridLost: true });
-  assert.ok(lost.body.includes('never started (the grid was lost during the window)'), lost.body);
+  assert.ok(lost.body.includes('never started (the grid read as lost)'), lost.body);
   const none = sum({ forceCharge: { kind: 'none', expectedLeg: false }, closePoolPct: 52 });
   assert.ok(none.body.startsWith('Supervised night charge for 2027-01-04 completed: the reserve stood at 50%; no restore was due.'), none.body);
   // A written night keeps its words.
@@ -897,8 +897,8 @@ test('★★★ S10 the APPLY guards read it: no stamp, no apply, whatever the r
 
 test('★★★ S10 the ride reads it: no ON and no ceiling sync, with the grid back and the reserve at the target, and its own words', () => {
   assert.equal(ride(lostAtStamp()), false);
-  assert.deepEqual(dfc(lostAtStamp(), startTick, { ceilingReadbackPct: 66 }), { kind: 'none', why: 'the grid was lost during the window' });
-  assert.deepEqual(dfc(lostAtStamp({ forceChargeCeilingPct: 90 }), startTick, { enabled: true, ceilingReadbackPct: 90 }), { kind: 'none', why: 'the grid was lost during the window' }, 'nor a cost ceiling');
+  assert.deepEqual(dfc(lostAtStamp(), startTick, { ceilingReadbackPct: 66 }), { kind: 'none', why: 'the grid read as lost' });
+  assert.deepEqual(dfc(lostAtStamp({ forceChargeCeilingPct: 90 }), startTick, { enabled: true, ceilingReadbackPct: 90 }), { kind: 'none', why: 'the grid read as lost' }, 'nor a cost ceiling');
   assert.equal(nfc.reserveWriteStands(lostAtStamp()), false);
 });
 
@@ -922,7 +922,7 @@ test('★★★ S10 legFinished from its own tick, inside the apply window; legS
     assert.equal(cyc.lineStartClosedStatus(lostAtStamp(), t, G).lineStartClosed?.cancel, false, String((t - OPEN) / M));
     assert.equal(cyc.legResolved(lostAtStamp(), t, 50), true, String((t - OPEN) / M));
   }
-  assert.deepEqual(cyc.lineStartClosedStatus(lostAtStamp(), OPEN + M, G), { lineStartClosed: { text: 'No force-charge for the 55.6% outage line starts: the grid was lost during the window.', cancel: false } });
+  assert.deepEqual(cyc.lineStartClosedStatus(lostAtStamp(), OPEN + M, G), { lineStartClosed: { text: 'No force-charge for the 55.6% outage line starts: the grid read as lost.', cancel: false } });
   assert.equal(cyc.legStatusState(lostAtStamp({ cancelled: true }), OPEN + M), 'cancelled', 'a cancel still reads as one');
   assert.equal(cyc.legStatusState(armed(), OPEN + 31 * M), 'missed', 'no loss: as ever');
   assert.equal(act.armOpenItem(lostAtStamp(), 50), null, 'the next arm is free');
@@ -935,7 +935,7 @@ test('★★★ S10 lineCloseAccountDue: the standing account with gridLost, nev
   assert.equal(nfc.lineCloseAccountDue(lostAtStamp({ lineCloseAccountAtMs: CLOSE }), CLOSE + M), null, 'once');
   const m = notify.buildNightChargeMorningSummary({ day: '2027-01-04', targetPct: 50, restorePct: 50, expectedKwh: 12.3, linePct: 55.55, standing: true, gridLost: true, closePoolPct: 52, forceCharge: nfc.forceChargeNightOutcome(lostAtStamp(), G) } as never);
   assert.ok(m.body.includes('the reserve stood at 50%'), m.body);
-  assert.ok(m.body.includes('never started (the grid was lost during the window)'), m.body);
+  assert.ok(m.body.includes('never started (the grid read as lost)'), m.body);
   assert.ok(m.body.includes('no restore was due.'), m.body);
   assert.doesNotMatch(m.body, /no verified reserve write/, m.body);
 });

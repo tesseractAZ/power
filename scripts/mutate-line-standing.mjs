@@ -733,7 +733,7 @@ const MUTANTS = [
   {
     id: 'LS8-m. ★★ a grid loss unsaid at the close',
     file: NTF, tests: [T_S],
-    find: "`never started${o.gridLost === true ? ' (the grid was lost during the window)' : ''}`\n",
+    find: "`never started${o.gridLost === true ? ' (the grid read as lost)' : ''}`\n",
     to: "'never started' /* MUTANT */\n",
     why: 'S7.',
   },

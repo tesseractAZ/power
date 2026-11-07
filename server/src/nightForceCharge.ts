@@ -815,7 +815,7 @@ export const FORCE_CHARGE_START_CLOSED_WHY: Readonly<Record<Exclude<LineStartClo
   reverted: "the reserve's restore was sent",
   // v1.200.1 — neutral: on a stood night the add-on's own floor route lands here too.
   foreign: 'the reserve was changed',
-  gridLost: 'the grid was lost during the window',
+  gridLost: 'the grid read as lost',
   noWindow: 'the night has no charge window',
   over: 'the window has closed',
   late: `${Math.round(FORCE_CHARGE_MIN_RUN_MS / 60_000)} min or less of the window is left`,
