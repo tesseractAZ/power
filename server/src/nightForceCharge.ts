@@ -732,8 +732,8 @@ export function lineLatestStartMs(
  * A time at or before now is null: a deadline that cannot be met is no time to act, and the push's words then name no clock. Residual: with
  * no live rate the plan rate stands, which can run late on a plant under about 10 kW; and an EV above its prediction, or a house that rises
  * after the push, can run a clock late. A person's one Charge Now at an early clock differs from the add-on's start: it stops at the panel's
- * ceiling with no re-ON, so an EV to the close can take the pool under the line where a later tap holds (118 of 11,738 walked clocks, all on
- * EV nights; a tap 30 min later closes under on 1,535, so the clock stays early). The pool size is the live one, else the frozen projection's: its
+ * ceiling with no re-ON, so with the blocker held to the close an EV to the close can take the pool under the line where a later tap holds (118 of
+ * 11,738 walked clocks, all on EV nights; a tap 30 min later closes under on 1,535, so the clock stays early). The pool size is the live one, else the frozen projection's: its
  * backupFullCapWh is a nameplate capacity, not a reading, and while a frozen projection never decides a write, this decides only a sentence. With
  * no capacity at all it falls back to the last start, the close less FORCE_CHARGE_MIN_RUN_MS, which no push reaches: decideForceCharge declines on
  * the clock from there, and the clock is no blocker. null with no close.
