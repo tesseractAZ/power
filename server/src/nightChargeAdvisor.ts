@@ -2139,7 +2139,7 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
     // minimum buy turned a charge night into a hold (2027-02-01 21:30, 47.65 h, ×0.944, 40 kWh: buy 42.04 at
     // 0 W, a hold at 270 W). With it every figure the standby moves stays non-decreasing in the figure (I-B2):
     // the bisected lift is ≤ hiLift, and min(hiLift, chargePowerLiftKwh) is the most this window delivers.
-    // With no figure, or 0 W, the proxy stays: v1.200.0's plan, number for number.
+    // With no figure, or 0 W, the proxy stays: v1.200.1's plan, number for number.
     requiredExtraKwh = standbyCounted ? hiLift : poolHeadroomLiftKwh;
   } else {
     let lo = 0;

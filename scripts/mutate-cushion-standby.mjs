@@ -10,7 +10,7 @@
  * cushion; a figure that is no reading (not finite, negative, above 1500 W, not a number) ⇒ 0 W recorded
  * 'implausible'; legacy-pct and disabled do not move. Where a figure above 0 W is counted, an unmeetable line is
  * sized at the window's full effort (hiLift), so the requirement and the buy stay non-decreasing in the figure
- * across the pool's 100% (review); with no figure, 0 W or no reading, v1.200.0's proxy. Mutants S-i..xviii.
+ * across the pool's 100% (review); with no figure, 0 W or no reading, v1.200.1's proxy. Mutants S-i..xviii.
  *
  * (A) AGREEMENT. Every reader of the cushion reads the one cushionKwh and the one line: the shortfall, the
  * rationale's clause only where a figure above 0 W applied, the plan field on both plan shapes; the log line states
@@ -89,7 +89,7 @@ const MUTANTS = [
     file: NCA, tests: [T_SB],
     find: PLAUSIBLE,
     to: "  if (typeof w !== 'number' || !Number.isFinite(w) || w > CUSHION_STANDBY_PLAUSIBLE_MAX_W + 1e-9) { /* MUTANT */",
-    why: 'A −1 W figure lowers the written reserve below v1.200.0\'s: the fail-safe direction inverted.',
+    why: 'A −1 W figure lowers the written reserve below v1.200.1\'s: the fail-safe direction inverted.',
   },
   {
     id: 'S-vi. ★★★ a NaN figure is accepted',
@@ -174,7 +174,7 @@ const MUTANTS = [
     file: NCA, tests: [T_SB],
     find: "  const standbyCounted = standby?.basis === 'runway-overhead' && standby.kwh > 0;",
     to: '  const standbyCounted = true; /* MUTANT */',
-    why: 'An unmeetable night with no figure moves off v1.200.0\'s plan (61.27 → 99.04 kWh): I-B0 broken for every caller that passes none.',
+    why: 'An unmeetable night with no figure moves off v1.200.1\'s plan (61.27 → 99.04 kWh): I-B0 broken for every caller that passes none.',
   },
   {
     id: 'S-xviii. ★★ full effort at 0 W or on a figure that is no reading',
