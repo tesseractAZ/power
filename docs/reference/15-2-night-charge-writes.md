@@ -306,9 +306,7 @@ Three properties an operator needs before setting these:
    cost leg.
 
    Setting `ARB_COST_MAX_SOC_PCT` to 50 disables the **cost** force-charge. Since v1.200.0 it does
-   not stop every Charge Now: a night whose outage line is above the 50% reserve still
-   force-charges to it in supervised or auto mode (below). Only `NIGHT_CHARGE_MODE: advisory` or
-   the per-night cancel stops that.
+   not stop the line force-charge (below); `NIGHT_CHARGE_MODE: advisory` or the night's cancel does.
 2. **Cost mode is rate-blind.** `costModeTargetKwh` reads no tariff. "Cost" here means *fill
    further*, on the premise that overnight energy is the cheapest the day will offer — not
    that the planner optimises against the rate table. The tariff model informs the *window*,
@@ -579,7 +577,7 @@ Add-on options (`config.yaml` → env):
 | `ARB_OUTAGE_CUSHION_HOURS` | `4` | float 0–72 | Outage length the cushion carries the measured islanded load through (v1.125.0); `0` disables the cushion (basis `disabled`, v1.133.0) |
 | `ARB_ISLANDED_LOAD_SAFETY` | `1.25` | float 1–5 | Multiplier on the 7-day mean islanded (panel) load in the cushion; raising it buys more |
 | `ARB_OBJECTIVE` | `resilience` | list(resilience\|cost) | Sizing objective (§8b) |
-| `ARB_COST_MAX_SOC_PCT` | `90` | int 50–100 | Cost-mode fill ceiling; above 50 it is reached by force-charge (v1.165.0); `50` disables the **cost** force-charge — a night whose outage line is above the 50% reserve still force-charges to it in supervised or auto mode (v1.200.0) |
+| `ARB_COST_MAX_SOC_PCT` | `90` | int 50–100 | Cost-mode fill ceiling; above 50 it is reached by force-charge (v1.165.0); `50` disables the **cost** force-charge, not the line force-charge (v1.200.0) |
 | `ARB_GRID_INPUT_CAP_KW` | `17` | float 0–100 | The panel's total grid-input envelope shared by house load and charging; sets the live force-charge rate and the planner's contention cap (≤ 0 disables contention modelling). The default is the reference plant's measured figure; a home enters its grid-input breaker capacity |
 | `NIGHT_CHARGE_CHEAP_PERIOD` | unset | str (optional) | The tariff period the planner charges in, by id; unset takes the plan's cheap period (`overnight` with the preset) |
 | `FORCE_CHARGE_KW_PER_CORE` | unset (5.5) | float (optional) | The rate one Core takes into its pack under force charge (pack side); with the slots known, the slots × this value bound the force-charge rate that times the run, and the planner's AUTO cap is connected Cores × this ÷ √RTE |

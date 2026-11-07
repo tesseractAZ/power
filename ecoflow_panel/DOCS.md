@@ -217,8 +217,8 @@ is not yet confirmed.
 To stop a night, press **Cancel tonight** (or **Cancel & revert** once the reserve is raised) on
 the night-charge card on the **Strategy** page. To stop all writes, set `NIGHT_CHARGE_MODE` to
 `advisory`: a reserve already raised is still restored. To stop only the cost force charge, set
-`ARB_COST_MAX_SOC_PCT` to 50; a night whose outage line is above 50 % still force-charges unless it
-is cancelled or the mode is `advisory`. Change `NIGHT_CHARGE_ADVISOR_ENABLED` only outside a charge night:
+`ARB_COST_MAX_SOC_PCT` to 50. `ARB_COST_MAX_SOC_PCT` 50 does not stop the line force charge;
+`NIGHT_CHARGE_MODE` `advisory` or the night's **Cancel** does. Change `NIGHT_CHARGE_ADVISOR_ENABLED` only outside a charge night:
 turning it off also stops the timer that restores a raised reserve. The write-readiness gate
 (`LEARNING`, `READY_TO_CONSIDER_WRITES` or `BLOCKED`) needs 21 scored nights on which Power itself
 raised the reserve, so it never graduates in an install that only advises; it informs `auto`
