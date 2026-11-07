@@ -24,7 +24,8 @@ import * as cardText from '../../web/src/cards/nightChargeText.js';
  * S1 the plan: the reading decides words, never the record. S2 the stamp: behind every apply guard, and the grid. S3 after the stamp: no
  * apply, the foreign rule to the close, the grid-loss stamp. S4 the ride: stamp and a same-tick reading. S5 the record's readers. S6 the OFF
  * and the ceiling, no revert ever. S7 the texts, true in every outcome. S8 the gate: graded by disposition, no graduation evidence.
- * S9 the wiring, source-anchored. The year's walks are in lineStandingWalk.test.ts.
+ * S9 the wiring, source-anchored. S10 a grid read lost where the stamp would go: one-way, on a record with no stamp, and each reader of it.
+ * The year's walks are in lineStandingWalk.test.ts.
  */
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -180,10 +181,21 @@ test('★★★ S2 the stamp: on a line ask, a reading strictly equal to the tar
   assert.deepEqual(dac(armed({ applyAttemptedAtMs: OPEN, attemptBaselinePct: 50 }), OPEN + 2 * M), { kind: 'none' }, 'an attempt that read the target: no stamp');
 });
 
-test('★★★ S2 a grid known lost never stamps: a written night never rides one; unknown keeps its reading for the ON to refuse', () => {
-  assert.deepEqual(dac(armed(), OPEN, { gridPresent: false }), { kind: 'none' });
+test('★★★ S2 a grid read lost where the stamp would go is one-way, never a deferred stamp; unknown keeps its reading for the ON to refuse', () => {
+  assert.deepEqual(dac(armed(), OPEN, { gridPresent: false }), { kind: 'gridLost' });
   assert.deepEqual(dac(armed(), OPEN, { gridPresent: null }), { kind: 'reserveStanding' }, 'unknown: the ON needs it known, and a stamp writes nothing');
   assert.deepEqual(dac(noAsk(), OPEN, { gridPresent: false }), { kind: 'none' });
+  // The same site as the stamp, so the same guards: each of these is the stamp's own "no".
+  assert.deepEqual(dac(armed(), OPEN - M, { gridPresent: false }), { kind: 'none' }, 'before the open');
+  assert.deepEqual(dac(armed(), OPEN + 30 * M + 1000, { gridPresent: false }), { kind: 'none' }, 'past the apply window');
+  assert.deepEqual(dac(armed(), OPEN, { gridPresent: false, mode: 'advisory' }), { kind: 'none' });
+  assert.deepEqual(dac(armed({ cancelled: true }), OPEN, { gridPresent: false }), { kind: 'none' });
+  assert.deepEqual(dac(armed(), OPEN, { gridPresent: false, vitalsRed: true }), { kind: 'none' });
+  assert.deepEqual(dac(armed(), OPEN, { gridPresent: false, socCoherent: false }), { kind: 'none' });
+  assert.deepEqual(dac(armed(), OPEN, { gridPresent: false, currentReservePct: null }), { kind: 'none' });
+  assert.deepEqual(dac(armed({ targetPct: 45 }), OPEN, { gridPresent: false, currentReservePct: 50 }), { kind: 'none' }, 'above the target: strict equality');
+  assert.deepEqual(dac(armed({ applyAttemptedAtMs: OPEN, attemptBaselinePct: 50 }), OPEN + 2 * M, { gridPresent: false }), { kind: 'none' }, 'an attempt on record');
+  assert.deepEqual(dac(armed(), OPEN, { gridPresent: false, currentReservePct: 45 }), { kind: 'apply', targetPct: 50 }, 'a reading under the target: a written night, as it was');
 });
 
 /* ══ S3 — after the stamp ══════════════════════════════════════════════════════════════════════════════════════════════════════ */
@@ -531,6 +543,29 @@ test('★★ S7 the foreign close account of a stood night says what happened, a
   assert.ok(w.body.includes('the reserve was set outside the add-on'), w.body);
 });
 
+test('★★★ S7 the card\'s footer holds on both kinds of night, on both shapes that render it: a bounded write only under the target, none and no restore at it', () => {
+  const src = SRC('../../web/src/cards/NightChargeCard.tsx');
+  const note = src.slice(src.indexOf('function AdvisoryNote('), src.indexOf('Advisory only — this add-on'));
+  const flat = note.replace(/\s+/g, ' ');
+  assert.ok(flat.includes("{mode === 'auto' ? 'Auto' : 'Supervised'} write mode — on a charge night the add-on performs at most one bounded reserve write, only when the reserve reads under the night's target (announced each evening, cancellable above), and auto-restores the prior reserve after it. A reserve that already reads the target gets no write and no restore."), flat);
+  assert.ok(flat.includes('The reserve-floor alarms are independent of this path.'), flat);
+  assert.doesNotMatch(flat, /on charge nights|performs one/, flat);
+  assert.equal(src.split('<AdvisoryNote mode={status.mode} />').length - 1, 2, 'the charge shape and the hold shape');
+});
+
+test('★★★ S7 the card\'s reserve label reads plan.lineReserveStands: no write sets a standing reserve, and a written night keeps its words', () => {
+  const label = cardText.reserveWriteLabel as unknown as (s: number | null, p: number | null, m: number | null, stands?: boolean) => string | null;
+  assert.equal(label(66, 50, 50, true), "reserve reads 50% (the panel's maximum; 66% needed)");
+  assert.equal(label(66, 50, 50, false), "reserve set to 50% (the panel's maximum; 66% needed)");
+  assert.equal(label(66, 50, 50), "reserve set to 50% (the panel's maximum; 66% needed)", 'the fourth argument is optional');
+  assert.equal(label(50, 40, 50, true), 'reserve reads 50%');
+  assert.equal(label(50, 40, 50), 'reserve set to 50%');
+  assert.equal(label(40, 40, 50, true), null, 'nothing to say');
+  const src = SRC('../../web/src/cards/NightChargeCard.tsx');
+  assert.ok(src.includes('reserveWriteLabel(plan.setpointSocPct, plan.targetSocPct, status.reserveWriteMaxPct ?? null, plan.lineReserveStands === true)'), 'the card passes it');
+  assert.ok(src.includes('lineReserveStands?: boolean;'), 'and its plan carries it');
+});
+
 test('★★★ S7 the grid-loss push: no force-charge starts tonight, whatever the grid does next; what a person can do; an OFF keeps its words', () => {
   const none = notify.buildLineForceChargeGridOff({ linePct: 55.55, poolPct: 52, closeText: '5:00 AM', noneOn: true } as never);
   assert.equal(none.severity, 'warning');
@@ -551,7 +586,9 @@ test('★★★ S7 the banner and the card: the reserve stands, no write and not
   assert.deepEqual(banner(card({ cancelled: true }), '23:00', 50), { text: "Cancelled — no reserve write to undo; any force-charge of tonight's switches off within a minute.", settled: true, cancel: null });
   assert.deepEqual(banner(card({ foreignSettledAtMs: OPEN + H, foreignReservePct: 40 }), '23:00', 40), { text: "The reserve was changed to 40% after it read the night's target — no force-charge runs on it tonight.", settled: true, cancel: null });
   const ct = cardText as unknown as { noPlanText: (b: boolean, s: boolean, r?: boolean) => string; holdSummary: (p: unknown, o: unknown) => { headline: string; detail: string }; cancelOutcome: (s: number, b: unknown) => { text: string }; RESERVE_STOOD_HEADLINE: string };
-  assert.ok(ct.noPlanText(false, true, true).endsWith('The force-charge armed with the announced plan still rides the standing reserve; cancel it below.'));
+  assert.ok(ct.noPlanText(false, true, true).endsWith('The night armed on the standing reserve can be cancelled below.'));
+  assert.ok(ct.noPlanText(true, true, true).endsWith('The night armed on the standing reserve can be cancelled below.'));
+  assert.doesNotMatch(ct.noPlanText(false, true, true), /rides/, 'true with the ride over: the banner beneath says why');
   assert.ok(ct.noPlanText(false, true).endsWith('The write armed with the announced plan stands; cancel it below.'), 'a written night');
   const hold = ct.holdSummary({ requiredExtraKwh: null, reserveFloorPct: 50 }, { writeStands: true, reserveStood: true });
   assert.equal(hold.headline, 'The latest recompute would not charge — the night armed on the standing reserve stands.');
@@ -718,7 +755,7 @@ test('★★★ S9 a late verify on the record: the gate sees a real night again
 
 test('★★★ S9 the cancel route: the disposition goes on a stood record with no ON, before the close only', () => {
   const route = INDEX.slice(INDEX.indexOf("app.post('/api/night-charge/cancel'"), INDEX.indexOf('// v1.184.0 — the operator\'s "the grid is back"'));
-  assert.ok(route.includes('if (s.reserveStandingAtMs != null && s.forceChargeOnAtMs == null && (cancelledCloseMs == null || Date.now() < cancelledCloseMs)) {'), route);
+  assert.ok(route.includes('s.forceChargeOnAtMs == null && (cancelledCloseMs == null || Date.now() < cancelledCloseMs)) {'), route);
   assert.ok(route.includes("stampLegOutcome(s, { arm_disposition: 'cancelled by a person; the reserve stood at the target and no force-charge had started' });"), route);
   assert.equal('cancelled by a person; the reserve stood at the target and no force-charge had started'.startsWith(STOOD_PREFIX), false, 'it leaves the gate\'s prefix');
   assert.equal((gate as unknown as { RESERVE_STOOD_DISPOSITION: string }).RESERVE_STOOD_DISPOSITION, STOOD_PREFIX);
@@ -735,5 +772,193 @@ test('★★ S9 the logs a stood night reaches word the stamp: the ARMED line, t
   assert.ok(INDEX.includes("if (state.reserveStandingAtMs != null) app.log.info(`night-charge: reserve reading moved"));
   assert.ok(INDEX.includes("if (state.reserveStandingAtMs != null) app.log.warn(`night-charge: reserve reading SETTLED"));
   assert.ok(INDEX.includes('line: foreignLineWords(state, nowMs), standing: state.reserveStandingAtMs != null,'));
-  assert.ok(INDEX.includes("nightActuationMem.reserveStandingAtMs != null ? `tonight's reserve stood at its target, so no restore is due at this window's close"));
+  assert.ok(INDEX.includes("? `tonight's reserve stood at its target, so no restore is due at this window's close"));
+});
+
+/* ══ S10 — a grid read lost where the stamp would go ═══════════════════════════════════════════════════════════════
+
+/** A record whose reading of the target, every apply guard clear, came with the grid read lost. It has no stamp, and never will. */
+const lostAtStamp = (o: Partial<Rec> = {}): Rec => armed({ gridLostAtMs: OPEN, ...o });
+
+/** One night through the real deciders, tick by tick, the grid and the reading as inputs. `log` holds every action that is not 'none'. */
+const walkGrid = (rec: Rec, from: number, grid: (t: number) => boolean | null, reading: (t: number, s: Rec) => number | null = () => 50) => {
+  let s = { ...rec } as Rec;
+  let ceiling = 100;
+  let on = false;
+  const log: string[] = [];
+  const at = (t: number): number => (t - OPEN) / M;
+  for (let t = from; t <= CLOSE + 10 * M; t += M) {
+    const r = reading(t, s);
+    const g = grid(t);
+    const a = act.decideActuation(s, t, ao({ currentReservePct: r, gridPresent: g }));
+    if (a.kind !== 'none') log.push(`${a.kind}@${at(t)}`);
+    if (a.kind === 'reserveStanding') s = { ...s, reserveStandingAtMs: t };
+    else if (a.kind === 'gridLost') s = { ...s, gridLostAtMs: t };
+    else if (a.kind === 'apply') s = { ...s, applyAttemptedAtMs: t, attemptBaselinePct: r, appliedAtMs: t, priorReservePct: r, applyLastAttemptMs: t };
+    else if (a.kind === 'applyVerified') s = { ...s, applyVerifiedAtMs: t };
+    else if (a.kind === 'revert') s = { ...s, revertedAtMs: t, revertLastAttemptMs: t };
+    else if (a.kind === 'revertVerified') s = { ...s, revertVerifiedAtMs: t };
+    const f = nfc.decideForceCharge(s, t, fo({ gridPresent: g, reservePct: r, ceilingReadbackPct: ceiling, slotsOn: on ? [1, 2, 3] : [], slotSocPct: { 1: 50, 2: 50, 3: 50 } }));
+    if (f.kind !== 'none') log.push(`${f.kind}@${at(t)}`);
+    if (f.kind === 'syncCeiling') { s = { ...s, forceChargeCeilingAttemptedAtMs: t, forceChargeCeilingPriorPct: s.forceChargeCeilingPriorPct ?? f.prior, forceChargeCeilingSyncedPct: f.pct }; ceiling = f.pct; }
+    else if (f.kind === 'on') { s = { ...s, ...nfc.forceChargeOnStamp(s, t, f.slots, G), forceChargeOnLastAttemptMs: t }; on = true; }
+    else if (f.kind === 'onVerified') s = { ...s, forceChargeOnVerifiedAtMs: t };
+    else if (f.kind === 'off') { s = { ...s, forceChargeOffAtMs: t, forceChargeOffReason: f.reason, forceChargeOffLastAttemptMs: t }; on = false; }
+    else if (f.kind === 'offVerified') s = { ...s, forceChargeOffVerifiedAtMs: t };
+    else if (f.kind === 'restoreCeiling') { s = { ...s, forceChargeCeilingRestoreAttempts: s.forceChargeCeilingRestoreAttempts + 1, forceChargeCeilingRestoreLastAttemptMs: t }; ceiling = f.pct; }
+    else if (f.kind === 'ceilingRestored') s = { ...s, forceChargeCeilingRestoredAtMs: t };
+  }
+  return { log, s };
+};
+const ons = (log: string[]): string[] => log.filter((l) => /^(on|lineReOn|syncCeiling)@/.test(l));
+
+test('★★★ S10 grid false from the open through open + 5, then true: the first tick stamps the loss; no stamp, no ceiling write, no ON, one action, ever', () => {
+  const r = walkGrid(armed(), OPEN, (t) => t > OPEN + 5 * M);
+  assert.deepEqual(r.log, ['gridLost@0']);
+  assert.equal(r.s.reserveStandingAtMs, null);
+  assert.equal(r.s.gridLostAtMs, OPEN);
+  assert.equal(r.s.forceChargeOnAtMs, null);
+  assert.equal(r.s.forceChargeCeilingPriorPct, null, 'no ceiling to bring back');
+  assert.equal(r.s.appliedAtMs, null);
+  assert.equal(r.s.priorReservePct, null);
+});
+
+test('★★★ S10 deep in the window too: false from the open to open + 29, or for the whole night, is the same one action', () => {
+  assert.deepEqual(walkGrid(armed(), OPEN, (t) => t >= OPEN + 30 * M).log, ['gridLost@0']);
+  assert.deepEqual(walkGrid(armed(), OPEN, () => false).log, ['gridLost@0']);
+  // A reading that then drops, or comes back: nothing raises it, nothing stamps it.
+  assert.deepEqual(walkGrid(armed(), OPEN, (t) => t >= OPEN + 10 * M, (t) => (t > OPEN + 5 * M ? 45 : 50)).log, ['gridLost@0']);
+  assert.deepEqual(walkGrid(armed(), OPEN, (t) => t >= OPEN + 10 * M, (t) => (t === OPEN || t > OPEN + 12 * M ? 50 : null)).log, ['gridLost@0']);
+});
+
+test('★★★ S10 a loss that ends before the open still rides: the night has not begun, and the stamp reads the tick it stands on', () => {
+  const r = walkGrid(armed(), OPEN - 30 * M, (t) => t >= OPEN);
+  assert.equal(r.log[0], 'reserveStanding@0');
+  assert.equal(r.s.gridLostAtMs, null);
+  assert.ok(ons(r.log).some((l) => l.startsWith('on@')), r.log.join(' '));
+  assert.ok(!r.log.includes('gridLost@0'));
+});
+
+test('★★★ S10 a stamped record is unchanged: its stamp stands, the loss is its second one-way stamp, and the ride ends there', () => {
+  const r = walkGrid(armed(), OPEN, (t) => !(t >= OPEN + 2 * M && t <= OPEN + 5 * M));
+  assert.equal(r.log[0], 'reserveStanding@0');
+  assert.ok(r.log.includes('gridLost@2'), r.log.join(' '));
+  assert.equal(r.s.reserveStandingAtMs, OPEN);
+  assert.equal(r.s.gridLostAtMs, OPEN + 2 * M);
+  assert.equal(r.log.filter((l) => l.startsWith('on@')).length, 0, r.log.join(' '));
+  assert.equal(r.log.filter((l) => l.startsWith('gridLost@')).length, 1);
+});
+
+test('★★★ S10 a written night and a record with no ask never carry it: the same blip, as they were', () => {
+  const reading = (_t: number, s: Rec): number => (s.revertedAtMs != null || s.appliedAtMs == null ? 30 : 50);
+  const w = walkGrid(armed(), OPEN, (t) => t > OPEN + 5 * M, reading);
+  assert.deepEqual(w.log, ['apply@0', 'revert@1', 'revertVerified@2'], 'its abort, on the first grid-false tick after the apply');
+  assert.equal(w.s.gridLostAtMs, null);
+  const one = walkGrid(armed(), OPEN, (t) => t > OPEN, reading);
+  assert.equal(one.log.slice(0, 2).join(' '), 'apply@0 applyVerified@1', 'one false tick, on the apply\'s own: a written night reads no loss');
+  assert.equal(one.s.gridLostAtMs, null);
+  assert.deepEqual(walkGrid(noAsk(), OPEN, (t) => t > OPEN + 5 * M).log, []);
+  assert.deepEqual(walkGrid(noAsk(), OPEN, () => false).log, []);
+  assert.deepEqual(walkGrid(noAsk({ forceChargeCeilingPct: 90, forceChargeRides: true }), OPEN, (t) => t > OPEN + 5 * M).log, []);
+});
+
+test('★★★ S10 the APPLY guards read it: no stamp, no apply, whatever the reading does, the grid back', () => {
+  for (const t of [OPEN + M, OPEN + 5 * M, OPEN + 30 * M]) for (const r of [50, 45, 30, 10, null]) {
+    assert.deepEqual(dac(lostAtStamp(), t, { currentReservePct: r, gridPresent: true }), { kind: 'none' }, `${(t - OPEN) / M} min, reading ${r}`);
+    assert.deepEqual(dac(lostAtStamp(), t, { currentReservePct: r, gridPresent: false }), { kind: 'none' }, `${(t - OPEN) / M} min, reading ${r}, still lost`);
+  }
+  assert.deepEqual(dac(lostAtStamp(), OPEN + M, { currentReservePct: 45, mode: 'auto', writeReady: true }), { kind: 'none' });
+});
+
+test('★★★ S10 the ride reads it: no ON and no ceiling sync, with the grid back and the reserve at the target, and its own words', () => {
+  assert.equal(ride(lostAtStamp()), false);
+  assert.deepEqual(dfc(lostAtStamp(), startTick, { ceilingReadbackPct: 66 }), { kind: 'none', why: 'the grid was lost during the window' });
+  assert.deepEqual(dfc(lostAtStamp({ forceChargeCeilingPct: 90 }), startTick, { enabled: true, ceilingReadbackPct: 90 }), { kind: 'none', why: 'the grid was lost during the window' }, 'nor a cost ceiling');
+  assert.equal(nfc.reserveWriteStands(lostAtStamp()), false);
+});
+
+test('★★★ S10 forceChargeStartClosed and the closure: the loss from its own tick, ahead of "noWrite", the clock and every later reading', () => {
+  for (const t of [OPEN, OPEN + 31 * M, CLOSE - 20 * M, CLOSE, CLOSE + H]) {
+    assert.equal(nfc.forceChargeStartClosed(lostAtStamp(), t, G), 'gridLost', String((t - OPEN) / M));
+    assert.deepEqual(nfc.armedLineStartClosed(lostAtStamp(), t, G), { windowStartMs: OPEN, why: 'gridLost' }, 'no write stands');
+  }
+});
+
+test('★★★ S10 missedApplyDue is false: its own push told the person, and "no write was issued" would give a false cause', () => {
+  const armedLeg = leg(armed(), {});
+  assert.equal(cyc.missedApplyDue(armedLeg, OPEN + 31 * M), true, 'no stamp, no loss: as ever');
+  for (const t of [OPEN + 31 * M, OPEN + H, CLOSE, CLOSE + H]) assert.equal(cyc.missedApplyDue(leg(lostAtStamp(), {}), t), false, String((t - OPEN) / M));
+});
+
+test('★★★ S10 legFinished from its own tick, inside the apply window; legStatusState completed, no Cancel; resolved, with nothing of ours held', () => {
+  for (const t of [OPEN, OPEN + 5 * M, OPEN + 31 * M, CLOSE]) {
+    assert.equal(cyc.legFinished(lostAtStamp(), t), true, String((t - OPEN) / M));
+    assert.equal(cyc.legStatusState(lostAtStamp(), t), 'completed', String((t - OPEN) / M));
+    assert.equal(cyc.lineStartClosedStatus(lostAtStamp(), t, G).lineStartClosed?.cancel, false, String((t - OPEN) / M));
+    assert.equal(cyc.legResolved(lostAtStamp(), t, 50), true, String((t - OPEN) / M));
+  }
+  assert.deepEqual(cyc.lineStartClosedStatus(lostAtStamp(), OPEN + M, G), { lineStartClosed: { text: 'No force-charge for the 55.6% outage line starts: the grid was lost during the window.', cancel: false } });
+  assert.equal(cyc.legStatusState(lostAtStamp({ cancelled: true }), OPEN + M), 'cancelled', 'a cancel still reads as one');
+  assert.equal(cyc.legStatusState(armed(), OPEN + 31 * M), 'missed', 'no loss: as ever');
+  assert.equal(act.armOpenItem(lostAtStamp(), 50), null, 'the next arm is free');
+});
+
+test('★★★ S10 lineCloseAccountDue: the standing account with gridLost, never "noWrite"; a cancel is still the person\'s own', () => {
+  assert.equal(nfc.lineCloseAccountDue(lostAtStamp(), CLOSE - M), null, 'before the close');
+  assert.equal(nfc.lineCloseAccountDue(lostAtStamp(), CLOSE), 'standing');
+  assert.equal(nfc.lineCloseAccountDue(lostAtStamp({ cancelled: true }), CLOSE), null);
+  assert.equal(nfc.lineCloseAccountDue(lostAtStamp({ lineCloseAccountAtMs: CLOSE }), CLOSE + M), null, 'once');
+  const m = notify.buildNightChargeMorningSummary({ day: '2027-01-04', targetPct: 50, restorePct: 50, expectedKwh: 12.3, linePct: 55.55, standing: true, gridLost: true, closePoolPct: 52, forceCharge: nfc.forceChargeNightOutcome(lostAtStamp(), G) } as never);
+  assert.ok(m.body.includes('the reserve stood at 50%'), m.body);
+  assert.ok(m.body.includes('never started (the grid was lost during the window)'), m.body);
+  assert.ok(m.body.includes('no restore was due.'), m.body);
+  assert.doesNotMatch(m.body, /no reserve write was confirmed/, m.body);
+});
+
+test('★★★ S10 priorArmSuperseded is false: the next arm leaves its disposition, which the gate grades', () => {
+  assert.equal(cyc.priorArmSuperseded(armed() as never, '2027-01-05'), true, 'no stamp, no loss: superseded as ever');
+  assert.equal(cyc.priorArmSuperseded(lostAtStamp() as never, '2027-01-05'), false);
+  assert.equal(cyc.priorArmSuperseded(stood() as never, '2027-01-05'), false);
+});
+
+test('★★★ S10 no other push of the record: a held start has no ride to be held, and the push rides the stamp\'s tick alone', () => {
+  let mem = { day: null as string | null, st: nfc.EMPTY_LINE_DECLINED_PUSH };
+  const out: string[] = [];
+  for (let t = OPEN + H; t <= OPEN + H + 11 * M; t += M) { const r = nfc.lineDeclinedPushTick(mem, lostAtStamp(), 'host vitals are critical — no new device writes', t, G); mem = r.mem; if (r.push != null) out.push(r.push); }
+  assert.deepEqual(out, []);
+  assert.equal(nfc.lineAtRiskPushDue(lostAtStamp(), OPEN + H, fo()), null);
+});
+
+test('★★★ S10 the record survives a restart: the loss on a record with no stamp reads back, one-way', () => {
+  const back = act.coerceActuationState(JSON.parse(JSON.stringify(lostAtStamp()))) as Rec;
+  assert.equal(back.gridLostAtMs, OPEN);
+  assert.equal(back.reserveStandingAtMs, null);
+  assert.deepEqual(dac(back, OPEN + M), { kind: 'none' });
+});
+
+test('★★★ S10 the handler: words true with no stamp, the one push, and a stood disposition for the gate on that record alone', () => {
+  const t = reserveTick();
+  const lost = t.slice(t.indexOf("if (action.kind === 'gridLost') {"), t.indexOf("if (action.kind === 'apply') {"));
+  assert.ok(lost.includes('if (state.reserveStandingAtMs == null) stampLegOutcome(state, { arm_disposition: `${RESERVE_STOOD_DISPOSITION}the panel read the ${state.targetPct}% target in the apply window with the grid read lost; no write was due and no ride followed` });'), lost);
+  assert.ok(lost.includes('`night-charge: GRID LOST mid-window on ${state.day}\'s stood night — the ride on the ${state.targetPct}% reserve is over for the night;'), lost);
+  assert.ok(lost.includes('`night-charge: GRID LOST in the apply window of ${state.day}\'s night, with the panel reading the ${state.targetPct}% target — nothing was written and no ride follows: no force-charge starts tonight, whatever the grid does next.`'), lost);
+  assert.ok(lost.includes('app.log.warn(state.reserveStandingAtMs != null\n      ? `night-charge: GRID LOST mid-window on'), 'the stood words on a stamped record alone');
+  assert.ok(lost.includes('    if (lostLinePct != null && closeAtMs != null && (state.forceChargeOnAtMs == null || state.forceChargeOffAtMs != null)) {\n'), 'the push goes on a record with no ON, stamped or not');
+  assert.doesNotMatch(lost, /actuated:/);
+});
+
+test('★★★ S10 the gate grades it as a stood grid loss: the stood prefix on its disposition, so a close under the line is a strike, on either shape', () => {
+  const words = `${(gate as unknown as { RESERVE_STOOD_DISPOSITION: string }).RESERVE_STOOD_DISPOSITION}the panel read the 50% target in the apply window with the grid read lost; no write was due and no ride followed`;
+  const base = without3(led(30));
+  assert.equal(read([...base, stoodRow({ arm_disposition: words })]).metrics.activeStrikes, 1, 'no stamp: the same strike');
+  assert.equal(read([...base, stoodRow()]).metrics.activeStrikes, 1, 'a stamped night that lost the grid: nothing on the row tells it apart');
+  assert.equal(read([...base, stoodRow({ arm_disposition: words, cushion_breached: 0, window_close_soc_pct: 70, actual_min_soc_pct: 60 })]).metrics.activeStrikes, 0, 'held');
+  assert.equal(read([...base, stoodRow({ arm_disposition: words, cushion_shortfall: 1 })]).metrics.activeStrikes, 1, 'disclosed, never ran, closed under');
+  assert.equal(read(led(30, (r) => { r.actuated = null; r.actuation_applied_at_ms = null; r.arm_disposition = words; })).metrics.scoredDays, 0, 'no graduation evidence');
+});
+
+test('★★★ S10 the cancel route and the floor route read it as they read a stood record', () => {
+  const route = INDEX.slice(INDEX.indexOf("app.post('/api/night-charge/cancel'"), INDEX.indexOf('// v1.184.0 — the operator\'s "the grid is back"'));
+  assert.ok(route.includes('if ((s.reserveStandingAtMs != null || s.gridLostAtMs != null) && s.forceChargeOnAtMs == null && (cancelledCloseMs == null || Date.now() < cancelledCloseMs)) {'), route);
+  assert.ok(INDEX.includes("nightActuationMem.reserveStandingAtMs != null || nightActuationMem.gridLostAtMs != null ? `tonight's reserve stood at its target, so no restore is due at this window's close"));
 });

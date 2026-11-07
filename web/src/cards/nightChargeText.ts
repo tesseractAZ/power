@@ -163,7 +163,7 @@ export function writeStands(a: BannerTextActuation | null, mode: string, nowMs: 
 export function noPlanText(basisIncomplete: boolean, stands: boolean, reserveStood = false): string {
   if (stands) {
     return `${basisIncomplete ? 'No fresh plan — forecast/telemetry basis incomplete.' : 'No fresh night-charge plan — advisor idle or plan stale.'} `
-      + (reserveStood ? 'The force-charge armed with the announced plan still rides the standing reserve; cancel it below.' : 'The write armed with the announced plan stands; cancel it below.');
+      + (reserveStood ? 'The night armed on the standing reserve can be cancelled below.' : 'The write armed with the announced plan stands; cancel it below.');
   }
   return basisIncomplete
     ? 'No plan tonight — forecast/telemetry basis incomplete; nothing will be charged.'
@@ -206,12 +206,14 @@ export function cancelOutcome(httpStatus: number, body: unknown): { ok: boolean;
  * SHP2 caps backupReserveSoc at 50 — settled 2026-09-16). The card printed "reserve set to 94%"
  * from the unclamped requirement; the device would sit at 50.
  */
-export function reserveWriteLabel(setpointPct: number | null, predictedPct: number | null, maxPct: number | null): string | null {
+export function reserveWriteLabel(setpointPct: number | null, predictedPct: number | null, maxPct: number | null, reserveStands = false): string | null {
   if (setpointPct == null) return null;
   const cap = maxPct != null && maxPct > 0 ? maxPct : null;
   const rounded = Math.round(setpointPct); // the actuator writes Math.round, clamped (clampReserveTarget)
-  if (cap != null && rounded > cap) return `reserve set to ${cap}% (the panel's maximum; ${rounded}% needed)`;
-  if (predictedPct != null && setpointPct > predictedPct + 0.5) return `reserve set to ${rounded}%`;
+  // v1.200.1 — a plan whose reserve already reads the write (plan.lineReserveStands): no write sets it.
+  const verb = reserveStands ? 'reads' : 'set to';
+  if (cap != null && rounded > cap) return `reserve ${verb} ${cap}% (the panel's maximum; ${rounded}% needed)`;
+  if (predictedPct != null && setpointPct > predictedPct + 0.5) return `reserve ${verb} ${rounded}%`;
   return null;
 }
 

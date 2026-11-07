@@ -5,7 +5,8 @@
  * lineStanding.walkIdentity.json was made (STANDING_WALK_WRITE=1, on that tree only).
  *
  * Unmodelled, and said so wherever these figures are quoted: the ON-reading latch (the code path of a written night, unmeasured), the re-entry
- * band after the close, a grid loss (lineStandingReserve.test.ts walks those by hand), and every reading is the reading of the tick.
+ * band after the close, and every reading is the reading of the tick. The grid is an input (GridAt): present on every tick unless a walk
+ * says otherwise, and the plant does not stop charging with it (a walk with the grid lost counts decisions, never the pool).
  */
 import { computeNightChargePlan, buildNightChargeInputs, type NightChargePlan } from '../../src/nightChargeAdvisor.js';
 import { armFromPlan, emptyActuationState, decideActuation, writeWindowEndMs, type NightActuationState } from '../../src/nightChargeActuator.js';
@@ -28,12 +29,14 @@ export type Basis = 'np' | 'm';
 export type WalkCase = 'A' | 'B' | 'C' | 'O' | 'W';
 export const WALK_HOURS_ALL = [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20];
 export const WALK_HOURS_SAMPLE = [4, 8, 12, 20];
+/** What the grid reads on a tick, against the window open; omitted: present on every tick. */
+export type GridAt = (t: number, open: number) => boolean | null;
 
 export interface WalkNight {
   close: number | null; onMin: number; reOns: number; onAt: number | null; onMode: string | null; bought: number;
   writes: { reserve: number; restore: number; ceiling: number; on: number }; push: string | null; onPool: number | null;
   applied: boolean; verified: boolean; standing: boolean; ask: number | null; offReason: string | null; ceilRestored: boolean;
-  closed: string | null; account: string | null; wMin: number;
+  closed: string | null; account: string | null; wMin: number; gridLost: number;
 }
 export interface WalkRow extends WalkNight {
   label: string; b: Basis; h: number; cs: WalkCase; own: number; L: number | null; reason: string | null; armedAsk: number | null;
@@ -54,7 +57,7 @@ function loadKwAt(d: Deps, t: number): number {
 }
 
 /** One night. `reserveOpen` is what the panel reads at the open, whatever the plan read; `p0` the pool there. */
-export function walkNight(p: Record<string, any>, d: Deps, rec0: NightActuationState, cfg: { reserveOpen: number; p0: number }): WalkNight {
+export function walkNight(p: Record<string, any>, d: Deps, rec0: NightActuationState, cfg: { reserveOpen: number; p0: number; grid?: GridAt }): WalkNight {
   let s: any = { ...rec0 };
   const W0 = s.windowStartMs as number;
   const W1 = s.windowEndMs as number;
@@ -75,6 +78,7 @@ export function walkNight(p: Record<string, any>, d: Deps, rec0: NightActuationS
   let onPool: number | null = null;
   let bought = 0;
   let push: string | null = null;
+  let gridLost = 0;
   const writes = { reserve: 0, restore: 0, ceiling: 0, on: 0 };
   const tail: number[] = [];
   const slots = [1, 2, 3];
@@ -87,17 +91,19 @@ export function walkNight(p: Record<string, any>, d: Deps, rec0: NightActuationS
     const seen = Math.round((pack / CAP) * 100);
     if (t >= W1 - 15 * MIN && t < W1) tail.push(seen);
     const load = loadKwAt(d, t);
-    const a = decideActuation(s, t, { mode: 'supervised', writeReady: false, currentReservePct: reserve, socCoherent: true, vitalsRed: false, gridPresent: true }) as { kind: string; targetPct?: number; restorePct?: number };
+    const grid = cfg.grid == null ? true : cfg.grid(t, W0);
+    const a = decideActuation(s, t, { mode: 'supervised', writeReady: false, currentReservePct: reserve, socCoherent: true, vitalsRed: false, gridPresent: grid }) as { kind: string; targetPct?: number; restorePct?: number };
     if (a.kind === 'apply') { s = { ...s, applyAttemptedAtMs: t, attemptBaselinePct: reserve, appliedAtMs: t, priorReservePct: reserve, applyLastAttemptMs: t }; writes.reserve++; pendingR = Math.min(50, a.targetPct!); }
     else if (a.kind === 'applyVerified') s = { ...s, applyVerifiedAtMs: t };
     else if (a.kind === 'revert') { s = { ...s, revertedAtMs: t, revertLastAttemptMs: t }; writes.restore++; pendingR = a.restorePct!; }
     else if (a.kind === 'revertVerified') s = { ...s, revertVerifiedAtMs: t };
     else if (a.kind === 'reserveStanding') s = { ...s, reserveStandingAtMs: t };
+    else if (a.kind === 'gridLost') { s = { ...s, gridLostAtMs: t }; gridLost++; }
     else if (a.kind !== 'none') throw new Error(`action ${a.kind}`);
     const rate = forceChargeRateKw({ gridCapKw: d.gridInputCapKw ?? null, houseLoadKw: load, legEff: LEG, slotCount: 3 });
     const evD = typeof evKwh === 'number' && evKwh > 0 ? evDisplacedPackKwh({ evKwh, peakEvKw: peak ?? null, rateKw: rate, unboundedRateKw: d.gridInputCapKw != null ? Math.max(1, (d.gridInputCapKw - load) * LEG) : null, legEff: LEG }) : null;
     const o: any = {
-      enabled: gates.cost, lineEnabled: gates.line, gridPresent: true, gridStaLost: false, slotsOn: on ? slots : [], reservePct: reserve, connectedSlots: slots, vitalsRed: false, socCoherent: true,
+      enabled: gates.cost, lineEnabled: gates.line, gridPresent: grid, gridStaLost: false, slotsOn: on ? slots : [], reservePct: reserve, connectedSlots: slots, vitalsRed: false, socCoherent: true,
       slotSocPct: { 1: seen, 2: seen, 3: seen }, ceilingReadbackPct: ceiling, poolSocPct: seen, fullKwh: NAME, chargeRateKw: rate, evDisplacedKwh: evD,
     };
     const obs = nfc.lineNightObservations(s, t, o);
@@ -129,13 +135,13 @@ export function walkNight(p: Record<string, any>, d: Deps, rec0: NightActuationS
     bought: Math.round(bought * 10) / 10, writes, push, onPool, applied: s.appliedAtMs != null, verified: s.applyVerifiedAtMs != null,
     standing: s.reserveStandingAtMs != null, ask: s.forceChargeLineAskPct, offReason: s.forceChargeOffReason,
     ceilRestored: s.forceChargeCeilingPriorPct == null || s.forceChargeCeilingRestoredAtMs != null,
-    closed: nfc.forceChargeStartClosed(s, W1 + 30 * MIN, gates), account: nfc.lineCloseAccountDue(s, W1 + 30 * MIN), wMin: Math.round((W1 - W0) / MIN),
+    closed: nfc.forceChargeStartClosed(s, W1 + 30 * MIN, gates), account: nfc.lineCloseAccountDue(s, W1 + 30 * MIN), wMin: Math.round((W1 - W0) / MIN), gridLost,
   };
 }
 
 /** The five cases: A, 50 at the plan and the open; B, 50 at the plan, the plant's own floor at the open; C, the own floor at the plan, 50 at the open; O, the plant's
  *  own floor throughout (no move); W, 49 throughout (the written control of A). */
-export function walkYear(hours: readonly number[], cases: ReadonlySet<WalkCase>): WalkRow[] {
+export function walkYear(hours: readonly number[], cases: ReadonlySet<WalkCase>, grid?: GridAt): WalkRow[] {
   const rows: WalkRow[] = [];
   for (const c of legacyIdentityCases().filter((x) => / 21:30$/.test(x.label))) for (const b of ['np', 'm'] as const) for (const h of hours) {
     const d0 = live(c.deps as Deps);
@@ -148,7 +154,7 @@ export function walkYear(hours: readonly number[], cases: ReadonlySet<WalkCase>)
     const lineA = p50.chargeTonight && Math.ceil((p50.cushionLineSocPct ?? 0) - 1e-9) > 50;
     const row = (cs: WalkCase, p: Record<string, any>, rec: NightActuationState, reserveOpen: number, p0: number, extra: Partial<WalkRow> = {}) => rows.push({
       ...base, cs, L: p.cushionLineSocPct ?? null, reason: p.cushionEnvelopeReason ?? null, armedAsk: p.forceChargeLine?.askPct ?? null, shortfall: p.cushionShortfall === true,
-      ...extra, ...walkNight(p, d0, rec, { reserveOpen, p0 }),
+      ...extra, ...walkNight(p, d0, rec, { reserveOpen, p0, grid }),
     });
     if (rA && lineA && cases.has('A')) row('A', p50, rA, 50, Math.max(50, p50.expectedStartSocPct ?? 50), { stands: p50.lineReserveStands === true });
     if (rA && lineA && cases.has('B')) row('B', p50, rA, own, pOwn.expectedStartSocPct ?? d0.socNowPct, { stands: p50.lineReserveStands === true });

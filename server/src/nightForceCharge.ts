@@ -784,7 +784,7 @@ function nightSettledKey(
  * close ('overGuard', 'lateGuard', as decideForceCharge's why tells them apart: the window itself is still open there);
  * (Fix9 review 1) no write issued and the apply window passed ('noWrite': no apply comes after it, and with no attempt on
  * record no reading is adopted, so appliedAtMs stays null; v1.200.1 — nor a stamp: the reserve read at the target in that window, the
- * one other thing a start rides, and a stood night's grid loss is 'gridLost'); and last, no mode riding the record under the live
+ * one other thing a start rides, and a grid loss, stamped or where the stamp would have gone, is 'gridLost'); and last, no mode riding the record under the live
  * gates (forceChargeModeOf: the line gate off is NIGHT_CHARGE_MODE advisory, which only an option change and a restart
  * undo). The line-night words that say the force-charge "waits on" a reading of the target (index.ts: the reserve-apply
  * failure and the two proofs that the write never landed; notify.buildNightChargeApplyFailure) are keyed on it: a
@@ -848,7 +848,8 @@ export function lineStartClosedWords(line: string, why: ForceChargeStartClosed |
  * reserve write never applied ('noWrite': the morning's only word for it) or settled as someone else's ('foreign': nothing of
  * ours restores it). A restore sent has its summary; a cancelled night is the person's own act. Active leg only: a leg
  * promoted past (a mid-day cycle: inert until the mid-day switch) has had its missed push.
- * v1.200.1 — and a stood night ('standing'): no write and no restore, and the morning's summary words its account (index.ts). A reserve
+ * v1.200.1 — and a stood night ('standing'): no write and no restore, and the morning's summary words its account (index.ts). A record that
+ * read the grid lost where the stamp would have gone is one too: no write was due on it, and the summary says why nothing started. A reserve
  * that settled as someone else's goes ahead of it: that night's account is the foreign one.
  */
 export function lineCloseAccountDue(s: NightActuationState, nowMs: number): 'noWrite' | 'foreign' | 'standing' | null {
@@ -856,7 +857,7 @@ export function lineCloseAccountDue(s: NightActuationState, nowMs: number): 'noW
   if (s.cancelled || s.revertedAtMs != null) return null;
   const closeMs = writeWindowEndMs(s);
   if (closeMs == null || nowMs < closeMs) return null;
-  return s.foreignSettledAtMs != null ? 'foreign' : s.reserveStandingAtMs != null ? 'standing' : s.appliedAtMs == null ? 'noWrite' : null;
+  return s.foreignSettledAtMs != null ? 'foreign' : s.reserveStandingAtMs != null || s.gridLostAtMs != null ? 'standing' : s.appliedAtMs == null ? 'noWrite' : null;
 }
 
 /**

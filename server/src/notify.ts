@@ -767,7 +767,7 @@ export function buildNightChargeMorningSummary(o: {
   /** v1.200.1 — the reserve stood at the target (reserveStandingAtMs): the close's account of a night with no write and no restore. `restorePct`
    *  is not read; the panel's stop, the re-ONs and the close are told as on a written night. */
   standing?: boolean;
-  /** v1.200.1 — a stood night read the grid lost (gridLostAtMs): why a force-charge never started. */
+  /** v1.200.1 — the night read the grid lost (gridLostAtMs), after the stamp or where it would have gone: why a force-charge never started. */
   gridLost?: boolean;
 }): NotifyMessage {
   const base = { severity: 'info' as const, dedupId: 'night_charge_actuation' };
@@ -932,7 +932,7 @@ function linePoolStandsWords(linePct: number, poolPct: number | null | undefined
  *  Now by hand always, whatever the pool reads now: nothing of the add-on's watches the line after this. PURE. */
 export function buildLineForceChargeGridOff(o: {
   linePct: number; poolPct: number | null; closeText: string;
-  /** v1.200.1 — a stood night's grid loss with no force-charge of ours for an OFF to report: no abort goes on such a night, so this is its account. */
+  /** v1.200.1 — a grid loss on a record that rides no write, with no force-charge of ours for an OFF to report: no abort goes on such a night, so this is its account. */
   noneOn?: boolean;
 }): NotifyMessage {
   const none = o.noneOn === true;

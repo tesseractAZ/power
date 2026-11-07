@@ -7009,12 +7009,17 @@ async function runNightActuationTickInner(): Promise<void> {
   }
 
   if (action.kind === 'gridLost') {
-    // v1.200.1 — a stood night's grid-loss abort: no write to restore, one one-way stamp. The ride is over for the night whatever the grid does
-    // next, as on a written night, and a force-charge of ours on is switched off on this tick (offReason 'gridLoss') and reported by that OFF.
+    // v1.200.1 — a grid-loss abort with no write to restore, one one-way stamp: on a stood night, or on the tick that would have stamped one. No
+    // ride for the night whatever the grid does next, as on a written night, and a force-charge of ours on is switched off on this tick
+    // (offReason 'gridLoss') and reported by that OFF. A record with no stamp has none of the stood disposition yet: it takes it here, and the
+    // gate grades it as it grades a stood night that lost the grid. A stamped record keeps the one it has.
     persistNightActuation({ ...state, gridLostAtMs: nowMs, lastError: null });
+    if (state.reserveStandingAtMs == null) stampLegOutcome(state, { arm_disposition: `${RESERVE_STOOD_DISPOSITION}the panel read the ${state.targetPct}% target in the apply window with the grid read lost; no write was due and no ride followed` });
     const lostLinePct = forceChargeLineNightPct(state);
     const closeAtMs = writeWindowEndMs(state);
-    app.log.warn(`night-charge: GRID LOST mid-window on ${state.day}'s stood night — the ride on the ${state.targetPct}% reserve is over for the night; the panel's ceiling comes back and no force-charge starts, whatever the grid does next.`);
+    app.log.warn(state.reserveStandingAtMs != null
+      ? `night-charge: GRID LOST mid-window on ${state.day}'s stood night — the ride on the ${state.targetPct}% reserve is over for the night; the panel's ceiling comes back and no force-charge starts, whatever the grid does next.`
+      : `night-charge: GRID LOST in the apply window of ${state.day}'s night, with the panel reading the ${state.targetPct}% target — nothing was written and no ride follows: no force-charge starts tonight, whatever the grid does next.`);
     if (lostLinePct != null && closeAtMs != null && (state.forceChargeOnAtMs == null || state.forceChargeOffAtMs != null)) {
       void sendNotification(loadNotifyConfig(), buildLineForceChargeGridOff({ linePct: lostLinePct, poolPct: freshPoolSocPct(nowMs), closeText: fmtSiteClock(closeAtMs), noneOn: true })).catch((e: any) => {
         app.log.debug(`night-charge: line grid-lost notify failed (${e?.message ?? e})`);
@@ -7842,9 +7847,10 @@ app.post('/api/night-charge/cancel', { preHandler: requireWriteAuth }, async (re
   persistCycle(r.cycle);
   const s = r.leg;
   // v1.200.1 — a stood night a person cancels before any device write of its ride: the disposition goes, so a cancel is no strike. With an ON on
-  // the record it stays, graded as a written night's cancel after the apply is; and a cancel past the close changes nothing of the night.
+  // the record it stays, graded as a written night's cancel after the apply is; and a cancel past the close changes nothing of the night. A
+  // record that read the grid lost where its stamp would have gone carries the same disposition, and is read the same.
   const cancelledCloseMs = writeWindowEndMs(s);
-  if (s.reserveStandingAtMs != null && s.forceChargeOnAtMs == null && (cancelledCloseMs == null || Date.now() < cancelledCloseMs)) {
+  if ((s.reserveStandingAtMs != null || s.gridLostAtMs != null) && s.forceChargeOnAtMs == null && (cancelledCloseMs == null || Date.now() < cancelledCloseMs)) {
     stampLegOutcome(s, { arm_disposition: 'cancelled by a person; the reserve stood at the target and no force-charge had started' });
   }
   const which = s.leg === 'cost' && s.windowKind === 'overnight' ? '' : ` ${s.leg === 'backup' ? 'outage-backup' : 'daytime'} leg${r.where === 'pending' ? ' (pending)' : ''}`;
@@ -8446,7 +8452,7 @@ app.post<{ Querystring: { pct?: string } }>(
     app.log.warn(
       `reserve-floor: OWNER set backupReserveSoc ${before ?? '?'}% → ${targetPct}% (this is the floor the reserve alarm defends `
       // v1.200.1 — a night that stood wrote nothing, so tonight's close restores nothing either.
-      + `and the night-charge planner sizes against; ${nightActuationMem.reserveStandingAtMs != null ? `tonight's reserve stood at its target, so no restore is due at this window's close, and a later night's write restores ${targetPct}%` : `the nightly write will now restore ${targetPct}% at window close`}).`,
+      + `and the night-charge planner sizes against; ${nightActuationMem.reserveStandingAtMs != null || nightActuationMem.gridLostAtMs != null ? `tonight's reserve stood at its target, so no restore is due at this window's close, and a later night's write restores ${targetPct}%` : `the nightly write will now restore ${targetPct}% at window close`}).`,
     );
     return { ok: true, previousPct: before, targetPct, note: 'device readback appears in the next poll (~60s)' };
   },

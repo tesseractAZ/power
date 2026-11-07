@@ -1033,7 +1033,7 @@ test('★★★ U6 the card leads with a closed start no write stands behind, an
   const CARD = readFileSync(resolve(HERE, '../../web/src/cards/NightChargeCard.tsx'), 'utf8');
   assert.ok(CARD.includes('const closedLead = startClosedLead(plan);'), CARD);
   assert.ok(/\{refused \? \([\s\S]{0,300}?\) : closedLead \? \(\n\s+<div className="mb-3 text-sm">\n\s+<div className="text-warn font-medium">\{closedLead\.headline\}<\/div>\n\s+<div className="text-muted mt-1 leading-relaxed">\{closedLead\.detail\}<\/div>\n\s+<\/div>\n\s+\) : \(/.test(CARD), 'the same shape as the refused lead, ahead of the figure');
-  assert.ok(CARD.includes('closedLead != null ? null : reserveWriteLabel(plan.setpointSocPct, plan.targetSocPct, status.reserveWriteMaxPct ?? null),'), 'the stat names no reserve set');
+  assert.ok(CARD.includes('closedLead != null ? null : reserveWriteLabel(plan.setpointSocPct, plan.targetSocPct, status.reserveWriteMaxPct ?? null, plan.lineReserveStands === true),'), 'the stat names no reserve set');
   assert.ok(CARD.includes('cushionStartClosedNoWrite?: boolean;'), 'the field reaches the card');
 });
 

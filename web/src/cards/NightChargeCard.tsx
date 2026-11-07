@@ -62,6 +62,8 @@ interface NightChargePlan {
   cushionEnvelopeReason?: 'advisory' | 'backupLeg' | 'reserveAtTarget' | 'armedNoLine' | 'startClosed' | 'nearFull' | 'closeUnder';
   cushionStartClosedWords?: string;
   cushionStartClosedNoWrite?: boolean;
+  /** v1.200.1 — the plan read the reserve already at its write: no write is due while it does. */
+  lineReserveStands?: boolean;
   forceChargeLine?: { askPct: number; linePct: number } | null;
   expectedForceChargeMode?: 'line';
   /** v1.200.0 (review 2) — the expected walk reaches the panel ceiling: the panel switches Charge Now off there and
@@ -411,7 +413,7 @@ export const NightChargeCard = memo(function NightChargeCard() {
               'sizing basis',
               // v1.182.0 — what will actually be WRITTEN (clamped to the panel's maximum).
               // v1.200.0 (Fix10 review 1) — and on a closed start no write stands behind, nothing: the stat names no reserve set.
-              closedLead != null ? null : reserveWriteLabel(plan.setpointSocPct, plan.targetSocPct, status.reserveWriteMaxPct ?? null),
+              closedLead != null ? null : reserveWriteLabel(plan.setpointSocPct, plan.targetSocPct, status.reserveWriteMaxPct ?? null, plan.lineReserveStands === true),
               plan.bindingCap ? `cap: ${BINDING_CAP_LABEL[plan.bindingCap] ?? plan.bindingCap}` : null,
             ]
               .filter(Boolean)
@@ -544,9 +546,10 @@ function AdvisoryNote({ mode }: { mode: NightChargeStatus['mode'] }) {
   if (mode !== 'advisory') {
     return (
       <div className="text-[11px] text-muted mt-3 leading-relaxed">
-        {mode === 'auto' ? 'Auto' : 'Supervised'} write mode — on charge nights the add-on performs one
-        bounded reserve write (announced each evening, cancellable above) and auto-restores the prior
-        reserve after the window. The reserve-floor alarms are independent of this path.
+        {mode === 'auto' ? 'Auto' : 'Supervised'} write mode — on a charge night the add-on performs at most
+        one bounded reserve write, only when the reserve reads under the night's target (announced each
+        evening, cancellable above), and auto-restores the prior reserve after it. A reserve that already
+        reads the target gets no write and no restore. The reserve-floor alarms are independent of this path.
       </div>
     );
   }

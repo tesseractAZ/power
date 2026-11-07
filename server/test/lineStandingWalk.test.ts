@@ -111,4 +111,47 @@ if (process.env.STANDING_WALK_WRITE === '1') {
     }
     assert.ok(worst.short <= 2.02, `under at 50, held at 49: at most 2.02 points short (${worst.n} cells, worst ${worst.short})`);
   });
+
+  /** The grid read false on every tick of [open, open + B min), then true: every stood night, with its written control. Sampled hours at every level. */
+  const BLIPS = new Map<number, ReturnType<typeof blipOf>>();
+  const blip = (B: number): ReturnType<typeof blipOf> => { if (!BLIPS.has(B)) BLIPS.set(B, blipOf(B)); return BLIPS.get(B)!; };
+  const blipOf = (B: number) => {
+    const rows = walkYear(WALK_HOURS_SAMPLE, new Set<WalkCase>(['A', 'W']), (t, open) => !(t >= open && t < open + B * 60_000));
+    const a = rows.filter((r) => r.cs === 'A' && r.stands === true);
+    const w = rows.filter((r) => r.cs === 'W');
+    return {
+      stood: a.length, stamped: a.filter((r) => r.standing).length, on: a.filter((r) => r.onAt != null).length, lost: a.filter((r) => r.gridLost === 1).length,
+      lostTwice: a.filter((r) => r.gridLost > 1).length, ceilingWrites: a.reduce((n, r) => n + r.writes.ceiling, 0), reserveWrites: a.reduce((n, r) => n + r.writes.reserve + r.writes.restore, 0),
+      accounts: [...new Set(a.map((r) => r.account))], written: w.length, writtenOn: w.filter((r) => r.onAt != null).length,
+    };
+  };
+
+  test('★★★ W6 a grid read lost in the window, the year: no stood night rides after the blip, whatever its length, and each takes one stamp and the standing account', () => {
+    const clean = blip(0);
+    assert.equal(clean.on, clean.stood, 'the control: every night rides');
+    assert.equal(clean.stamped, clean.stood);
+    assert.equal(clean.lost, 0);
+    for (const B of [1, 2, 6, 15, 30]) {
+      const r = blip(B);
+      assert.deepEqual(
+        [r.stood, r.stamped, r.on, r.lost, r.lostTwice, r.ceilingWrites, r.reserveWrites, r.accounts],
+        [clean.stood, 0, 0, clean.stood, 0, 0, 0, ['standing']],
+        `grid false for ${B} min from the open`,
+      );
+      assert.equal(r.written, clean.written);
+    }
+    // The written control: its abort needs a tick after the apply, so a blip of one tick rides on it and two ticks do not.
+    assert.equal(blip(1).writtenOn, clean.writtenOn);
+    assert.equal(blip(2).writtenOn, 0);
+  });
+
+  test('★★★ W6 a loss that ends before the open still rides, and a stood night that loses the grid after its stamp keeps its one stamp', () => {
+    const before = walkYear([4], new Set<WalkCase>(['A']), (t, open) => !(t < open));
+    const clean = walkYear([4], new Set<WalkCase>(['A']));
+    const pick = (rs: typeof clean) => rs.filter((r) => r.stands === true).map((r) => [r.label, r.b, r.standing, r.onAt, r.gridLost]);
+    assert.deepEqual(pick(before), pick(clean));
+    const after = walkYear([4], new Set<WalkCase>(['A']), (t, open) => !(t >= open + 60_000 && t < open + 6 * 60_000)).filter((r) => r.stands === true);
+    assert.ok(after.length > 0);
+    for (const r of after) assert.deepEqual([r.standing, r.gridLost, r.onAt], [true, 1, null], `${r.label} ${r.b}: stamped on the open's tick, then one-way`);
+  });
 }
