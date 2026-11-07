@@ -3553,7 +3553,7 @@ const MUTANTS = [
     id: "F10-a(iii). ★★ 'started' reads as closed",
     file: NFC, tests: [T_UNHELD],
     find: "key !== 'started' ? key : nightSettledKey(s) ?? (s.forceChargeOffAtMs != null ? 'stopped' : lineRunGone(s, nowMs));",
-    to: "key !== 'started' ? key : nightSettledKey(s) ?? 'stopped'; /* MUTANT */",
+    to: "key !== 'started' ? key : nightSettledKey(s) ?? (s.forceChargeOffAtMs != null ? 'stopped' : lineRunGone(s, nowMs) ?? 'stopped'); /* MUTANT */",
     why: 'A night whose force-charge is running reads "no force-charge starts".',
   },
   {
@@ -3673,7 +3673,7 @@ const MUTANTS = [
     id: 'F10-b(xii). ★★★ every key takes one key\'s words',
     file: NCA, tests: [T_UNHELD],
     find: "lineStartClosedWords('it', lineStartClosed)",
-    to: "lineStartClosedWords('it', 'noWrite' as ForceChargeStartClosed) /* MUTANT */",
+    to: "lineStartClosedWords('it', 'noWrite') /* MUTANT */",
     why: 'A cancelled night says none was issued: the words must be true of each key.',
   },
   {
