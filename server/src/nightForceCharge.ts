@@ -706,21 +706,23 @@ export function lineLatestStartMs(
 }
 
 /**
- * v1.200.0 (Fix13) — PURE. The time the declined-start push quotes, or null where no clock can be given. Two figures, each counting a
- * predicted EV ONCE, and the earlier of them, both lineLatestStartMs:
- *  - planT: at what the plant can deliver (lineDeliverableRateKw, a rate with no EV in it) with the EV's energy;
- *  - liveT: at the live rate, whose load already carries an EV that is on, with no EV energy; no such figure with no live rate.
- * The EV-null forms alone LOSE THE LINE on an EV still ahead, which the live rate cannot see (an EV 03:00-05:00 quotes ~04:21, and a start
- * then closes 52.2 under a 55.55 line). The live rate WITH the EV's energy, a double count, is hours early with the EV on (a push at 23:10
- * quoting ~18:59, before the window opened). The earlier of the two held on both shapes. That double count stays for the START alone
- * (index.ts): it errs early there, and it moves writes; a quoted deadline has no safe direction.
- * The pool is the coherent live reading, else the reserve: with no reading the earlier and safer time, and a stale panel is the usual such
- * night. Not the frozen last reading: it ignores the drain still to come, and quotes too late on 21,903 of 68,963 year pushes. The pool size
- * is the live one, else the frozen projection's: its backupFullCapWh is a nameplate capacity, not a reading, and while a frozen projection
- * never decides a write, this decides only a sentence. A time at or before now is null: from the reserve on a pool above it, or beside a
- * large EV, it can be gone before the push, and a deadline that cannot be met is no time to act. With no capacity at all it falls back to
- * the last start, the close less FORCE_CHARGE_MIN_RUN_MS, which no push reaches: decideForceCharge declines on the clock from there, and
- * the clock is no blocker. null with no close.
+ * v1.200.0 (Fix14) — PURE. The time the declined-start push quotes, or null where no clock can be given. A late clock loses the line, and an
+ * early one costs only urgency, so each input errs early, as lineLatestStartMs takes them:
+ *  - The pool: the coherent live reading, never above the reserve: a verified write holds the pool there, and the house draws a pool above
+ *    it down to it in the hours before the quoted time (a 59.1 line, pool 62 at the open, quoted ~04:40 from the reading: a start then
+ *    closes 53). With no reading, the reserve. Not the frozen last reading: it ignores the drain still to come, and quotes too late on
+ *    21,903 of 68,963 year pushes.
+ *  - The rate: the lower of the live rate, which sees the cap, the house and an EV on, and lineDeliverableRateKw (the latter alone, on a
+ *    10 kW cap with an EV ahead, quoted ~01:58 for a 65.95 line, and a start then closes 61).
+ *  - The EV's energy, always: the live rate cannot see an EV still ahead (an EV 03:00-05:00 quotes ~04:21 without it, and a start then closes
+ *    52.2 under a 55.55 line). With the EV already on the live rate carries it too, a double count that errs early. It is safe here for the
+ *    reason the guard gives: at worst it is a time gone by the push (at 23:10 it reads ~18:59, before the window opened), which is no clock.
+ * A time at or before now is null: a deadline that cannot be met is no time to act, and the push's words then name no clock. Residual: with
+ * no live rate the plan rate stands, which can run late on a plant under about 10 kW; and an EV above its prediction, or a house that rises
+ * after the push, can run a clock late. The pool size is the live one, else the frozen projection's: its backupFullCapWh is a nameplate
+ * capacity, not a reading, and while a frozen projection never decides a write, this decides only a sentence. With no capacity at all it
+ * falls back to the last start, the close less FORCE_CHARGE_MIN_RUN_MS, which no push reaches: decideForceCharge declines on the clock from
+ * there, and the clock is no blocker. null with no close.
  */
 export function lineDeclinedLatestStartMs(o: {
   nowMs: number; closeAtMs: number | null; askPct: number; poolSocPct: number | null; liveFullWh: number | null; frozenFullWh: number | null;
@@ -729,10 +731,10 @@ export function lineDeclinedLatestStartMs(o: {
   if (o.closeAtMs == null) return null;
   const fullWh = o.liveFullWh != null && o.liveFullWh > 0 ? o.liveFullWh : o.frozenFullWh != null && o.frozenFullWh > 0 ? o.frozenFullWh : null;
   if (fullWh == null) return o.closeAtMs - FORCE_CHARGE_MIN_RUN_MS;
-  const pool = o.poolSocPct ?? RESERVE_WRITE_MAX_PCT;
-  const planT = lineLatestStartMs(o.closeAtMs, o.askPct, pool, fullWh / 1000, lineDeliverableRateKw(o.slotCount), o.evDisplacedKwh, o.slotCount);
-  const liveT = o.rateKw != null ? lineLatestStartMs(o.closeAtMs, o.askPct, pool, fullWh / 1000, o.rateKw, null, o.slotCount) : planT;
-  const t = Math.min(planT, liveT);
+  const pool = Math.min(o.poolSocPct ?? RESERVE_WRITE_MAX_PCT, RESERVE_WRITE_MAX_PCT);
+  const planKw = lineDeliverableRateKw(o.slotCount);
+  const rateKw = o.rateKw != null ? Math.min(o.rateKw, planKw) : planKw;
+  const t = lineLatestStartMs(o.closeAtMs, o.askPct, pool, fullWh / 1000, rateKw, o.evDisplacedKwh, o.slotCount);
   return t <= o.nowMs ? null : t;
 }
 

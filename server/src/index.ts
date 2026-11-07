@@ -6310,8 +6310,8 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     const declinedLinePct = forceChargeLineNightPct(state);
     if (dp.push != null && why != null && declinedLinePct != null) {
       persistNightActuation({ ...nightActuationMem, forceChargeLineDeclinedPushed: [...dp.mem.st.pushed] });
-      // (Fix13) The rate and the EV as the start takes them, counted once there (lineDeclinedLatestStartMs). On a stale panel connectedSlots is
-      // empty: the frozen projection's connected count, on the same terms as its capacity (a sentence, never a write).
+      // (Fix14) The rate and the EV as the start takes them; the helper makes each input err early (lineDeclinedLatestStartMs). On a stale panel
+      // connectedSlots is empty: the frozen projection's connected count, on the same terms as its capacity (a sentence, never a write).
       const latestAt = lineDeclinedLatestStartMs({
         nowMs, closeAtMs: writeWindowEndMs(state), askPct: state.forceChargeLineAskPct!, poolSocPct: socCoherent ? socNowPct : null,
         liveFullWh: fullWh, frozenFullWh: shp2.projection?.kind === 'shp2' ? shp2.projection.backupFullCapWh : null,

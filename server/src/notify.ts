@@ -1257,10 +1257,11 @@ export function buildNightForceChargeOnFailure(o: {
  * the pool (nightForceCharge.forceChargeBlockerClass: the ceiling refused or unread, Charge Now already on,
  * the grid unknown or absent, vitals red, no slot readback, no slot connected, an incoherent SoC), once per
  * blocker class a night, once it has held (nightForceCharge.lineDeclinedPushStep) — while there is still
- * time to act. `latestStartText` is the time from nightForceCharge.lineDeclinedLatestStartMs as clock text: the earlier of a start reaching
- * the line at the rate the plant can deliver, a predicted EV's energy counted, and at the rate now, with no live reading from the reserve;
- * a later start may close lower, and with none the add-on adds nothing above the 50% reserve. null where no time can be quoted (a time
- * already gone at the push): then a start now may already close under the line, true in every outcome. PURE.
+ * time to act. `latestStartText` is the time from nightForceCharge.lineDeclinedLatestStartMs as clock text: a latest start for the line that
+ * errs early on every input; a later start may close lower, and with none the add-on adds nothing above the 50% reserve. null where no time
+ * can be quoted (a time gone by the push): then the words name no clock, and say only that a later start may close lower, perhaps under the
+ * line, true in every outcome (on the walked year a start at such a push reached the ask every time, and on 72 of 1,983 the pool held it
+ * with no start at all). PURE.
  */
 export function buildLineForceChargeDeclinedStart(o: {
   day: string | null; linePct: number; why: string; latestStartText: string | null;
@@ -1279,7 +1280,7 @@ export function buildLineForceChargeDeclinedStart(o: {
       + (line > RESERVE_WRITE_MAX_PCT
         ? o.latestStartText != null
           ? `If it has not started by ~${o.latestStartText}, the pool may close under the line; if it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.`
-          : `A start now may already close under the line; if it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.`
+          : `The later it starts, the lower the pool may close, perhaps under the line; if it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.`
         : `If it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.`),
   };
 }
