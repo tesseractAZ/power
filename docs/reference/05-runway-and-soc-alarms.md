@@ -169,7 +169,7 @@ a surplus hour, so delta stays monotone in PV and the `runwayPvBasisGuard` monot
 `backup_remaining_kwh` / `backup_pool_percent` keep the panel's own figures; the runway hours and
 `projected_low_soc_percent` carry the corrected values.
 
-**Not changed (the change is scoped to the runway and its alarms), with two exceptions.** The night-charge
+**Not changed (the change is scoped to the runway and its alarms), with three exceptions.** The night-charge
 planner, its cushion, the JIT force-charge, the MPC/dispatch recommendations and
 `RUNWAY_DISCHARGE_EFFICIENCY` itself. The planner reads only the forecast's per-hour PV/load and the
 band's PV percentiles, which do not depend on the basis; `runwayBasisContracts.test.ts` builds every
@@ -180,8 +180,8 @@ house pool's measured capacity scale, which reaches it through one pinned door (
 in index.ts, a third tracker on the main thread with its own file, `pool-energy-basis-cushion.json`).
 No other consumer reads the scale under any spelling: `runwayBasisContracts.test.ts` pins every source
 line that names the plan's scale, the ledger helper that returns it or the ledger's `cushion_pool_scale`
-columns, and the tracker's file is named only where its tracker is built. Every planner walk stays on
-nameplate kWh per percent (chapter 15 part 1, "The cushion line on the measured capacity").
+columns, and the tracker's file is named only where its tracker is built. Until v1.202.0 every planner
+walk stayed on nameplate kWh per percent.
 The second exception (v1.201.0) is the cushion's STANDBY: an islanded-outage cushion counts the
 Cores' standby draw for its hours, the runway's overhead figure for the Cores the cushion tracker
 counted, which reaches the planner as one number through a second pinned door
@@ -196,8 +196,10 @@ both overhead options and η_m, each as analytics.ts's constant and as the `limi
 is read from (`runwayPoolOverheadFloorW`, `runwayCoreOverheadW`, `runwayDrainMarginalEfficiency`,
 which index.ts could reach through its own `limits` import), and two inventories across the source
 pin who names the options at all: the getters in limits.ts and analytics.ts only, the option names
-in config.ts, limits.ts and analytics.ts only. Every planner walk still drains `load/η` with no
-overhead (chapter 15 part 1, "The Cores' standby in the cushion").
+in config.ts, limits.ts and analytics.ts only. Until v1.202.0 every planner walk drained `load/η`
+with no overhead. The third exception (v1.202.0) is the night-charge plan's WALKS: through the same
+two doors the plan counts its pool on the measured capacity and drains that standby figure on every
+discharge leg (chapter 15 part 1, "The plan on the packs' measured capacity").
 
 #### 1.4 Key constants
 

@@ -393,7 +393,7 @@ cadence are unchanged; while the grid is backstopping the audible ladder stays s
 least 1.5 kW above the load, pool 25–85 %) the pool charged 8–19 % less than `pv − load/0.94`
 predicts on the measured capacity, and 2–7 % less with the 270 W overhead subtracted (why the
 overhead applies in every hour). Every pool walk except the MPC optimiser's now stores a surplus
-at √0.86 = 0.927, below all 29 spans. The night-charge planner's walks keep the nameplate basis and `load/0.94`; its outage cushion counts the 270 W overhead for its hours (v1.201.0), and its line is on the measured capacity (v1.199.0) (reference chapter 5, [1.3a The measured energy basis](reference/05-runway-and-soc-alarms.md#13a-the-measured-energy-basis-v118719)).
+at √0.86 = 0.927, below all 29 spans. Since v1.202.0 the night-charge planner's walks are on the measured capacity too and drain the 270 W overhead wherever the grid is not charging the pool, the load still at `load/0.94` (its line moved there in v1.199.0, its cushion's hours counted the overhead in v1.201.0) (reference chapter 5, [1.3a The measured energy basis](reference/05-runway-and-soc-alarms.md#13a-the-measured-energy-basis-v118719)).
 
 ### Live check on three nights (measured 2026-10-15)
 
