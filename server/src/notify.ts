@@ -935,14 +935,14 @@ export function buildLineForceChargeGridOff(o: {
   /** v1.200.1 — a stood night's grid loss with no force-charge of ours for an OFF to report: no abort goes on such a night, so this is its account. */
   noneOn?: boolean;
 }): NotifyMessage {
-  const line = lineBesidePct(o.linePct, RESERVE_WRITE_MAX_PCT);
+  const none = o.noneOn === true;
   return {
     severity: 'warning',
     dedupId: 'night_charge_line_grid_off',
-    title: o.noneOn === true ? 'Night-charge: no force-charge for the outage line starts tonight' : 'Night-charge: the force-charge for the outage line stopped',
-    body: (o.noneOn === true
-      ? `The grid read as lost during the window, so no force-charge for tonight's ${line}% outage line starts, whatever the grid does next. `
-      : `The panel read the grid as lost, so the add-on switched off the force-charge for tonight's ${line}% outage line; it does not start again tonight. `)
+    title: none ? 'Night-charge: no force-charge for the outage line starts tonight' : 'Night-charge: the force-charge for the outage line stopped',
+    body: (none
+      ? `The grid read as lost during the window, so no force-charge for tonight's ${lineBesidePct(o.linePct, RESERVE_WRITE_MAX_PCT)}% outage line starts, whatever the grid does next. `
+      : `The panel read the grid as lost, so the add-on switched off the force-charge for tonight's ${lineBesidePct(o.linePct, RESERVE_WRITE_MAX_PCT)}% outage line; it does not start again tonight. `)
       + `${linePoolStandsWords(o.linePct, o.poolPct)} ${lineChargeNowByHandWords(o.closeText, 'with the grid present')}`,
   };
 }
@@ -1123,7 +1123,7 @@ export function buildNightChargeForeignReserve(o: {
       + `${named! > RESERVE_WRITE_MAX_PCT ? ' The pool may close under the line.' : ''} ${lineChargeNowByHandWords(l.closeText)}`;
   if (stood) {
     return {
-      severity: l != null ? 'warning' : 'info',
+      severity: l == null ? 'info' : 'warning',
       dedupId: 'night_charge_actuation',
       title: `Night-charge: the reserve now reads ${o.pct}%`,
       body:

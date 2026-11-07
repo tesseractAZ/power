@@ -7494,14 +7494,13 @@ function runLineCloseAccountStep(): void {
     // v1.200.1 — a stood night's close: no write, no restore. The morning's summary, whose account of the panel's stop, the re-ONs and the close
     // is the night's, never the close account's "was stopped" on a good night.
     app.log.info(`night-charge: the ${state.day} night closed on a standing ${state.targetPct}% reserve, with no write and no restore: the ${lineLogPct(state)}% outage line had ${state.forceChargeOnAtMs != null ? 'a force-charge' : 'no force-charge'}, and the pool reads ${freshPoolSocPct(nowMs) ?? 'unknown'}%.`);
-    void sendNotification(loadNotifyConfig(), buildNightChargeMorningSummary({
-      day: state.day, targetPct: state.targetPct, restorePct: state.targetPct ?? RESERVE_WRITE_MAX_PCT,
-      expectedKwh: armedExpectedBuyKwh(state.day),
-      forceCharge: forceChargeNightOutcome(state, forceChargeGatesOn()),
-      closePoolPct: freshPoolSocPct(nowMs), linePct: forceChargeLineNightPct(state),
-      closeReadLate: lineCloseReadingLate(state, nowMs),
-      standing: true, gridLost: state.gridLostAtMs != null,
-    })).catch((e: any) => {
+    const stoodOutcome = forceChargeNightOutcome(state, forceChargeGatesOn());
+    const stoodClose = buildNightChargeMorningSummary({
+      day: state.day, targetPct: state.targetPct, restorePct: state.targetPct ?? RESERVE_WRITE_MAX_PCT, expectedKwh: armedExpectedBuyKwh(state.day),
+      forceCharge: stoodOutcome, closePoolPct: freshPoolSocPct(nowMs), linePct: forceChargeLineNightPct(state),
+      closeReadLate: lineCloseReadingLate(state, nowMs), standing: true, gridLost: state.gridLostAtMs != null,
+    });
+    void sendNotification(loadNotifyConfig(), stoodClose).catch((e: any) => {
       app.log.debug(`night-charge: standing close summary notify failed (${e?.message ?? e})`);
     });
     return;

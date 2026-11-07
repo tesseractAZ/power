@@ -436,8 +436,8 @@ const MUTANTS = [
   {
     id: 'R-i. ★★★ the gate trusts every stored realized flag (the defect, gate side)',
     file: GATE, tests: [T_REAL],
-    find: '    const realizedStrike = (truthy(r.actuated) || lineWriteNeverHeld(r)) && realizedBreached(r);',
-    to: '    const realizedStrike = (truthy(r.actuated) || lineWriteNeverHeld(r)) && truthy(r.cushion_breached); /* MUTANT */',
+    find: "    const realizedStrike = (truthy(r.actuated) || lineWriteNeverHeld(r) || lineReserveStood(r)) && realizedBreached(r);"
+    to: "    const realizedStrike = (truthy(r.actuated) || lineWriteNeverHeld(r) || lineReserveStood(r)) && truthy(r.cushion_breached); /* MUTANT */"
     why: 'Every M5 night an older scorer stored on the legacy band stays an engine-fault strike: BLOCKED for good.',
   },
   {
