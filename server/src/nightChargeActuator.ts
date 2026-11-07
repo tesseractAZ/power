@@ -1494,8 +1494,10 @@ export function decideActuation(
     // v1.200.1 — this line sits behind every apply guard above, so the stamp inherits them all: a line ask, a reading strictly equal to the
     // target, and no attempt on record (that reading is the attempt's, for the adopt rule). The grid is the stamp's one fork, and it does not
     // defer: read lost here, the record takes gridLostAtMs and never the stamp, so a grid that returns inside the apply window finds no ride
-    // to take up (the feeder that trips, recloses and trips again). No dwell. A grid unknown stamps: the ON needs it known. A loss that ended
-    // before the open is no reading here, and a tick another guard above refused decides nothing, this one included.
+    // to take up (the feeder that trips, recloses and trips again). No dwell. A grid unknown stamps: the ON needs it known. A grid the panel
+    // still reads lost at the open loses the ride, whenever that reading was taken: the first tick may read a sample from before the open
+    // (up to SHP2_READBACK_STALE_MS), and a reply that omits gridSta keeps the last one, with no age limit. A tick another guard above
+    // refused decides nothing, this one included.
     if (cur !== state.targetPct || state.forceChargeLineAskPct == null || state.applyAttemptedAtMs != null) return { kind: 'none' };
     return opts.gridPresent === false ? { kind: 'gridLost' } : { kind: 'reserveStanding' };
   }

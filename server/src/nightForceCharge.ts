@@ -1763,7 +1763,7 @@ export function lineCloseReadingLate(s: Pick<NightActuationState, 'windowEndMs' 
 }
 
 /** v1.200.0 (Fix10 review 1) — PURE. The line to push at an OFF of ours nothing else reports while a person can act: 'gridLoss' fires on a
- *  gridSta reading alone (offReason: gridStaLost), and the restore's abort needs gridPresent false, so with grid flow still measured, or
+ *  not-OK gridSta (offReason: gridStaLost), and the restore's abort needs gridPresent false, so with live grid import beside it, or
  *  the reading unknown, the force-charge ends for good with no restore, no summary and no at-risk push (it needs no OFF of ours yet).
  *  With gridPresent false the abort's own account goes, with the same words. null on a night with no line (v1.199.1).
  *  v1.200.1 — a stood night has no abort, so this is its account with gridPresent false too. */

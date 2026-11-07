@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { walkYear, closeUnder, WALK_HOURS_ALL, WALK_HOURS_SAMPLE, type Basis, type WalkCase, type WalkRow } from './fixtures/lineStandingWalk.js';
+import { walkYear, closeUnder, panelGridAt, WALK_HOURS_ALL, WALK_HOURS_SAMPLE, type Basis, type WalkCase, type WalkRow } from './fixtures/lineStandingWalk.js';
 
 /**
  * v1.200.1 — THE YEAR ON A STANDING 50, walked through the real decisions (fixtures/lineStandingWalk.ts). Case A: 50 at the plan and the open. B: 50 at the plan, the
@@ -145,11 +145,27 @@ if (process.env.STANDING_WALK_WRITE === '1') {
     assert.equal(blip(2).writtenOn, 0);
   });
 
-  test('★★★ W6 a loss that ends before the open still rides, and a stood night that loses the grid after its stamp keeps its one stamp', () => {
-    const before = walkYear([4], new Set<WalkCase>(['A']), (t, open) => !(t < open));
+  test('★★★ W6 a grid the panel still reads lost at the open loses the ride, whenever that reading was taken, and a stood night that loses the grid after its stamp keeps its one stamp', () => {
     const clean = walkYear([4], new Set<WalkCase>(['A']));
     const pick = (rs: typeof clean) => rs.filter((r) => r.stands === true).map((r) => [r.label, r.b, r.standing, r.onAt, r.gridLost]);
-    assert.deepEqual(pick(before), pick(clean));
+    // The grid read from the panel's last quota, 30 s before each tick, through the real resolver (panelGridAt): the first tick of the window
+    // reads a sample from before the open. A loss that ended 40 s before the open, that sample reading Grid OK: every night rides, as clean.
+    const back = walkYear([4], new Set<WalkCase>(['A']), panelGridAt({ sta: (q, open) => (q < open - 40_000 ? 0 : 1) }));
+    assert.ok(pick(clean).length > 0 && pick(clean).every((x) => x[2] === true && x[3] != null), 'the control: every stood night rides');
+    assert.deepEqual(pick(back), pick(clean));
+    // A loss that ended 10 s before the open, still in that sample; and replies that omit gridSta, the last that carried it a 0 three hours
+    // before the open, Grid OK from open + 10. Each stood night: no stamp, no ON, no write, one grid-lost action (its one push) and no other,
+    // and the standing account at the close.
+    for (const [what, g] of [
+      ['a 0 sampled before the open', panelGridAt({ sta: (q, open) => (q < open - 10_000 ? 0 : 1) })],
+      ['an omitted gridSta carrying an old 0', panelGridAt({ sta: (q, open) => (q < open + 10 * 60_000 ? null : 1), carried: { sta: 0, atMs: (open) => open - 3 * 3_600_000 } })],
+    ] as const) {
+      const lost = walkYear([4], new Set<WalkCase>(['A']), g).filter((r) => r.stands === true);
+      assert.equal(lost.length, pick(clean).length, what);
+      for (const r of lost) {
+        assert.deepEqual([r.standing, r.gridLost, r.onAt, r.push, r.writes.on, r.writes.ceiling, r.writes.reserve + r.writes.restore, r.account], [false, 1, null, null, 0, 0, 0, 'standing'], `${what}: ${r.label} ${r.b}`);
+      }
+    }
     const after = walkYear([4], new Set<WalkCase>(['A']), (t, open) => !(t >= open + 60_000 && t < open + 6 * 60_000)).filter((r) => r.stands === true);
     assert.ok(after.length > 0);
     for (const r of after) assert.deepEqual([r.standing, r.gridLost, r.onAt], [true, 1, null], `${r.label} ${r.b}: stamped on the open's tick, then one-way`);

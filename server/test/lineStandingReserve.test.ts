@@ -14,6 +14,7 @@ import * as notify from '../src/notify.js';
 import * as gate from '../src/nightChargeGate.js';
 import { legacyIdentityCases } from './fixtures/legacyIdentityFixtures.js';
 import { MEASURED_SCALE } from './fixtures/measuredCushionLineFigures.js';
+import { panelGridAt, type GridAt } from './fixtures/lineStandingWalk.js';
 import * as cardText from '../../web/src/cards/nightChargeText.js';
 
 /**
@@ -400,7 +401,7 @@ test('★★★ S5 lineGridOffPushDue: a stood night\'s OFF reports the grid los
   const r = running();
   assert.equal(nfc.lineGridOffPushDue(r, 'gridLoss', { gridPresent: false }), 55.55);
   assert.equal(nfc.lineGridOffPushDue(written(), 'gridLoss', { gridPresent: false }), null, 'the abort\'s own account goes');
-  assert.equal(nfc.lineGridOffPushDue(written(), 'gridLoss', { gridPresent: true }), 55.55, 'a gridSta reading alone');
+  assert.equal(nfc.lineGridOffPushDue(written(), 'gridLoss', { gridPresent: true }), 55.55, 'a not-OK gridSta beside live grid import');
   assert.equal(nfc.lineGridOffPushDue(r, 'windowEnd', { gridPresent: false }), null);
 });
 
@@ -831,12 +832,36 @@ test('★★★ S10 deep in the window too: false from the open to open + 29, or
   assert.deepEqual(walkGrid(armed(), OPEN, (t) => t >= OPEN + 10 * M, (t) => (t === OPEN || t > OPEN + 12 * M ? 50 : null)).log, ['gridLost@0']);
 });
 
-test('★★★ S10 a loss that ends before the open still rides: the night has not begun, and the stamp reads the tick it stands on', () => {
+test('★★★ S10 a grid the panel still reads lost at the open loses the ride, whenever that reading was taken; one it reads present there rides', () => {
+  // The tick's own reading: the night has not begun before the open, and the stamp reads the tick it stands on.
   const r = walkGrid(armed(), OPEN - 30 * M, (t) => t >= OPEN);
   assert.equal(r.log[0], 'reserveStanding@0');
   assert.equal(r.s.gridLostAtMs, null);
   assert.ok(ons(r.log).some((l) => l.startsWith('on@')), r.log.join(' '));
   assert.ok(!r.log.includes('gridLost@0'));
+  // The grid as index.ts reads it: the panel's last quota, through the real freshness gate and resolver (panelGridAt), not the grid of the tick.
+  const tick = reserveTick();
+  assert.ok(tick.includes('  const gridNow = liveGridBackstop(store.get().devices);\n  const action = decideActuation(state, nowMs, {'), 'the reserve step reads the resolver');
+  assert.ok(tick.includes('    gridPresent: gridNow.present ? true : gridNow.presenceUnknown ? null : false,\n  });'), 'tri-stated, with no reading of its age');
+  const via = (g: GridAt) => (t: number): boolean | null => g(t, OPEN);
+  for (const declared of [false, true]) {
+    // A loss that ended 10 s before the open, in the quota the first tick of the window reads: 30 s old, or near the 5-min freshness bound.
+    // One action and nothing after it: no stamp, no ceiling write, no ON, and the gridLost tick's one push (S9), whatever the grid does next.
+    for (const lagMs of [30_000, 4.9 * M]) {
+      const pre = walkGrid(armed(), OPEN - 30 * M, via(panelGridAt({ sta: (q, open) => (q < open - 10_000 ? 0 : 1), lagMs, declared })));
+      assert.deepEqual(pre.log, ['gridLost@0'], `GRID_AVAILABLE ${declared}, a sample ${lagMs / 1000} s old`);
+      assert.deepEqual([pre.s.gridLostAtMs, pre.s.reserveStandingAtMs, pre.s.forceChargeOnAtMs, pre.s.appliedAtMs], [OPEN, null, null, null]);
+    }
+    // Replies that omit gridSta keep the last one that carried it, a 0 three hours before the open, with no age limit; Grid OK from open + 10.
+    const old = walkGrid(armed(), OPEN - 30 * M, via(panelGridAt({ sta: (q, open) => (q < open + 10 * M ? null : 1), carried: { sta: 0, atMs: (open) => open - 3 * H }, declared })));
+    assert.deepEqual(old.log, ['gridLost@0'], `GRID_AVAILABLE ${declared}, an omitted gridSta`);
+    assert.deepEqual([old.s.gridLostAtMs, old.s.reserveStandingAtMs, old.s.forceChargeOnAtMs], [OPEN, null, null]);
+    // A loss that ended 40 s before the open, the quota of 30 s before it reading Grid OK: the stamp, and the ride.
+    const back = walkGrid(armed(), OPEN - 30 * M, via(panelGridAt({ sta: (q, open) => (q < open - 40_000 ? 0 : 1), declared })));
+    assert.equal(back.log[0], 'reserveStanding@0', `GRID_AVAILABLE ${declared}`);
+    assert.equal(back.s.gridLostAtMs, null);
+    assert.ok(ons(back.log).some((l) => l.startsWith('on@')), back.log.join(' '));
+  }
 });
 
 test('★★★ S10 a stamped record is unchanged: its stamp stands, the loss is its second one-way stamp, and the ride ends there', () => {

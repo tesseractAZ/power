@@ -6,13 +6,15 @@
  *
  * Unmodelled, and said so wherever these figures are quoted: the ON-reading latch (the code path of a written night, unmeasured), the re-entry
  * band after the close, and every reading is the reading of the tick. The grid is an input (GridAt): present on every tick unless a walk
- * says otherwise, and the plant does not stop charging with it (a walk with the grid lost counts decisions, never the pool).
+ * says otherwise, and the plant does not stop charging with it (a walk with the grid lost counts decisions, never the pool). A walk can read
+ * it from a panel's last quota instead (panelGridAt), a sample that may predate the tick.
  */
 import { computeNightChargePlan, buildNightChargeInputs, type NightChargePlan } from '../../src/nightChargeAdvisor.js';
 import { armFromPlan, emptyActuationState, decideActuation, writeWindowEndMs, type NightActuationState } from '../../src/nightChargeActuator.js';
 import * as nfc from '../../src/nightForceCharge.js';
 import { decideForceCharge, forceChargeRateKw, evDisplacedPackKwh } from '../../src/nightForceCharge.js';
 import { nextOnPeakStartMs } from '../../src/chargeWindows.js';
+import { resolveGridBackstop } from '../../src/gridState.js';
 import { legacyIdentityCases, MODEL } from './legacyIdentityFixtures.js';
 import { MEASURED_SCALE } from './measuredCushionLineFigures.js';
 
@@ -31,6 +33,29 @@ export const WALK_HOURS_ALL = [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
 export const WALK_HOURS_SAMPLE = [4, 8, 12, 20];
 /** What the grid reads on a tick, against the window open; omitted: present on every tick. */
 export type GridAt = (t: number, open: number) => boolean | null;
+
+/**
+ * v1.200.1 — the grid as the tick reads it from one panel's last REST quota, not the grid of the tick: index.ts's gridPresent, tri-stated from
+ * liveGridBackstop over the device list, through the real freshness gate and resolver (resolveGridBackstop, `declared` its GRID_AVAILABLE). The
+ * quotas come every minute, `lagMs` before each tick (they and the ticks are both 60 s and unsynchronised), so the first tick of the window
+ * reads a sample taken before the open. `sta(q, open)` is the gridSta the quota at q carries, null where the reply omits it; the last reply
+ * that carried one before then is `carried`, as the store keeps it (lastGridReading). No grid flow on the main line: at a standing 50 with
+ * the pool above it the house runs from the pool.
+ */
+export function panelGridAt(o: { sta: (q: number, open: number) => number | null; carried?: { sta: number; atMs: (open: number) => number }; lagMs?: number; declared?: boolean }): GridAt {
+  const lag = o.lagMs ?? 30_000;
+  return (t, open) => {
+    const q = t - lag;
+    const sta = o.sta(q, open);
+    const last = sta != null ? { connected: sta === 1, sta, atMs: q } : o.carried != null ? { connected: o.carried.sta === 1, sta: o.carried.sta, atMs: o.carried.atMs(open) } : undefined;
+    const panel = {
+      sn: 'P1', deviceName: 'panel', productName: 'Smart Home Panel 2', online: true, contentStaleSinceMs: null, lastQuotaAtMs: q, lastUpdated: q, lastGridReading: last,
+      projection: { kind: 'shp2', gridSta: sta, gridConnected: sta == null ? null : sta === 1, gridWatt: 0, sources: [], backupReserveSoc: 50, backupFullCapWh: 92_160, backupRemainWh: 55_296, backupBatPercent: 60 },
+    };
+    const g = resolveGridBackstop({ devices: { P1: panel } as never, gridEntity: null, gridEntityConfigured: false, gridAvailableFallback: o.declared === true, nowMs: t });
+    return g.present ? true : g.presenceUnknown ? null : false;
+  };
+}
 
 export interface WalkNight {
   close: number | null; onMin: number; reOns: number; onAt: number | null; onMode: string | null; bought: number;

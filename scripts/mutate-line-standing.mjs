@@ -11,7 +11,7 @@
  * (LS4) THE RIDE on the stamp and a same-tick reading, one-way on a grid loss, ahead of the ceiling sync.
  * (LS5) THE RECORD'S READERS, one each. (LS6) THE CLOSE. (LS7) THE LEDGER: no `actuated`, a disposition graded, the cancel, a late verify.
  * (LS8) THE TEXTS, true in every outcome. (LS9) THE PIN GUARD. (LS10) A GRID LOSS WHERE THE STAMP WOULD GO: one-way, on a record with no stamp, each reader of
- * that shape, and the APPLY guard.
+ * that shape, the APPLY guard, and the panel's reading as the open reads it, whenever it was taken.
  *
  * Left out, because no input tells it apart: `writtenPct === reserveFloorPct` -> `reserveFloorPct === 50` (a line above 50 writes 50, so a floor at the
  * write is a floor of 50; S1's c1 pin holds it on the year); `!truthy(r.actuated)` dropped from lineReserveStood (each site ORs it with truthy(r.actuated)).
@@ -34,6 +34,7 @@ const CARDX = resolve(REPO, 'web/src/cards/NightChargeCard.tsx');
 const GATE = resolve(REPO, 'server/src/nightChargeGate.ts');
 const IDX = resolve(REPO, 'server/src/index.ts');
 const CARD = resolve(REPO, 'web/src/cards/nightChargeText.ts');
+const GRID = resolve(REPO, 'server/src/gridState.ts');
 
 const T_S = 'test/lineStandingReserve.test.ts';
 const T_W = 'test/lineStandingWalk.test.ts';
@@ -962,7 +963,7 @@ const MUTANTS = [
     file: ACT, tests: [T_S],
     find: "  if (mode === 'advisory') return { kind: 'none' };\n",
     to: "  if (opts.gridPresent === false && opts.currentReservePct === state.targetPct && state.forceChargeLineAskPct != null && state.applyAttemptedAtMs == null && state.gridLostAtMs == null) return { kind: 'gridLost' }; /* MUTANT */\n  if (mode === 'advisory') return { kind: 'none' };\n",
-    why: 'S2: before the open a loss is no reading of the night, and advisory never stamps.',
+    why: 'S2: a tick before the open decides nothing, and advisory never stamps.',
   },
   {
     id: 'LS10-e. ★★★ legFinished on a stamped record alone',
@@ -1054,6 +1055,20 @@ const MUTANTS = [
     find: 'nightActuationMem.reserveStandingAtMs != null || nightActuationMem.gridLostAtMs != null ? `tonight\'s reserve stood at its target',
     to: 'nightActuationMem.reserveStandingAtMs != null ? `tonight\'s reserve stood at its target',
     why: 'S10: no write went, so none restores at this close.',
+  },
+  {
+    id: 'LS10-r. ★★★ a sample from before the open read as no reading (the reading\'s own time)',
+    file: IDX, tests: [T_S],
+    find: '    // (decideActuation never aborts on null).\n    gridPresent: gridNow.present ? true : gridNow.presenceUnknown ? null : false,\n  });\n  if (action.kind === \'none\' || !shp2) return;\n',
+    to: '    // (decideActuation never aborts on null).\n    gridPresent: gridNow.present ? true : gridNow.presenceUnknown || (shp2?.lastQuotaAtMs ?? nowMs) < (state.windowStartMs ?? 0) ? null : false, /* MUTANT */\n  });\n  if (action.kind === \'none\' || !shp2) return;\n',
+    why: 'S10: a grid the panel still reads lost at the open loses the ride, whenever that reading was taken; its own time would ride an outage in progress at the open.',
+  },
+  {
+    id: 'LS10-s. ★★★ a reply that omits gridSta drops the last one',
+    file: GRID, tests: [T_S, T_W],
+    find: '  const reading = fromProjection ? proj!.gridConnected : p.lastGridReading?.connected;\n',
+    to: '  const reading = fromProjection ? proj!.gridConnected : undefined; /* MUTANT */\n',
+    why: 'S10, W6: the walks read the real resolver, and an old 0 the panel still carries loses the ride.',
   },
 ];
 
