@@ -1030,7 +1030,7 @@ export interface NightLedgerRow {
   // its window; score_notes' "Cost:" clause says which. Rows do not tile time (weekday
   // 21:00–23:00 and Sat 16:00 → Mon 00:00 fall in none), so a sum is not a bill.
   realized_cost_cents: number | null; // measured
-  // Still never written (docs/reference/15-1-night-charge-planning.md “6. The learning ledger”):
+  // Still never written (docs/reference/15-3-night-charge-ledger-and-scoring.md “6. The learning ledger”):
   // each needs the no-buy trajectory, which the panel's
   // re-entry hysteresis makes unmeasurable from the recorded one.
   counterfactual_cost_cents: number | null; // flagged ESTIMATE

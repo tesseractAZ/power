@@ -49,8 +49,9 @@ split into parts, and their section numbers run on across the parts.
 - [12. Configuration, Deployment, Security & Operations](12-configuration-deployment-security.md)
 - [13. Safety & Operational Plumbing](13-safety-plumbing.md)
 - [14. Intelligent Lighting & HVAC Posture (energy-aware automation)](14-lighting-and-hvac.md)
-- [15. Night-Charge TOU Arbitrage Advisor, part 1 — sections 1–7: purpose, the tariff model, inputs, the sizing brain, the ledger, outcome scoring](15-1-night-charge-planning.md)
+- [15. Night-Charge TOU Arbitrage Advisor, part 1 — sections 1–5: purpose, the tariff model, inputs, the sizing brain](15-1-night-charge-planning.md)
 - [15. Night-Charge TOU Arbitrage Advisor, part 2 — sections 8–13: the write-readiness gate, supervised writes, delivery surfaces, configuration, failure modes, the de-bias factors](15-2-night-charge-writes.md)
+- [15. Night-Charge TOU Arbitrage Advisor, part 3 — sections 6–7: the learning ledger, outcome scoring](15-3-night-charge-ledger-and-scoring.md)
 - [Appendix A — Feature Inventory (evidence linkage)](A-feature-inventory.md)
 <!-- chapters:end -->
 
