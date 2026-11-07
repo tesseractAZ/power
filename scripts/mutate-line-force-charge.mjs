@@ -2891,22 +2891,22 @@ const MUTANTS = [
   {
     id: 'F9r1-c(i). ★★★ a line night with no restore has no account (the defect)',
     file: NFC, tests: [T_UNHELD],
-    find: "  return s.foreignSettledAtMs != null ? 'foreign' : s.reserveStandingAtMs != null ? 'standing' : s.appliedAtMs == null ? 'noWrite' : null;",
+    find: "  return s.foreignSettledAtMs != null ? 'foreign' : s.reserveStandingAtMs != null || s.gridLostAtMs != null ? 'standing' : s.appliedAtMs == null ? 'noWrite' : null;",
     to: '  return null; /* MUTANT */',
     why: 'Nothing in the morning says the line was never run for.',
   },
   {
     id: 'F9r1-c(ii). ★★ an account for every applied night too',
     file: NFC, tests: [T_UNHELD],
-    find: "  return s.foreignSettledAtMs != null ? 'foreign' : s.reserveStandingAtMs != null ? 'standing' : s.appliedAtMs == null ? 'noWrite' : null;",
-    to: "  return s.foreignSettledAtMs != null ? 'foreign' : s.reserveStandingAtMs != null ? 'standing' : 'noWrite'; /* MUTANT */",
+    find: "  return s.foreignSettledAtMs != null ? 'foreign' : s.reserveStandingAtMs != null || s.gridLostAtMs != null ? 'standing' : s.appliedAtMs == null ? 'noWrite' : null;",
+    to: "  return s.foreignSettledAtMs != null ? 'foreign' : s.reserveStandingAtMs != null || s.gridLostAtMs != null ? 'standing' : 'noWrite'; /* MUTANT */",
     why: 'Two accounts of one night, one of them false.',
   },
   {
     id: 'F9r1-c(iii). ★★ a foreign night read as no write',
     file: NFC, tests: [T_UNHELD],
-    find: "  return s.foreignSettledAtMs != null ? 'foreign' : s.reserveStandingAtMs != null ? 'standing' : s.appliedAtMs == null ? 'noWrite' : null;",
-    to: "  return s.reserveStandingAtMs != null ? 'standing' : s.appliedAtMs == null ? 'noWrite' : null; /* MUTANT */",
+    find: "  return s.foreignSettledAtMs != null ? 'foreign' : s.reserveStandingAtMs != null || s.gridLostAtMs != null ? 'standing' : s.appliedAtMs == null ? 'noWrite' : null;",
+    to: "  return s.reserveStandingAtMs != null || s.gridLostAtMs != null ? 'standing' : s.appliedAtMs == null ? 'noWrite' : null; /* MUTANT */",
     why: 'A foreign night has no restore and no account.',
   },
   {
@@ -3737,14 +3737,14 @@ const MUTANTS = [
   {
     id: 'F10-d(i). ★★★ Cancel stays with nothing to cancel, and the write "stands"',
     file: CYC, tests: [T_UNHELD],
-    find: "cancel: state !== 'missed' && !(state === 'completed' && s.reserveStandingAtMs != null) } };",
+    find: "cancel: state !== 'missed' && !(state === 'completed' && (s.reserveStandingAtMs != null || s.gridLostAtMs != null)) } };",
     to: "cancel: state != null } }; /* MUTANT */",
     why: 'writeStands: "the armed write stands" on a night whose apply window passed.',
   },
   {
     id: 'F10-d(ii). ★★★ Cancel goes while a write can still come of it',
     file: CYC, tests: [T_UNHELD],
-    find: "cancel: state !== 'missed' && !(state === 'completed' && s.reserveStandingAtMs != null) } };",
+    find: "cancel: state !== 'missed' && !(state === 'completed' && (s.reserveStandingAtMs != null || s.gridLostAtMs != null)) } };",
     to: "cancel: state == null } }; /* MUTANT */",
     why: 'An attempt that reads back later is restored only if cancelled; a short window can still write.',
   },
@@ -3959,8 +3959,8 @@ const MUTANTS = [
   {
     id: 'F10r1-b(v). ★★★ the stat names the reserve set',
     file: CARDX, tests: [T_UNHELD],
-    find: '              closedLead != null ? null : reserveWriteLabel(plan.setpointSocPct, plan.targetSocPct, status.reserveWriteMaxPct ?? null),\n',
-    to: '              reserveWriteLabel(plan.setpointSocPct, plan.targetSocPct, status.reserveWriteMaxPct ?? null), /* MUTANT */\n',
+    find: '              closedLead != null ? null : reserveWriteLabel(plan.setpointSocPct, plan.targetSocPct, status.reserveWriteMaxPct ?? null, plan.lineReserveStands === true),\n',
+    to: '              reserveWriteLabel(plan.setpointSocPct, plan.targetSocPct, status.reserveWriteMaxPct ?? null, plan.lineReserveStands === true), /* MUTANT */\n',
     why: '"reserve set to 50%" on a night nothing set it.',
   },
   {
@@ -4331,8 +4331,8 @@ const MUTANTS = [
   {
     id: 'F10r1-j(i). ★★★ the rule stamps a missed leg (the finding)',
     file: CYC, tests: ['test/ledgerChargeCycle.test.ts'],
-    find: "  return a.day != null && a.day !== today && a.appliedAtMs == null && a.applyAttemptedAtMs == null && a.reserveStandingAtMs == null\n    && a.targetPct != null && a.missedApplyPushedAtMs == null;\n",
-    to: "  return a.day != null && a.day !== today && a.appliedAtMs == null && a.applyAttemptedAtMs == null && a.reserveStandingAtMs == null\n    && a.targetPct != null; /* MUTANT */\n",
+    find: "    && a.gridLostAtMs == null && a.targetPct != null && a.missedApplyPushedAtMs == null;\n",
+    to: "    && a.gridLostAtMs == null && a.targetPct != null; /* MUTANT */\n",
     why: "BLOCKED falls to LEARNING, and the ledger blames a Sat/Sun window that had nothing to do with it.",
   },
   {

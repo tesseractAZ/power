@@ -6,11 +6,12 @@
  * foreign rule ending at the close; and both reads of the reserve, the stamp alone and the ON-tick check alone each failing a test.
  *
  * (LS1) THE PLAN carries the ask whenever the panel reads the write; 'reserveAtTarget' stays for a reading above it and a mid-day leg.
- * (LS2) THE STAMP behind every apply guard, one mutant per guard, and the grid (the critic's HIGH).
+ * (LS2) THE STAMP behind every apply guard, one mutant per guard, and its one fork, the grid.
  * (LS3) AFTER THE STAMP no apply, the foreign rule bounded by the close, the grid-loss action, the record across a restart.
  * (LS4) THE RIDE on the stamp and a same-tick reading, one-way on a grid loss, ahead of the ceiling sync.
  * (LS5) THE RECORD'S READERS, one each. (LS6) THE CLOSE. (LS7) THE LEDGER: no `actuated`, a disposition graded, the cancel, a late verify.
- * (LS8) THE TEXTS, true in every outcome. (LS9) THE PIN GUARD.
+ * (LS8) THE TEXTS, true in every outcome. (LS9) THE PIN GUARD. (LS10) A GRID LOSS WHERE THE STAMP WOULD GO: one-way, on a record with no stamp, each reader of
+ * that shape, and the APPLY guard.
  *
  * Left out, because no input tells it apart: `writtenPct === reserveFloorPct` -> `reserveFloorPct === 50` (a line above 50 writes 50, so a floor at the
  * write is a floor of 50; S1's c1 pin holds it on the year); `!truthy(r.actuated)` dropped from lineReserveStood (each site ORs it with truthy(r.actuated)).
@@ -29,6 +30,7 @@ const NFC = resolve(REPO, 'server/src/nightForceCharge.ts');
 const ACT = resolve(REPO, 'server/src/nightChargeActuator.ts');
 const CYC = resolve(REPO, 'server/src/chargeCycle.ts');
 const NTF = resolve(REPO, 'server/src/notify.ts');
+const CARDX = resolve(REPO, 'web/src/cards/NightChargeCard.tsx');
 const GATE = resolve(REPO, 'server/src/nightChargeGate.ts');
 const IDX = resolve(REPO, 'server/src/index.ts');
 const CARD = resolve(REPO, 'web/src/cards/nightChargeText.ts');
@@ -102,30 +104,30 @@ const MUTANTS = [
   {
     id: 'LS2-a. ★★★ a stamp with no ask',
     file: ACT, tests: [T_S],
-    find: "    return cur === state.targetPct && state.forceChargeLineAskPct != null && state.applyAttemptedAtMs == null && opts.gridPresent !== false\n",
-    to: "    return cur === state.targetPct && state.applyAttemptedAtMs == null && opts.gridPresent !== false /* MUTANT */\n",
+    find: "    if (cur !== state.targetPct || state.forceChargeLineAskPct == null || state.applyAttemptedAtMs != null) return { kind: 'none' };\n",
+    to: "    if (cur !== state.targetPct || state.applyAttemptedAtMs != null) return { kind: 'none' }; /* MUTANT */\n",
     why: 'S2: a no-ask record must stay byte-identical; a stamp there would stop its evening supersede and missed-apply readers.',
   },
   {
     id: 'LS2-b. ★★★ a stamp over an attempt',
     file: ACT, tests: [T_S],
-    find: "    return cur === state.targetPct && state.forceChargeLineAskPct != null && state.applyAttemptedAtMs == null && opts.gridPresent !== false\n",
-    to: "    return cur === state.targetPct && state.forceChargeLineAskPct != null && opts.gridPresent !== false /* MUTANT */\n",
+    find: "    if (cur !== state.targetPct || state.forceChargeLineAskPct == null || state.applyAttemptedAtMs != null) return { kind: 'none' };\n",
+    to: "    if (cur !== state.targetPct || state.forceChargeLineAskPct == null) return { kind: 'none' }; /* MUTANT */\n",
     why: 'S2: the two paths would share a record: a write outstanding, and a night with no restore.',
   },
   {
     id: 'LS2-c. ★★★ a reading above the target stamps',
     file: ACT, tests: [T_S],
-    find: "    return cur === state.targetPct && state.forceChargeLineAskPct != null && state.applyAttemptedAtMs == null && opts.gridPresent !== false\n",
-    to: "    return cur >= state.targetPct && state.forceChargeLineAskPct != null && state.applyAttemptedAtMs == null && opts.gridPresent !== false /* MUTANT */\n",
+    find: "    if (cur !== state.targetPct || state.forceChargeLineAskPct == null || state.applyAttemptedAtMs != null) return { kind: 'none' };\n",
+    to: "    if (state.forceChargeLineAskPct == null || state.applyAttemptedAtMs != null) return { kind: 'none' }; /* MUTANT */\n",
     why: 'S2: strict equality, as applyVerified compares.',
   },
   {
-    id: 'LS2-d. ★★★ a stamp on a grid known lost (the critic\'s HIGH)',
-    file: ACT, tests: [T_S],
-    find: "    return cur === state.targetPct && state.forceChargeLineAskPct != null && state.applyAttemptedAtMs == null && opts.gridPresent !== false\n",
-    to: "    return cur === state.targetPct && state.forceChargeLineAskPct != null && state.applyAttemptedAtMs == null /* MUTANT */\n",
-    why: 'S2 (c4): a written night never rides a grid loss; the ride after a return is the unproven state.',
+    id: 'LS2-d. ★★★ a stamp on a grid read lost, so a ride over the loss',
+    file: ACT, tests: [T_S, T_W],
+    find: "    return opts.gridPresent === false ? { kind: 'gridLost' } : { kind: 'reserveStanding' };\n",
+    to: "    return { kind: 'reserveStanding' }; /* MUTANT */\n",
+    why: 'S2, S10, W6: the critic\'s high state: Charge Now on a slot as the grid fails again.',
   },
   {
     id: 'LS2-e. ★★★ the stamp ahead of the advisory guard',
@@ -137,8 +139,8 @@ const MUTANTS = [
   {
     id: 'LS2-f. ★★★ the stamp ahead of the cancelled guard',
     file: ACT, tests: [T_S],
-    find: "  if (state.cancelled || state.appliedAtMs != null) return { kind: 'none' };\n",
-    to: `${EARLY}  if (state.cancelled || state.appliedAtMs != null) return { kind: 'none' };\n`,
+    find: "  if (state.cancelled || state.appliedAtMs != null || state.gridLostAtMs != null) return { kind: 'none' };\n",
+    to: `${EARLY}  if (state.cancelled || state.appliedAtMs != null || state.gridLostAtMs != null) return { kind: 'none' };\n`,
     why: 'S2: a person cancelled.',
   },
   {
@@ -395,15 +397,15 @@ const MUTANTS = [
   {
     id: 'LS5-d. ★★★ the close says "no reserve write was confirmed"',
     file: NFC, tests: [T_S],
-    find: "  return s.foreignSettledAtMs != null ? 'foreign' : s.reserveStandingAtMs != null ? 'standing' : s.appliedAtMs == null ? 'noWrite' : null;",
-    to: "  return s.foreignSettledAtMs != null ? 'foreign' : s.appliedAtMs == null ? 'noWrite' : null; /* MUTANT */",
+    find: "  return s.foreignSettledAtMs != null ? 'foreign' : s.reserveStandingAtMs != null || s.gridLostAtMs != null ? 'standing' : s.appliedAtMs == null ? 'noWrite' : null;",
+    to: "  return s.foreignSettledAtMs != null ? 'foreign' : s.gridLostAtMs != null ? 'standing' : s.appliedAtMs == null ? 'noWrite' : null; /* MUTANT */",
     why: 'S5.',
   },
   {
     id: 'LS5-e. ★★ standing ahead of foreign',
     file: NFC, tests: [T_S],
-    find: "  return s.foreignSettledAtMs != null ? 'foreign' : s.reserveStandingAtMs != null ? 'standing' : s.appliedAtMs == null ? 'noWrite' : null;",
-    to: "  return s.reserveStandingAtMs != null ? 'standing' : s.foreignSettledAtMs != null ? 'foreign' : s.appliedAtMs == null ? 'noWrite' : null; /* MUTANT */",
+    find: "  return s.foreignSettledAtMs != null ? 'foreign' : s.reserveStandingAtMs != null || s.gridLostAtMs != null ? 'standing' : s.appliedAtMs == null ? 'noWrite' : null;",
+    to: "  return s.reserveStandingAtMs != null || s.gridLostAtMs != null ? 'standing' : s.foreignSettledAtMs != null ? 'foreign' : s.appliedAtMs == null ? 'noWrite' : null; /* MUTANT */",
     why: 'S5: that night\'s account is the foreign one.',
   },
   {
@@ -430,50 +432,50 @@ const MUTANTS = [
   {
     id: 'LS5-i. ★★★ a stood leg finishes at its apply window',
     file: CYC, tests: [T_S],
-    find: '  if (s.reserveStandingAtMs != null) {\n    const closeMs = writeWindowEndMs(s);\n    return s.gridLostAtMs != null || closeMs == null || nowMs >= closeMs;\n  }\n',
+    find: '  if (s.reserveStandingAtMs != null) {\n    const closeMs = writeWindowEndMs(s);\n    return closeMs == null || nowMs >= closeMs;\n  }\n',
     to: '  /* MUTANT */\n',
     why: 'S5.',
   },
   {
     id: 'LS5-j. ★★ a grid loss does not finish a stood leg',
     file: CYC, tests: [T_S],
-    find: '    return s.gridLostAtMs != null || closeMs == null || nowMs >= closeMs;\n',
-    to: '    return closeMs == null || nowMs >= closeMs; /* MUTANT */\n',
+    find: '  if (s.cancelled || s.revertedAtMs != null || s.foreignSettledAtMs != null || s.gridLostAtMs != null) return true;\n',
+    to: '  if (s.cancelled || s.revertedAtMs != null || s.foreignSettledAtMs != null) return true; /* MUTANT */\n',
     why: 'S5: as a written leg finishes at its abort.',
   },
   {
     id: 'LS5-k. ★★ a stood leg finishes at the window end, not the add-on\'s close',
     file: CYC, tests: [T_S],
-    find: '    const closeMs = writeWindowEndMs(s);\n    return s.gridLostAtMs != null || closeMs == null || nowMs >= closeMs;\n',
-    to: '    const closeMs = s.windowEndMs; /* MUTANT */\n    return s.gridLostAtMs != null || closeMs == null || nowMs >= closeMs;\n',
+    find: '    const closeMs = writeWindowEndMs(s);\n    return closeMs == null || nowMs >= closeMs;\n',
+    to: '    const closeMs = s.windowEndMs; /* MUTANT */\n    return closeMs == null || nowMs >= closeMs;\n',
     why: 'S5: the on-peak guard is the close of a ride.',
   },
   {
     id: 'LS5-l. ★★★ a finished stood leg stays armed (the critic\'s LOW)',
     file: CYC, tests: [T_S],
-    find: "  if (s.reserveStandingAtMs != null) return legFinished(s, nowMs) ? 'completed' : 'armed';\n",
-    to: "  if (s.reserveStandingAtMs != null) return 'armed'; /* MUTANT */\n",
+    find: "  if (s.reserveStandingAtMs != null || s.gridLostAtMs != null) return legFinished(s, nowMs) ? 'completed' : 'armed';\n",
+    to: "  if (s.reserveStandingAtMs != null || s.gridLostAtMs != null) return 'armed'; /* MUTANT */\n",
     why: 'S5 (c2): /status says armed at noon.',
   },
   {
     id: 'LS5-m. ★★★ a stamp reads "missed"',
     file: CYC, tests: [T_S],
-    find: "  if (s.reserveStandingAtMs != null) return legFinished(s, nowMs) ? 'completed' : 'armed';\n",
+    find: "  if (s.reserveStandingAtMs != null || s.gridLostAtMs != null) return legFinished(s, nowMs) ? 'completed' : 'armed';\n",
     to: '  /* MUTANT */\n',
     why: 'S5.',
   },
   {
     id: 'LS5-n. ★★★ a finished stood leg keeps its Cancel (the critic\'s LOW)',
     file: CYC, tests: [T_S],
-    find: "cancel: state !== 'missed' && !(state === 'completed' && s.reserveStandingAtMs != null) } };",
+    find: "cancel: state !== 'missed' && !(state === 'completed' && (s.reserveStandingAtMs != null || s.gridLostAtMs != null)) } };",
     to: "cancel: state !== 'missed' } }; /* MUTANT */",
     why: 'S5 (c2): "Cancel tonight" on a finished night.',
   },
   {
     id: 'LS5-o. ★★★ a missed push on a stamp',
     file: CYC, tests: [T_S],
-    find: '  if (leg.appliedAtMs != null || leg.reserveStandingAtMs != null) return false;\n',
-    to: '  if (leg.appliedAtMs != null) return false; /* MUTANT */\n',
+    find: '  if (leg.appliedAtMs != null || leg.reserveStandingAtMs != null || leg.gridLostAtMs != null) return false;\n',
+    to: '  if (leg.appliedAtMs != null || leg.gridLostAtMs != null) return false; /* MUTANT */\n',
     why: 'S5.',
   },
   {
@@ -602,15 +604,15 @@ const MUTANTS = [
   {
     id: 'LS7-i. ★★ a cancel rewrites a ride that ran',
     file: IDX, tests: [T_S],
-    find: '  if (s.reserveStandingAtMs != null && s.forceChargeOnAtMs == null && (cancelledCloseMs == null || Date.now() < cancelledCloseMs)) {\n',
-    to: '  if (s.reserveStandingAtMs != null && (cancelledCloseMs == null || Date.now() < cancelledCloseMs)) { /* MUTANT */\n',
+    find: '  if ((s.reserveStandingAtMs != null || s.gridLostAtMs != null) && s.forceChargeOnAtMs == null && (cancelledCloseMs == null || Date.now() < cancelledCloseMs)) {\n',
+    to: '  if ((s.reserveStandingAtMs != null || s.gridLostAtMs != null) && (cancelledCloseMs == null || Date.now() < cancelledCloseMs)) { /* MUTANT */\n',
     why: 'S9: graded as a written night\'s cancel after the apply is.',
   },
   {
     id: 'LS7-j. ★★ a cancel past the close clears a strike',
     file: IDX, tests: [T_S],
-    find: '  if (s.reserveStandingAtMs != null && s.forceChargeOnAtMs == null && (cancelledCloseMs == null || Date.now() < cancelledCloseMs)) {\n',
-    to: '  if (s.reserveStandingAtMs != null && s.forceChargeOnAtMs == null) { /* MUTANT */\n',
+    find: '  if ((s.reserveStandingAtMs != null || s.gridLostAtMs != null) && s.forceChargeOnAtMs == null && (cancelledCloseMs == null || Date.now() < cancelledCloseMs)) {\n',
+    to: '  if ((s.reserveStandingAtMs != null || s.gridLostAtMs != null) && s.forceChargeOnAtMs == null) { /* MUTANT */\n',
     why: 'S9: the night happened.',
   },
   {
@@ -842,9 +844,44 @@ const MUTANTS = [
   {
     id: 'LS8-ac. ★★ the no-plan shape says a write stands',
     file: CARD, tests: [T_S],
-    find: "      + (reserveStood ? 'The force-charge armed with the announced plan still rides the standing reserve; cancel it below.' : 'The write armed with the announced plan stands; cancel it below.');\n",
+    find: "      + (reserveStood ? 'The night armed on the standing reserve can be cancelled below.' : 'The write armed with the announced plan stands; cancel it below.');\n",
     to: "      + 'The write armed with the announced plan stands; cancel it below.'; /* MUTANT */\n",
     why: 'S7.',
+  },
+  {
+    id: 'LS8-ai. ★★★ the no-plan shape says the ride goes on after it ended',
+    file: CARD, tests: [T_S],
+    find: "      + (reserveStood ? 'The night armed on the standing reserve can be cancelled below.' : 'The write armed with the announced plan stands; cancel it below.');\n",
+    to: "      + (reserveStood ? 'The force-charge armed with the announced plan still rides the standing reserve; cancel it below.' : 'The write armed with the announced plan stands; cancel it below.'); /* MUTANT */\n",
+    why: 'S7: above a banner that says it does not start again.',
+  },
+  {
+    id: 'LS8-aj. ★★★ the footer promises a write and a restore on every charge night',
+    file: CARDX, tests: [T_S],
+    find: "write mode — on a charge night the add-on performs at most\n        one bounded reserve write, only when the reserve reads under the night's target (announced each\n        evening, cancellable above), and auto-restores the prior reserve after it. A reserve that already\n        reads the target gets no write and no restore. The reserve-floor alarms",
+    to: "write mode — on charge nights the add-on performs one\n        bounded reserve write (announced each evening, cancellable above) and auto-restores the prior\n        reserve after the window. The reserve-floor alarms",
+    why: 'S7: under a banner that says neither happens.',
+  },
+  {
+    id: 'LS8-ak. ★★★ the reserve label says set on a night nothing set it',
+    file: CARD, tests: [T_S],
+    find: "  const verb = reserveStands ? 'reads' : 'set to';\n",
+    to: "  const verb = 'set to' as string; void reserveStands; /* MUTANT */\n",
+    why: 'S7.',
+  },
+  {
+    id: 'LS8-al. ★★★ the card does not hand the label the flag',
+    file: CARDX, tests: [T_S],
+    find: "status.reserveWriteMaxPct ?? null, plan.lineReserveStands === true),\n",
+    to: "status.reserveWriteMaxPct ?? null), /* MUTANT */\n",
+    why: 'S7.',
+  },
+  {
+    id: 'LS8-am. ★★ the label reads on a written night',
+    file: CARD, tests: [T_S],
+    find: "  const verb = reserveStands ? 'reads' : 'set to';\n",
+    to: "  const verb = 'reads' as string; void reserveStands; /* MUTANT */\n",
+    why: 'S7: a written night keeps its words.',
   },
   {
     id: 'LS8-ad. ★★ the hold shape says a write stands',
@@ -896,6 +933,127 @@ const MUTANTS = [
     find: "      : forceChargeInFlight(m) || (m.reserveStandingAtMs != null && !legFinished(m, Date.now())) ? 'a night-charge force-charge is riding the house panel\\'s reserve'\n",
     to: "      : (m.reserveStandingAtMs != null && !legFinished(m, Date.now())) ? 'a night-charge force-charge is riding the house panel\\'s reserve' /* MUTANT */\n",
     why: 'S9.',
+  },
+
+  /* ── LS10: a grid read lost where the stamp would go ── */
+  {
+    id: 'LS10-a. ★★★ the deferring form back: a grid false on the stamp\'s tick records nothing',
+    file: ACT, tests: [T_S, T_W],
+    find: "    return opts.gridPresent === false ? { kind: 'gridLost' } : { kind: 'reserveStanding' };\n",
+    to: "    return opts.gridPresent === false ? { kind: 'none' } : { kind: 'reserveStanding' }; /* MUTANT */\n",
+    why: 'S10, W6: the grid returns inside the apply window, the night stamps and rides, in silence.',
+  },
+  {
+    id: 'LS10-b. ★★★ the APPLY guard goes: a stamp or a raise after the loss',
+    file: ACT, tests: [T_S],
+    find: "  if (state.cancelled || state.appliedAtMs != null || state.gridLostAtMs != null) return { kind: 'none' };\n",
+    to: "  if (state.cancelled || state.appliedAtMs != null) return { kind: 'none' }; /* MUTANT */\n",
+    why: 'S10: one-way is the whole point, whatever the reading does.',
+  },
+  {
+    id: 'LS10-c. ★★★ a grid unknown read as lost',
+    file: ACT, tests: [T_S],
+    find: "    return opts.gridPresent === false ? { kind: 'gridLost' } : { kind: 'reserveStanding' };\n",
+    to: "    return opts.gridPresent !== true ? { kind: 'gridLost' } : { kind: 'reserveStanding' }; /* MUTANT */\n",
+    why: 'S2: a dark panel would end the ride for the night; unknown keeps its reading for the ON to refuse.',
+  },
+  {
+    id: 'LS10-d. ★★★ the loss ahead of the apply guards',
+    file: ACT, tests: [T_S],
+    find: "  if (mode === 'advisory') return { kind: 'none' };\n",
+    to: "  if (opts.gridPresent === false && opts.currentReservePct === state.targetPct && state.forceChargeLineAskPct != null && state.applyAttemptedAtMs == null && state.gridLostAtMs == null) return { kind: 'gridLost' }; /* MUTANT */\n  if (mode === 'advisory') return { kind: 'none' };\n",
+    why: 'S2: before the open a loss is no reading of the night, and advisory never stamps.',
+  },
+  {
+    id: 'LS10-e. ★★★ legFinished on a stamped record alone',
+    file: CYC, tests: [T_S],
+    find: '  if (s.cancelled || s.revertedAtMs != null || s.foreignSettledAtMs != null || s.gridLostAtMs != null) return true;\n',
+    to: '  if (s.cancelled || s.revertedAtMs != null || s.foreignSettledAtMs != null || (s.gridLostAtMs != null && s.reserveStandingAtMs != null)) return true; /* MUTANT */\n',
+    why: 'S10: the shape this fix makes finishes inside its apply window.',
+  },
+  {
+    id: 'LS10-f. ★★★ legStatusState on a stamped record alone',
+    file: CYC, tests: [T_S],
+    find: "  if (s.reserveStandingAtMs != null || s.gridLostAtMs != null) return legFinished(s, nowMs) ? 'completed' : 'armed';\n",
+    to: "  if (s.reserveStandingAtMs != null) return legFinished(s, nowMs) ? 'completed' : 'armed'; /* MUTANT */\n",
+    why: 'S10: it would read armed, then missed.',
+  },
+  {
+    id: 'LS10-g. ★★★ a Cancel on a leg a grid loss ended before any stamp',
+    file: CYC, tests: [T_S],
+    find: "cancel: state !== 'missed' && !(state === 'completed' && (s.reserveStandingAtMs != null || s.gridLostAtMs != null)) } };",
+    to: "cancel: state !== 'missed' && !(state === 'completed' && s.reserveStandingAtMs != null) } }; /* MUTANT */",
+    why: 'S10: nothing of it is left to cancel.',
+  },
+  {
+    id: 'LS10-h. ★★★ a missed push on it',
+    file: CYC, tests: [T_S],
+    find: '  if (leg.appliedAtMs != null || leg.reserveStandingAtMs != null || leg.gridLostAtMs != null) return false;\n',
+    to: '  if (leg.appliedAtMs != null || leg.reserveStandingAtMs != null) return false; /* MUTANT */\n',
+    why: 'S10: "no write was issued" would give a false cause, and a second push.',
+  },
+  {
+    id: 'LS10-i. ★★★ the close says "no reserve write was confirmed" on it',
+    file: NFC, tests: [T_S],
+    find: "  return s.foreignSettledAtMs != null ? 'foreign' : s.reserveStandingAtMs != null || s.gridLostAtMs != null ? 'standing' : s.appliedAtMs == null ? 'noWrite' : null;",
+    to: "  return s.foreignSettledAtMs != null ? 'foreign' : s.reserveStandingAtMs != null ? 'standing' : s.appliedAtMs == null ? 'noWrite' : null; /* MUTANT */",
+    why: 'S10: no write was due; the standing account says why nothing started.',
+  },
+  {
+    id: 'LS10-j. ★★★ the next arm supersedes it',
+    file: CYC, tests: [T_S],
+    find: '    && a.gridLostAtMs == null && a.targetPct != null && a.missedApplyPushedAtMs == null;\n',
+    to: '    && a.targetPct != null && a.missedApplyPushedAtMs == null; /* MUTANT */\n',
+    why: 'S10: the stamp would replace the disposition the gate grades.',
+  },
+  {
+    id: 'LS10-k. ★★★ no disposition: the gate never sees the night',
+    file: IDX, tests: [T_S],
+    find: "    if (state.reserveStandingAtMs == null) stampLegOutcome(state, { arm_disposition: `${RESERVE_STOOD_DISPOSITION}the panel read the ${state.targetPct}% target in the apply window with the grid read lost; no write was due and no ride followed` });\n",
+    to: '    /* MUTANT */\n',
+    why: 'S10: with no missed push either, a miss on that row would go ungraded.',
+  },
+  {
+    id: 'LS10-l. ★★★ the disposition on a stamped record too',
+    file: IDX, tests: [T_S],
+    find: "    if (state.reserveStandingAtMs == null) stampLegOutcome(state, { arm_disposition: `${RESERVE_STOOD_DISPOSITION}the panel read",
+    to: "    stampLegOutcome(state, { arm_disposition: `${RESERVE_STOOD_DISPOSITION}the panel read",
+    why: 'S10: a stamped record is unchanged; the sentence is false on it.',
+  },
+  {
+    id: 'LS10-m. ★★ the disposition leaves the gate\'s prefix',
+    file: IDX, tests: [T_S],
+    find: "    if (state.reserveStandingAtMs == null) stampLegOutcome(state, { arm_disposition: `${RESERVE_STOOD_DISPOSITION}the panel read",
+    to: "    if (state.reserveStandingAtMs == null) stampLegOutcome(state, { arm_disposition: `the panel read",
+    why: 'S10: the gate would grade it apart from a stood grid loss.',
+  },
+  {
+    id: 'LS10-n. ★★★ the log calls it a stood night, mid-window',
+    file: IDX, tests: [T_S],
+    find: "    app.log.warn(state.reserveStandingAtMs != null\n      ? `night-charge: GRID LOST mid-window on",
+    to: "    app.log.warn((true as boolean) /* MUTANT */\n      ? `night-charge: GRID LOST mid-window on",
+    why: 'S10: it never stood, and it may be the open\'s own tick.',
+  },
+  {
+    id: 'LS10-o. ★★★ no push on a record with no stamp',
+    file: IDX, tests: [T_S],
+    find: '    if (lostLinePct != null && closeAtMs != null && (state.forceChargeOnAtMs == null || state.forceChargeOffAtMs != null)) {\n',
+    to: '    if (state.reserveStandingAtMs != null && lostLinePct != null && closeAtMs != null && (state.forceChargeOnAtMs == null || state.forceChargeOffAtMs != null)) { /* MUTANT */\n',
+    why: 'S10: the rule is no ON, and told. The push is what tells.',
+  },
+  {
+    id: 'LS10-p. ★★ the cancel route blind to it',
+    file: IDX, tests: [T_S],
+    find: '  if ((s.reserveStandingAtMs != null || s.gridLostAtMs != null) && s.forceChargeOnAtMs == null && (cancelledCloseMs == null || Date.now() < cancelledCloseMs)) {\n',
+    to: '  if (s.reserveStandingAtMs != null && s.forceChargeOnAtMs == null && (cancelledCloseMs == null || Date.now() < cancelledCloseMs)) { /* MUTANT */\n',
+    why: 'S10: the same disposition, read the same: a person\'s cancel is no strike.',
+  },
+  {
+    id: 'LS10-q. ★★ the floor route promises a restore tonight',
+    file: IDX, tests: [T_S],
+    find: 'nightActuationMem.reserveStandingAtMs != null || nightActuationMem.gridLostAtMs != null ? `tonight\'s reserve stood at its target',
+    to: 'nightActuationMem.reserveStandingAtMs != null ? `tonight\'s reserve stood at its target',
+    why: 'S10: no write went, so none restores at this close.',
   },
 ];
 
