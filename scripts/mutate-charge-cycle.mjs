@@ -70,8 +70,8 @@ const MUTANTS = [
   {
     id: 'K-i. ★★★ the no-fresh-plan shape drops its Cancel',
     file: CARD,
-    find: "{noPlanText(plan != null && !plan.basisComplete, stands, actuation?.reserveStandingAtMs != null)}</div>\n        {banner('mt-3')}"
-    to: "{noPlanText(plan != null && !plan.basisComplete, stands, actuation?.reserveStandingAtMs != null)}</div>\n        {/* MUTANT */}"
+    find: "{noPlanText(plan != null && !plan.basisComplete, stands, actuation?.reserveStandingAtMs != null)}</div>\n        {banner('mt-3')}",
+    to: "{noPlanText(plan != null && !plan.basisComplete, stands, actuation?.reserveStandingAtMs != null)}</div>\n        {/* MUTANT */}",
     why: 'A recompute that loses its basis, or a plan gone stale, leaves a raised reserve with no Cancel & revert on the card.',
   },
   {
@@ -112,7 +112,7 @@ const MUTANTS = [
   {
     id: 'K-vii. ★★ the hold shape ignores the standing write',
     file: CARD,
-    find: "    const hold = holdSummary(plan, { writeStands: stands, reserveStood: actuation?.reserveStandingAtMs != null });"
+    find: "    const hold = holdSummary(plan, { writeStands: stands, reserveStood: actuation?.reserveStandingAtMs != null });",
     to: '    const hold = holdSummary(plan); /* MUTANT */',
     why: '"No overnight charge needed … nothing will be charged" above "Reserve raised to 50% (was 16%)".',
   },
@@ -212,8 +212,8 @@ const MUTANTS = [
   {
     id: 'T-xiii. ★★ a reserve someone else set offers "Cancel & revert"',
     file: WEB,
-    find: "  if (a.foreignSettledAtMs != null) {\n    // v1.200.1 — a stood night"
-    to: "  if (false /* MUTANT */) {\n    // v1.200.1 — a stood night"
+    find: "  if (a.foreignSettledAtMs != null) {\n    // v1.200.1 — a stood night",
+    to: "  if (false /* MUTANT */) {\n    // v1.200.1 — a stood night",
     why: 'The card offers to revert a reserve the owner set; the server answers 409.',
   },
   {

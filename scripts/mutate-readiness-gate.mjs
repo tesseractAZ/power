@@ -83,8 +83,8 @@ const MUTANTS = [
   {
     id: 'ix. ★★★ a set-aside night loses its REALIZED judgement',
     file: GATE,
-    find: "    const realizedStrike = (truthy(r.actuated) || lineWriteNeverHeld(r) || lineReserveStood(r)) && realizedBreached(r);"
-    to: "    const realizedStrike = (truthy(r.actuated) || lineWriteNeverHeld(r) || lineReserveStood(r)) && realizedBreached(r) && trajGradedOnSizingTrough(r); /* MUTANT */"
+    find: "    const realizedStrike = (truthy(r.actuated) || lineWriteNeverHeld(r) || lineReserveStood(r)) && realizedBreached(r);",
+    to: "    const realizedStrike = (truthy(r.actuated) || lineWriteNeverHeld(r) || lineReserveStood(r)) && realizedBreached(r) && trajGradedOnSizingTrough(r); /* MUTANT */",
     why: 'An actuated night that really went below floor+cushion is not a strike because its plan row is pre-v1.186.0.',
   },
   {
