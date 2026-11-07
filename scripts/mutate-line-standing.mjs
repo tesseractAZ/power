@@ -859,7 +859,7 @@ const MUTANTS = [
   {
     id: 'LS8-aj. ★★★ the footer promises a write and a restore on every charge night',
     file: CARDX, tests: [T_S],
-    find: "write mode — on a charge night the add-on performs at most\n        one bounded reserve write, only when the reserve reads under the night's target (announced each\n        evening, cancellable above), and auto-restores the prior reserve after it. A reserve that already\n        reads the target gets no write and no restore. The reserve-floor alarms",
+    find: "write mode — on a charge night the add-on performs at most\n        one bounded reserve write, only when the reserve reads under the night's target (announced each\n        evening, cancellable above). The write may be re-issued if it does not read back, and the prior\n        reserve is auto-restored after it. A reserve that already reads the target gets no write and no\n        restore. The reserve-floor alarms",
     to: "write mode — on charge nights the add-on performs one\n        bounded reserve write (announced each evening, cancellable above) and auto-restores the prior\n        reserve after the window. The reserve-floor alarms",
     why: 'S7: under a banner that says neither happens.',
   },

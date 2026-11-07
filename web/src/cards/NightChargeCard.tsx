@@ -548,8 +548,9 @@ function AdvisoryNote({ mode }: { mode: NightChargeStatus['mode'] }) {
       <div className="text-[11px] text-muted mt-3 leading-relaxed">
         {mode === 'auto' ? 'Auto' : 'Supervised'} write mode — on a charge night the add-on performs at most
         one bounded reserve write, only when the reserve reads under the night's target (announced each
-        evening, cancellable above), and auto-restores the prior reserve after it. A reserve that already
-        reads the target gets no write and no restore. The reserve-floor alarms are independent of this path.
+        evening, cancellable above). The write may be re-issued if it does not read back, and the prior
+        reserve is auto-restored after it. A reserve that already reads the target gets no write and no
+        restore. The reserve-floor alarms are independent of this path.
       </div>
     );
   }

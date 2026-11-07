@@ -544,11 +544,11 @@ test('★★ S7 the foreign close account of a stood night says what happened, a
   assert.ok(w.body.includes('the reserve was set outside the add-on'), w.body);
 });
 
-test('★★★ S7 the card\'s footer holds on both kinds of night, on both shapes that render it: a bounded write only under the target, none and no restore at it', () => {
+test('★★★ S7 the card\'s footer holds on both kinds of night, on both shapes that render it: a bounded write only under the target, which may be re-issued if it does not read back; none and no restore at it', () => {
   const src = SRC('../../web/src/cards/NightChargeCard.tsx');
   const note = src.slice(src.indexOf('function AdvisoryNote('), src.indexOf('Advisory only — this add-on'));
   const flat = note.replace(/\s+/g, ' ');
-  assert.ok(flat.includes("{mode === 'auto' ? 'Auto' : 'Supervised'} write mode — on a charge night the add-on performs at most one bounded reserve write, only when the reserve reads under the night's target (announced each evening, cancellable above), and auto-restores the prior reserve after it. A reserve that already reads the target gets no write and no restore."), flat);
+  assert.ok(flat.includes("{mode === 'auto' ? 'Auto' : 'Supervised'} write mode — on a charge night the add-on performs at most one bounded reserve write, only when the reserve reads under the night's target (announced each evening, cancellable above). The write may be re-issued if it does not read back, and the prior reserve is auto-restored after it. A reserve that already reads the target gets no write and no restore."), flat);
   assert.ok(flat.includes('The reserve-floor alarms are independent of this path.'), flat);
   assert.doesNotMatch(flat, /on charge nights|performs one/, flat);
   assert.equal(src.split('<AdvisoryNote mode={status.mode} />').length - 1, 2, 'the charge shape and the hold shape');
