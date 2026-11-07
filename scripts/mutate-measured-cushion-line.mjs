@@ -69,22 +69,22 @@ const MUTANTS = [
   {
     id: 'L-iv. ★★★ a scale above 1 is accepted',
     file: NCA, tests: [T_LINE],
-    find: '  if (typeof s !== \'number\' || !Number.isFinite(s) || s < CUSHION_SCALE_PLAUSIBLE_MIN || s > 1 + 1e-9) {',
-    to: '  if (typeof s !== \'number\' || !Number.isFinite(s) || s < CUSHION_SCALE_PLAUSIBLE_MIN) { /* MUTANT */',
+    find: '  const s = o.poolScale.scale;\n  if (typeof s !== \'number\' || !Number.isFinite(s) || s < CUSHION_SCALE_PLAUSIBLE_MIN || s > 1 + 1e-9) {',
+    to: '  const s = o.poolScale.scale;\n  if (typeof s !== \'number\' || !Number.isFinite(s) || s < CUSHION_SCALE_PLAUSIBLE_MIN) { /* MUTANT */',
     why: 'Clamped to 1 it is harmless here, but recorded as a measured 1 rather than ignored as a bad reading.',
   },
   {
     id: 'L-v. ★★★ a scale under 0.5 is accepted',
     file: NCA, tests: [T_LINE],
-    find: '  if (typeof s !== \'number\' || !Number.isFinite(s) || s < CUSHION_SCALE_PLAUSIBLE_MIN || s > 1 + 1e-9) {',
-    to: '  if (typeof s !== \'number\' || !Number.isFinite(s) || s <= 0 || s > 1 + 1e-9) { /* MUTANT */',
+    find: '  const s = o.poolScale.scale;\n  if (typeof s !== \'number\' || !Number.isFinite(s) || s < CUSHION_SCALE_PLAUSIBLE_MIN || s > 1 + 1e-9) {',
+    to: '  const s = o.poolScale.scale;\n  if (typeof s !== \'number\' || !Number.isFinite(s) || s <= 0 || s > 1 + 1e-9) { /* MUTANT */',
     why: 'A 0.3 reading triples the cushion\'s percent: every resilience night writes 50 on a bad reading.',
   },
   {
     id: 'L-vi. ★★★ NaN is accepted',
     file: NCA, tests: [T_LINE],
-    find: '  if (typeof s !== \'number\' || !Number.isFinite(s) || s < CUSHION_SCALE_PLAUSIBLE_MIN || s > 1 + 1e-9) {',
-    to: '  if (typeof s !== \'number\' || s < CUSHION_SCALE_PLAUSIBLE_MIN || s > 1 + 1e-9) { /* MUTANT */',
+    find: '  const s = o.poolScale.scale;\n  if (typeof s !== \'number\' || !Number.isFinite(s) || s < CUSHION_SCALE_PLAUSIBLE_MIN || s > 1 + 1e-9) {',
+    to: '  const s = o.poolScale.scale;\n  if (typeof s !== \'number\' || s < CUSHION_SCALE_PLAUSIBLE_MIN || s > 1 + 1e-9) { /* MUTANT */',
     why: 'A NaN line makes every comparison false: the v1.39.0 fail-open class (a confident max buy).',
   },
   {
@@ -97,8 +97,8 @@ const MUTANTS = [
   {
     id: 'L-viii. ★★ float noise above 1 is not clamped',
     file: NCA, tests: [T_LINE],
-    find: '  const scale = Math.min(1, s);',
-    to: '  const scale = s; /* MUTANT */',
+    find: '  const scale = Math.min(1, s);\n  return { kwh: o.reserveKwh + o.cushionKwh / scale',
+    to: '  const scale = s; /* MUTANT */\n  return { kwh: o.reserveKwh + o.cushionKwh / scale',
     why: 'A scale of 1 + 1e-10 lowers the line by a hair and records a scale above nameplate.',
   },
   {
@@ -111,8 +111,9 @@ const MUTANTS = [
   {
     id: 'L-x. ★★★ the planner ignores the scale (the defect)',
     file: NCA, tests: [T_LINE, T_SCOPE],
-    find: '  const cushionLine = cushionLineKwh({ reserveKwh, cushionKwh, cushionBasis, poolScale: inputs.cushionPoolScale });',
-    to: '  const cushionLine = cushionLineKwh({ reserveKwh, cushionKwh, cushionBasis, poolScale: null }); /* MUTANT */',
+    // v1.202.0 — re-anchored at the seam: the one read of the scale, into the planning pool the line is counted on.
+    find: '  const pool = plannerPoolKwh(panelFullKwh, inputs.cushionPoolScale);',
+    to: '  const pool = plannerPoolKwh(panelFullKwh, null); /* MUTANT */',
     why: 'The written line holds ~0.944 of the cushion again: 18.27 of 18.85 kWh on the scenario.',
   },
 
@@ -185,22 +186,23 @@ const MUTANTS = [
     id: 'A-x. ★★★ the plan carries an undefined scale key where none applied',
     file: NCA, tests: [T_LINE],
     // v1.201.0 — re-anchored: the charge plan's spread is followed by the standby's (the Cores' standby in the cushion).
-    find: "    ...(cushionLine.applied != null ? { cushionPoolScale: cushionLine.applied } : {}),\n    // v1.201.0 — the Cores' standby the cushion counted, only where a figure was passed (islanded-outage).\n    ...(standby != null ? { cushionStandby: standby } : {}),\n    cushionOutageHours: inputs.outageCushionHours ?? DEFAULT_OUTAGE_CUSHION_HOURS,\n    // R2",
-    to: "    cushionPoolScale: cushionLine.applied ?? undefined, /* MUTANT */\n    // v1.201.0 — the Cores' standby the cushion counted, only where a figure was passed (islanded-outage).\n    ...(standby != null ? { cushionStandby: standby } : {}),\n    cushionOutageHours: inputs.outageCushionHours ?? DEFAULT_OUTAGE_CUSHION_HOURS,\n    // R2",
+    // v1.202.0 — re-anchored: the plan's scale is the pool's or the line's (planScale), beside the plan's pool.
+    find: "    ...(planScale != null ? { cushionPoolScale: planScale } : {}),\n    // v1.202.0 — the pool and the standby the walks counted, only where either differs from v1.201.0's walks.\n    ...planPoolField,\n    // v1.201.0 — the Cores' standby the cushion counted, only where a figure was passed (islanded-outage).\n    ...(standby != null ? { cushionStandby: standby } : {}),\n    cushionOutageHours:",
+    to: "    cushionPoolScale: planScale ?? undefined, /* MUTANT */\n    // v1.202.0 — the pool and the standby the walks counted, only where either differs from v1.201.0's walks.\n    ...planPoolField,\n    // v1.201.0 — the Cores' standby the cushion counted, only where a figure was passed (islanded-outage).\n    ...(standby != null ? { cushionStandby: standby } : {}),\n    cushionOutageHours:",
     why: 'Every plan without a scale gains a key: no plan reproduces its digest (the persisted JSON\'s key list).',
   },
   {
     id: 'A-xi. ★★ the rationale names the measured capacity at a scale of 1',
     file: NCA, tests: [T_LINE],
-    find: '  const measuredCushionNote = cushionLine.applied != null && cushionLine.applied.scale < 1',
-    to: '  const measuredCushionNote = cushionLine.applied != null && cushionLine.applied.scale <= 1 /* MUTANT */',
+    find: '  const measuredCushionNote = planScale != null && planScale.scale < 1',
+    to: '  const measuredCushionNote = planScale != null && planScale.scale <= 1 /* MUTANT */',
     why: 'A plan that moved no number says it did: "×1.000 of nameplate", and the golden text moves.',
   },
   {
     id: 'A-xii. ★★ the rationale\'s share divides by the scale a second time',
     file: NCA, tests: [T_LINE],
-    find: "    ? `, ${round1(((targetFloorKwh - reserveKwh) / fullKwh) * 100)}% of the packs' measured capacity at ×${cushionLine.applied.scale.toFixed(3)} of nameplate`",
-    to: "    ? `, ${round1(((targetFloorKwh - reserveKwh) / fullKwh / cushionLine.applied.scale) * 100)}% of the packs' measured capacity at ×${cushionLine.applied.scale.toFixed(3)} of nameplate` /* MUTANT */",
+    find: "    ? `, ${round1(((targetFloorKwh - reserveKwh) / fullKwh) * 100)}% of the packs' measured capacity at ×${planScale.scale.toFixed(3)} of nameplate`",
+    to: "    ? `, ${round1(((targetFloorKwh - reserveKwh) / fullKwh / planScale.scale) * 100)}% of the packs' measured capacity at ×${planScale.scale.toFixed(3)} of nameplate` /* MUTANT */",
     why: '"23% of the packs\' measured capacity" for a cushion that is 21.7% of it.',
   },
   {
@@ -250,8 +252,8 @@ const MUTANTS = [
   {
     id: 'D-vi. ★★★ the scale never reaches the planner',
     file: IDX, tests: [T_SCOPE],
-    find: "    // v1.199.0 — the cushion line's measured capacity scale (null: the nameplate line).\n    cushionPoolScale,",
-    to: "    // v1.199.0 — the cushion line's measured capacity scale (null: the nameplate line).\n    ...((false as boolean) ? { cushionPoolScale } : {}), /* MUTANT */",
+    find: "    // v1.199.0 — the cushion line's measured capacity scale (null: the nameplate line). v1.202.0 — the plan's pool's too.\n    cushionPoolScale,",
+    to: "    // v1.199.0 — the cushion line's measured capacity scale (null: the nameplate line). v1.202.0 — the plan's pool's too.\n    ...((false as boolean) ? { cushionPoolScale } : {}), /* MUTANT */",
     why: 'The add-on keeps writing the nameplate line: the fix ships inert.',
   },
   {

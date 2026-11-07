@@ -136,8 +136,8 @@ const MUTANTS = [
   {
     id: 'S-xii. ★★★ the standby is added after the conversion (s skipped for the standby)',
     file: NCA, tests: [T_SB, T_SCOPE],
-    find: '  const cushionLine = cushionLineKwh({ reserveKwh, cushionKwh, cushionBasis, poolScale: inputs.cushionPoolScale });\n  const targetFloorKwh = cushionLine.kwh;\n',
-    to: '  const cushionLine = cushionLineKwh({ reserveKwh, cushionKwh: cushion.kwh, cushionBasis, poolScale: inputs.cushionPoolScale });\n'
+    find: '  const cushionLine = cushionLineKwh({ reserveKwh, cushionKwh, cushionBasis, poolScale: pool.lineScale });\n  const targetFloorKwh = cushionLine.kwh;\n',
+    to: '  const cushionLine = cushionLineKwh({ reserveKwh, cushionKwh: cushion.kwh, cushionBasis, poolScale: pool.lineScale });\n'
       + "  const targetFloorKwh = cushionLine.kwh + (standby?.basis === 'runway-overhead' ? standby.kwh : 0); /* MUTANT */\n",
     why: 'The standby is pack energy like the load leg: on the panel\'s percent it is a share of the measured capacity too (33.20 vs 33.26%).',
   },
@@ -165,8 +165,8 @@ const MUTANTS = [
   {
     id: 'S-xvi. ★★★ an unmeetable line keeps the legacy proxy where the standby is counted (the review\'s cliff)',
     file: NCA, tests: [T_SB, T_SCOPE],
-    find: '    requiredExtraKwh = standbyCounted ? hiLift : poolHeadroomLiftKwh;',
-    to: '    requiredExtraKwh = standbyCounted ? poolHeadroomLiftKwh : poolHeadroomLiftKwh; /* MUTANT */',
+    find: '    requiredExtraKwh = standbyCounted || walkStandbyW > 0 ? hiLift : poolHeadroomLiftKwh;',
+    to: '    requiredExtraKwh = standbyCounted || walkStandbyW > 0 ? poolHeadroomLiftKwh : poolHeadroomLiftKwh; /* MUTANT */',
     why: 'A figure that carries the line past the pool drops the requirement and the buy below the plan without it (84.67 → 61.27 kWh for 10 W more), and under a 40 kWh minimum buy turns a charge night into a hold.',
   },
   {
@@ -189,7 +189,7 @@ const MUTANTS = [
     id: 'A-i. ★★★ the shortfall reads a second cushion without the standby',
     file: NCA, tests: [T_SB, T_SCOPE],
     find: '  const cushionShortfall = minProjKwh < targetFloorKwh - 1e-6;',
-    to: '  const cushionShortfall = minProjKwh < cushionLineKwh({ reserveKwh, cushionKwh: cushion.kwh, cushionBasis, poolScale: inputs.cushionPoolScale }).kwh - 1e-6; /* MUTANT */',
+    to: '  const cushionShortfall = minProjKwh < cushionLineKwh({ reserveKwh, cushionKwh: cushion.kwh, cushionBasis, poolScale: pool.lineScale }).kwh - 1e-6; /* MUTANT */',
     why: 'A charge-bound night that misses the new line says nothing: the shortfall is judged on the old one.',
   },
   {
@@ -290,8 +290,8 @@ const MUTANTS = [
   {
     id: 'D-x. ★★★ the standby never reaches the planner',
     file: IDX, tests: [T_SCOPE],
-    find: "    // v1.201.0 — the Cores' standby draw the islanded-outage cushion counts (W; the runway's figure).\n    cushionStandbyW,\n",
-    to: "    // v1.201.0 — the Cores' standby draw the islanded-outage cushion counts (W; the runway's figure).\n    ...((false as boolean) ? { cushionStandbyW } : {}), /* MUTANT */\n",
+    find: "    // v1.201.0 — the Cores' standby draw the islanded-outage cushion counts (W; the runway's figure). v1.202.0 — and the walks drain.\n    cushionStandbyW,\n",
+    to: "    // v1.201.0 — the Cores' standby draw the islanded-outage cushion counts (W; the runway's figure). v1.202.0 — and the walks drain.\n    ...((false as boolean) ? { cushionStandbyW } : {}), /* MUTANT */\n",
     why: 'The add-on keeps the cushion without the standby: the fix ships inert.',
   },
   {

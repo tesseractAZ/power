@@ -75,8 +75,8 @@ const MUTANTS = [
   {
     id: 'C-i. ★★★ the expected carry drains the P90 load',
     file: NCA,
-    find: '    pack = Math.max(slotFloor, Math.min(o.fullKwh, pack + chargeLegStep((w * (pv - Math.max(0, h.loadP50W!) / o.dischargeEff)) / 1000, o.legEff)));',
-    to: '    pack = Math.max(slotFloor, Math.min(o.fullKwh, pack + chargeLegStep((w * (pv - Math.max(0, h.loadP90W) / o.dischargeEff)) / 1000, o.legEff))); /* MUTANT */',
+    find: '    pack = Math.max(slotFloor, Math.min(o.fullKwh, pack + chargeLegStep((w * (pv - Math.max(0, h.loadP50W!) / o.dischargeEff - standbyW)) / 1000, o.legEff)));',
+    to: '    pack = Math.max(slotFloor, Math.min(o.fullKwh, pack + chargeLegStep((w * (pv - Math.max(0, h.loadP90W) / o.dischargeEff - standbyW)) / 1000, o.legEff))); /* MUTANT */',
     why: 'The "expected" start collapses onto the worst case again and the 10-12 plan says ~62 kWh expected.',
   },
   {
@@ -192,8 +192,8 @@ const MUTANTS = [
     // v1.187.22 — re-pointed at the sizing sentence, the one place it is named.
     id: 'C-xvii. ★★ the worst case named is the raw figure, not the announced (de-biased) one',
     file: NCA,
-    find: '  const sizingNote = ` ${sizingBasisText(buyKwhDebiased, calNote)}${projSocAtWindowStartPct != null',
-    to: '  const sizingNote = ` ${sizingBasisText(buyKwh, calNote)}${projSocAtWindowStartPct != null /* MUTANT */',
+    find: '  const sizingNote = ` ${sizingBasisText(buyKwhDebiased, calNote, walkStandbyW)}${projSocAtWindowStartPct != null',
+    to: '  const sizingNote = ` ${sizingBasisText(buyKwh, calNote, walkStandbyW)}${projSocAtWindowStartPct != null /* MUTANT */',
     why: 'With a learned calibration the worst case named disagrees with the calibration note beside it.',
   },
   {
@@ -388,7 +388,7 @@ const MUTANTS = [
   {
     id: 'C-xliii. ★★★ the walk does not drain the pool before the start',
     file: NCA,
-    find: '    pack = Math.max(floor, Math.min(o.fullKwh, pack + chargeLegStep(((pv - loadW / o.dischargeEff) / 1000) * (EXPECTED_JIT_STEP_MS / HOUR_MS), o.legEff)));',
+    find: '    pack = Math.max(floor, Math.min(o.fullKwh, pack + chargeLegStep(((pv - loadW / o.dischargeEff - standbyW) / 1000) * (EXPECTED_JIT_STEP_MS / HOUR_MS), o.legEff)));',
     to: '    pack = Math.max(floor, Math.min(o.fullKwh, pack)); /* MUTANT */',
     why: 'The pool sits at its window-open level until the start: the same understatement by another road.',
   },
@@ -508,8 +508,8 @@ const MUTANTS = [
     // v1.187.22 — re-pointed: the calibration rides in the sizing sentence.
     id: 'C-lvi. ★★ the sizing sentence drops the calibration',
     file: NCA,
-    find: '  const sizingNote = ` ${sizingBasisText(buyKwhDebiased, calNote)}${projSocAtWindowStartPct != null',
-    to: '  const sizingNote = ` ${sizingBasisText(buyKwhDebiased)}${projSocAtWindowStartPct != null /* MUTANT */',
+    find: '  const sizingNote = ` ${sizingBasisText(buyKwhDebiased, calNote, walkStandbyW)}${projSocAtWindowStartPct != null',
+    to: '  const sizingNote = ` ${sizingBasisText(buyKwhDebiased, '', walkStandbyW)}${projSocAtWindowStartPct != null /* MUTANT */',
     why: 'With a learned de-bias the worst case is named at ×1.66 with nothing saying so.',
   },
   // ── what is spoken and pushed: the charge the write arms ──

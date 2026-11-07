@@ -246,8 +246,8 @@ const MUTANTS = [
   {
     id: 'M-xxix. ★★ the pre-window disclosure ignores the armed backup',
     file: NCA,
-    find: '      dischargeEff, legEff, 0, windowStart, holdLift,\n',
-    to: '      dischargeEff, legEff, 0, windowStart, /* MUTANT */\n',
+    find: '      dischargeEff, legEff, walkStandbyW, 0, windowStart, holdLift,\n',
+    to: '      dischargeEff, legEff, walkStandbyW, 0, windowStart, /* MUTANT */\n',
     why: 'The plan states a 10:00 pool the backup would not leave.',
   },
   {

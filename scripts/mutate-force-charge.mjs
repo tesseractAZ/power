@@ -414,8 +414,8 @@ const MUTANTS = [
     // v1.170.0 — REPLACES the coast ARMED-line mutant (property retired).
     id: 'lii. ★ the ARMED line says Charge Now stays on to the window end',
     file: IDX,
-    find: 'OFF when it gets there (software stop; panel ceiling ${desiredForceChargeCeilingPct(c)}% as backstop).`;',
-    to: 'Charge Now stays on until the window-end OFF.`; /* MUTANT */',
+    find: 'OFF when it gets there (software stop; panel ceiling ${desiredForceChargeCeilingPct(c)}% as backstop).`\n',
+    to: 'Charge Now stays on until the window-end OFF.` /* MUTANT */\n',
     why: 'The journal describes the retired coast; an audit reads the target OFF as a surprise.',
   },
   // ── v1.169.0 — the live charge rate (grid-import cap less the house).
