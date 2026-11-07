@@ -75,11 +75,10 @@ When `NIGHT_CHARGE_MODE` is `supervised` (or `auto`), each charge night runs one
    no force-charge leg, or a force-charge that ran with one that counts it — never beside a
    reserve-only account whose figure may count the leg (a record from before the stamp with the
    armed ceiling above the reserve maximum), nor beside a force-charge that ran on a night armed
-   without it. It used to name "force-charge toward ~80%" from the armed ceiling and the
-   option alone (`armedForceChargeStopPct`), on nights the force-charge never ran. The
+   without it. The
    force-charge ON-failure warning (`buildNightForceChargeOnFailure`, "Night-charge: force-charge
    did not take effect") names where the force-charge stops — "Tonight's buy above the 50% reserve
-   (toward ~80%) will not happen" (`forceChargeStopPct`), where it named the 80.4% ceiling — and
+   (toward ~80%) will not happen" (`forceChargeStopPct`) — and
    adds "on those slot(s)" on a partial failure. Since v1.196.0 it names each failed slot's Core
    (`forceChargeSlotCores`: the slot's DPU from the panel's source list, labelled `coreLabel`, a
    never-named Core by its slot — never serial digits), says "offline in the cloud" when the cloud
@@ -103,15 +102,11 @@ When `NIGHT_CHARGE_MODE` is `supervised` (or `auto`), each charge night runs one
 
 3. **Revert (at the window close, or immediately on a post-apply cancel or a grid loss).** v1.187.0: `REVERT_LAG_MS` is 0 (it was 5 min): a pack still under its target at the close kept grid-charging at the off-peak rate until the restore. The revert readback verification and the settling grace (`REVERT_VERIFY_AFTER_MS`, `REVERT_READBACK_GRACE_MS`) are measured from the revert itself and do not move. **Force-charge's OFF goes first on that tick** (`actuationStepOrder`, nightForceCharge.ts): whenever a force-charge OFF is due on the night's own record — window closed, no window, cancelled, or reserve already reverted (`forceChargeOffDueNow`) — the tick runs the force-charge step before the reserve step; otherwise the reserve step runs first, so the START still rides the reserve it just verified. Each step runs in its own try (`runActuationSteps`), in either order. Without this the OFF waited behind the revert PUT (writes carry no timeout of their own; undici's 300 s default applies) and the morning summary while the Cores kept grid-charging at 16–19 kW. Both are OFF-direction writes, so neither order can raise a charge. The restore stamps `actuation_reverted_at_ms` on the ledger row (the delivered-energy span's end, §7). The prior reserve value is restored. The revert path is mode-independent — it runs even if the owner flips the option back to advisory mid-night — and refuses an invalid restore value. After `REVERT_ESCALATE_AFTER = 3` consecutive CLOUD-REJECTED writes it annunciates a critical (audible + HA notification) once and keeps retrying; the floor/runway/SoC alarm spine is fully independent throughout. A successful revert sends a morning summary notification — not awaited (v1.187.0): an info push (5 s headers + 10 s body per target) never holds the tick. **v1.189.0 (review):** the summary no longer goes on the restore's cloud ACK, where it said "reserve restored to 16%" and a restore that then did not read back was paged critical half an hour later, both cards standing. It goes once (`restoreSummaryDue`, stamped `restoreSummaryAtMs` before it is sent): on the tick the restore reads back (`revertVerifiedAtMs`), in the words above ("restored"); or, when the restore's readback grace (`REVERT_VERIFY_AFTER_MS`, 5 min from the ACK) runs with no readback, saying the restore was sent and acknowledged and the panel has not read it back yet ("Night-charge: reserve restore to 16% sent"), with no "restored" anywhere. After a restart with no reading yet, the owed summary first waits for this process's first reserve reading, at most `REVERT_DEADLINE_HOLD_MAX_MS` (10 min; `restoreSummaryAwaitsFirstReading`, stamped `restoreSummaryHeldAtMs`, v1.190.1), so a restore that reading confirms gets one "restored" card. A grid-loss abort is kept on the record with the restore (`revertGridLossAbort`), so the later summary still says the grid was lost. A record from before the field reads back as already summarised (its summary went on the ACK), so an update never sends a second one.
 
-   **v1.131.0 — revert readback.** The revert stamped `revertedAtMs` the moment the cloud
-   ACK'd, which is exactly the evidence v1.79.0 ruled insufficient on the apply side, and
-   the revert branch is gated on `revertedAtMs == null` — so the stamp also stopped the
-   actuator looking at the panel at all. A restore the SHP2 accepted-then-ignored therefore
-   left the reserve pinned at the raised target with the ledger recording a clean, completed
-   night. That is the expensive end state: the panel holds the raised value as its floor, so
-   it buys grid at on-peak instead of discharging the pack the plan had just paid overnight
-   rates to fill, and the floor alarm reads a false AT-RESERVE-FLOOR posture. A reverted
-   night now verifies against the DEVICE: reading the restored floor stamps
+   **v1.131.0 — revert readback.** `revertedAtMs` is stamped on the cloud's ACK, the evidence
+   v1.79.0 ruled insufficient on the apply side. A restore the SHP2 accepted then ignored would
+   leave the reserve raised with a clean ledger: the expensive end state, where the panel holds
+   it as its floor and buys grid at on-peak, and the floor alarm reads a false AT-RESERVE-FLOOR
+   posture. A reverted night verifies against the DEVICE: reading the restored floor stamps
    `revertVerifiedAtMs`; still reading the RAISED target after `REVERT_VERIFY_AFTER_MS`
    (= `REVERT_READBACK_GRACE_MS` = 5 min, so a verdict can never be reached inside the
    settling window `isRevertSettling` exists to cover) re-issues the restore up to
@@ -248,12 +243,9 @@ distinguish:
 | `legacy-pct` | no usable islanded-load measurement; the flat percentage-of-pool band stands in | whole-house **forward trough** (harsher) |
 | `disabled` | the owner set the cushion to zero — the plan stops sizing for an outage entirely | pack **at window close** |
 
-**Before v1.133.0 an exact `0` was not a decision, it was a fallback.** The guard folded
-`outageHours <= 0` into the same branch as "no measurement available", so setting the option
-to 0 silently delivered the legacy band (15% of pool ≈ 13.8 kWh on the reference plant) — the option
-was accepted, `validate-addon-config` passed, and the setting did not take effect. It was
-worse than inert: the legacy basis also switches the cushion test to the whole-house forward
-trough, so **asking for no cushion made the requirement larger**. An exact `0` is now honoured,
+**An exact `0` is a decision, not a fallback.** Before v1.133.0 it fell into the "no measurement
+available" branch and delivered the legacy band, whose whole-house trough made **asking for no
+cushion raise the requirement**. An exact `0` is honoured,
 and is checked FIRST — a disabled cushion does not depend on an islanded-load reading, so a
 missing measurement cannot resurrect the legacy band underneath it. Anything else nonsensical
 (negative, `NaN`, `Infinity`) still falls back: fail toward more cushion, never less.
@@ -326,15 +318,12 @@ Three properties an operator needs before setting these:
    still evaluates the cost target. It holds only when the pack already sits at or above the
    night's cost ceiling, or when the window can deliver less than the minimum buy toward it.
    The hold rationale names which case applied, and the ledger records the ceiling the night
-   was measured against. Before v1.174.0 the hold returned ahead of the objective in both
-   modes, so a high-pack night, including the long-gap 90% ceiling, never bought toward the
-   cost ceiling.
+   was measured against.
 
 **The outage line above the reserve envelope (v1.200.0).**
 
 The panel accepts a backup reserve of at most 50% (`RESERVE_WRITE_MAX_PCT`), so a line above it cannot be
-written. Before v1.200.0 such a night wrote 50 and still claimed the cushion: 13 and 24 plans of the year
-fixture (nameplate, 0.944), 10 and 15 of them closing near 50 (`lineForceCharge.test.ts` T4).
+written.
 
 - **Which plans qualify** (`nightChargeAdvisor.ts`): an islanded-outage charge plan, not economic-only
   (`requiredExtraKwh > 0`), whose line asked to the whole percent above it, ⌈L⌉ (`askOf`, the one
@@ -343,12 +332,20 @@ fixture (nameplate, 0.944), 10 and 15 of them closing near 50 (`lineForceCharge.
   qualify on nameplate and 37 at 0.944.
 - **Armed, carried or disclosed.** Where the line force-charge is eligible (`lineForceChargeEligible`:
   supervised or auto mode, never the backup leg) the plan arms it whatever the ask (`forceChargeLine
-  { askPct: ⌈L⌉, linePct: L }`), unless the write has nothing to raise. It is **carried** only where ⌈L⌉ + 10 ≤ 100 and, with the sizing met,
+  { askPct: ⌈L⌉, linePct: L }`), unless the reserve reads above the write, or a mid-day leg's reads it. It is **carried** only where ⌈L⌉ + 10 ≤ 100 and, with the sizing met,
   its own walk closes at or above L − 0.05 (`lineWalkHolds`). Otherwise it **discloses**:
   `cushionShortfall`, cause `'envelope'` (`'envelope+caps'` with a sizing shortfall), reason `advisory`,
   `backupLeg`, `reserveAtTarget`, `armedNoLine` or `startClosed` (nothing armed), `nearFull` (⌈L⌉ + 10 > 100) or `closeUnder`, the last two still armed. The flag is OR-ed in **after** the cost block, so the cost ceiling and its de-bias bound
   read the sized flag alone. `cushionTroughSocPct` stays the sized trough. The written reserve and every sizing figure
   equal v1.199.1's for the same inputs; with no eligibility input the plan is byte for byte.
+- **A standing reserve (v1.200.1).** The plan-time reading decides words only (`lineStanding`, `lineReserveStands`): the ask stays on the record, so a reserve lowered by the open gets its
+  write and rides it, at the ask sized on 50 (high, cost only: about 28 points over that reserve's own line, ~18 kWh; a strike there is at the recorded line, no exemption). A record with an ask reading
+  the target behind every apply guard, with no attempt and the grid not known lost, stamps `reserveStandingAtMs` (not under a write block). That writes nothing and no restore follows: `appliedAtMs`,
+  `applyVerifiedAtMs` and `priorReservePct` stay null. The ON and the ceiling sync need the stamp and the same tick's fresh reading (`reserveRideReady`, `ForceChargeOpts.reservePct`). Then the foreign
+  rule runs to the close (any change, the floor route's too), and a grid read lost stamps `gridLostAtMs`, one-way with no dwell: no ride after a return, the ceiling back at once, pushed. The OFFs read no
+  write. The close is the morning summary (`standing`). No `actuated`: `RESERVE_STOOD_DISPOSITION` grades it (`lineReserveStood`), a cancel before any ON rewrites it, and a plant that only stands
+  gives no graduation evidence. A cost-dominant night with an ask gets an ON in cost mode. At a standing 50 Charge Now reads ON a mean 116-176 minutes a night (4-20 h), its outage behaviour unproven;
+  the re-entry band at 50 is unmeasured, so no hold rule. Emulated: nothing here has run on the plant.
 - **The two modes** (`forceChargeModeOf`, `nightForceCharge.ts`). The armed record keeps the line's ask
   in its own field (`forceChargeLineAskPct`) beside the cost ceiling (`forceChargeCeilingPct`, whose
   meaning is unchanged). Each tick composes the mode from the **live** gates: the cost force-charge
@@ -365,8 +362,7 @@ fixture (nameplate, 0.944), 10 and 15 of them closing near 50 (`lineForceCharge.
   Now is ON under the panel ceiling the house and an EV ride the grid, so a load that starts after the start cannot draw the pool under the line.
 - **The panel's own stop, and the re-ON.** At its ceiling the panel switches a slot's Charge Now off by
   itself and leaves it off, read per slot with the panel-side classifier on 2026-09-23 (ch1 04:19, ch3
-  04:30) and 2026-10-02 (slots 2 and 1, 04:24-04:25). 2026-09-18 (90% ceiling at 03:30, 0 W import,
-  90 → 86% by 05:00) is consistent with it; its slot state is the add-on's record, not a readback. Below the ceiling the house and an
+  04:30) and 2026-10-02 (slots 2 and 1, 04:24-04:25). Below the ceiling the house and an
   EV draw the pool again. A start pulled early by a predicted EV reaches the ceiling hours before
   the close, and a real EV arriving later can draw the pool under the line: emulated, 8 of 200 year
   nights with a 20 kWh EV predicted and a 7 kW one arriving 90 minutes out. So on a line night whose ON verified, when the pool reads under the start target and
@@ -411,14 +407,14 @@ fixture (nameplate, 0.944), 10 and 15 of them closing near 50 (`lineForceCharge.
   the panel's own stop" only with it on record) and those a check found off. The stop ended the charge
   unless a re-ON after it took (`forceChargeLineReOnAppliedAtMs`) or a slot read ON again; with the last
   re-ON taking on no slot and none reading ON after it, Charge Now "read off" before the close. The close reading follows, "under the 55.6% outage line"
-  when under, "the pool was not read at the close" with no fresh reading; over 15 minutes late, the pool "now", no verdict (`lineCloseReadingLate`); a grid loss or cancel gives the reading then. A write never read back is told so, not "raised", there and on the banner (`lineWriteUnreadStatus`). A night with nothing to restore (no write, a foreign reserve) has its own account at the close (`lineCloseAccountDue`). A night with no line ask
+  when under, "the pool was not read at the close" with no fresh reading; over 15 minutes late, the pool "now", no verdict (`lineCloseReadingLate`); a grid loss or cancel gives the reading then. A write never read back is told so, not "raised", there and on the banner (`lineWriteUnreadStatus`). A night with nothing to restore (no write, a foreign reserve) has its own account at the close (`lineCloseAccountDue`), a stood night the summary's. A night with no line ask
   reads as v1.199.1, word for word (`fixtures/lineNightCostTexts.v1199.json`).
 - **Strikes.** A carried night whose sizing held (`cushion_shortfall` = 0) is clean at or above its line and
   a strike, fail-closed, under it (a run-time refusal, an ON that never took, a slow pack, a late load taking
   the grid cap, below). A row with `cushion_shortfall` = 1 (disclosed, or carried with its caps note) is
   exempt unless it is armed, actuated and never switched on (`force_charge_on_at_ms` NULL) with a close
   under min(line, 100): a strike, an owner's cancel after the apply too (no cancel column). An ON that never took leaves it exempt (no ON-verified
-  column). A write that never held it (`actuated` 0, a missed apply) is graded as actuated (`lineWriteNeverHeld`). `lineForceChargeStrikes` counts the strikes with an ask in the window. The ledger
+  column). A write that never held it (`actuated` 0, a missed apply) is graded as actuated (`lineWriteNeverHeld`). A verify after `applyFailed` stamps `actuated` 1. `lineForceChargeStrikes` counts the strikes with an ask in the window. The ledger
   records `cushion_line_force_charge_pct` (the ask armed), `cushion_envelope_shortfall` (1/0) and, at the ON, `force_charge_mode` ('cost' or
   'line'). `CURRENT_ALGO_VERSION` stays 3: no scored column's formula or sign moved.
 - **The exposure.** On a line night in a write mode, Charge Now is ON from the timed start
@@ -457,15 +453,12 @@ fixture (nameplate, 0.944), 10 and 15 of them closing near 50 (`lineForceCharge.
   **cost-dominant** night (a cost stop at ⌈L⌉ + 10 or above, today's cost force-charge with its software
   stop) with a late EV can close under a line of 70-90%: with a cost ceiling at ⌈L⌉ + 10, 5 of 140 with a
   7 kW EV from 60 minutes and 15 with an 11.52 kW one; no year line (≤ 65.95%) closes under there.
-  Adding a 7 kW EV from 90 minutes, an 11.52 kW one at ⌈L⌉ + 15 and floored readings, 89 close under;
-  the line-at-risk push ends at the cost stop and reaches 30 (49 end after it, 10 slow packs still
-  rising). **The ON-reading latch** (a slot that stops importing at its ceiling and keeps reading
+  Stresses combined, 89 close under, and the line-at-risk push, which ends at the cost stop, reaches 30. **The ON-reading latch** (a slot that stops importing at its ceiling and keeps reading
   ON) is unmeasured on this plant; no re-ON keys on it, so per predicted-EV cell 0-65 of 200 year nights
   close under (0-72 floored) and 52-140 of 140 at lines of 70-90% (variant `onLatch`, `PIN_ON_LATCH`).
   The line-at-risk push reaches every one of them at least 20 minutes before the close, after the latch;
   on the measured latch it goes on none of the 3,740 predicted-EV nights. With re-ONs accepted but never applied (unmeasured, `reOnInert`) it reaches 174 of 390 year nights
-  under, 2,334 of 2,615 at 70-90% (the rest checked at or inside the lead, or 25 a tick before the re-ON's
-  cutoff with a re-ON left). A late apply, a glitch at the check or a person's ON log no
+  under, 2,334 of 2,615 at 70-90%. A late apply, a glitch at the check or a person's ON log no
   shape. Of the unpredicted
   11.52 kW EV from 90 minutes it reaches 69 of 73 (70 of 82); a load that only slows the charge (7 kW from 120 minutes, an ON 5 minutes late) leaves the pool
   rising, not pushed.

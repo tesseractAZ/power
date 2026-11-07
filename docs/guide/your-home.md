@@ -176,7 +176,9 @@ second panel gets its own charge-level ladder and runway, and nothing else.
   switch Charge Now on for one slot in the EcoFlow app, open the main breaker, and check that the
   backed-up circuits stay powered and the pool discharges. `NIGHT_CHARGE_MODE` `advisory`, the
   per-night cancel, or a cushion whose line is at or under 50 % keeps Charge Now off on those
-  nights.
+  nights. A reserve already at 50 % gets no write and no restore: Charge Now rides it, reading ON
+  about two to three hours a night in the same emulation, and stops for the night if the reserve
+  moves or the grid is lost.
 
 ## Runway
 

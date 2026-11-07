@@ -107,6 +107,14 @@ test('★★★ S1 no eligibility input: no ask and no flag at a reserve of 50, 
   assert.equal('lineReserveStands' in p, false);
 });
 
+test('★★★ S1 a ride under 50 is unreachable: no plan of the year stands at a floor under the write (c1)', () => {
+  const evenings = CASES.filter((c) => / 21:30$/.test(c.label));
+  for (const floor of [10, 16, 30, 40, 47, 49]) for (const hours of [4, 12, 20]) for (const c of evenings) {
+    const p = planAt(floor, { label: c.label, hours });
+    assert.equal('lineReserveStands' in p, false, `${c.label} at ${floor}, ${hours} h`);
+  }
+});
+
 const MID_DAY = { kind: 'super_off_peak', role: 'cost' } as const;
 test('★★★ S1 a mid-day leg at the write keeps its disclosure: its re-entry rule is a separate change', () => {
   // The leg's kind is all the plan's standing test reads; its window stays the case's own.
@@ -136,6 +144,19 @@ test('★★★ S1 the rationale of a night that stands names no write and no re
   const cost = costPlan(label);
   assert.equal(cost.lineReserveStands, true);
   assert.doesNotMatch(cost.rationale, /tonight's write|The reserve is set to/, cost.rationale);
+});
+
+test('★★★ S1 the two sentences only a pool under the reserve or a cost-dominant ask reach: the panel\'s own reserve fills it, and it reads 50%', () => {
+  // A recompute mid-window with the pool under the reserve: what charges it is the panel's own, no write.
+  const d = CASES.find((c) => c.label === '2026-10-14 21:30')!.deps as { nowMs: number };
+  const low = computeNightChargePlan(buildNightChargeInputs({ ...d, reserveFloorPct: 50, cushionPoolScale: MEASURED_SCALE, forceChargeEligible: false, lineForceChargeEligible: true, nowMs: d.nowMs + 2 * H, socNowPct: 45 } as never)) as P;
+  assert.equal(low.lineReserveStands, true);
+  assert.ok(low.rationale.includes("the pool is at ~45% now, and the panel's own reserve charges it to the 50% reserve"), low.rationale);
+  // A cost-dominant night with its setpoint above what the window reaches keeps the reserve sentence, in the words of a reading.
+  const cost = computeNightChargePlan(buildNightChargeInputs({ ...CASES.find((c) => c.label === '2026-10-12 mid-window 02:55')!.deps, reserveFloorPct: 50, outageCushionHours: 2, forceChargeEligible: true, objectiveMode: 'cost', costMaxSocPct: 80, lineForceChargeEligible: true } as never)) as P;
+  assert.equal(cost.lineReserveStands, true);
+  assert.ok(cost.expectedForceChargeMode !== 'line');
+  assert.ok(cost.rationale.includes("The reserve reads 50% — tonight's cost target asks for 80%, but the panel only accepts a backup reserve up to 50%."), cost.rationale);
 });
 
 /* ══ S2 — the stamp ════════════════════════════════════════════════════════════════════════════════════════════════════════════ */
@@ -243,6 +264,16 @@ test('★★★ S4 no stamp is no ride; a stamp with its ask coerced away is non
   assert.equal(ride(stood({ gridLostAtMs: OPEN + H })), false, 'the grid-loss stamp ends it');
   assert.equal(dfc(stood({ forceChargeLineAskPct: null, forceChargeLinePct: null, forceChargeCeilingPct: 80 }), startTick, { enabled: true }).kind, 'none');
   for (const reading of [null, 40, 50, undefined]) assert.equal(dfc(written(), startTick, { reservePct: reading }).kind, 'on', `written night, reading ${reading}`);
+});
+
+test('★★★ S4 the one deliberate non-identity: a cost-dominant night WITH an ask at a standing 50 rides in cost mode, for its stop carries the line; with no ask it never stamps', () => {
+  const dominant = stood({ forceChargeCeilingPct: 90, forceChargeLineAskPct: 56 });
+  assert.equal(nfc.forceChargeModeOf(dominant, { cost: true, line: true })?.kind, 'cost');
+  const t = CLOSE - 2 * H;
+  assert.deepEqual(dfc(dominant, t, { enabled: true, ceilingReadbackPct: 90 }), { kind: 'on', slots: [1, 2, 3] });
+  assert.deepEqual(dfc(dominant, t, { enabled: true, ceilingReadbackPct: 90, reservePct: 40 }), { kind: 'none', why: 'the reserve no longer reads the night\'s target' });
+  assert.deepEqual(dac(noAsk({ forceChargeCeilingPct: 90 }), OPEN), { kind: 'none' }, 'a cost night with no ask at a reading of 50 is as it was: no stamp, no ride');
+  assert.equal(dfc(noAsk({ forceChargeCeilingPct: 90 }), t, { enabled: true, ceilingReadbackPct: 90 }).kind, 'none');
 });
 
 test('★★★ S4 a grid lost is one-way: the same blip as a written night, no ON when it returns, and the ceiling comes back at once', () => {
@@ -580,6 +611,14 @@ test('★★★ S8 a claimed stood night that closes under is struck, ON or not;
   assert.equal(read([...base, stoodRow({ force_charge_on_at_ms: NOW - 3 * DAY })]).metrics.activeStrikes, 1, 'a ride that ran: the realized strike');
   assert.equal(read([...base, stoodRow({ cushion_breached: 0, window_close_soc_pct: 70, actual_min_soc_pct: 60 })]).metrics.activeStrikes, 0, 'held');
   assert.equal(read([...base, stoodRow()]).metrics.lineForceChargeStrikes, 1);
+});
+
+test('★★★ S8 the disposition grades a line night alone: with no ask on the plan row it is no evidence of anything', () => {
+  const base = without3(led(30));
+  assert.equal(read([...base, stoodRow({ cushion_line_force_charge_pct: null })]).metrics.activeStrikes, 0, 'no ask on the row');
+  assert.equal(read([...base, stoodRow({ cushion_line_force_charge_pct: null, cushion_shortfall: 1 })]).metrics.activeStrikes, 0);
+  assert.equal(read([stoodRow({ cushion_shortfall: 1, cushion_line_force_charge_pct: null })]).metrics.strikesMeasurable, 0, 'no line row: nothing to measure');
+  assert.equal(read([stoodRow({ cushion_shortfall: 1 })]).metrics.strikesMeasurable, 1, 'a stood line row can strike, though disclosed');
 });
 
 test('★★★ S8 a disclosed stood night is struck only if it never ran and closed under; a ride that ran is physics, as a written night is', () => {

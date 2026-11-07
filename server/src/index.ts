@@ -4988,7 +4988,7 @@ async function runNightChargeEveningJobInner(): Promise<void> {
         && nightActuationMem.appliedAtMs == null && nightActuationMem.applyAttemptedAtMs == null
         && nightActuationMem.targetPct != null && nightActuationMem.windowStartMs != null
         && nowMs < nightActuationMem.windowStartMs) {
-      app.log.warn(`night-charge: the ARM for ${nightActuationMem.day} (target ${nightActuationMem.targetPct}%) is still pending and WILL write at ${new Date(nightActuationMem.windowStartMs - APPLY_LEAD_MS).toISOString()} — tonight's job never reached a decision to supersede or cancel it. Cancel from the panel if that is not wanted.`);
+      app.log.warn(`night-charge: the ARM for ${nightActuationMem.day} (target ${nightActuationMem.targetPct}%) is still pending and WILL write at ${new Date(nightActuationMem.windowStartMs - APPLY_LEAD_MS).toISOString()}${nightActuationMem.forceChargeLineAskPct != null ? ' (or ride the reserve, if the panel reads the target then)' : ''} — tonight's job never reached a decision to supersede or cancel it. Cancel from the panel if that is not wanted.`);
     }
     // v1.40.0: the NOTIFY is skipped, but the LEDGER ROW need not be lost — if
     // a pre-window plan snapshot from today exists and no row was recorded,
