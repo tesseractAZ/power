@@ -586,32 +586,41 @@ export function buildNightChargeMessage(
   // night — Friday's one-hour window included, where it starts at the open (~23:00) and the pool
   // ends near 62%. Where it stops is forceChargeStopPct, the level the title states: an 80.4
   // target syncs an 80 ceiling and stops at 80.
+  // v1.200.1 — the clauses below follow a sentence about the add-on's write; beside the words of a night that stands they name the add-on,
+  // for "it" would read as the reserve. Every other night: "it", word for word.
+  const stands = plan.lineReserveStands === true;
+  const it = stands ? 'the add-on' : 'it';
+  const also = stands ? 'The add-on' : 'It';
   const forceChargeClause = (ceiling: number): string => {
     const stop = `~${pct(forceChargeStopPct(ceiling))}`;
     const startMs = plan.expectedForceChargeStartMs;
     if (held || startMs === null) {
-      return `It also arms the panel's force-charge toward ${stop}, timed to finish by the window close; it is not expected to start. `;
+      return `${also} also arms the panel's force-charge toward ${stop}, timed to finish by the window close; it is not expected to start. `;
     }
     if (startMs === undefined) {
-      return 'Then, just in time to finish by the window close, it switches the panel\'s force-charge ON just long enough to '
+      return `Then, just in time to finish by the window close, ${it} switches the panel's force-charge ON just long enough to `
         + `reach ${stop}, and OFF when it gets there (or when the window closes). `;
     }
     const at = fmtPhoenixDayHm(startMs, plan.generatedAt);
     return bound
-      ? `Then it switches the panel's force-charge ON at ~${at} and charges toward ${stop}; the window is expected to close `
+      ? `Then ${it} switches the panel's force-charge ON at ~${at} and charges toward ${stop}; the window is expected to close `
         + 'before it gets there, and force-charge switches OFF then. '
-      : `Then, at ~${at}, timed to finish by the window close, it switches the panel's force-charge ON just long enough to `
+      : `Then, at ~${at}, timed to finish by the window close, ${it} switches the panel's force-charge ON just long enough to `
         + `reach ${stop}, and OFF when it gets there (or when the window closes). `;
   };
   // v1.200.0 — a LINE night: the force-charge runs to the window close for the outage line, and the level
   // it names is the title's (chargeLevelPct: the expected close). No software stop is promised.
+  // v1.200.1 — after the window: on a night that stands no restore is due, whichever way the words go, and what the house then draws is the
+  // panel's own reserve to decide (the re-entry band, unmeasured at 50), so no "as usual" and no hold rule.
+  const afterWindow = stands ? `No restore is due while the reserve reads ${round1(plan.reserveFloorPct)}%. `
+    : `After the window the reserve returns to ${round1(plan.reserveFloorPct)}% and the house uses the pool as usual. `;
   const lineClause = (l: { linePct: number; panelCeilingPct: number }): string => {
     // (Fix8) The line beside the reserve (and the note's full pool) as lineBesidePct names it; a line stated at the reserve unnumbered.
     const why = `${lineAboveReserveWords(l.linePct, "for tonight's ", ' outage line')} (above the ${RESERVE_WRITE_MAX_PCT}% the panel holds as a reserve)`;
     const lineStartMs = plan.expectedForceChargeStartMs;
     if (held || lineStartMs === null) {
       // v1.200.0 (review) — armed, never switched on: nothing "on until the window closes".
-      return `It also arms the panel's force-charge ${why}; it is not expected to start (the pool is expected to stay at or above the panel's ${l.panelCeilingPct}% force-charge ceiling). `;
+      return `${also} also arms the panel's force-charge ${why}; it is not expected to start (the pool is expected to stay at or above the panel's ${l.panelCeilingPct}% force-charge ceiling). `;
     }
     const at = lineStartMs === undefined ? 'just in time' : `at ~${fmtPhoenixDayHm(lineStartMs, plan.generatedAt)}`;
     // v1.200.0 (review 2) — a night whose expected walk reaches the panel ceiling (plan.expectedLineCeilingStop): the
@@ -619,23 +628,32 @@ export function buildNightChargeMessage(
     // the close. Never "keeps it on until the window closes", and the ceiling is no backstop there.
     const stop = plan.expectedLineCeilingStop;
     if (stop != null) {
-      return `Then, ${at}, it switches the panel's force-charge ON ${why}; the panel switches it off at its ${stop.ceilingPct}% force-charge ceiling, `
+      return `Then, ${at}, ${it} switches the panel's force-charge ON ${why}; the panel switches it off at its ${stop.ceilingPct}% force-charge ceiling, `
         + `and the add-on switches it back on if the pool falls under ${stop.startTargetPct}% before the window closes (at most ${lineReOnTimesWords(FORCE_CHARGE_LINE_REON_MAX)}), `
         + `${levelText} expected at the close. `
-        + `After the window the reserve returns to ${round1(plan.reserveFloorPct)}% and the house uses the pool as usual. `;
+        + afterWindow;
     }
-    return `Then, ${at}, it switches the panel's force-charge ON and keeps it on until the window closes, ${why}, `
+    return `Then, ${at}, ${it} switches the panel's force-charge ON and keeps it on until the window closes, ${why}, `
       + `taking the pool ${to} ${levelText}; the panel's ${l.panelCeilingPct}% force-charge ceiling is the backstop. `
-      + `After the window the reserve returns to ${round1(plan.reserveFloorPct)}% and the house uses the pool as usual. `;
+      + afterWindow;
   };
   // v1.200.0 (Fix9 review 1) — a plan whose reserve reads the write (cushionEnvelopeReason 'reserveAtTarget'): none is due, so no raise and
   // no force-charge are promised, a cost ceiling armed beside it included (each rides the verified write). (Fix9 review 2) That is the
   // plan's reading: the record stands armed, with no line ask, so a reserve lowered before the apply lets the write go, and a cost
   // ceiling ride it: true whichever way it goes, and what a lowered reserve does not do is said.
+  // v1.200.1 — 'before the window opens', not the deadline's text, which is its own phrase ("at 11:00 PM"). Now a reading above the write.
+  // A night that stands (lineReserveStands) carries its ask, so its sentence is true whichever way it goes: the reading stays and the night
+  // rides it, or it falls under the target, the write goes, the ride rides that, and the lowered reading comes back after the window. Its
+  // Cancel has no deadline of its own: it stands to the close.
   const tail = supervised && plan.cushionEnvelopeReason === 'reserveAtTarget'
     ? `SUPERVISED: the backup reserve reads ${round1(plan.reserveFloorPct)}% now, so no write is due while it does, and no force-charge runs without one. `
       + `A reading under ${supervised.targetPct}% when the window opens lets the armed write go, and it carries no force-charge for the outage line. `
-      + `Cancel from the night-charge card on the panel before ${supervised.cancelDeadlineText}.`
+      + 'Cancel from the night-charge card on the panel before the window opens.'
+    : supervised && stands
+    ? `SUPERVISED: the backup reserve reads ${round1(plan.reserveFloorPct)}% now, so no write is due while it does. `
+      + (forceLine != null ? lineClause(forceLine) : forceCeiling != null ? forceChargeClause(forceCeiling) : '')
+      + `A reading under ${supervised.targetPct}% when the window opens lets the armed write go, the force-charge rides it, and that reading is restored after the window. `
+      + 'Cancel from the night-charge card on the panel.'
     : supervised
     ? `SUPERVISED: ${supervised.cancelDeadlineText} the add-on raises the backup reserve to `
       + `${supervised.targetPct}% (bounded write; auto-restores after the charge window closes). `
@@ -658,7 +676,7 @@ export function buildNightChargeMessage(
   // (Fix9 review 2) A reserve reading the write: no write to price, and the figure "with" is the sized buy, which no write is due to make.
   const lowSoc = plan.cushionEnvelopeReason === 'reserveAtTarget'
     ? `with no charge, ~${pct(plan.minProjSocPct)} with the plan's full buy`
-    : `without ${held ? "tonight's write" : 'this charge'}, ~${pct(plan.minProjSocPct)} with it`;
+    : `without ${held && !stands ? "tonight's write" : 'this charge'}, ~${pct(plan.minProjSocPct)} with it`;
   const projection = `Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~${pct(plan.baselineMinSocPct)} `
     + `${lowSoc}; the floor+cushion line is ${pct(line)}. `
     + `Confidence: ${plan.confidenceTier}.${shortfallNote}${overBuyNote}${economicNote}${held ? '' : evNote} `;
@@ -746,10 +764,16 @@ export function buildNightChargeMorningSummary(o: {
   /** v1.200.0 (Fix10 review 1) — on a line night, the write was acknowledged and the panel never read it back (applyVerifiedAtMs null):
    *  it says that, never "raised" or "held". Always false or omitted on a night with no line: v1.199.1's words, word for word. */
   writeUnread?: boolean;
+  /** v1.200.1 — the reserve stood at the target (reserveStandingAtMs): the close's account of a night with no write and no restore. `restorePct`
+   *  is not read; the panel's stop, the re-ONs and the close are told as on a written night. */
+  standing?: boolean;
+  /** v1.200.1 — the night read the grid lost (gridLostAtMs), after the stamp or where it would have gone: why a force-charge never started. */
+  gridLost?: boolean;
 }): NotifyMessage {
   const base = { severity: 'info' as const, dedupId: 'night_charge_actuation' };
   const day = o.day ?? '—';
   const raised = `${o.targetPct ?? '—'}%`;
+  const stood = o.standing === true;
   const acked = o.restore === 'acknowledged';
   const sent = `the restore to ${o.restorePct}% was sent (the EcoFlow cloud acknowledged it), and the panel has not read it back yet`;
   const titleRestore = acked ? `reserve restore to ${o.restorePct}% sent` : `reserve restored to ${o.restorePct}%`;
@@ -789,9 +813,11 @@ export function buildNightChargeMorningSummary(o: {
   // beside a reserve-only figure, nor beside a leg that never started, failed or never confirmed.
   const figureFits = fc.kind === 'none' ? fc.expectedLeg === false : fc.kind === 'ran' && fc.expectedLeg === true;
   const note = expected && figureFits ? ` (${expected})` : '';
-  const restored = acked ? `${sent}. ` : `the reserve is restored to ${o.restorePct}%. `;
+  const restored = stood ? 'no restore was due. ' : acked ? `${sent}. ` : `the reserve is restored to ${o.restorePct}%. `;
   let night: string;
-  if (fc.kind === 'none' && unread != null) {
+  if (fc.kind === 'none' && stood) {
+    night = `the reserve stood at ${raised}; ${restored}`;
+  } else if (fc.kind === 'none' && unread != null) {
     night = `${unread}; ${restored}`;
   } else if (fc.kind === 'none') {
     night = acked
@@ -800,7 +826,8 @@ export function buildNightChargeMorningSummary(o: {
         ? `the reserve was held at ${raised} overnight as a floor (no charge was expected) and is restored to ${o.restorePct}%. `
         : `reserve raised to ${raised}${note} and restored to ${o.restorePct}%. `;
   } else {
-    const reserve = unread ?? (held ? `the reserve was held at ${raised} overnight as a floor (no charge was expected)` : `reserve raised to ${raised}`);
+    const reserve = stood ? `the reserve stood at ${raised}`
+      : unread ?? (held ? `the reserve was held at ${raised} overnight as a floor (no charge was expected)` : `reserve raised to ${raised}`);
     // v1.200.0 — a LINE night ran to the window close for its outage line (no stop to name).
     const line = 'line' in fc ? fc.line : undefined;
     const toward = line != null ? ` for the ${round1(line.linePct)}% outage line`
@@ -871,13 +898,13 @@ export function buildNightChargeMorningSummary(o: {
       ? (line != null
         ? `${reserve}, and force-charge ${ranLine}${readOffText}${reOnText}${close}${note}; ${restored}`
         : `${reserve}, and force-charge ran${toward}${close}${note}; ${restored}`)
-      : `${reserve}${note}; force-charge${toward} ${fc.kind === 'neverStarted' ? 'never started'
+      : `${reserve}${note}; force-charge${toward} ${fc.kind === 'neverStarted' ? `never started${o.gridLost === true ? ' (the grid read as lost)' : ''}`
         : fc.kind === 'failed' ? failedOn
           : 'was switched ON but the panel never confirmed it'}${close}; ${restored}`;
   }
   return {
     ...base,
-    title: `Night-charge: ${titleRestore}`,
+    title: `Night-charge: ${stood ? `reserve stood at ${raised}` : titleRestore}`,
     body:
       `Supervised night charge for ${day} completed: ${night}`
       + "Delivery vs plan scores in the ledger at tomorrow evening's update.",
@@ -903,12 +930,19 @@ function linePoolStandsWords(linePct: number, poolPct: number | null | undefined
 /** v1.200.0 (Fix10 review 1) — an OFF of the add-on's on a grid-status reading that no abort reports (nightForceCharge.lineGridOffPushDue):
  *  the one a person did not cause, in the grid-loss account's words. "Lost" is the panel's reading: grid flow may still be measured. Charge
  *  Now by hand always, whatever the pool reads now: nothing of the add-on's watches the line after this. PURE. */
-export function buildLineForceChargeGridOff(o: { linePct: number; poolPct: number | null; closeText: string }): NotifyMessage {
+export function buildLineForceChargeGridOff(o: {
+  linePct: number; poolPct: number | null; closeText: string;
+  /** v1.200.1 — a grid loss on a record that rides no write, with no force-charge of ours for an OFF to report: no abort goes on such a night, so this is its account. */
+  noneOn?: boolean;
+}): NotifyMessage {
+  const none = o.noneOn === true;
   return {
     severity: 'warning',
     dedupId: 'night_charge_line_grid_off',
-    title: 'Night-charge: the force-charge for the outage line stopped',
-    body: `The panel read the grid as lost, so the add-on switched off the force-charge for tonight's ${lineBesidePct(o.linePct, RESERVE_WRITE_MAX_PCT)}% outage line; it does not start again tonight. `
+    title: none ? 'Night-charge: no force-charge for the outage line starts tonight' : 'Night-charge: the force-charge for the outage line stopped',
+    body: (none
+      ? `The grid read as lost during the window, so no force-charge for tonight's ${lineBesidePct(o.linePct, RESERVE_WRITE_MAX_PCT)}% outage line starts, whatever the grid does next. `
+      : `The panel read the grid as lost, so the add-on switched off the force-charge for tonight's ${lineBesidePct(o.linePct, RESERVE_WRITE_MAX_PCT)}% outage line; it does not start again tonight. `)
       + `${linePoolStandsWords(o.linePct, o.poolPct)} ${lineChargeNowByHandWords(o.closeText, 'with the grid present')}`,
   };
 }
@@ -1074,15 +1108,29 @@ export function buildNightChargeForeignReserve(o: {
   restorePct: number | null;
   /** v1.200.0 (Fix9 review 1) — the line the record carries, whether a force-charge of ours is on, and the close as clock text. */
   line?: { linePct: number; started: boolean; closeText: string } | null;
+  /** v1.200.1 — the reserve stood at the target (reserveStandingAtMs): no write went and none is restored, and the add-on's own floor route
+   *  lands here too, so nothing is said of who changed it. */
+  standing?: boolean;
 }): NotifyMessage {
   const l = o.line ?? null;
   const named = l != null ? lineBesidePct(l.linePct, RESERVE_WRITE_MAX_PCT) : null;
+  const stood = o.standing === true;
   const lineTail = l == null ? ''
     : (l.started
-      ? ` The force-charge for tonight's ${named}% outage line rode that write, so the add-on switches it off, and it does not start again, whatever the reserve reads later.`
-      : ` No force-charge for tonight's ${named}% outage line starts: the reserve was set outside the add-on, and setting it back does not change that.`)
+      ? ` The force-charge for tonight's ${named}% outage line rode ${stood ? 'that reading' : 'that write'}, so the add-on switches it off, and it does not start again, whatever the reserve reads later.`
+      : ` No force-charge for tonight's ${named}% outage line starts: the reserve was ${stood ? 'changed' : 'set outside the add-on'}, and setting it back does not change that.`)
       // (Fix8) Only a line named above the reserve can the pool close under.
       + `${named! > RESERVE_WRITE_MAX_PCT ? ' The pool may close under the line.' : ''} ${lineChargeNowByHandWords(l.closeText)}`;
+  if (stood) {
+    return {
+      severity: l == null ? 'info' : 'warning',
+      dedupId: 'night_charge_actuation',
+      title: `Night-charge: the reserve now reads ${o.pct}%`,
+      body:
+        `The backup reserve reads ${o.pct}%, not the ${o.targetPct ?? '—'}% it read in the ${o.day ?? '—'} night charge's apply window, on two readings five or more minutes apart. `
+        + `The night charge leaves it at ${o.pct}% and writes nothing to it for this charge.${lineTail}`,
+    };
+  }
   return {
     severity: l != null ? 'warning' : 'info',
     dedupId: 'night_charge_actuation',
@@ -1110,6 +1158,9 @@ export function buildLineNightCloseAccount(o: {
   onAtMs?: number | null;
   offAtMs?: number | null;
   offReason?: string | null;
+  /** v1.200.1 — the reserve stood at the target until it was changed (the `foreign` cause on a stood night): the add-on's own floor route lands
+   *  there too, so nothing is said of who changed it. */
+  standing?: boolean;
 }): NotifyMessage {
   const read = o.closePoolPct != null && Number.isFinite(o.closePoolPct) ? round1(o.closePoolPct) : null;
   // (Fix9 review 2) Named beside the reading too: "the 55.6% outage line. The pool reads 55.6%, under the line." shows no order.
@@ -1117,9 +1168,11 @@ export function buildLineNightCloseAccount(o: {
   const pool = read == null ? 'The pool was not read (no fresh panel reading).'
     : `The pool reads ${read}%, ${read < o.linePct ? 'under' : 'at or above'} the line.`;
   const ran = o.onAtMs != null && Number.isFinite(o.onAtMs);
-  const head = o.cause === 'noWrite' ? 'no reserve write was confirmed' : 'the reserve was set outside the add-on';
+  const head = o.cause === 'noWrite' ? 'no verified reserve write, and no reading of the target with every check clear, came in the apply window'
+    : o.standing === true ? "the reserve was changed after it read the night's target" : 'the reserve was set outside the add-on';
   const off = o.offAtMs != null && Number.isFinite(o.offAtMs)
-    ? (o.offReason == null || o.offReason === 'windowEnd' ? 'to the window close' : `until ${phxShortClock(o.offAtMs)} (switched off: ${forceChargeOffWords(o.offReason)})`)
+    ? (o.offReason == null || o.offReason === 'windowEnd' ? 'to the window close'
+      : `until ${phxShortClock(o.offAtMs)} (switched off: ${o.standing === true && o.offReason === 'foreign' ? 'the reserve was changed' : forceChargeOffWords(o.offReason)})`)
     : 'and was not switched off before the window close';
   return {
     severity: 'info',

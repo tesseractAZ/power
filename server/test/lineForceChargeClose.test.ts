@@ -119,6 +119,8 @@ interface Knobs {
   restartMin: number | null;
   /** (Fix13) A blocker of the start (red vitals) from this long before the close, to the close: the declined-start push, as index.ts ticks it. */
   blockFromMin: number | null;
+  /** (v1.200.1) The instant that blocker ends, on a walk of the add-on's own start from it (the ceiling sync, the ON, the panel's stop, the re-ON); null: it holds to the close. */
+  blockEndAtMs: number | null;
   /** (Fix13) Charge Now on from this instant, whoever's: the plant takes it, under the blocker; what a start at a quoted time closes at. */
   startAtMs: number | null;
   /** (Fix14) The window EV shrinking through the night, as index.ts reads it from the latest plan: this share of the session's energy still to
@@ -127,7 +129,7 @@ interface Knobs {
 }
 const BASE: Knobs = {
   p0: 50, evFromMin: null, evKw: 7, standbyKw: 0, onDelayMin: 0, staleMin: 0, floor: false, predEvKwh: null, costPct: null, phaseMs: 0, lagMs: 0, judgeCheck: true, evEndMin: 0, lateKw: null, lateFromMin: 0,
-  slots: 3, nameKwh: NAME, capKw: 17, restartMin: null, blockFromMin: null, startAtMs: null, predRemaining: null,
+  slots: 3, nameKwh: NAME, capKw: 17, restartMin: null, blockFromMin: null, blockEndAtMs: null, startAtMs: null, predRemaining: null,
 };
 
 type LineState = NightActuationState & {
@@ -232,7 +234,7 @@ function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Varian
     const o = {
       enabled: gates.cost, lineEnabled: gates.line, gridPresent: true, gridStaLost: false,
       slotsOn: chargeNowOn && !glitch ? allSlots : [], connectedSlots: allSlots, socCoherent: true,
-      vitalsRed: kn.blockFromMin != null && t >= W1 - kn.blockFromMin * MIN,
+      vitalsRed: kn.blockFromMin != null && t >= W1 - kn.blockFromMin * MIN && (kn.blockEndAtMs == null || t < kn.blockEndAtMs),
       slotSocPct: Object.fromEntries(allSlots.map((n) => [n, seen])),
       ceilingReadbackPct: panelCeiling, poolSocPct: seen, fullKwh: kn.nameKwh, chargeRateKw, evDisplacedKwh,
     } as ForceChargeOpts;
@@ -816,15 +818,19 @@ test('★★★ T7 (Fix13) the named nights: a one-Core home on a line of 90 is 
 
 /* ══ (Fix14) the time the declined-start push quotes: one figure, each input erring early ═════════════════════════════════════════════════
  * A blocker of the start, 10 min unbroken: lineDeclinedPushTick pushes, and lineDeclinedLatestStartMs quotes. For the add-on's own start a late
- * clock loses the line and an early one costs only urgency: a time gone by the push is words with no clock. The plant walks a start at the
- * quoted time, re-asserting Charge Now every tick: a person's one Charge Now, stopped at the ceiling, is not this (the helper's docblock). */
+ * clock loses the line and an early one costs only urgency: a time gone by the push is words with no clock. (v1.200.1) The grids walk the add-on's
+ * own start: the blocker ends at the quoted time, or a tick ahead of the last tick that can sync the ceiling and start, and the tick does the rest
+ * (blockEndAtMs). The named findings keep `startAtMs`, a Charge Now re-asserted every tick, which is neither start: it shows what a time does and no more. */
 
 /** The EV on at the push (from the open), and still ahead of it (the last 2 hours). */
 const EV_ON = { ...BASE, ...session(EV_MAX_KW, 0, 150, 'exact', false) };
 const EV_AHEAD = { ...BASE, ...session(EV_MAX_KW, 240, 120, 'exact', false) };
 const NO_CLOCK = 'The later it starts, the lower the pool may close, perhaps under the line; if it never starts, the add-on adds nothing above the 50% reserve.';
 
-/** Walk one blocked night: its push, and where a start at the quoted time closes. Every clock is after the push, and such a start reaches the ask. */
+/** (v1.200.1) The blocker ends at the clock, with the two ticks the sync and the ON take kept clear of the last start: a clock at T-20.5 leaves none. */
+const blockEndsAt = (quotedAtMs: number): number => Math.min(quotedAtMs, W1 - nfc.FORCE_CHARGE_MIN_RUN_MS - 2 * MIN);
+
+/** Walk one blocked night: its push, and where the add-on's own start from the quoted time closes. Every clock is after the push, and such a start reaches the ask. */
 const quoteHolds = (name: string, L: number, h: number, K: Knobs, stats: { started: number; pushes: number; clocks: number; none: number; reached: number }): void => {
   const r = night(L, h, 1, K, 'real');
   if (r.declinedAtMs == null) { assert.ok(r.onAtMs != null, `${name} ${L} ${h}: the timed start came before the blocker`); stats.started += 1; return; }
@@ -832,10 +838,30 @@ const quoteHolds = (name: string, L: number, h: number, K: Knobs, stats: { start
   if (r.quotedAtMs == null) { stats.none += 1; return; }
   stats.clocks += 1;
   assert.ok(r.quotedAtMs > r.declinedAtMs!, `${name} ${L} ${h}: quoted ${(W1 - r.quotedAtMs) / MIN} pushed ${(W1 - r.declinedAtMs!) / MIN}`);
-  const close = night(L, h, 1, { ...K, startAtMs: r.quotedAtMs }, 'real').close;
-  assert.ok(close >= Math.ceil(L - 1e-9), `${name} ${L} ${h}: a start at T-${(W1 - r.quotedAtMs) / MIN} closes ${close}`);
+  const close = night(L, h, 1, { ...K, blockEndAtMs: blockEndsAt(r.quotedAtMs) }, 'real').close;
+  assert.ok(close >= Math.ceil(L - 1e-9), `${name} ${L} ${h}: the add-on's start from T-${(W1 - r.quotedAtMs) / MIN} closes ${close}`);
   stats.reached += 1;
 };
+
+test('★★★ T7 (v1.200.1) the blocker that ends is the add-on\'s own start: the sync and the ON on the ticks after it; held to the close, none; the last start has no margin', () => {
+  const kn = { ...BASE, blockFromMin: 360 };
+  const held = night(65.95, 2, 1, kn, 'real');
+  assert.equal(held.onAtMs, null, 'a blocker to the close: no start');
+  const endAt = held.quotedAtMs!;
+  const r = night(65.95, 2, 1, { ...kn, blockEndAtMs: endAt }, 'real');
+  assert.equal(r.onAtMs, Math.ceil((endAt - W0) / MIN) * MIN + W0 + MIN, 'the ceiling on the first clear tick, the ON on the next');
+  assert.equal(r.onWrites, 1);
+  assert.ok(r.close >= 66, String(r.close));
+  assert.equal(night(65.95, 2, 1, { ...kn, startAtMs: endAt }, 'real').onWrites, 0, 'a Charge Now re-asserted is no write of the add-on\'s, which is why the grids no longer walk it');
+  // A clock on the tick before the last start: the sync takes it, and no ON can follow. Why the grids keep two ticks clear.
+  const lastStart = W1 - nfc.FORCE_CHARGE_MIN_RUN_MS;
+  const late = night(50.45, 2, 1, { ...kn, blockEndAtMs: lastStart - 30_000 }, 'real');
+  assert.equal(late.onAtMs, null, 'the last start, missed by a tick');
+  assert.ok(late.close < 51, String(late.close));
+  const margin = night(50.45, 2, 1, { ...kn, blockEndAtMs: blockEndsAt(lastStart - 30_000) }, 'real');
+  assert.ok(margin.onAtMs != null, 'two ticks clear: it starts');
+  assert.ok(margin.close >= 51, String(margin.close));
+});
 
 test('★★★ T7 (Fix14) the 23:10 push with the EV on: the double count errs early and is gone by the push, so no clock and the no-clock words, never ~18:59', () => {
   // The finding's night: house 2, 11.52 kW from the open, a 28 kWh figure, a blocker from the open.
@@ -876,8 +902,8 @@ test('★★★ T7 (Fix14) the grid: every clock is after the push, and with the
       stats.clocks += 1;
       assert.ok(r.quotedAtMs > r.declinedAtMs!, `${name} ${L} ${h} ${k}: quoted ${(W1 - r.quotedAtMs) / MIN} pushed ${(W1 - r.declinedAtMs!) / MIN}`);
       const ask = Math.ceil(L - 1e-9);
-      const close = night(L, h, k, { ...K, startAtMs: r.quotedAtMs }, 'real').close;
-      assert.ok(close >= ask, `${name} ${L} ${h} ${k} ${floor}: a start at T-${(W1 - r.quotedAtMs) / MIN} closes ${close} under ${ask}`);
+      const close = night(L, h, k, { ...K, blockEndAtMs: blockEndsAt(r.quotedAtMs) }, 'real').close;
+      assert.ok(close >= ask, `${name} ${L} ${h} ${k} ${floor}: the add-on's start from T-${(W1 - r.quotedAtMs) / MIN} closes ${close} under ${ask}`);
       stats.reached += 1;
     }
   }

@@ -146,8 +146,8 @@ const MUTANTS = [
   {
     id: 'G-x. ★★ the panel\'s ceiling is restored only after the window close',
     file: FC,
-    find: '  const nightOver = s.cancelled || s.revertedAtMs != null || s.foreignSettledAtMs != null\n    || s.windowEndMs == null || nowMs >= writeWindowEndMs(s)!;',
-    to: '  const nightOver = s.cancelled || s.revertedAtMs != null || s.foreignSettledAtMs != null\n    || s.windowEndMs == null || nowMs >= s.windowEndMs; /* MUTANT */',
+    find: "  const nightOver = s.cancelled || s.revertedAtMs != null || s.foreignSettledAtMs != null || s.gridLostAtMs != null\n    || s.windowEndMs == null || nowMs >= writeWindowEndMs(s)!;",
+    to: "  const nightOver = s.cancelled || s.revertedAtMs != null || s.foreignSettledAtMs != null || s.gridLostAtMs != null\n    || s.windowEndMs == null || nowMs >= s.windowEndMs; /* MUTANT */",
     why: 'The synced ceiling stays on the panel into on-peak on a night whose force-charge never ran.',
   },
 

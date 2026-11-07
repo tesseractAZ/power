@@ -214,8 +214,8 @@ const MUTANTS = [
   {
     id: 'C-xx. ★ the rationale stops naming the force-charge leg',
     file: NCA,
-    find: '    if (start < writtenPct) return `, and tonight\'s write charges it ${to} (the ${writtenPct}% reserve, then force-charge from ~${at})${asFar}`;',
-    to: '    if (start < writtenPct) return `, and tonight\'s write charges it ${to}${asFar}`; /* MUTANT */',
+    find: "    if (start < writtenPct) return `, and ${reserveDoer} charges it ${to} (the ${writtenPct}% reserve, then force-charge from ~${at})${asFar}`;",
+    to: "    if (start < writtenPct) return `, and ${reserveDoer} charges it ${to}${asFar}`; /* MUTANT */",
     why: 'An 80% level with a 50% reserve reads as one write; the reader cannot tell the force-charge carries most of it.',
   },
   // ── the P50 plumbing ──
@@ -638,8 +638,8 @@ const MUTANTS = [
   {
     id: 'C-lxxiii. ★★ the rationale repeats the worst-case arrival as "expected"',
     file: NCA,
-    find: "    ? ` The reserve is set to ${writtenPct}%${truncated ? ` — ${askName} asks for ${setpointSocPct}%, but the panel only accepts a backup reserve up to ${RESERVE_WRITE_MAX_PCT}%` : ` (${askName})`}.`",
-    to: "    ? ` The reserve is set to ${writtenPct}%${truncated ? ` — ${askName} asks for ${setpointSocPct}%, but the panel only accepts a backup reserve up to ${RESERVE_WRITE_MAX_PCT}%` : ` (${askName})`}, and the window is only expected to reach ~${targetSocPct}%.` /* MUTANT */",
+    find: "    ? ` The reserve ${lineStanding ? 'reads' : 'is set to'} ${writtenPct}%${truncated ? ` — ${askName} asks for ${setpointSocPct}%, but the panel only accepts a backup reserve up to ${RESERVE_WRITE_MAX_PCT}%` : ` (${askName})`}.`",
+    to: "    ? ` The reserve ${lineStanding ? 'reads' : 'is set to'} ${writtenPct}%${truncated ? ` — ${askName} asks for ${setpointSocPct}%, but the panel only accepts a backup reserve up to ${RESERVE_WRITE_MAX_PCT}%` : ` (${askName})`}, and the window is only expected to reach ~${targetSocPct}%.` /* MUTANT */",
     why: 'The worst case\'s arrival is stated twice, the second time as what the window is expected to reach, beside the Expected: sentence\'s 50%.',
   },
   {
@@ -879,7 +879,7 @@ const MUTANTS = [
   {
     id: 'C-cvi. ★★ the held push calls the write "this charge"',
     file: NOTIFY,
-    find: "    : `without ${held ? \"tonight's write\" : 'this charge'}, ~${pct(plan.minProjSocPct)} with it`;",
+    find: "    : `without ${held && !stands ? \"tonight's write\" : 'this charge'}, ~${pct(plan.minProjSocPct)} with it`;",
     to: "    : `without this charge, ~${pct(plan.minProjSocPct)} with it`; /* MUTANT */",
     why: 'A night that charges nothing is described as having a charge.',
   },
@@ -992,8 +992,8 @@ const MUTANTS = [
   {
     id: 'C-cxxi. ★★★ a window-bound night is told the force-charge reaches the stop',
     file: NOTIFY,
-    find: "    return bound\n      ? `Then it switches the panel's force-charge ON at ~${at}",
-    to: "    return false /* MUTANT */\n      ? `Then it switches the panel's force-charge ON at ~${at}",
+    find: "    return bound\n      ? `Then ${it} switches the panel's force-charge ON at ~${at}",
+    to: "    return false /* MUTANT */\n      ? `Then ${it} switches the panel's force-charge ON at ~${at}",
     why: 'Friday: "charging toward ~80%" then "just long enough to reach ~80%" for a window that closes near 62%.',
   },
   {
@@ -1006,8 +1006,8 @@ const MUTANTS = [
   {
     id: 'C-cxxiii. ★★ a force-charge not expected to start is pushed as switching on',
     file: NOTIFY,
-    find: "    if (held || startMs === null) {\n      return `It also arms the panel's force-charge toward ${stop}, timed to finish by the window close; it is not expected to start. `;\n    }\n    if (startMs === undefined) {",
-    to: "    if (held) { /* MUTANT */\n      return `It also arms the panel's force-charge toward ${stop}, timed to finish by the window close; it is not expected to start. `;\n    }\n    if (startMs == null) {",
+    find: "    if (held || startMs === null) {\n      return `${also} also arms the panel's force-charge toward ${stop}, timed to finish by the window close; it is not expected to start. `;\n    }\n    if (startMs === undefined) {",
+    to: "    if (held) { /* MUTANT */\n      return `${also} also arms the panel's force-charge toward ${stop}, timed to finish by the window close; it is not expected to start. `;\n    }\n    if (startMs == null) {",
     why: 'A night whose walk expects no start is told the force-charge switches on just in time.',
   },
   {

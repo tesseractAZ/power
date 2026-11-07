@@ -888,7 +888,7 @@ test('★★★ SOURCE PIN: the cancel route takes { leg }, the status route ser
   // Every reserve-tick ledger stamp goes through the leg (a backup leg's to backup_*).
   const inner = idx.slice(idx.indexOf('async function runNightActuationTickInner('), idx.indexOf('function runCycleStep('));
   assert.ok(!inner.includes('recorder.recordNightOutcome('), 'no direct stamp');
-  assert.equal((inner.match(/stampLegOutcome\(state, /g) ?? []).length, 4);
+  assert.equal((inner.match(/stampLegOutcome\(state, /g) ?? []).length, 8); // v1.200.1 — the stood disposition, twice (the stamp, a grid loss where it would go); actuated on a verify after applyFailed (two sites)
   // The plan row records the cost leg's window kind.
   assert.ok(idx.includes("    window_kind: 'overnight',\n  };"));
 });

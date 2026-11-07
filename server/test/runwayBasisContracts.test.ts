@@ -197,7 +197,12 @@ function planFrom(r: Reports, nowMs: number, over: Partial<NightChargeInputDeps>
 beforeEach(() => { resetOwnerReserveFloorPct(); setWeatherCacheForTesting(weather()); });
 afterEach(() => { setWeatherCacheForTesting(null); setPoolBasisOverrideForTesting(null); resetPoolEnergyBasisForTesting(); resetForecastCachesForTesting(); });
 
-test('★★★ SCOPE — the planner and MPC inputs are byte-identical on the legacy and the measured basis; the planner\'s plan is identical', async () => {
+/** v1.200.1 — the SCOPE test's own clock. Whether the fixture's evening plan sizes an islanded-outage line depends on where "now" falls
+ *  against tonight's window, so on the wall clock it passed only from about 20:10 to 00:10 MST and failed at every other hour, on main
+ *  too. Fixed at 20:30 MST on 2026-11-06, inside that span; Date alone is mocked, so timers and I/O run as they do. */
+const SCOPE_NOW_MS = Date.UTC(2026, 10, 7, 3, 30);
+test('★★★ SCOPE — the planner and MPC inputs are byte-identical on the legacy and the measured basis; the planner\'s plan is identical', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: SCOPE_NOW_MS });
   let legacy = await reports('legacy');
   let measured = await reports('measured');
   if (legacy.fc.hours[0].ts !== measured.fc.hours[0].ts) { // an hour boundary between the two builds

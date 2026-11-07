@@ -38,7 +38,7 @@
  */
 import {
   APPLY_LATE_MS, APPLY_VERIFY_AFTER_MS, RESERVE_WRITE_MAX_PCT, RESERVE_WRITE_MIN_PCT,
-  armFromPlan, armOpenItem, armRefusalReason, coerceActuationState, emptyActuationState, onPeakGuardActive,
+  armFromPlan, armOpenItem, armRefusalReason, coerceActuationState, emptyActuationState, onPeakGuardActive, writeWindowEndMs,
   type ArmablePlan, type NightActuationState,
 } from './nightChargeActuator.js';
 import {
@@ -165,10 +165,16 @@ export function serializeCycle(c: ChargeCycleState): Record<string, unknown> {
 /**
  * A leg is FINISHED: idle, cancelled, restored, settled as someone else's reserve, or past its apply
  * window (decideActuation's APPLY_LATE_MS) with no write applied. PURE.
+ * v1.200.1 — a stood leg rides past its apply window: it finishes at the add-on's close (writeWindowEndMs). A grid loss (gridLostAtMs) ends
+ * it at once, stamped or not, as a written leg finishes at its abort: no write and no ride can follow it, inside the apply window too.
  */
 export function legFinished(s: NightActuationState, nowMs: number): boolean {
   if (s.day == null) return true;
-  if (s.cancelled || s.revertedAtMs != null || s.foreignSettledAtMs != null) return true;
+  if (s.cancelled || s.revertedAtMs != null || s.foreignSettledAtMs != null || s.gridLostAtMs != null) return true;
+  if (s.reserveStandingAtMs != null) {
+    const closeMs = writeWindowEndMs(s);
+    return closeMs == null || nowMs >= closeMs;
+  }
   return s.appliedAtMs == null && s.windowStartMs != null && nowMs > s.windowStartMs + APPLY_LATE_MS;
 }
 
@@ -389,13 +395,16 @@ export function withLiveTrailing(armed: ChargeCycleState, liveActive: ChargeLegS
  * with a target (Saturday's arm for the Monday window Sunday re-arms). PURE. v1.200.0 (Fix10 review 1) — not a leg whose missed push
  * went: its window passed, no later arm shares it, and the stamp would replace the 'missed — ' disposition, the only evidence the
  * strike rule has of a night whose write never went (nightChargeGate lineWriteNeverHeld). A cost overnight leg with no ask is never
- * stamped missed, so its ledger stays as it was.
+ * stamped missed, so its ledger stays as it was. v1.200.1 — nor a leg whose reserve stood, or that read the grid lost where the stamp would
+ * have gone: its window was its own, and the stamp would replace the disposition the strike rule grades it by (lineReserveStood).
  */
 export function priorArmSuperseded(
-  a: Pick<ChargeLegState, 'day' | 'appliedAtMs' | 'applyAttemptedAtMs' | 'targetPct' | 'missedApplyPushedAtMs'>, today: string,
+  a: Pick<ChargeLegState, 'day' | 'appliedAtMs' | 'applyAttemptedAtMs' | 'targetPct' | 'missedApplyPushedAtMs'>
+    & Partial<Pick<ChargeLegState, 'reserveStandingAtMs' | 'gridLostAtMs'>>,
+  today: string,
 ): boolean {
-  return a.day != null && a.day !== today && a.appliedAtMs == null && a.applyAttemptedAtMs == null && a.targetPct != null
-    && a.missedApplyPushedAtMs == null;
+  return a.day != null && a.day !== today && a.appliedAtMs == null && a.applyAttemptedAtMs == null && a.reserveStandingAtMs == null
+    && a.gridLostAtMs == null && a.targetPct != null && a.missedApplyPushedAtMs == null;
 }
 
 /**
@@ -452,6 +461,10 @@ export function cancelLeg(c: ChargeCycleState, req: ChargeLegRole | null): Cance
   }
   const s = target.leg;
   if (s.revertedAtMs != null) return { ok: false, error: 'tonight’s write already completed and reverted' };
+  // v1.200.1 — a stood night names neither the app nor a write: the add-on's own floor route lands here too, and no write went.
+  if (s.foreignSettledAtMs != null && s.reserveStandingAtMs != null) {
+    return { ok: false, error: `the reserve was changed to ${s.foreignReservePct ?? '?'}% after it read the night’s target; nothing of tonight’s is left to cancel` };
+  }
   if (s.foreignSettledAtMs != null) {
     return { ok: false, error: `the reserve was set to ${s.foreignReservePct ?? '?'}% outside the add-on; nothing of tonight’s write is left to cancel` };
   }
@@ -510,6 +523,9 @@ export function legStatusState(s: NightActuationState, nowMs: number): LegStatus
   if (s.appliedAtMs != null) return s.cancelled ? 'restoring' : 'applied';
   if (forceChargeInFlight(s)) return 'forceChargeOff';
   if (s.cancelled) return 'cancelled';
+  // v1.200.1 — a stood leg has no write to miss, and none to complete: done when it finishes (legFinished), never 'armed' with a Cancel. A grid
+  // loss where its stamp would have gone is that leg too, finished from its own tick.
+  if (s.reserveStandingAtMs != null || s.gridLostAtMs != null) return legFinished(s, nowMs) ? 'completed' : 'armed';
   if (s.applyAttemptedAtMs == null && s.windowStartMs != null && nowMs > s.windowStartMs + APPLY_LATE_MS) return 'missed';
   return 'armed';
 }
@@ -523,7 +539,9 @@ export function lineStartClosedStatus(
   const closed = armedLineStartClosed(s, nowMs, gates);
   if (closed == null) return {};
   const words = lineStartClosedWords(lineAboveReserveWords(forceChargeLineNightPct(s)!, 'the ', ' outage line'), closed.why);
-  return { lineStartClosed: { text: `${words.charAt(0).toUpperCase()}${words.slice(1)}.`, cancel: legStatusState(s, nowMs) !== 'missed' } };
+  const state = legStatusState(s, nowMs);
+  // v1.200.1 — nor a stood leg that has finished, nor one a grid loss ended before any stamp: nothing of it is left to cancel.
+  return { lineStartClosed: { text: `${words.charAt(0).toUpperCase()}${words.slice(1)}.`, cancel: state !== 'missed' && !(state === 'completed' && (s.reserveStandingAtMs != null || s.gridLostAtMs != null)) } };
 }
 
 /** v1.200.0 (Fix10 review 1) — the status route's word for a write the cloud acknowledged and the panel has not read back, on a line
@@ -707,11 +725,13 @@ export function forceChargeDriftLeg(
  * accepted write, the declined start and the at-risk push a verified one, the summary a restore). There too an attempt the
  * cloud never confirmed: the apply stops for good at the window's end, so its push falls due once the last attempt has had
  * its readback grace (a write that landed with its confirmation lost is adopted on its reading first).
+ * v1.200.1 — a leg whose reserve stood missed nothing: no write was due on it. Nor did one that read the grid lost where the stamp would have
+ * gone: its own push told the person, and "no write was issued" would give a false cause.
  */
 export function missedApplyDue(leg: ChargeLegState, nowMs: number): boolean {
   if (leg.day == null || leg.announcedAtMs == null || leg.cancelled) return false;
   if (leg.missedApplyPushedAtMs != null) return false;
-  if (leg.appliedAtMs != null) return false;
+  if (leg.appliedAtMs != null || leg.reserveStandingAtMs != null || leg.gridLostAtMs != null) return false;
   const line = forceChargeLineNightPct(leg) != null;
   if (leg.applyAttemptedAtMs != null && !(line && nowMs - leg.applyAttemptedAtMs >= APPLY_VERIFY_AFTER_MS)) return false;
   if (leg.windowStartMs == null || nowMs <= leg.windowStartMs + APPLY_LATE_MS) return false;
@@ -720,6 +740,10 @@ export function missedApplyDue(leg: ChargeLegState, nowMs: number): boolean {
 
 /** The missed apply's reason when no guard names one (or the tick could not read them). */
 export const MISSED_APPLY_FALLBACK_REASON = `no write was issued in the ${APPLY_LATE_MS / 60_000} minutes after the window opened`;
+
+/** v1.200.1 — the missed apply's reason on a leg with a line ask whose reserve reads the target at the push: no stamp came, so no reading of
+ *  it in the window passed the stamp's checks. Stale for the whole window, or any other of them; these words hold for each. */
+export const MISSED_STAND_REASON = `the panel's reserve reading did not reach the add-on with every check clear while the ${APPLY_LATE_MS / 60_000}-minute apply window was open`;
 
 /** What the tick saw, for the missed-apply reason. */
 export interface MissedApplyContext {
@@ -761,6 +785,11 @@ export function missedApplyReason(leg: ChargeLegState, ctx: MissedApplyContext):
   if (!Number.isInteger(cur) || cur < RESERVE_WRITE_MIN_PCT || cur > RESERVE_WRITE_MAX_PCT) {
     return `the backup reserve read ${cur}%, outside the ${RESERVE_WRITE_MIN_PCT}–${RESERVE_WRITE_MAX_PCT}% the add-on writes`;
   }
+  // v1.200.1 — on a leg with a line ask a reading of the target no longer says nothing was due: the ride needed it, in the window, with every
+  // check clear (the stamp's). The block goes first, for it names the remedy, and the words hold whichever check it was. A no-ask leg is unchanged.
+  const line = forceChargeLineNightPct(leg) != null;
+  if (line && ctx.panelBlock) return ctx.panelBlock;
+  if (line && cur === leg.targetPct) return MISSED_STAND_REASON;
   if (leg.targetPct != null && leg.targetPct <= cur) return `the backup reserve already read ${cur}%, at or above the ${leg.targetPct}% this charge sets`;
   if (ctx.panelBlock) return ctx.panelBlock;
   return MISSED_APPLY_FALLBACK_REASON;

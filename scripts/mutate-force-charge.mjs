@@ -64,8 +64,8 @@ const MUTANTS = [
   {
     id: 'v. ★★ ON rides an UNVERIFIED reserve write',
     file: FC,
-    find: '  if (s.appliedAtMs == null || s.applyVerifiedAtMs == null) return { kind: \'none\', why: \'waiting for the reserve write to be verified by readback\' };',
-    to: '  if (s.appliedAtMs == null) return { kind: \'none\' }; /* MUTANT */',
+    find: "  if (!reserveRideReady(s)) return { kind: 'none', why: s.gridLostAtMs != null ? FORCE_CHARGE_START_CLOSED_WHY.gridLost : 'waiting for the reserve write to be verified by readback' };",
+    to: "  if (s.appliedAtMs == null && s.reserveStandingAtMs == null) return { kind: 'none' }; /* MUTANT */",
     why: 'Force-charge starts on the night the write path is least proven to be working (the 2026-08-16 phantom shape).',
   },
   {
@@ -525,7 +525,7 @@ const MUTANTS = [
   {
     id: 'xxvi. ★★ the "why not" line fires outside a live night',
     file: IDX,
-    find: '    const live = state.appliedAtMs != null && state.revertedAtMs == null && !state.cancelled',
+    find: "    const live = (state.appliedAtMs != null || reserveRideReady(state)) && state.revertedAtMs == null && !state.cancelled",
     to: '    const live = true /* MUTANT */',
     why: 'Every daytime tick against last night\'s reverted record logs a refusal — the log fills with non-decisions.',
   },

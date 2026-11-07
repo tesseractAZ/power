@@ -57,7 +57,7 @@ import {
   forceChargeNightOutcome, partialForceChargeOnFailureSlots, FORCE_CHARGE_MAX_RUN_MS,
   forceChargeSlotCores, forceChargeFailedSlotsText,
   // v1.200.0 — the outage line above the reserve envelope: its gate, the mode a tick runs, its texts.
-  lineForceChargeEnabled, forceChargeModeOf, forceChargeLineArmNote,
+  lineForceChargeEnabled, forceChargeModeOf, forceChargeLineArmNote, reserveRideReady,
   FORCE_CHARGE_MIN_RUN_MS,
   // v1.200.0 (review) — the ON's write-ahead stamp, the line re-ON's budget.
   forceChargeOnStamp, FORCE_CHARGE_LINE_REON_MAX, armedForceChargeAnnouncement, lineReOnTimesWords,
@@ -247,7 +247,7 @@ import {
   getLatestReadiness,
   setLatestReadiness,
   nightChargeGateFields,
-  computeNightChargeReadiness, MISSED_APPLY_DISPOSITION,
+  computeNightChargeReadiness, MISSED_APPLY_DISPOSITION, RESERVE_STOOD_DISPOSITION,
   CURRENT_ALGO_VERSION,
   // v1.196.0 — the realized cushion verdict on the claim the plan made.
   realizedCushionBreach,
@@ -319,7 +319,7 @@ import {
 } from './notify.js';
 // v1.189.0 — the charge cycle: the legs one evening arms (chargeCycle.ts).
 import {
-  coerceCycle, serializeCycle, emptyCycle, asChargeLeg, legRoleOf, armCycle, promoteCycle, cancelLeg, parseCancelLeg,
+  coerceCycle, serializeCycle, emptyCycle, asChargeLeg, legRoleOf, armCycle, promoteCycle, cancelLeg, parseCancelLeg, legFinished,
   cycleLegsStatus, lineStartClosedStatus, lineWriteUnreadStatus, noEveningArmLeft, servedLineClosure, lineNotArmedPushDue, priorArmSuperseded, cycleDriftLeg, missedApplyDue, missedApplyReason, legLedgerFields, supersededLegs, trailingResolved,
   departedAfterStep, forceChargeDriftLeg, type DepartedLeg,
   nextForceChargeOpenMs, withLiveTrailing, MISSED_APPLY_FALLBACK_REASON,
@@ -4661,6 +4661,9 @@ function scoreNightRow(
   // deliveredIntoCores) is recorded for the buy de-bias learner only and is NOT part of
   // buy_err_kwh.
   const wasActuated = y.actuated === 1 || (y.actuated as unknown) === true;
+  // v1.200.1 — a night that rode a standing reserve: no write went, so `actuated` stays unset and the learner and the graduation stay off the
+  // row, and what it delivered into the Cores is still measured, for a person reading the ledger and for the note below.
+  const measuredDelivery = wasActuated || String(y.arm_disposition ?? '').startsWith(RESERVE_STOOD_DISPOSITION);
   // v1.187.0 — the on-peak, realized-cost, delivered-energy and PV-evidence columns, pure
   // (nightLedgerScoring.assembleNightLedgerColumns) behind a query seam on the house panel:
   //  - on-peak over the governed span (2026-09-28's 4.27 kWh on-peak buy belongs to the
@@ -4679,7 +4682,7 @@ function scoreNightRow(
   const tariffNow = tariffModelFromEnv();
   const cols = assembleNightLedgerColumns({
     row: y,
-    actuated: wasActuated,
+    actuated: measuredDelivery,
     windowStartMs: windowStart,
     windowEndMs: windowEnd,
     scoreSpanEndMs: s.scoreSpanEnd,
@@ -4736,7 +4739,7 @@ function scoreNightRow(
     scoreNotes =
       `scored — planner-sizing basis (algo v3): net forecast miss ${missKwh} kWh `
       + `(PV ${fcPv}→${actualPvKwh}, load ${fcLoad}→${actualLoadKwh})`
-      + `${wasActuated ? `; delivered ~${deliveredKwh ?? '?'} kWh, deliberately NOT part of this metric` : '; advisory night'}.`;
+      + `${measuredDelivery ? `; delivered ~${deliveredKwh ?? '?'} kWh, deliberately NOT part of this metric` : '; advisory night'}.`;
   }
 
   // v1.187.22 — the plan's expected buy against what was delivered, and its expected window-open
@@ -4746,7 +4749,7 @@ function scoreNightRow(
     expectedStartSocPct: y.expected_start_soc_pct ?? null,
     sizingStartSocPct: y.soc_at_window_start_pct ?? null,
     windowOpenSocPct,
-    actuated: wasActuated,
+    actuated: measuredDelivery,
     deliveredKwh,
   });
 
@@ -4985,7 +4988,7 @@ async function runNightChargeEveningJobInner(): Promise<void> {
         && nightActuationMem.appliedAtMs == null && nightActuationMem.applyAttemptedAtMs == null
         && nightActuationMem.targetPct != null && nightActuationMem.windowStartMs != null
         && nowMs < nightActuationMem.windowStartMs) {
-      app.log.warn(`night-charge: the ARM for ${nightActuationMem.day} (target ${nightActuationMem.targetPct}%) is still pending and WILL write at ${new Date(nightActuationMem.windowStartMs - APPLY_LEAD_MS).toISOString()} — tonight's job never reached a decision to supersede or cancel it. Cancel from the panel if that is not wanted.`);
+      app.log.warn(`night-charge: the ARM for ${nightActuationMem.day} (target ${nightActuationMem.targetPct}%) is still pending and WILL write at ${new Date(nightActuationMem.windowStartMs - APPLY_LEAD_MS).toISOString()}${nightActuationMem.forceChargeLineAskPct != null ? ' (or ride the reserve, if the panel reads the target then)' : ''} — tonight's job never reached a decision to supersede or cancel it. Cancel from the panel if that is not wanted.`);
     }
     // v1.40.0: the NOTIFY is skipped, but the LEDGER ROW need not be lost — if
     // a pre-window plan snapshot from today exists and no row was recorded,
@@ -5247,7 +5250,8 @@ async function runNightChargeEveningJobInner(): Promise<void> {
           stampLegOutcome(leg, { arm_disposition: `superseded by the ${today} plan` });
         }
         app.log.info(
-          `night-charge: supervised write ARMED for ${today} — reserve → ${armedCandidate.targetPct}% at ${new Date(armedCandidate.windowStartMs! - APPLY_LEAD_MS).toISOString()} (${buyFiguresLogText(plan?.expectedBuyKwh, plan?.buyKwhDebiased ?? plan?.buyKwh)}); announced via ${[haNotifyDelivered ? 'HA notify' : null, audibleDelivered ? 'audible' : null].filter(Boolean).join(' + ')}; cancellable until the write moment. ${forceChargeArmNote(armedCandidate, plan)}`,
+          // v1.200.1 — a night that stands: no write is due while the reserve reads the target, and its Cancel stands to the close.
+          `night-charge: supervised write ARMED for ${today} — ${plan?.lineReserveStands === true ? `the reserve reads ${plan.reserveFloorPct}%, so no write is due while it does (a reading under ${armedCandidate.targetPct}% at ${new Date(armedCandidate.windowStartMs! - APPLY_LEAD_MS).toISOString()} lets the armed write go)` : `reserve → ${armedCandidate.targetPct}% at ${new Date(armedCandidate.windowStartMs! - APPLY_LEAD_MS).toISOString()}`} (${buyFiguresLogText(plan?.expectedBuyKwh, plan?.buyKwhDebiased ?? plan?.buyKwh)}); announced via ${[haNotifyDelivered ? 'HA notify' : null, audibleDelivered ? 'audible' : null].filter(Boolean).join(' + ')}; ${plan?.lineReserveStands === true ? 'cancellable to the close' : 'cancellable until the write moment'}. ${forceChargeArmNote(armedCandidate, plan)}`,
         );
       } else {
         app.log.error(
@@ -6238,6 +6242,8 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     // “Backup pool + grid presence”): 2 is islanded, 0 absent.
     gridStaLost: sp != null && typeof sp.gridSta === 'number' && sp.gridSta !== 1,
     slotsOn,
+    // v1.200.1 — the reserve from the same fresh `sp` as the slots: a stood night reads it again on the ON's own tick.
+    reservePct: typeof sp?.backupReserveSoc === 'number' ? sp.backupReserveSoc : null,
     connectedSlots,
     slotSocPct, // v1.186.0 — the ON verify's at-the-ceiling exemption
     vitalsRed: currentAssessment()?.level === 'crit',
@@ -6328,9 +6334,9 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
   const action = decideForceCharge(state, nowMs, fcOpts);
   if (action.kind === 'none') {
     // v1.166.0 — "chose not to" must never read like "broke". While a night is live
-    // (reserve applied, not reverted, force-charge not started), say WHY the start
-    // is declined — each distinct reason once per night.
-    const live = state.appliedAtMs != null && state.revertedAtMs == null && !state.cancelled
+    // (reserve applied, or (v1.200.1) a ride on the standing reserve, not reverted, force-charge not started), say WHY the
+    // start is declined — each distinct reason once per night.
+    const live = (state.appliedAtMs != null || reserveRideReady(state)) && state.revertedAtMs == null && !state.cancelled
       && state.forceChargeOnAtMs == null;
     if (live && action.why) {
       if (forceChargeWhyLogged.day !== state.day) forceChargeWhyLogged = { day: state.day, reasons: new Set() };
@@ -6990,6 +6996,38 @@ async function runNightActuationTickInner(): Promise<void> {
     return;
   }
 
+  if (action.kind === 'reserveStanding') {
+    // v1.200.1 — the panel already reads the target, every apply guard passed, on a record with a line ask: the night rides the reserve as it
+    // stands. Nothing is written, and only the stamp goes on the record: never appliedAtMs or priorReservePct, or the revert branch would
+    // write the reserve at the close. Refused under the write block, as the apply is: no ride goes to a panel the add-on will not write to.
+    const blocked = multiPanelWriteBlock();
+    if (blocked) { app.log.warn(`night-charge: reserve stand refused — ${blocked}`); return; }
+    persistNightActuation({ ...state, reserveStandingAtMs: nowMs, lastError: null });
+    stampLegOutcome(state, { arm_disposition: `${RESERVE_STOOD_DISPOSITION}the panel read the ${state.targetPct}% target in the apply window; no write was due` });
+    app.log.info(`night-charge: the panel reads the ${state.targetPct}% target for ${state.day}: no write and no restore; the force-charge for the ${lineLogPct(state)}% outage line rides this reserve while it reads ${state.targetPct}%.`);
+    return;
+  }
+
+  if (action.kind === 'gridLost') {
+    // v1.200.1 — a grid-loss abort with no write to restore, one one-way stamp: on a stood night, or on the tick that would have stamped one. No
+    // ride for the night whatever the grid does next, as on a written night, and a force-charge of ours on is switched off on this tick
+    // (offReason 'gridLoss') and reported by that OFF. A record with no stamp has none of the stood disposition yet: it takes it here, and the
+    // gate grades it as it grades a stood night that lost the grid. A stamped record keeps the one it has.
+    persistNightActuation({ ...state, gridLostAtMs: nowMs, lastError: null });
+    if (state.reserveStandingAtMs == null) stampLegOutcome(state, { arm_disposition: `${RESERVE_STOOD_DISPOSITION}the panel read the ${state.targetPct}% target in the apply window with the grid read lost; no write was due and no ride followed` });
+    const lostLinePct = forceChargeLineNightPct(state);
+    const closeAtMs = writeWindowEndMs(state);
+    app.log.warn(state.reserveStandingAtMs != null
+      ? `night-charge: GRID LOST mid-window on ${state.day}'s stood night — the ride on the ${state.targetPct}% reserve is over for the night; the panel's ceiling comes back and no force-charge starts, whatever the grid does next.`
+      : `night-charge: GRID LOST in the apply window of ${state.day}'s night, with the panel reading the ${state.targetPct}% target — nothing was written and no ride follows: no force-charge starts tonight, whatever the grid does next.`);
+    if (lostLinePct != null && closeAtMs != null && (state.forceChargeOnAtMs == null || state.forceChargeOffAtMs != null)) {
+      void sendNotification(loadNotifyConfig(), buildLineForceChargeGridOff({ linePct: lostLinePct, poolPct: freshPoolSocPct(nowMs), closeText: fmtSiteClock(closeAtMs), noneOn: true })).catch((e: any) => {
+        app.log.debug(`night-charge: line grid-lost notify failed (${e?.message ?? e})`);
+      });
+    }
+    return;
+  }
+
   if (action.kind === 'apply') {
     const blocked = multiPanelWriteBlock();
     if (blocked) { app.log.warn(`night-charge: APPLY refused — ${blocked}`); return; }
@@ -7015,7 +7053,8 @@ async function runNightActuationTickInner(): Promise<void> {
   if (action.kind === 'foreignSeen') {
     // The foreign rule (nightChargeActuator.foreignStep): the first of the two readings.
     persistNightActuation({ ...state, foreignReservePct: action.pct, foreignSeenAtMs: nowMs });
-    app.log.info(`night-charge: foreign reserve reading — the panel reads ${action.pct}%, neither the ${state.targetPct}% set for ${state.day} nor the ${state.priorReservePct ?? '?'}% it restores; taken as set outside the add-on if it still reads ${action.pct}% in ${Math.round(FOREIGN_RESERVE_SETTLE_MS / 60_000)} min.`);
+    if (state.reserveStandingAtMs != null) app.log.info(`night-charge: reserve reading moved — the panel reads ${action.pct}%, not the ${state.targetPct}% ${state.day} stood on; the ride ends for the night if it still reads ${action.pct}% in ${Math.round(FOREIGN_RESERVE_SETTLE_MS / 60_000)} min.`);
+    else app.log.info(`night-charge: foreign reserve reading — the panel reads ${action.pct}%, neither the ${state.targetPct}% set for ${state.day} nor the ${state.priorReservePct ?? '?'}% it restores; taken as set outside the add-on if it still reads ${action.pct}% in ${Math.round(FOREIGN_RESERVE_SETTLE_MS / 60_000)} min.`);
     return;
   }
 
@@ -7030,10 +7069,11 @@ async function runNightActuationTickInner(): Promise<void> {
     // returns 'none' from here), the night is resolved for the next arm, and the force-charge
     // riding the write switches OFF (nightForceCharge offReason 'foreign').
     persistNightActuation({ ...state, foreignSettledAtMs: nowMs, foreignReservePct: action.pct, lastError: null });
-    app.log.warn(`night-charge: foreign reserve SETTLED — the panel has read ${action.pct}% since ${state.foreignSeenAtMs != null ? new Date(state.foreignSeenAtMs).toISOString() : '?'}: neither the ${state.targetPct}% set for ${state.day} nor the ${state.priorReservePct ?? '?'}% it restores. Taken as set outside the add-on; nothing more is written to the reserve for this night${state.revertedAtMs != null ? ' (the restore was sent and did not read back)' : ' (no restore is sent)'}.`);
+    if (state.reserveStandingAtMs != null) app.log.warn(`night-charge: reserve reading SETTLED — the panel has read ${action.pct}% since ${state.foreignSeenAtMs != null ? new Date(state.foreignSeenAtMs).toISOString() : '?'}, not the ${state.targetPct}% ${state.day} stood on: the ride ends for the night, and nothing is written to the reserve (no restore is due).`);
+    else app.log.warn(`night-charge: foreign reserve SETTLED — the panel has read ${action.pct}% since ${state.foreignSeenAtMs != null ? new Date(state.foreignSeenAtMs).toISOString() : '?'}: neither the ${state.targetPct}% set for ${state.day} nor the ${state.priorReservePct ?? '?'}% it restores. Taken as set outside the add-on; nothing more is written to the reserve for this night${state.revertedAtMs != null ? ' (the restore was sent and did not read back)' : ' (no restore is sent)'}.`);
     void sendNotification(loadNotifyConfig(), buildNightChargeForeignReserve({
       day: state.day, pct: action.pct, targetPct: state.targetPct, restorePct: state.priorReservePct,
-      line: foreignLineWords(state, nowMs),
+      line: foreignLineWords(state, nowMs), standing: state.reserveStandingAtMs != null,
     })).catch((e: any) => {
       app.log.debug(`night-charge: foreign-reserve notify failed (${e?.message ?? e})`);
     });
@@ -7044,6 +7084,9 @@ async function runNightActuationTickInner(): Promise<void> {
     // v1.79.0 — the DEVICE now reads the target: the actuation is real, not
     // merely cloud-ACK'd. One line, stamped once.
     persistNightActuation({ ...state, applyVerifiedAtMs: nowMs, lastError: null });
+    // v1.200.1 — a reading of the target after applyFailed stamped actuated 0: the write landed after all, so the gate sees the night again. A
+    // normal night has applyEscalated false and writes nothing new.
+    if (state.applyEscalated) stampLegOutcome(state, { actuated: 1 });
     app.log.info(`night-charge: write VERIFIED by device readback — backupReserveSoc reads ${state.targetPct}% for ${state.day}.`);
     return;
   }
@@ -7062,6 +7105,7 @@ async function runNightActuationTickInner(): Promise<void> {
       applyVerifiedAtMs: nowMs,
       lastError: null,
     });
+    if (state.applyEscalated) stampLegOutcome(state, { actuated: 1 }); // v1.200.1 — as applyVerified: the panel took it after applyFailed
     app.log.warn(
       `night-charge: device CEILING — asked backupReserveSoc ${requested}%, the panel settled at ${action.achievedPct}% (baseline was ${state.attemptBaselinePct ?? '?'}%). Treating it as applied: the reserve IS raised and tonight's buy is real, just smaller than planned. Reverts to ${state.priorReservePct ?? '?'}% after the window. If this repeats at the same value, that value is the SHP2's own limit and RESERVE_WRITE_MAX_PCT should be set to it.`,
     );
@@ -7451,11 +7495,27 @@ function runLineCloseAccountStep(): void {
   const due = lineCloseAccountDue(state, nowMs);
   if (due == null) return;
   persistNightActuation({ ...state, lineCloseAccountAtMs: nowMs });
-  app.log.warn(`night-charge: the ${state.day} night closed with no restore to account for (${due === 'foreign' ? 'the reserve was set outside the add-on' : 'no reserve write was confirmed'}): the ${lineLogPct(state)}% outage line had ${state.forceChargeOnAtMs != null ? 'a force-charge that was stopped' : 'no force-charge'}, and the pool reads ${freshPoolSocPct(nowMs) ?? 'unknown'}%.`);
+  if (due === 'standing') {
+    // v1.200.1 — a stood night's close: no write, no restore. The morning's summary, whose account of the panel's stop, the re-ONs and the close
+    // is the night's, never the close account's "was stopped" on a good night.
+    app.log.info(`night-charge: the ${state.day} night closed on a standing ${state.targetPct}% reserve, with no write and no restore: the ${lineLogPct(state)}% outage line had ${state.forceChargeOnAtMs != null ? 'a force-charge' : 'no force-charge'}, and the pool reads ${freshPoolSocPct(nowMs) ?? 'unknown'}%.`);
+    const stoodOutcome = forceChargeNightOutcome(state, forceChargeGatesOn());
+    const stoodClose = buildNightChargeMorningSummary({
+      day: state.day, targetPct: state.targetPct, restorePct: state.targetPct ?? RESERVE_WRITE_MAX_PCT, expectedKwh: armedExpectedBuyKwh(state.day),
+      forceCharge: stoodOutcome, closePoolPct: freshPoolSocPct(nowMs), linePct: forceChargeLineNightPct(state),
+      closeReadLate: lineCloseReadingLate(state, nowMs), standing: true, gridLost: state.gridLostAtMs != null,
+    });
+    void sendNotification(loadNotifyConfig(), stoodClose).catch((e: any) => {
+      app.log.debug(`night-charge: standing close summary notify failed (${e?.message ?? e})`);
+    });
+    return;
+  }
+  app.log.warn(`night-charge: the ${state.day} night closed with no restore to account for (${due === 'foreign' ? (state.reserveStandingAtMs != null ? 'the reserve was changed after it read the target' : 'the reserve was set outside the add-on') : 'no verified reserve write, and no reading of the target with every check clear, came in the apply window'}): the ${lineLogPct(state)}% outage line had ${state.forceChargeOnAtMs != null ? 'a force-charge that was stopped' : 'no force-charge'}, and the pool reads ${freshPoolSocPct(nowMs) ?? 'unknown'}%.`);
   void sendNotification(loadNotifyConfig(), buildLineNightCloseAccount({
     day: state.day, linePct: forceChargeLineNightPct(state)!, cause: due,
     closePoolPct: freshPoolSocPct(nowMs),
     onAtMs: state.forceChargeOnAtMs, offAtMs: state.forceChargeOffAtMs, offReason: state.forceChargeOffReason,
+    standing: state.reserveStandingAtMs != null,
   })).catch((e: any) => {
     app.log.debug(`night-charge: line close-account notify failed (${e?.message ?? e})`);
   });
@@ -7786,9 +7846,16 @@ app.post('/api/night-charge/cancel', { preHandler: requireWriteAuth }, async (re
   }
   persistCycle(r.cycle);
   const s = r.leg;
+  // v1.200.1 — a stood night a person cancels before any device write of its ride: the disposition goes, so a cancel is no strike. With an ON on
+  // the record it stays, graded as a written night's cancel after the apply is; and a cancel past the close changes nothing of the night. A
+  // record that read the grid lost where its stamp would have gone carries the same disposition, and is read the same.
+  const cancelledCloseMs = writeWindowEndMs(s);
+  if ((s.reserveStandingAtMs != null || s.gridLostAtMs != null) && s.forceChargeOnAtMs == null && (cancelledCloseMs == null || Date.now() < cancelledCloseMs)) {
+    stampLegOutcome(s, { arm_disposition: 'cancelled by a person; the reserve stood at the target and no force-charge had started' });
+  }
   const which = s.leg === 'cost' && s.windowKind === 'overnight' ? '' : ` ${s.leg === 'backup' ? 'outage-backup' : 'daytime'} leg${r.where === 'pending' ? ' (pending)' : ''}`;
   app.log.info(
-    `night-charge: owner CANCELLED tonight's supervised write${which} (${s.day})${s.appliedAtMs != null ? ' — the applied write reverts within a minute' : ''}.`,
+    `night-charge: owner CANCELLED tonight's supervised write${which} (${s.day})${s.appliedAtMs != null ? ' — the applied write reverts within a minute' : s.reserveStandingAtMs != null ? ' — the reserve stood at the target: nothing to restore, and a force-charge of ours on switches off within a minute' : ''}.`,
   );
   return { ok: true, actuation: s, leg: s.leg, legs: cycleLegsStatus(nightCycleView(), Date.now()) };
 });
@@ -7831,6 +7898,9 @@ app.post<{ Body: { sn?: unknown } }>('/api/house-panel', { preHandler: requireWr
     const forcing = (house?.projection.sources ?? []).some((c) => c?.forceCharge === 'FORCE_CHARGE_ON');
     const m = nightActuationMem;
     const busy = getReserveArbitrageRaised() ? 'the night-charge plan is holding the house panel\'s reserve raised'
+      // v1.200.1 — a stood night writes no reserve, so the check above reads false all night: its ride waits for the close, its next ON or re-ON
+      // would land on the other panel.
+      : forceChargeInFlight(m) || (m.reserveStandingAtMs != null && !legFinished(m, Date.now())) ? 'a night-charge force-charge is riding the house panel\'s reserve'
       : m.applyAttemptedAtMs != null && m.appliedAtMs == null && m.revertedAtMs == null ? 'a night-charge reserve write is unconfirmed'
       : m.forceChargeCeilingPriorPct != null && m.forceChargeCeilingRestoredAtMs == null ? 'the house panel\'s force-charge ceiling is still to be restored'
       // v1.189.0 — and a trailing leg (chargeCycle.ts) still switching its force-charge off.
@@ -8381,7 +8451,8 @@ app.post<{ Querystring: { pct?: string } }>(
     analytics.pushOwnerFloor(ownerReserveFloorPct(nightActuationMem, targetPct, Date.now()));
     app.log.warn(
       `reserve-floor: OWNER set backupReserveSoc ${before ?? '?'}% → ${targetPct}% (this is the floor the reserve alarm defends `
-      + `and the night-charge planner sizes against; the nightly write will now restore ${targetPct}% at window close).`,
+      // v1.200.1 — a night that stood wrote nothing, so tonight's close restores nothing either.
+      + `and the night-charge planner sizes against; ${nightActuationMem.reserveStandingAtMs != null || nightActuationMem.gridLostAtMs != null ? `tonight's reserve stood at its target, so no restore is due at this window's close, and a later night's write restores ${targetPct}%` : `the nightly write will now restore ${targetPct}% at window close`}).`,
     );
     return { ok: true, previousPct: before, targetPct, note: 'device readback appears in the next poll (~60s)' };
   },

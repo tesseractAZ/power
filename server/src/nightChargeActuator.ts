@@ -712,6 +712,16 @@ export interface NightActuationState {
   /** v1.200.0 (Fix9 review 1) — when the close account of a line night with no restore to summarise went
    *  (nightForceCharge.lineCloseAccountDue), stamped before it goes: once a record. */
   lineCloseAccountAtMs: number | null;
+  /** v1.200.1 — when the apply decision, every apply guard passed, found the panel already reading the target on a record with a
+   *  line ask (decideActuation 'reserveStanding'). One-way: the night rides a standing reserve from here (nightForceCharge.reserveRideReady).
+   *  It stands in for no write: appliedAtMs, applyVerifiedAtMs and priorReservePct stay null, so nothing of the night's revert, restore or
+   *  money-detector path ever engages, and the reserve stays the panel's own. null on every written night, and on a record of v1.200.0. */
+  reserveStandingAtMs: number | null;
+  /** v1.200.1 — when the reserve step read the grid lost on a record that rides no write (decideActuation 'gridLost'), once: after the stamp,
+   *  or where the stamp would have gone, in which case reserveStandingAtMs stays null for good. One-way, as a written night's grid-loss abort
+   *  is: no ride for the night whatever the grid does next, and on a stamped record the panel's ceiling comes back at once. null on every
+   *  written night. */
+  gridLostAtMs: number | null;
   /** v1.190.1 — when the owed summary first waited for this process's first reading of the reserve
    *  (restoreSummaryDue 'hold': a restart across the restore's readback grace). It waits at most
    *  REVERT_DEADLINE_HOLD_MAX_MS from here; on the record, so a second restart inside the wait does
@@ -757,6 +767,7 @@ export function emptyActuationState(): NightActuationState {
     revertDeadlineHeldAtMs: null,
     revertGridLossAbort: false,
     restoreSummaryAtMs: null, lineCloseAccountAtMs: null, restoreSummaryHeldAtMs: null,
+    reserveStandingAtMs: null, gridLostAtMs: null,
     lastError: null,
   };
 }
@@ -879,6 +890,8 @@ export function coerceActuationState(raw: unknown): NightActuationState {
     // absent, it reads as sent then, so the update never sends a second one.
     restoreSummaryAtMs: o.restoreSummaryAtMs === undefined ? num(o.revertedAtMs) : num(o.restoreSummaryAtMs),
     lineCloseAccountAtMs: num(o.lineCloseAccountAtMs),
+    reserveStandingAtMs: num(o.reserveStandingAtMs),
+    gridLostAtMs: num(o.gridLostAtMs),
     restoreSummaryHeldAtMs: num(o.restoreSummaryHeldAtMs),
     lastError: str(o.lastError),
   };
@@ -1258,7 +1271,15 @@ export type ActuationAction =
    *  within what the night asked for (ceilingMovedPct): the panel moved on our own write. Adopt it
    *  as the target, as applyCeiling does, so the restore's readback, the revertDeadline pages and
    *  the money detectors' hold compare against what the panel holds. */
-  | { kind: 'ceilingMoved'; pct: number };
+  | { kind: 'ceilingMoved'; pct: number }
+  /** v1.200.1 — a record with a line ask, no attempt on it, and every apply guard passed: the panel already reads the target, so no write
+   *  is due and the night rides the reserve as it stands. Stamp reserveStandingAtMs and write nothing (the driver refuses it under a
+   *  panel write block, as it refuses an apply). */
+  | { kind: 'reserveStanding' }
+  /** v1.200.1 — a stood night read the grid lost before its close, or a record read it on the tick that would have stamped reserveStanding:
+   *  stamp gridLostAtMs, once, and write nothing. The written night's grid-loss abort (`revert`, gridLossAbort) in the only form a night with
+   *  no write has. */
+  | { kind: 'gridLost' };
 
 export interface ActuationTickOpts {
   mode: NightChargeMode;
@@ -1440,9 +1461,24 @@ export function decideActuation(
     }
   }
 
+  // ── STANDING (v1.200.1). The stamp ends the apply path for good: no apply can follow one, and no stamp can follow an attempt, so the two
+  // paths never share a record and nothing written here raises a reading a person lowered. What is left of the night is one-way stamps,
+  // bounded by the close: no restore comes to end the foreign rule, and without the bound tomorrow's reserve change would settle as
+  // foreign. A grid-loss abort has no write to send here, so its one-way stamp is its own action, ahead of a pending sighting. The view
+  // gives isForeignReserveReading an in-envelope prior without writing one to the record. ──
+  if (state.reserveStandingAtMs != null) {
+    if (state.cancelled || state.foreignSettledAtMs != null || state.gridLostAtMs != null) return { kind: 'none' };
+    const dueAt = revertDueMs(state);
+    if (dueAt == null || nowMs >= dueAt) return { kind: 'none' };
+    if (opts.gridPresent === false) return { kind: 'gridLost' };
+    return foreignStep({ ...state, priorReservePct: state.targetPct }, opts.currentReservePct, nowMs) ?? { kind: 'none' };
+  }
+
   // ── APPLY. Every guard fail-closed. ──
   if (mode === 'advisory') return { kind: 'none' };
-  if (state.cancelled || state.appliedAtMs != null) return { kind: 'none' };
+  // v1.200.1 — gridLostAtMs: one-way, no stamp and no apply follow it, whatever the reading does. Only the "nothing to raise" branch below and
+  // the standing block above stamp it, on a record no write is on, so a written night never carries it.
+  if (state.cancelled || state.appliedAtMs != null || state.gridLostAtMs != null) return { kind: 'none' };
   if (state.targetPct == null || state.windowStartMs == null) return { kind: 'none' };
   if (nowMs < state.windowStartMs - APPLY_LEAD_MS) return { kind: 'none' }; // too early
   if (nowMs > state.windowStartMs + APPLY_LATE_MS) return { kind: 'none' }; // window missed — no late write
@@ -1454,7 +1490,17 @@ export function decideActuation(
   // envelope reading is garbage or outside interference; fail closed either way.
   if (cur == null || !Number.isInteger(cur)
       || cur < RESERVE_WRITE_MIN_PCT || cur > RESERVE_WRITE_MAX_PCT) return { kind: 'none' };
-  if (state.targetPct <= cur) return { kind: 'none' }; // nothing to raise
+  if (state.targetPct <= cur) { // nothing to raise
+    // v1.200.1 — this line sits behind every apply guard above, so the stamp inherits them all: a line ask, a reading strictly equal to the
+    // target, and no attempt on record (that reading is the attempt's, for the adopt rule). The grid is the stamp's one fork, and it does not
+    // defer: read lost here, the record takes gridLostAtMs and never the stamp, so a grid that returns inside the apply window finds no ride
+    // to take up (the feeder that trips, recloses and trips again). No dwell. A grid unknown stamps: the ON needs it known. A grid the panel
+    // still reads lost at the open loses the ride, whenever that reading was taken: the first tick may read a sample from before the open
+    // (up to SHP2_READBACK_STALE_MS), and a reply that omits gridSta keeps the last one, with no age limit. A tick another guard above
+    // refused decides nothing, this one included.
+    if (cur !== state.targetPct || state.forceChargeLineAskPct == null || state.applyAttemptedAtMs != null) return { kind: 'none' };
+    return opts.gridPresent === false ? { kind: 'gridLost' } : { kind: 'reserveStanding' };
+  }
   return { kind: 'apply', targetPct: state.targetPct };
 }
 

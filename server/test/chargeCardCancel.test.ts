@@ -256,8 +256,8 @@ test('★★★ every shape of the card renders a Cancel: the banner where the s
   assert.match(card, /\} finally \{\n\s+window\.clearTimeout\(timer\);\n\s+\}/);
   // The no-plan and hold shapes say a standing write stands.
   assert.match(card, /\n\s+const stands = writeStands\(actuation, status\.mode, Date\.now\(\)\);\n/);
-  assert.match(shapes[1], /\{noPlanText\(plan != null && !plan\.basisComplete, stands\)\}<\/div>\n\s+\{banner\('mt-3'\)\}/);
-  assert.match(card, /const hold = holdSummary\(plan, \{ writeStands: stands \}\);/);
+  assert.match(shapes[1], /\{noPlanText\(plan != null && !plan\.basisComplete, stands, actuation\?\.reserveStandingAtMs != null\)\}<\/div>\n\s+\{banner\('mt-3'\)\}/);
+  assert.match(card, /const hold = holdSummary\(plan, \{ writeStands: stands, reserveStood: actuation\?\.reserveStandingAtMs != null \}\);/);
   assert.match(shapes[2], /\{hold\.detail\}<\/div>\n\s+\{banner\('mt-3'\)\}\n\s+<AdvisoryNote mode=\{status\.mode\} \/>/);
   assert.match(shapes[3], /\n\s+\{banner\('mb-3'\)\}\n/);
 });
