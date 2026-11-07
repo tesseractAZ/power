@@ -815,8 +815,9 @@ test('★★★ T7 (Fix13) the named nights: a one-Core home on a line of 90 is 
 });
 
 /* ══ (Fix14) the time the declined-start push quotes: one figure, each input erring early ═════════════════════════════════════════════════
- * A blocker of the start, 10 min unbroken: lineDeclinedPushTick pushes, and lineDeclinedLatestStartMs quotes. A late clock loses the line, and
- * an early one costs only urgency: a time gone by the push is words with no clock. The plant walks a start at the quoted time. */
+ * A blocker of the start, 10 min unbroken: lineDeclinedPushTick pushes, and lineDeclinedLatestStartMs quotes. For the add-on's own start a late
+ * clock loses the line and an early one costs only urgency: a time gone by the push is words with no clock. The plant walks a start at the
+ * quoted time, re-asserting Charge Now every tick: a person's one Charge Now, stopped at the ceiling, is not this (the helper's docblock). */
 
 /** The EV on at the push (from the open), and still ahead of it (the last 2 hours). */
 const EV_ON = { ...BASE, ...session(EV_MAX_KW, 0, 150, 'exact', false) };
