@@ -121,8 +121,7 @@
  * words with no clock where none can be given (F13-b); the at-risk body names a load first, conditionally, on every body with a slot
  * reading on (F13-c). F12-a(viii), (ix), (xiv), F12-b(x)-(xiii) re-anchored.
  * (Fix14) The quote is one figure, each input erring early, and the no-clock words name no close a start would make (F14). F13-b(iii)-(vii)
- * retired: the two figures they mutated are gone. F12-b(x)-(xiii) and F13-b(xiv)-(xvi) re-anchored, and (x), (xii), (xiii) moved to the
- * tick's call, the helper's own line being F14's now.
+ * retired with the two figures. F12-b(xi), F13-b(xiv)-(xvi) re-anchored; F12-b(x), (xii), (xiii) moved to the tick's call.
  *
  *   node scripts/mutate-line-force-charge.mjs [--only <id prefix>]
  *
