@@ -338,12 +338,12 @@ test('★★★ S5 MONOTONE — on the year, w = 0…1500 in 30 W steps on both 
  *  (an EV, the caps note at every figure) from 570 W on nameplate and 390 W at 0.944, where its line comes within 10
  *  points of the 70% cost ceiling: the line force-charge takes over from the cost force-charge, and the level stated
  *  goes from the cost ceiling (70%) to the close its line walk expects (50%), the expected buy unchanged (35.34 kWh).
- *  And with the year's 4 h cases at 8, 14 and 16 h at 270 W: the plans whose expected buy or write level falls below
- *  the 0 W plan, and the armed lines the standby disarms — none (v1.200.0 arms a line whatever its ask). */
+ *  And with the year's 4 h cases at 8, 12, 14 and 16 h at 270 W: the plans whose expected buy or write level falls
+ *  below the 0 W plan, and the armed lines the standby disarms — none (v1.200.0 arms a line whatever its ask). */
 const PIN_S5_LINE = {
   labels: ['2027-01-04 21:30', '2027-01-04 13:00'], fromW: 1050, levels: [78.4, 78.3, 77.5], swept: [2406, 17_150],
   handOff: { label: '2027-01-12 +1 01:30', fromW: { np: 570, m: 390 }, levels: [70, 50], expectedBuyKwh: 35.34 },
-  hours: { 8: { m: [11, 0], np: [8, 0] }, 14: { m: [34, 0], np: [34, 0] }, 16: { m: [26, 0], np: [35, 0] } } as Record<number, Record<'m' | 'np', [number, number]>>,
+  hours: { 8: { m: [11, 0], np: [8, 0] }, 12: { m: [29, 0], np: [20, 0] }, 14: { m: [34, 0], np: [34, 0] }, 16: { m: [26, 0], np: [35, 0] } } as Record<number, Record<'m' | 'np', [number, number]>>,
   example8: { label: '2027-04-13 21:30', expectedBuyKwh: [40.8, 38.77], expectedWriteLevelPct: [74.4, 70.3] },
   example16: { label: '2026-10-26 21:30', expectedBuyKwh: [56.29, 56.29], expectedWriteLevelPct: [96.5, 97.4] },
 };
@@ -406,6 +406,9 @@ test('★★★ S5 LINE NIGHTS — with line force-charge eligibility (a write m
         if (b0.chargeTonight) assert.ok(p.chargeTonight && written(p)! >= written(b0)!, `${c.label} ${H} h ${name}: the write`);
         if ((['expectedBuyKwh', 'expectedWriteLevelPct'] as const).some((f) => b0[f] != null && !(p[f] != null && p[f]! >= b0[f]! - 1e-9))) fell += 1;
         if (b0.forceChargeLine != null && p.forceChargeLine == null) dropped += 1;
+        if ((p.forceChargeLine != null || p.cushionEnvelopeReason != null) && p.expectedWriteLevelPct! < p.cushionLineSocPct! - 0.05 - 1e-9) {
+          assert.equal(p.cushionShortfall, true, `${c.label} ${H} h ${name}: a line night under its line, undisclosed`);
+        }
       }
       assert.deepEqual([fell, dropped], byScale[name], `${H} h ${name}: [under the 0 W plan, armed lines disarmed]`);
     }
