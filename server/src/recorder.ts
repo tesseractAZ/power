@@ -755,7 +755,8 @@ export interface NightLedgerRow {
    *  ignored). With it the row is self-describing: cushion_line_soc_pct = reserve_floor_pct + 100 ×
    *  cushion_kwh ÷ (pool_full_kwh × cushion_pool_scale), to the line's rounding. NULL where no scale
    *  applied (a legacy-pct or disabled cushion, a null plan) and on rows written before v1.199.0,
-   *  whose line is on the nameplate pool. */
+   *  whose line is on the nameplate pool. v1.202.0 — or the scale the plan's pool was counted on
+   *  (plan_pool_kwh = pool_full_kwh × it), on every cushion basis where it moved the pool. */
   cushion_pool_scale: number | null;
   cushion_pool_scale_basis: string | null;
   /** v1.201.0 — the Cores' standby the islanded-outage cushion counted (NightChargePlan.cushionStandby;
@@ -768,6 +769,16 @@ export interface NightLedgerRow {
   cushion_standby_w: number | null;
   cushion_standby_basis: string | null;
   cushion_standby_kwh: number | null;
+  /** v1.202.0 — the pool the plan's walks counted, kWh per 100% (NightChargePlan.planPool; nightChargeAdvisor
+   *  plannerPoolKwh: pool_full_kwh × the measured scale, cushion_pool_scale), and the Cores' standby they drained beside the
+   *  load, W (planPoolLedgerColumns). WHICH ROWS CARRY WHICH POOL: pool_full_kwh is always the panel's own figure
+   *  (backupFullCapWh). A SIZED row (a charge or a hold) is on plan_pool_kwh — its target, troughs and line are percents of
+   *  it, and on the legacy-pct basis its cushion_kwh is cushion_pct of it; plan_pool_kwh equals pool_full_kwh (and
+   *  plan_walk_standby_w is 0) where no scale moved the pool and no standby was drained. A REFUSED row (no plan sized: an
+   *  incomplete basis, no window) counted no pool: NULL in both, and its cushion_kwh fallback is cushion_pct of
+   *  pool_full_kwh. NULL in both on rows written before v1.202.0, whose walks are on pool_full_kwh with no standby. */
+  plan_pool_kwh: number | null;
+  plan_walk_standby_w: number | null;
   /** v1.200.0 — the outage line above the 50% reserve the plan CARRIES with the night force-charge to the
    *  window close: its ask, ⌈line⌉ (NightChargePlan.forceChargeLine.askPct; lineForceChargeLedgerColumns).
    *  NULL where the plan carries none, on a null plan, and on every row written before v1.200.0. A strike on
@@ -1156,6 +1167,8 @@ const NIGHT_LEDGER_COLUMNS: readonly (keyof NightLedgerRow)[] = [
   'cushion_pool_scale', 'cushion_pool_scale_basis',
   // v1.201.0 — the Cores' standby the islanded-outage cushion counted.
   'cushion_standby_w', 'cushion_standby_basis', 'cushion_standby_kwh',
+  // v1.202.0 — the pool and the standby the plan's walks counted.
+  'plan_pool_kwh', 'plan_walk_standby_w',
   // v1.200.0 — the outage line above the reserve envelope: carried (its ask) or disclosed.
   'cushion_line_force_charge_pct', 'cushion_envelope_shortfall',
   // v1.189.0 — the charge cycle (NightLedgerRow.window_kind).
@@ -1440,6 +1453,8 @@ export function createRecorder(
     'cushion_pool_scale REAL', 'cushion_pool_scale_basis TEXT',
     // v1.201.0 — see NightLedgerRow.cushion_standby_w.
     'cushion_standby_w REAL', 'cushion_standby_basis TEXT', 'cushion_standby_kwh REAL',
+    // v1.202.0 — see NightLedgerRow.plan_pool_kwh.
+    'plan_pool_kwh REAL', 'plan_walk_standby_w REAL',
     // v1.200.0 — see NightLedgerRow.cushion_line_force_charge_pct.
     'cushion_line_force_charge_pct REAL', 'cushion_envelope_shortfall INTEGER',
     // v1.189.0 — the charge cycle, from the list the allowlist reads (CHARGE_CYCLE_LEDGER_SCHEMA).

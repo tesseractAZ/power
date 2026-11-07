@@ -236,6 +236,9 @@ export interface ChargeFigurePlan {
   setpointSocPct: number | null;
   /** v1.198.0 — the plan was sized on the provisional solar band; absent on the full basis. */
   pvBandWiden?: PvBandWidenText | null;
+  /** v1.202.0 — the pool and the Cores' standby the plan's walks counted (NightChargePlan.planPool); absent where neither
+   *  differs from the panel's figure with no standby, and on older plans. */
+  planPool?: { kwh: number; standbyW: number } | null;
 }
 
 /** v1.200.0 — the plan fields the card's outage-cushion notes read (/api/night-charge/status → plan). */
@@ -454,8 +457,11 @@ export function sizingLine(plan: ChargeFigurePlan): string | null {
   const r1 = (n: number): number => Math.round(n * 10) / 10;
   const cal = factor > 1.005 && plan.buyKwh != null && Number.isFinite(plan.buyKwh)
     ? ` (raw estimate ${r1(plan.buyKwh)} kWh × ${factor.toFixed(2)} realized-buy calibration)` : '';
-  // v1.198.0 — and, on a provisional plan, the widened P10 it was sized on.
-  return `Sized on an islanded worst case (P10 PV, P90 load including any committed EV session, no grid) of ~${r1(worst)} kWh${cal}.`
+  // v1.198.0 — and, on a provisional plan, the widened P10 it was sized on. v1.202.0 — and the Cores' standby where the walks
+  // drained it (the server's sizingBasisText).
+  const sb = plan.planPool?.standbyW;
+  const standby = sb != null && Number.isFinite(sb) && sb > 0 ? ` and the Cores' ~${Math.round(sb)} W standby` : '';
+  return `Sized on an islanded worst case (P10 PV, P90 load including any committed EV session${standby}, no grid) of ~${r1(worst)} kWh${cal}.`
     + provisionalBandText(plan.pvBandWiden);
 }
 

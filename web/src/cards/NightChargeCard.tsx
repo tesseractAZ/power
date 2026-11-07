@@ -90,6 +90,8 @@ interface NightChargePlan {
    *  the cushion's hours (kWh, inside the cushion) and its basis ('implausible': a figure that was no reading,
    *  counted as 0 W). Not shown: the rationale names it. Absent on other bases and on older plans. */
   cushionStandby?: { w: number; kwh: number; basis: 'runway-overhead' | 'implausible' };
+  /** v1.202.0 — the pool and the Cores' standby the plan's walks counted (the sizing line names the standby). */
+  planPool?: { kwh: number; standbyW: number } | null;
   confidenceTier: 'forecast' | 'mixed' | 'climatology';
   window: { startMs: number; endMs: number } | null;
   reserveFloorPct: number;

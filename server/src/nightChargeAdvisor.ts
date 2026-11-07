@@ -45,7 +45,8 @@
  * The DC-bus depletion recurrence: each hour the pack changes by
  * `pvW − loadW / dischargeEff` (delivering `load` at the panel draws `load/η`
  * from the pack — the discharge conversion tax), clamped to [0, fullWh], with the
- * pool sized on the panel's NAMEPLATE capacity (fullKwh = backupFullCapWh).
+ * pool sized on the panel's NAMEPLATE capacity (fullKwh = backupFullCapWh) — v1.202.0: on
+ * the planning pool, and less the Cores' standby (both below).
  * v1.187.22 — this is NOT the runway's recurrence any more. Since v1.187.19 the
  * runway, the day/multi-day SoC trajectories and the probabilistic band drain the
  * pool by the load leg PLUS the Cores' standby overhead (~270 W, analytics.ts), on
@@ -58,13 +59,23 @@
  * conversion. The panel's reserve percent is a share of the packs' measured capacity, so
  * an islanded-outage cushion counted on nameplate held only ~0.944 of itself once written
  * (cushionLineKwh). index.ts passes the house pool's measured capacity scale
- * (cushionPoolScale, from its own main-thread tracker) and cushionLineKwh alone reads it;
- * every walk here stays on nameplate kWh per percent.
+ * (cushionPoolScale, from its own main-thread tracker) and cushionLineKwh alone read it;
+ * every walk here stayed on nameplate kWh per percent until v1.202.0 (below).
  * v1.201.0 — A SECOND EXCEPTION, pinned by the same test: the islanded-outage cushion counts the
  * Cores' standby draw for its hours. index.ts passes the runway's pool overhead figure for the
  * connected Cores as ONE number (cushionStandbyW, from its second door); plausibleStandbyW reads it
  * once and cushionStandbyKwh adds H × that draw to the cushion's load leg — not × the safety factor,
- * not ÷ the discharge efficiency. The walks here still drain the bare load/η.
+ * not ÷ the discharge efficiency. The walks here still drained the bare load/η.
+ * ★★ v1.202.0 — THE WALKS ON THE MEASURED CAPACITY, WITH THE STANDBY (the two inputs above, nothing more of
+ * the runway's basis). sizeNightChargePlan counts ONE planning pool at its top (plannerPoolKwh: the panel's
+ * nameplate figure × the measured scale, on every basis the tracker answers with a plausible scale), and
+ * every walk, clamp and kWh per percent here follows from it; the line is plain reserve + cushion on that
+ * pool, the same percent as v1.201.0's. Every discharge leg drains the Cores' standby (the one figure
+ * plausibleStandbyW validated, pack side) beside load/η. Three reads keep the panel's figure: the tick's
+ * mirror (tickPoolKwh — the force-charge times its start on backupFullCapWh), the cost room (the morning
+ * surplus counted at v1.201.0's percent: the walks drain the standby and the surplus does not, so the sun's
+ * share of the measured pool is not established) and the plan's record of its pool (planPool). With no
+ * scale and no standby the plan is v1.201.0's byte for byte.
  * v1.194.0 — a POSITIVE change is a surplus the Cores charge the cells with, and it is
  * stored at legEff (chargeLegStep, physics/chargeLeg.ts): every walk here (simulate, the
  * with-buy window walk, expectedCarryKwh, expectedPvChargeWalk, expectedForceChargeStart)
@@ -196,9 +207,10 @@ export interface NightChargeInputs {
 
   // ── Battery state (read from the SHP2 projection upstream) ──
   /** Pool capacity as the SHP2 reports it, kWh (backupFullCapWh/1000): the packs' nameplate sum
-   *  (92.16 at 15 packs), not their measured full-charge capacity and not usable energy. Every walk
-   *  counts a percent on it; only the cushion line's conversion also reads the measured capacity
-   *  (cushionPoolScale, v1.199.0). */
+   *  (92.16 at 15 packs), not their measured full-charge capacity and not usable energy. v1.202.0 — the
+   *  plan's walks count a percent on the planning pool, this × cushionPoolScale (plannerPoolKwh); this
+   *  figure itself is read by the capacity gate, the tick's mirror (tickPoolKwh), the cost room's percent
+   *  and the plan's record of its pool. */
   fullKwh: number;
   /** Current state-of-charge %, as the SHP2 reports it. */
   socNowPct: number;
@@ -216,13 +228,16 @@ export interface NightChargeInputs {
   /** v1.125.0 — multiplier on the observed islanded load. Higher = stricter. */
   islandedLoadSafety?: number;
   /** v1.199.0 — the house pool's measured capacity scale (index.ts measuredCushionScale): the ONE
-   *  measured input the planner takes, read only by cushionLineKwh to convert an islanded-outage
-   *  cushion's energy to the panel's percent. Absent / null ⇒ the nameplate line, exactly as before. */
+   *  measured input the planner takes. v1.202.0 — read ONCE, at the top of the sizing (plannerPoolKwh): the
+   *  planning pool every walk counts on, on every basis whose scale is plausible, the line plain reserve +
+   *  cushion on it. Absent / null / no reading / 1 ⇒ the panel's figure and v1.201.0's plan, exactly as before. */
   cushionPoolScale?: CushionPoolScale | null;
   /** v1.201.0 — the Cores' standby draw, W (index.ts cushionStandbyOverheadW: the runway's pool overhead figure
    *  for the connected Cores, the planner's second runway-basis input): read ONCE, by plausibleStandbyW, and
    *  counted in an islanded-outage cushion for its hours (cushionStandbyKwh). Absent / null ⇒ the cushion
-   *  without it, exactly as before; a figure that is no reading counts as 0 W, recorded 'implausible'. */
+   *  without it, exactly as before; a figure that is no reading counts as 0 W, recorded 'implausible'.
+   *  v1.202.0 — the same validated figure is drained by every walk's discharge legs (the sizing's walk standby), on every
+   *  cushion basis; absent ⇒ 0 W there too. */
   cushionStandbyW?: number | null;
   /** v1.127.0 — 'cost' sizes the buy to minimise the bill; 'resilience' (the
    *  legacy behaviour) sizes it to hold floor+cushion. Cost mode is bounded
@@ -717,8 +732,16 @@ export interface NightChargePlan {
   cushionBasis?: CushionBasis;
   /** v1.199.0 — the scale the cushion line was converted on (cushionLineKwh): present only where one
    *  was passed and the cushion is an islanded-outage energy; basis 'implausible' (scale 1) where the
-   *  scale passed was ignored. Absent otherwise, so that plan's JSON is unchanged. */
+   *  scale passed was ignored. Absent otherwise, so that plan's JSON is unchanged.
+   *  v1.202.0 — where the scale moved the planning pool (plannerPoolKwh: a plausible scale under 1), the scale the
+   *  pool was counted on, on every cushion basis: the line is then plain reserve + cushion on that pool, which is the
+   *  same percent (floor + 100 · cushionKwh ÷ (pool_full_kwh · scale) on an islanded-outage row). Elsewhere v1.201.0's. */
   cushionPoolScale?: { scale: number; basis: CushionScaleBasis | 'implausible' };
+  /** v1.202.0 — the pool the plan's walks counted on, kWh per 100% (plannerPoolKwh: the panel's figure × the measured
+   *  scale), and the Cores' standby they drained, W (the one figure plausibleStandbyW reads; 0 with none). Present on a
+   *  sized plan (a charge or a hold) wherever the pool is not the panel's figure or the standby is above 0 W; absent
+   *  otherwise, so a plan with no scale and no standby keeps its JSON (its walks are on fullKwh, with no standby). */
+  planPool?: { kwh: number; standbyW: number };
   /** v1.201.0 — the Cores' standby the islanded-outage cushion counts (cushionStandbyKwh): the figure (W), its
    *  energy over the cushion's hours (kWh, inside cushionKwh) and its basis — 'implausible' (0 W, 0 kWh) where
    *  the figure passed was no reading. Present only where a figure was passed and the cushion is an
@@ -785,7 +808,8 @@ interface SimResult {
  *  minimum pack over [scoreFromMs, ∞) and the pack level AT `markMs`.
  *  Recurrence pv − load/η, clamp [0,full] (the planner's own; see the header for
  *  how it differs from the runway's since v1.187.19). v1.194.0 — a surplus hour's net is stored
- *  at `chargeEff` (chargeLegStep; legEff), a deficit hour's taken as it is. */
+ *  at `chargeEff` (chargeLegStep; legEff), a deficit hour's taken as it is. v1.202.0 — less the
+ *  Cores' standby (`standbyW`), on the planning pool (`fullKwh`). */
 function simulate(
   startPackKwh: number,
   fullKwh: number,
@@ -793,6 +817,9 @@ function simulate(
   dischargeEff: number,
   /** v1.194.0 — the charge leg a P10 PV surplus goes into the cells at (legEff). */
   chargeEff: number,
+  /** v1.202.0 — the Cores' standby, W, drained from the pack every hour beside the load leg (pack side: not ÷ the
+   *  discharge efficiency); 0 with none. */
+  standbyW: number,
   scoreFromMs: number,
   markMs: number,
   /** R2 — an armed backup leg: entering the first hour at/after `atMs` (its window close) the
@@ -821,7 +848,7 @@ function simulate(
       packAtMarkWh = packWh;
       markCaptured = true;
     }
-    packWh = Math.max(0, Math.min(fullWh, packWh + chargeLegStep(h.pvP10W - h.loadP90W / dischargeEff, chargeEff)));
+    packWh = Math.max(0, Math.min(fullWh, packWh + chargeLegStep(h.pvP10W - h.loadP90W / dischargeEff - standbyW, chargeEff)));
     if (h.ts >= scoreFromMs && packWh < minPackWh) {
       minPackWh = packWh;
       minTsMs = h.ts;
@@ -973,7 +1000,10 @@ export function expectedCarryKwh(o: {
    *  being present) through every hour that starts before its window close `untilMs`.
    *  null/absent ⇒ the owner's reserve alone. */
   hold?: { kwh: number; untilMs: number } | null;
+  /** v1.202.0 — the Cores' standby, W, drained beside the load leg (pack side). Absent ⇒ 0. */
+  standbyW?: number;
 }): number | null {
+  const standbyW = o.standbyW ?? 0;
   let pack = Math.max(0, Math.min(o.fullKwh, o.startKwh));
   const floor = Math.min(Math.max(0, o.reserveKwh), pack);
   const hold = o.hold != null && Number.isFinite(o.hold.kwh) && Number.isFinite(o.hold.untilMs) ? o.hold : null;
@@ -985,7 +1015,7 @@ export function expectedCarryKwh(o: {
     if (h == null) return null;
     const pv = h.pvP50W != null && Number.isFinite(h.pvP50W) ? h.pvP50W : h.pvP10W;
     const slotFloor = hold != null && slot < hold.untilMs ? Math.max(floor, Math.min(o.fullKwh, hold.kwh)) : floor;
-    pack = Math.max(slotFloor, Math.min(o.fullKwh, pack + chargeLegStep((w * (pv - Math.max(0, h.loadP50W!) / o.dischargeEff)) / 1000, o.legEff)));
+    pack = Math.max(slotFloor, Math.min(o.fullKwh, pack + chargeLegStep((w * (pv - Math.max(0, h.loadP50W!) / o.dischargeEff - standbyW)) / 1000, o.legEff)));
   }
   return pack;
 }
@@ -1119,8 +1149,9 @@ export function expectedForceChargeStart(o: {
   /** The ceiling armFromPlan records (armedForceChargeCeilingPct): decideForceCharge's target. */
   ceilingPct: number;
   /** v1.200.0 — the pool the TICK times its start on, kWh: the panel's own backupFullCapWh (index.ts
-   *  runForceChargeTick), the nameplate pool. Required, so a walk on another pool (design C) keeps the
-   *  tick's mirror apart from its own `fullKwh`. Equal to fullKwh until then. */
+   *  runForceChargeTick), the nameplate pool. Required, so a walk on another pool keeps the tick's mirror
+   *  apart from its own `fullKwh`. v1.202.0 — the sizing passes the panel's figure while `fullKwh` is the
+   *  planning pool: the walk steps the pack on the pool and comes due on the tick's own clock. */
   tickPoolKwh: number;
   hours: ReadonlyArray<NightChargeHour>;
   fromMs: number;
@@ -1129,8 +1160,11 @@ export function expectedForceChargeStart(o: {
   chargeCapKw: number;
   envelopeKw: number | null;
   legEff: number;
+  /** v1.202.0 — the Cores' standby, W, drained beside the load leg before the start (pack side). Absent ⇒ 0. */
+  standbyW?: number;
 }): { packKwh: number; startMs: number | null } | null {
   const stopPct = forceChargeStopPct(o.ceilingPct);
+  const standbyW = o.standbyW ?? 0;
   const byHour = hoursByEpoch(o.hours);
   let pack = Math.max(0, Math.min(o.fullKwh, o.startKwh));
   const floor = Math.min(Math.max(0, o.reserveKwh), pack);
@@ -1154,7 +1188,7 @@ export function expectedForceChargeStart(o: {
       }
     }
     const pv = h.pvP50W != null && Number.isFinite(h.pvP50W) ? h.pvP50W : h.pvP10W;
-    pack = Math.max(floor, Math.min(o.fullKwh, pack + chargeLegStep(((pv - loadW / o.dischargeEff) / 1000) * (EXPECTED_JIT_STEP_MS / HOUR_MS), o.legEff)));
+    pack = Math.max(floor, Math.min(o.fullKwh, pack + chargeLegStep(((pv - loadW / o.dischargeEff - standbyW) / 1000) * (EXPECTED_JIT_STEP_MS / HOUR_MS), o.legEff)));
   }
   return { packKwh: pack, startMs: null };
 }
@@ -1194,6 +1228,9 @@ export interface ExpectedBuyWindow {
   /** R2 — what the packs accept from PV and the grid together, kW (expectedPvChargeWalk).
    *  null/absent ⇒ no acceptance bound. */
   acceptKw?: number | null;
+  /** v1.202.0 — the Cores' standby, W, the walks drain beside the load leg wherever the pool is not charging (the drain to
+   *  a start, a line walk latched at the panel ceiling); never while the grid charges it. Absent ⇒ 0. */
+  standbyW?: number;
 }
 
 /** v1.187.22 — expectedBuyFromPlan's result. */
@@ -1257,8 +1294,11 @@ export function expectedLineForceChargeWalk(o: {
   noReOn?: boolean;
   /** v1.200.0 (Fix11) — the run is on (armedLineRunOn): started at fromMs, past the timed start and the last-start gate. */
   runOn?: boolean;
+  /** v1.202.0 — the Cores' standby, W, drained beside the load leg before the start and while latched (pack side). Absent ⇒ 0. */
+  standbyW?: number;
 }): { closeKwh: number; startMs: number | null; startPackKwh: number; gridKwh: number; ceilingReached: boolean } | null {
   const byHour = hoursByEpoch(o.hours);
+  const standbyW = o.standbyW ?? 0;
   let pack = Math.max(0, Math.min(o.fullKwh, o.startKwh));
   const floor = Math.min(Math.max(0, o.reserveKwh), pack);
   const capKwh = (Math.min(100, o.panelCeilingPct) / 100) * o.fullKwh;
@@ -1312,7 +1352,7 @@ export function expectedLineForceChargeWalk(o: {
       // FORCE_CHARGE_LINE_REON_MAX a night, FORCE_CHARGE_ON_VERIFY_AFTER_MS apart, outside the last
       // FORCE_CHARGE_ON_RETRY_CUTOFF_MS — and the walk rises again from the next minute.
       const pv = h.pvP50W != null && Number.isFinite(h.pvP50W) ? h.pvP50W : h.pvP10W;
-      pack = Math.max(floor, Math.min(o.fullKwh, pack + chargeLegStep(((pv - loadW / o.dischargeEff) / 1000) * dtH, o.legEff)));
+      pack = Math.max(floor, Math.min(o.fullKwh, pack + chargeLegStep(((pv - loadW / o.dischargeEff - standbyW) / 1000) * dtH, o.legEff)));
       if (o.noReOn !== true && (pack / o.fullKwh) * 100 < o.startTargetPct && reOns < FORCE_CHARGE_LINE_REON_MAX
         && t + EXPECTED_JIT_STEP_MS < o.windowEndMs - FORCE_CHARGE_ON_RETRY_CUTOFF_MS
         && t + EXPECTED_JIT_STEP_MS - lastOnMs >= FORCE_CHARGE_ON_VERIFY_AFTER_MS) {
@@ -1322,7 +1362,7 @@ export function expectedLineForceChargeWalk(o: {
       }
     } else {
       const pv = h.pvP50W != null && Number.isFinite(h.pvP50W) ? h.pvP50W : h.pvP10W;
-      pack = Math.max(floor, Math.min(o.fullKwh, pack + chargeLegStep(((pv - loadW / o.dischargeEff) / 1000) * dtH, o.legEff)));
+      pack = Math.max(floor, Math.min(o.fullKwh, pack + chargeLegStep(((pv - loadW / o.dischargeEff - standbyW) / 1000) * dtH, o.legEff)));
     }
   }
   return { closeKwh: pack, startMs, startPackKwh: startMs != null ? startPackKwh : pack, gridKwh, ceilingReached: reached || latched };
@@ -1331,7 +1371,7 @@ export function expectedLineForceChargeWalk(o: {
 /**
  * v1.187.22 — PURE. The EXPECTED meter-side buy of an armed plan: the energy its write would
  * draw into the Cores, ÷ legEff, never negative, never past what the window can deliver on the
- * median load.
+ * median load. An estimate on the median basis, not a meter reading (see kWh per percent, below).
  *
  * WHAT THE WRITE DOES, by where the pool opens the window (S, `startKwh`) against the written
  * reserve (R) and the force-charge stop (F, when force-charge rides the night):
@@ -1348,13 +1388,14 @@ export function expectedLineForceChargeWalk(o: {
  * (armedForceChargeCeilingPct) — the fields the write uses; `levelPct` is returned even when the
  * buy is null (no P50 basis), because it is a fact about the write.
  *
- * kWh per percent: `fullKwh`, the planner's nameplate pool — the basis `buyKwh` is sized on, so
- * the expected and worst-case figures compare like for like and the ledger grades both against
- * `delivered_kwh` on one basis. The SoC is a share of the packs' BMS full-charge capacity (~0.944
- * of nameplate on this fleet), so a percent holds less energy than this counts; the measured
- * scale lives in the analytics worker and never reaches the planner, and the sizing basis is not
- * this disclosure's to change. The live force-charge times its start with the panel's own
- * backupFullCapWh, the same nameplate figure.
+ * kWh per percent: `fullKwh`, the planning pool — the basis `buyKwh` is sized on, so the expected
+ * and worst-case figures compare like for like and the ledger grades both against `delivered_kwh`
+ * on one basis. v1.202.0 — that pool is the packs' measured capacity (the panel's nameplate figure
+ * × the scale, plannerPoolKwh), the basis of the SoC percent, so a percent here holds the energy the
+ * packs hold. The live force-charge times its start with the panel's own backupFullCapWh, the
+ * nameplate figure: `tickPoolKwh` mirrors it. The figure is an estimate of the energy into the
+ * Cores — never a meter reading — and excludes their own standby while the grid charges them and
+ * any draw after a cost stop.
  */
 export function expectedBuyFromPlan(o: {
   setpointSocPct: number | null;
@@ -1471,7 +1512,7 @@ function expectedLineBuy(
     startTargetPct: mode.startTargetPct, panelCeilingPct: mode.panelCeilingPct,
     hours: o.window.hours, fromMs: reserveLeg.creditKwh > 0 ? reserveLeg.doneMs : o.window.fromMs, windowEndMs: o.window.windowEndMs,
     dischargeEff: o.window.dischargeEff, chargeCapKw: o.window.chargeCapKw, envelopeKw: o.window.envelopeKw, legEff: o.legEff,
-    acceptKw: o.window.acceptKw ?? null, noReOn: o.noReOn, runOn: o.runOn,
+    acceptKw: o.window.acceptKw ?? null, noReOn: o.noReOn, runOn: o.runOn, standbyW: o.window.standbyW,
   });
   if (walk == null) return { buyKwh: null, levelPct: floorLevel, mode: 'line', panelCeilingPct, startTargetPct };
   const out: ExpectedBuy = {
@@ -1618,10 +1659,13 @@ export const WORST_CASE_BASIS = 'P10 PV, P90 load including any committed EV ses
 /** v1.187.22 — the ONE sentence that names the worst case, labelled as the basis the plan is sized
  *  on: "Sized on an islanded worst case (P10 PV, …, no grid) of ~64.2 kWh" + `calNote` (the de-bias
  *  disclosure, beside the figure it multiplies). The card mirrors it (sizingLine, nightChargeText.ts).
- *  null with no figure. PURE. */
-export function sizingBasisText(worstKwh: number | null | undefined, calNote = ''): string | null {
+ *  v1.202.0 — where the walks drained the Cores' standby (`standbyW` above 0, NightChargePlan.planPool.standbyW) the basis
+ *  names it: "(P10 PV, P90 load including any committed EV session and the Cores' ~270 W standby, no grid)". 0 W or none:
+ *  the sentence as before. null with no figure. PURE. */
+export function sizingBasisText(worstKwh: number | null | undefined, calNote = '', standbyW = 0): string | null {
   if (worstKwh == null || !Number.isFinite(worstKwh)) return null;
-  return `Sized on an islanded worst case (${WORST_CASE_BASIS}) of ~${round1(worstKwh)} kWh${calNote}`;
+  const basis = standbyW > 0 ? WORST_CASE_BASIS.replace(', no grid', ` and the Cores' ~${Math.round(standbyW)} W standby, no grid`) : WORST_CASE_BASIS;
+  return `Sized on an islanded worst case (${basis}) of ~${round1(worstKwh)} kWh${calNote}`;
 }
 
 /** v1.187.22 — both buy figures for a LOG line, each labelled: logs serve diagnosis, so they keep
@@ -1646,7 +1690,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
 /** The sizing itself (computeNightChargePlan's body before v1.198.0, unchanged). */
 function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   const {
-    nowMs, fullKwh, socNowPct, reserveFloorPct, cushionPct, socCoherent,
+    nowMs, fullKwh: panelFullKwh, socNowPct, reserveFloorPct, cushionPct, socCoherent,
     legEff, dischargeEff, chargeCapKw, gridInputCapKw, window, horizon,
     morningPvSurplusP90Kwh, basisComplete, minBuyKwh,
   } = inputs;
@@ -1670,7 +1714,7 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   // Reporting basisComplete:false made HA say "basis incomplete" about a healthy
   // basis, and conflated a normal windowless night with a genuine data outage.
   if (!window || !(window.endMs > window.startMs)) return nullPlan(inputs, true, 'No plan — no valid cheap charge window resolved for tonight.');
-  if (!Number.isFinite(fullKwh) || fullKwh <= 0) return refuse('pool capacity unavailable', true);
+  if (!Number.isFinite(panelFullKwh) || panelFullKwh <= 0) return refuse('pool capacity unavailable', true);
   if (!Number.isFinite(socNowPct)) return refuse('current SoC unavailable', true);
   // v1.39.0 review fix: a non-finite floor/cushion made targetFloorKwh NaN,
   // every bisection comparison false, and the buy silently resolved to the FULL
@@ -1682,6 +1726,14 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   if (!Number.isFinite(legEff) || legEff <= 0 || !Number.isFinite(dischargeEff) || dischargeEff <= 0 || !Number.isFinite(chargeCapKw) || chargeCapKw < 0)
     return refuse('efficiency/charge-power configuration is not a finite number');
   if (horizon.length === 0) return refuse('empty forecast horizon', true);
+  // ★★ v1.202.0 — THE PLANNING POOL, ONCE (plannerPoolKwh): the panel's nameplate figure × the packs' measured capacity
+  // scale, the basis of the percent the panel reads and holds. Every walk below steps a percent on this one figure — the
+  // carries, the troughs, the with-buy window walk, the setpoint, the cost target and ceiling, the line's ask, the expected
+  // walks — and the line is plain reserve + cushion on it (cushionLineKwh's ÷ scale is in the pool). The only reads of the
+  // panel's figure are the capacity gate above, the tick's own mirror (tickPoolKwh), the cost room's percent and the plan's
+  // record of the pool. With no scale, or one that is no reading, or 1: the panel's figure, and v1.201.0's plan.
+  const pool = plannerPoolKwh(panelFullKwh, inputs.cushionPoolScale);
+  const fullKwh = pool.kwh;
 
   // R2 — the leg (WindowSpec). Every term below that reads it is a no-op on the overnight leg.
   const spec = inputs.windowSpec;
@@ -1730,8 +1782,22 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   // written percent holds the whole cushion. Every reader below — the hold test, the requirement,
   // cushionShortfall, the line and trough reported, the setpoint, T_mid and the backup leg's walk —
   // reads this one figure; no scale is read anywhere else (runwayBasisContracts.test.ts).
-  const cushionLine = cushionLineKwh({ reserveKwh, cushionKwh, cushionBasis, poolScale: inputs.cushionPoolScale });
+  const cushionLine = cushionLineKwh({ reserveKwh, cushionKwh, cushionBasis, poolScale: pool.lineScale });
   const targetFloorKwh = cushionLine.kwh;
+  // v1.202.0 — the scale the plan records (cushionPoolScale): the pool's where it moved the pool, else the line's (v1.201.0).
+  const planScale = pool.applied ?? cushionLine.applied;
+  // ★ v1.202.0 — THE WALKS' STANDBY: the Cores' standby figure B's one read validated (plausibleStandbyW: absent ⇒ null, a
+  // figure that is no reading ⇒ 0 W), 0 W with none. On an island the Cores' electronics draw whether or not the backup
+  // circuits load, and with the grid present they draw from the pool wherever it is not charging: every discharge leg of
+  // every walk below drains it beside the load leg, pack side (not ÷ the discharge efficiency) — simulate, the with-buy
+  // window walk's share not charging, the expected carry, the drain to a just-in-time start and a line walk before its
+  // start and while latched. Never a charging gain (the grid feeds the Cores while it charges), the morning surplus or the
+  // cushion (B's term, which runs from the close, where every walk here ends).
+  const walkStandbyW = standbyW?.w ?? 0;
+  // v1.202.0 — the plan's record of its walks' pool and standby (NightChargePlan.planPool), on both sized returns: only
+  // where the walks differ from v1.201.0's, so a plan with no scale and no standby keeps its JSON.
+  const planPoolField: { planPool?: { kwh: number; standbyW: number } } = fullKwh !== panelFullKwh || walkStandbyW > 0
+    ? { planPool: { kwh: Math.round(fullKwh * 1000) / 1000, standbyW: walkStandbyW } } : {};
 
   const socNowKwh = (fullKwh * socNowPct) / 100;
   const windowStart = window.startMs;
@@ -1768,11 +1834,11 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   // the conservative (over-buy) direction, consistent with buildInputs' trim.
   const simFromMs = Math.floor(nowMs / HOUR_MS) * HOUR_MS;
   const preHorizon = horizon.filter((h) => h.ts >= simFromMs);
-  const baseline = simulate(socNowKwh, fullKwh, preHorizon, dischargeEff, legEff, windowEnd, windowEnd, holdLift);
+  const baseline = simulate(socNowKwh, fullKwh, preHorizon, dischargeEff, legEff, walkStandbyW, windowEnd, windowEnd, holdLift);
   const packAtWindowEnd_noBuy = baseline.packAtMarkKwh;
   // v1.49.0 — pack level ENTERING the window (carry to window OPEN), the anchor
   // for the lift-aware window model below.
-  const packAtWindowStartKwh = simulate(socNowKwh, fullKwh, preHorizon, dischargeEff, legEff, windowStart, windowStart, holdLift).packAtMarkKwh;
+  const packAtWindowStartKwh = simulate(socNowKwh, fullKwh, preHorizon, dischargeEff, legEff, walkStandbyW, windowStart, windowStart, holdLift).packAtMarkKwh;
 
   // v1.39.0 (§4 honesty): the PRE-WINDOW carry — pack path from now to the
   // window OPEN. A tonight buy cannot prevent a pre-window dip (the floor alarm
@@ -1793,7 +1859,7 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
     const preWindow = simulate(
       socNowKwh, fullKwh,
       horizon.filter((h) => h.ts >= simFromMs && h.ts < windowStart),
-      dischargeEff, legEff, 0, windowStart, holdLift,
+      dischargeEff, legEff, walkStandbyW, 0, windowStart, holdLift,
     );
     projSocAtWindowStartPct = round1((preWindow.packAtMarkKwh / fullKwh) * 100);
     preWindowMinSocPct = round1((preWindow.minPackKwh / fullKwh) * 100);
@@ -1827,6 +1893,7 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
     : expectedCarryKwh({
       startKwh: socNowKwh, fullKwh, reserveKwh, dischargeEff, legEff, hours: horizon, fromMs: nowMs, toMs: windowStart,
       ...(holdLift != null ? { hold: { kwh: holdLift.minKwh, untilMs: holdLift.atMs } } : {}),
+      standbyW: walkStandbyW,
     });
   const expectedStartSocPct = expectedStartKwh == null ? null : round1((expectedStartKwh / fullKwh) * 100);
 
@@ -1975,7 +2042,7 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
       const gainKwh = hourLiftKwh * chargeFrac;
       remainingLift = Math.max(0, remainingLift - gainKwh);
       const pvKwh = h.pvP10W / 1000;
-      const drainKwh = ((h.loadP90W / 1000) * (1 - chargeFrac)) / dischargeEff;
+      const drainKwh = ((h.loadP90W / 1000) * (1 - chargeFrac)) / dischargeEff + (walkStandbyW / 1000) * (1 - chargeFrac);
       // v1.194.0 — the P10 PV beyond the hour's drain reaches the cells through the charge leg
       // (chargeLegStep × legEff), as in simulate(); the grid gain is already pack-side (× legEff).
       pack = Math.max(0, Math.min(fullKwh, pack + gainKwh + chargeLegStep(pvKwh - drainKwh, legEff)));
@@ -1986,7 +2053,7 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
    *  (minProjSocPct / baselineMinSocPct): it is still the honest answer to "what
    *  if the whole house ran off the pack", it is just not the cushion test. */
   const houseTroughAtLift = (lift: number): { minKwh: number; minTs: number | null } => {
-    const r = simulate(packAtWindowEndWith(lift), fullKwh, postHours, dischargeEff, legEff, windowEnd, windowEnd);
+    const r = simulate(packAtWindowEndWith(lift), fullKwh, postHours, dischargeEff, legEff, walkStandbyW, windowEnd, windowEnd);
     return { minKwh: r.minPackKwh, minTs: r.minTsMs };
   };
 
@@ -2022,8 +2089,8 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   // which is true of a standard that was lowered rather than met.
   // v1.199.0 — where the measured capacity moved the line, the cushion's share of it: the line's own
   // percent above the floor (no second division by the scale). Nowhere else: that text is unchanged.
-  const measuredCushionNote = cushionLine.applied != null && cushionLine.applied.scale < 1
-    ? `, ${round1(((targetFloorKwh - reserveKwh) / fullKwh) * 100)}% of the packs' measured capacity at ×${cushionLine.applied.scale.toFixed(3)} of nameplate`
+  const measuredCushionNote = planScale != null && planScale.scale < 1
+    ? `, ${round1(((targetFloorKwh - reserveKwh) / fullKwh) * 100)}% of the packs' measured capacity at ×${planScale.scale.toFixed(3)} of nameplate`
     : '';
   // v1.201.0 — where the Cores' standby is in the cushion, its share, named as the runway's figure: part of
   // what the line is sized to carry, not a measurement and not an outcome. Nowhere else (no figure, 0 W, or a
@@ -2061,8 +2128,10 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
       // carry the applied cushion here too or a HOLD night reports none.
       cushionKwh: round2(cushionKwh),
       cushionBasis,
-      // v1.199.0 — the scale the line was converted on, only where one applied.
-      ...(cushionLine.applied != null ? { cushionPoolScale: cushionLine.applied } : {}),
+      // v1.199.0 — the scale the line was converted on, only where one applied. v1.202.0 — or the pool was counted on.
+      ...(planScale != null ? { cushionPoolScale: planScale } : {}),
+      // v1.202.0 — the pool and the standby the walks counted, only where either differs from v1.201.0's walks.
+      ...planPoolField,
       // v1.201.0 — the Cores' standby the cushion counted, only where a figure was passed (islanded-outage).
       ...(standby != null ? { cushionStandby: standby } : {}),
       cushionOutageHours: inputs.outageCushionHours ?? DEFAULT_OUTAGE_CUSHION_HOURS,
@@ -2140,7 +2209,7 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
     // 0 W, a hold at 270 W). With it every figure the standby moves stays non-decreasing in the figure (I-B2):
     // the bisected lift is ≤ hiLift, and min(hiLift, chargePowerLiftKwh) is the most this window delivers.
     // With no figure, or 0 W, the proxy stays: v1.200.1's plan, number for number.
-    requiredExtraKwh = standbyCounted ? hiLift : poolHeadroomLiftKwh;
+    requiredExtraKwh = standbyCounted || walkStandbyW > 0 ? hiLift : poolHeadroomLiftKwh;
   } else {
     let lo = 0;
     let hi = hiLift;
@@ -2188,6 +2257,11 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
 
   const targetPackKwh = packAtWindowEndWith(liftKwh);
 
+  // v1.202.0 — THE MORNING SUN'S ROOM AT v1.201.0's PERCENT. A surplus is real energy, but the room it leaves under full
+  // is counted as a percent of the panel's figure, as before the planning pool: surplus × pool ÷ panel on the pool (1 with
+  // no scale). The walks drain the Cores' standby and the surplus does not subtract it, so the sun's share of the measured
+  // pool is not established; the over-buy flag below and the cost room keep v1.201.0's percent on every basis.
+  const costRoomScale = fullKwh / panelFullKwh;
   // Over-buy ceiling (flag only; resilience wins): the required buy pushes the
   // pack above full − P90 morning surplus, so morning PV will clip. Keep the
   // buy; flag the accepted clip — but only when the cushion IS met (otherwise
@@ -2195,7 +2269,7 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   if (
     morningPvSurplusP90Kwh != null &&
     !cushionShortfall &&
-    targetPackKwh > fullKwh - morningPvSurplusP90Kwh + 1e-6
+    targetPackKwh > fullKwh - morningPvSurplusP90Kwh * costRoomScale + 1e-6
   ) {
     // v1.127.0 — in COST mode the PV headroom is the ceiling the target is built
     // from, not a line it accidentally crossed, so crossing it here would be a
@@ -2259,15 +2333,20 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   // force-charge runs at full rate and must not stop short of the cushion. A shortfall night
   // therefore keeps the raw surplus whole; on any other night targetPackKwh holds the line
   // (islanded basis: it IS the trough; legacy basis: its whole-house trough clears the line).
+  // v1.202.0 — THE COST ROOM AT v1.201.0's PERCENT (costRoomScale, above): the ceiling is full − the headroom × pool ÷ panel
+  // (costRoomKwh), v1.201.0's percent of the same headroom on every basis. The de-bias bound is on the panel's figure too:
+  // the resilience target converted to it at its own percent, so a de-biased ceiling is never under the percent the
+  // resilience buy lifts the pool to, as on v1.201.0's walks.
   const costHeadroomKwh: number | null = debiasedCostSurplusKwh({
     rawKwh: costSurplusKwh,
     debiasedKwh: cushionShortfall ? null
       : costSurplusBasis === 'p50' ? costLoad?.p50Kwh : costSurplusBasis === 'p90' ? costLoad?.p90Kwh : null,
-    fullKwh,
+    fullKwh: panelFullKwh,
     // The pack the resilience buy lifts to; with no resilience buy there is nothing for the
     // force-charge to deliver, so no bound (a hold night reports its de-biased ceiling).
-    resilienceTargetKwh: liftKwh > 0 ? targetPackKwh : 0,
+    resilienceTargetKwh: liftKwh > 0 ? targetPackKwh / costRoomScale : 0,
   });
+  const costRoomKwh: number | null = costHeadroomKwh == null ? costHeadroomKwh : costHeadroomKwh * costRoomScale;
   const costHeadroomFields = {
     costCeilingSurplusRawKwh: costSurplusKwh != null ? round2(costSurplusKwh) : null,
     costSurplusLoadFactor: costLoad != null && !longGap ? costLoad.factor : null,
@@ -2280,7 +2359,7 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
     const ct = costModeTargetKwh({
       fullKwh,
       reserveKwh,
-      morningPvSurplusKwh: costHeadroomKwh,
+      morningPvSurplusKwh: costRoomKwh,
       maxSocPct: inputs.costMaxSocPct ?? DEFAULT_COST_MAX_SOC_PCT,
       resilienceTargetKwh: targetPackKwh,
       curtailFromPct: spec?.curtailFromPct,
@@ -2290,7 +2369,7 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
     // v1.165.0 — exposed for the force-charge ceiling (see costCeilingKwh).
     if (fullKwh > 0) {
       costCeilingSocPct = round1((costCeilingKwh({
-        fullKwh, morningPvSurplusKwh: costHeadroomKwh, maxSocPct: inputs.costMaxSocPct ?? DEFAULT_COST_MAX_SOC_PCT,
+        fullKwh, morningPvSurplusKwh: costRoomKwh, maxSocPct: inputs.costMaxSocPct ?? DEFAULT_COST_MAX_SOC_PCT,
         curtailFromPct: spec?.curtailFromPct,
       }).ceilingKwh / fullKwh) * 100);
     }
@@ -2374,7 +2453,7 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   // arrival, as the v1.60.0 note above requires.
   const setpointOnWalk = midday || backupLeg || cushionBasis === 'legacy-pct';
   const troughFromPack = (p: number): number =>
-    simulate(p, fullKwh, postHours, dischargeEff, legEff, windowEnd, windowEnd).minPackKwh;
+    simulate(p, fullKwh, postHours, dischargeEff, legEff, walkStandbyW, windowEnd, windowEnd).minPackKwh;
   let requiredPackAtWindowEndKwh: number;
   if (baselineHolds && !midday) {
     // v1.174.0 — an economic-only night (cost mode; floor+cushion holds with no buy): the
@@ -2422,7 +2501,8 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   // pool percent the panel holds (~0.944 of nameplate on this fleet), so ⌈line⌉ − floor points of
   // that capacity hold the whole cushion wherever the write is under the 50% envelope (a line above
   // it is truncated, and the reserve sentence below says so). Until v1.199.0 the line was on the
-  // nameplate fullKwh and the write held about 0.944 of the cushion.
+  // nameplate fullKwh and the write held about 0.944 of the cushion. v1.202.0 — fullKwh is that measured
+  // capacity (the planning pool) and the line plain reserve + cushion on it: the same percent.
   // v1.201.0 — and the cushion counts the Cores' standby for its hours (header), so ⌈line⌉ − floor points of the
   // measured capacity hold the safety-factored load AND the runway's standby figure for the configured hours.
   // v1.200.0 (review) — askOf, the ONE expression the line force-charge's ask reads too (forceChargeLine.askPct).
@@ -2515,9 +2595,9 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   const expected: ExpectedBuy = chargeTonight
     ? expectedBuyFromPlan({
       setpointSocPct, costCeilingSocPct, forceChargeEligible: inputs.forceChargeEligible === true && !lineNoWrite && lineStartClosed == null,
-      forceChargeLine, lineForceChargeEligible: inputs.lineForceChargeEligible === true, noReOn: lineNoReOn != null, runOn: lineRunOn, tickPoolKwh: fullKwh,
+      forceChargeLine, lineForceChargeEligible: inputs.lineForceChargeEligible === true, noReOn: lineNoReOn != null, runOn: lineRunOn, tickPoolKwh: panelFullKwh,
       startKwh: expectedStartKwh, deliverableKwh: expectedDeliverableKwh, fullKwh, legEff,
-      window: { hours: horizon, fromMs: effChargeStartMs, windowEndMs: windowEnd, dischargeEff, chargeCapKw, envelopeKw, acceptKw },
+      window: { hours: horizon, fromMs: effChargeStartMs, windowEndMs: windowEnd, dischargeEff, chargeCapKw, envelopeKw, acceptKw, standbyW: walkStandbyW },
     })
     : { buyKwh: 0, levelPct: null };
   // A5 — CARRIED (the line claimed, no envelope cause) only where the force-charge can hold it: ⌈L⌉ + 2H ≤ 100 (the
@@ -2593,7 +2673,7 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
     ? `Hold the reserve at ${writtenPct}% in the ${windowText}: no charge expected.`
     : `Charge ${expected.deliverableBound ? 'toward' : 'to'} ~${headlineLevelPct}% in the ${windowText}`
       + `${expected.buyKwh == null ? '' : `: ~${round1(expected.buyKwh)} kWh expected`}.`;
-  const sizingNote = ` ${sizingBasisText(buyKwhDebiased, calNote)}${projSocAtWindowStartPct != null
+  const sizingNote = ` ${sizingBasisText(buyKwhDebiased, calNote, walkStandbyW)}${projSocAtWindowStartPct != null
     ? `, from ~${projSocAtWindowStartPct}% at the window open` : ''}, projecting ~${targetSocPct}% by ${fmtLocalHint(windowEnd)}.`;
   // What the write does from the expected start (expectedBuyFromPlan): the reserve leg, then — when
   // force-charge rides the night — the house's drain to the just-in-time start and the fill to the stop.
@@ -2636,7 +2716,7 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   const expectedNote = expected.buyKwh != null && expected.levelPct != null && expectedStartSocPct != null
     ? ` Expected: ${midWindow
       ? `the pool is at ~${expectedStartSocPct}% now`
-      : `the pool should open the window near ~${expectedStartSocPct}% with the grid present (median load and PV, never below the ${round1(reserveFloorPct)}% reserve)`}${expectedWriteNote(expectedStartSocPct, expected.levelPct)}.`
+      : `the pool should open the window near ~${expectedStartSocPct}% with the grid present (${walkStandbyW > 0 ? "median load, PV and the Cores' standby" : 'median load and PV'}, never below the ${round1(reserveFloorPct)}% reserve)`}${expectedWriteNote(expectedStartSocPct, expected.levelPct)}.`
     : '';
   // v1.132.0 — SAY WHICH HOLD THIS IS.
   //
@@ -2790,8 +2870,10 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
     // v1.125.0 — how the cushion was derived, so a reader can tell a bounded
     // islanded-outage requirement from the legacy flat band at a glance.
     cushionBasis,
-    // v1.199.0 — the scale the line was converted on, only where one applied.
-    ...(cushionLine.applied != null ? { cushionPoolScale: cushionLine.applied } : {}),
+    // v1.199.0 — the scale the line was converted on, only where one applied. v1.202.0 — or the pool was counted on.
+    ...(planScale != null ? { cushionPoolScale: planScale } : {}),
+    // v1.202.0 — the pool and the standby the walks counted, only where either differs from v1.201.0's walks.
+    ...planPoolField,
     // v1.201.0 — the Cores' standby the cushion counted, only where a figure was passed (islanded-outage).
     ...(standby != null ? { cushionStandby: standby } : {}),
     cushionOutageHours: inputs.outageCushionHours ?? DEFAULT_OUTAGE_CUSHION_HOURS,
@@ -4590,6 +4672,11 @@ export interface CushionLine {
  * v1.199.0) is today's nameplate line exactly, and so is an implausible one (not finite, under
  * CUSHION_SCALE_PLAUSIBLE_MIN, above 1): never a line below the nameplate line. A value a hair above 1
  * (float noise, ≤ 1e-9) is 1. `cushionKwh / 1` is bit-exact, so scale 1 moves no number.
+ *
+ * v1.202.0 — the sizing hands this the scale only where the planning pool is the panel's figure
+ * (plannerPoolKwh's lineScale: no scale, one that is no reading, or 1); where the pool is counted on the
+ * measured capacity it hands null, and the line is plain reserve + cushion on that pool — the same
+ * percent, the ÷ scale being in the pool, once.
  */
 export function cushionLineKwh(o: {
   reserveKwh: number;
@@ -4605,6 +4692,50 @@ export function cushionLineKwh(o: {
   }
   const scale = Math.min(1, s);
   return { kwh: o.reserveKwh + o.cushionKwh / scale, applied: { scale, basis: o.poolScale.basis } };
+}
+
+/** v1.202.0 — the pool the plan's walks count on (plannerPoolKwh), the scale the line still converts its cushion on, and
+ *  the scale the pool was counted on. */
+export interface PlannerPool {
+  /** kWh per 100% of every walk: the panel's figure, or the packs' measured capacity (the panel's figure × the scale). */
+  kwh: number;
+  /** The scale cushionLineKwh is handed: null where the pool already carries it (the line is plain reserve + cushion on
+   *  the pool), the input as passed where the pool is the panel's figure (cushionLineKwh's own rules then apply). */
+  lineScale: CushionPoolScale | null | undefined;
+  /** The scale the pool was counted on, where it moved the pool; null where the pool is the panel's figure. */
+  applied: { scale: number; basis: CushionScaleBasis } | null;
+}
+
+/**
+ * v1.202.0 — THE PLANNING POOL. PURE.
+ *
+ * The panel's percent is a share of the packs' BMS full-charge capacity, about 0.944 of nameplate on the reference
+ * fleet, while the panel reports its pool on nameplate (fullKwh = backupFullCapWh). Until v1.202.0 every walk stepped a
+ * percent of that nameplate figure, so a kWh of house load or PV moved the pool by 1/0.944 too few points, and only the
+ * cushion line converted its energy on the measured capacity (cushionLineKwh). Here the pool itself is counted on the
+ * measured capacity, once, and every walk, clamp and kWh-per-percent of the plan follows from it:
+ *
+ *     kwh = panelKwh × scale        (the line on it: plain reserve + cushion, cushionLineKwh's ÷ scale not applied)
+ *
+ * The scale rides on EVERY basis the tracker answers with a plausible figure — 'measured', 'held' (a Core not reporting
+ * keeps its last ratio), 'min-known' (the lowest ratio known for any Core): the tracker rounds every substitute down
+ * (min(applied, candidate), and an increase is held at the lower figure for 24 h), so a substitute is never a larger
+ * pool than the last measurement. Nameplate (1) is the tracker's most optimistic answer for the drains.
+ *
+ * Fail-safe: no scale (null, undefined), a scale that is no reading (not a finite number in [0.5, 1], float noise above
+ * 1 included as 1) or a unit scale ⇒ the panel's figure, and the scale goes to cushionLineKwh as passed, so the plan is
+ * v1.201.0's exactly (its line, its key). A lower scale is a smaller pool: every drain in percent is deeper and the
+ * line (the same percent as v1.201.0's) is held on fewer kWh.
+ */
+export function plannerPoolKwh(panelKwh: number, poolScale: CushionPoolScale | null | undefined): PlannerPool {
+  if (poolScale == null) return { kwh: panelKwh, lineScale: poolScale, applied: null };
+  const s = poolScale.scale;
+  if (typeof s !== 'number' || !Number.isFinite(s) || s < CUSHION_SCALE_PLAUSIBLE_MIN || s > 1 + 1e-9) {
+    return { kwh: panelKwh, lineScale: poolScale, applied: null };
+  }
+  const scale = Math.min(1, s);
+  if (scale === 1) return { kwh: panelKwh, lineScale: poolScale, applied: null };
+  return { kwh: panelKwh * scale, lineScale: null, applied: { scale, basis: poolScale.basis } };
 }
 
 /** v1.201.0 — how the Cores' standby draw entered the cushion: the runway's pool overhead figure as given
@@ -4674,6 +4805,8 @@ export function cushionStandbyKwh(o: {
  * plan, a plan snapshot from before v1.199.0) so a re-issued plan never leaves an earlier plan's scale
  * beside its own line. With it a row is self-describing: cushion_line_soc_pct = reserve_floor_pct +
  * 100 · cushion_kwh ÷ (pool_full_kwh · cushion_pool_scale), to the line's rounding. PURE.
+ * v1.202.0 — or the scale the plan's pool was counted on (NightChargePlan.cushionPoolScale), on every cushion basis where
+ * it moved the pool: a legacy-pct or disabled row then carries it too, beside plan_pool_kwh.
  */
 export function cushionPoolScaleLedgerColumns(
   plan: Pick<NightChargePlan, 'cushionPoolScale'>,
@@ -4701,6 +4834,27 @@ export function cushionStandbyLedgerColumns(
   };
 }
 
+/**
+ * v1.202.0 — the night ledger's record of the pool and the standby the plan's walks counted (NightChargePlan.planPool):
+ * plan_pool_kwh, the kWh per 100% of every walk, and plan_walk_standby_w, the Cores' standby they drained beside the load.
+ * Written unconditionally by recordNightPlanRow, so a re-issued plan never leaves an earlier plan's pool beside its own: on
+ * a SIZED plan (a charge or a hold: requiredExtraKwh set) the walks' own figures — the panel's figure `panelFullKwh` and
+ * 0 W where the plan carries no planPool (its walks were on it, with no standby: every plan before v1.202.0 too) — and NULL
+ * on a plan nothing was sized on (a refused plan, a night with no window). With them a sized row is self-describing:
+ * target_soc_pct, the troughs and the line are percents of plan_pool_kwh, and on the legacy-pct basis cushion_kwh is
+ * cushion_pct of it. PURE.
+ */
+export function planPoolLedgerColumns(
+  plan: Pick<NightChargePlan, 'planPool' | 'requiredExtraKwh'>,
+  panelFullKwh: number,
+): { plan_pool_kwh: number | null; plan_walk_standby_w: number | null } {
+  if (plan.requiredExtraKwh == null) return { plan_pool_kwh: null, plan_walk_standby_w: null };
+  return {
+    plan_pool_kwh: plan.planPool?.kwh ?? Math.round(panelFullKwh * 1000) / 1000,
+    plan_walk_standby_w: plan.planPool?.standbyW ?? 0,
+  };
+}
+
 /** v1.200.0 — the plan's line force-charge columns (recorder.ts NightLedgerRow): the ask the night
  *  force-charge is armed for (cushion_line_force_charge_pct, NULL where none) and whether the plan disclosed
  *  the 50% envelope (cushion_envelope_shortfall, 1/0) — (A5) both set on an armed night the plan does not
@@ -4717,16 +4871,18 @@ export function lineForceChargeLedgerColumns(
 }
 
 /** v1.199.0 — the log line for the cushion line's capacity basis (index.ts logs it on change, live
- *  legs only). `s` is the main thread's measurement; null when it could not be taken. PURE. */
+ *  legs only). `s` is the main thread's measurement; null when it could not be taken. PURE.
+ *  v1.202.0 — the basis of the plan's pool (plannerPoolKwh), which the line is counted on: a rule for the plans that
+ *  are sized, never a plan (a refused plan counts no pool). */
 export function cushionScaleLogText(s: (CushionPoolScale & { connectedCores?: number }) | null): string {
   if (s == null) {
-    return "night-charge: the packs' measured capacity is unavailable (capacity tracker error) — the outage-cushion line is on nameplate";
+    return "night-charge: the packs' measured capacity is unavailable (capacity tracker error) — night-charge plans count the pool and the outage-cushion line on nameplate";
   }
   const cores = s.connectedCores != null ? `, ${s.connectedCores} connected Core(s)` : '';
   if (s.basis === 'nameplate') {
-    return `night-charge: the outage-cushion line is on nameplate — no pack capacity ratio has been measured yet${cores ? ` (${cores.slice(2)})` : ''}`;
+    return `night-charge: night-charge plans count the pool and the outage-cushion line on nameplate — no pack capacity ratio has been measured yet${cores ? ` (${cores.slice(2)})` : ''}`;
   }
-  return `night-charge: the outage-cushion line counts the cushion on the packs' measured capacity, ×${s.scale.toFixed(3)} of nameplate (${s.basis}${cores})`;
+  return `night-charge: night-charge plans count the pool and the outage-cushion line on the packs' measured capacity, ×${s.scale.toFixed(3)} of nameplate (${s.basis}${cores})`;
 }
 
 /** v1.201.0 — the log line for the Cores' standby figure the outage cushion takes (index.ts logs it on change of

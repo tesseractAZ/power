@@ -44,7 +44,8 @@
  * thread with its own tracker and its own file. v1.199.0 — so does the night-charge cushion line:
  * index.ts keeps a third tracker for the house panel (pool-energy-basis-cushion.json), evaluated by
  * the planner from its own snapshot, whose scale converts the outage cushion to the panel's percent
- * (nightChargeAdvisor.ts cushionLineKwh). The state is read and written in the thread that
+ * (nightChargeAdvisor.ts cushionLineKwh); v1.202.0 — and counts the night-charge plan's pool on
+ * (plannerPoolKwh: every walk of the plan). The state is read and written in the thread that
  * evaluates it — never set on one thread and read on the other.
  */
 import { existsSync, readFileSync } from 'node:fs';

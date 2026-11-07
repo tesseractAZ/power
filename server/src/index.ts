@@ -227,6 +227,8 @@ import {
   cushionPoolScaleLedgerColumns, cushionScaleLogText, type CushionPoolScale, type CushionScaleBasis,
   // v1.201.0 — the Cores' standby in the outage cushion: its ledger columns and its log line.
   cushionStandbyLedgerColumns, cushionStandbyLogText,
+  // v1.202.0 — the pool and the standby the plan's walks counted: its ledger columns.
+  planPoolLedgerColumns,
   lineForceChargeLedgerColumns,
   // v1.187.22 — the expected buy: its ledger columns, and what a spoken line states (the level
   // the write drives to and the expected draw — never the worst case, which only logs name).
@@ -2732,7 +2734,9 @@ const panelPoolBasisTracker = new PoolEnergyBasisTracker({ path: defaultPoolEner
 const cushionPoolBasisTracker = new PoolEnergyBasisTracker({ path: defaultPoolEnergyBasisPath('pool-energy-basis-cushion') });
 /** v1.199.0 — THE PLANNER'S ONE MEASURED INPUT (runwayBasisContracts.test.ts, the SCOPE exception):
  *  the house pool's measured capacity scale, from the device map the planner read its pool from, at
- *  the same instant. null when the tracker throws: the planner then keeps the nameplate line. */
+ *  the same instant. null when the tracker throws: the planner then keeps the nameplate line.
+ *  v1.202.0 — the planner counts its whole pool on it (plannerPoolKwh, every walk), on every basis the
+ *  tracker answers; null keeps the nameplate pool and line. */
 function measuredCushionScale(
   devs: FleetSnapshot['devices'], panel: NonNullable<ReturnType<typeof findShp2>>, nowMs: number,
 ): (CushionPoolScale & { connectedCores: number }) | null {
@@ -3761,7 +3765,9 @@ async function recomputeNightChargePlan(
   // line the plan writes counts the cushion's energy on that capacity (nightChargeAdvisor.ts
   // cushionLineKwh). Taken from the snapshot fullWh came from, before the first await: the one door
   // through the SCOPE contract (runwayBasisContracts.test.ts). A shadow leg evaluates it too (the
-  // tracker records the packs it sees, in its own file) but never logs.
+  // tracker records the packs it sees, in its own file) but never logs. v1.202.0 — the planner counts
+  // its whole pool on it (plannerPoolKwh); fullKwh here stays the panel's figure (the gate, the tick's
+  // mirror, the cost room, the ledger's pool_full_kwh).
   const cushionPoolScale = measuredCushionScale(devs, shp2, nowMs);
   if (!shadowLeg) {
     const scaleKey = cushionPoolScale == null ? 'unavailable'
@@ -3772,7 +3778,8 @@ async function recomputeNightChargePlan(
     }
   }
   // v1.201.0 — THE CORES' STANDBY IN THE OUTAGE CUSHION: the runway's pool overhead figure for the Cores the
-  // tracker above counted, the panel reporting a pool (fullWh > 0 here). The second door through the SCOPE
+  // tracker above counted, the panel reporting a pool (fullWh > 0 here). v1.202.0 — the plan's walks drain the same
+  // one figure (no second door). The second door through the SCOPE
   // contract: the same snapshot, before the first await. Logged on change of the figure OR the Core count it
   // names (at the defaults the figure is 270 W for 0-3 Cores), live legs only, as the figure the door evaluated:
   // whether tonight's cushion counts it is the plan's (cushionStandby), not this line's.
@@ -4100,9 +4107,9 @@ async function recomputeNightChargePlan(
     // closed to the legacy flat band rather than granting a weaker guarantee.
     islandedLoadKw: islandedLoadKwNow(),
     outageCushionHours, islandedLoadSafety, objectiveMode, costMaxSocPct,
-    // v1.199.0 — the cushion line's measured capacity scale (null: the nameplate line).
+    // v1.199.0 — the cushion line's measured capacity scale (null: the nameplate line). v1.202.0 — the plan's pool's too.
     cushionPoolScale,
-    // v1.201.0 — the Cores' standby draw the islanded-outage cushion counts (W; the runway's figure).
+    // v1.201.0 — the Cores' standby draw the islanded-outage cushion counts (W; the runway's figure). v1.202.0 — and the walks drain.
     cushionStandbyW,
     legEff, dischargeEff, chargeCapKw, gridInputCapKw,
     periodIdAt, cheapPeriodId, cheapNight, windowScanHours: 30,
@@ -4188,6 +4195,8 @@ async function recomputeNightChargePlan(
     // flat band. The ledger is the evidence base the readiness gate reduces over,
     // so a row that says 15%-of-pool when an islanded-outage cushion was used
     // would misattribute every downstream conclusion.
+    // v1.202.0 — a sized plan's cushion is on its walks' pool (plan_pool_kwh); a refused plan counted none, so its band
+    // falls back to the panel's figure (recorder.ts NightLedgerRow.plan_pool_kwh says which rows carry which pool).
     cushionKwh: plan.cushionKwh ?? round2((fullKwh * cushionPct) / 100),
     horizonHours: inputs.horizon.length,
     pvP10Kwh: round2(pvP10), pvP50Kwh: round2(pvP50), pvP90Kwh: round2(pvP90),
@@ -4230,7 +4239,9 @@ async function recomputeNightChargePlan(
         hours: bandHours, ...heldSpan(window, nextOnPeakStartMs(tariffModel, window.startMs)),
         startSocPct: plan.expectedStartSocPct ?? null,
         holdPct: plan.chargeTonight && plan.setpointSocPct != null ? clampReserveTarget(plan.setpointSocPct) : null,
-        floorPct: plan.reserveFloorPct, fullKwh, dischargeEff, legEff,
+        // v1.202.0 — on the pool and the standby the plan's own walks counted (NightChargePlan.planPool), never a second
+        // figure: absent, the panel's, with none.
+        floorPct: plan.reserveFloorPct, fullKwh: plan.planPool?.kwh ?? fullKwh, standbyW: plan.planPool?.standbyW ?? 0, dischargeEff, legEff,
         centsAt: (ms) => rateAt(tariffModel, ms).centsPerKwh,
         replaceCentsPerKwh: shadowLeg.replaceCentsPerKwh ?? null,
       }),
@@ -4346,6 +4357,9 @@ function recordNightPlanRow(planDate: string, plan: NightChargePlan, extras: Nig
     // v1.201.0 — the Cores' standby the cushion counted: its figure, basis and energy. Written unconditionally
     // (null with none), for the same reason.
     ...cushionStandbyLedgerColumns(plan),
+    // v1.202.0 — the pool and the standby the plan's walks counted (NULL where nothing was sized). Written unconditionally,
+    // for the same reason.
+    ...planPoolLedgerColumns(plan, extras.fullKwh),
     // v1.200.0 — the outage line above the reserve envelope: the ask carried by the night force-charge,
     // or the envelope disclosed. Written unconditionally (null with none), for the same reason.
     ...lineForceChargeLedgerColumns(plan),
