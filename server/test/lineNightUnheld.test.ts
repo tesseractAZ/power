@@ -102,9 +102,9 @@ const account = (o: AccountInput): { severity: string; dedupId: string; title: s
 
 /* ══ U1 — a panel already reading the write ═════════════════════════════════════════════════════════════════════════════════ */
 
-test('★★★ U1 a reserve already at the write: the plan neither claims nor arms the line (reason reserveAtTarget), says why, and no sizing figure moves; one point under, it arms', () => {
-  const p = planAt(50);
-  const absent = planAt(50, { eligible: false });
+test('★★★ U1 a reserve read above the write: the plan neither claims nor arms the line (reason reserveAtTarget), says why, and no sizing figure moves; at the write, or under it, it arms (v1.200.1: test/lineStandingReserve.test.ts)', () => {
+  const p = planAt(51);
+  const absent = planAt(51, { eligible: false });
   assert.equal(p.chargeTonight, true);
   assert.ok(p.cushionLineSocPct! > 50);
   assert.equal(p.forceChargeLine, undefined, 'nothing armed: a force-charge rides a verified write, and none goes');
@@ -113,7 +113,7 @@ test('★★★ U1 a reserve already at the write: the plan neither claims nor a
   assert.equal(p.cushionEnvelopeReason, 'reserveAtTarget');
   assert.deepEqual(sizing(p), sizing(absent), 'I-A1: no sizing figure moves');
   assert.notEqual(p.expectedForceChargeMode, 'line');
-  assert.ok(p.rationale.includes(`The reserve is set to 50%, the most the panel accepts as a backup reserve; tonight's ${p.cushionLineSocPct}% outage line is above it and the reserve reads 50%: no write is due while it does, and no force-charge runs without one, so the cushion is not assured — residual risk remains.`), p.rationale);
+  assert.ok(p.rationale.includes(`The reserve is set to 50%, the most the panel accepts as a backup reserve; tonight's ${p.cushionLineSocPct}% outage line is above it and the reserve reads 51%: no write is due while it does, and no force-charge runs without one, so the cushion is not assured — residual risk remains.`), p.rationale);
   assert.doesNotMatch(p.rationale, /switches on at|stays on until the window closes|tonight's write/);
   // The ledger: the ask is not recorded, the disclosure is.
   assert.deepEqual(lineForceChargeLedgerColumns(p as never), { cushion_line_force_charge_pct: null, cushion_envelope_shortfall: 1 });
@@ -122,11 +122,11 @@ test('★★★ U1 a reserve already at the write: the plan neither claims nor a
   assert.equal(q.forceChargeLine?.askPct != null, true, 'the write raises 49 to 50: armed');
   assert.equal(q.cushionEnvelopeReason === 'reserveAtTarget', false);
   // Advisory and the backup leg keep their own reason.
-  assert.equal(planAt(50, { eligible: false }).cushionEnvelopeReason, undefined, 'no eligibility input: v1.199.1');
+  assert.equal(planAt(51, { eligible: false }).cushionEnvelopeReason, undefined, 'no eligibility input: v1.199.1');
 });
 
 test('★★★ U1 no force-charge is expected on such a plan, a cost night too: what the night expects is what it can do (the reserve alone)', () => {
-  const costOn = planAt(50, { cost: true });
+  const costOn = planAt(51, { cost: true });
   assert.equal(costOn.forceChargeLine, undefined);
   assert.equal(costOn.cushionEnvelopeReason, 'reserveAtTarget');
   assert.ok(costOn.costCeilingSocPct! > 50, 'a cost ceiling above the reserve: on any other night the force-charge rides it');
@@ -137,26 +137,26 @@ test('★★★ U1 no force-charge is expected on such a plan, a cost night too:
 });
 
 test('★★★ U1 the evening surfaces of such a plan: the note names why, the supervised tail says nothing is written, no raise and no force-charge are promised; the card row says why', () => {
-  const p = planAt(50);
+  const p = planAt(51);
   const sup = { cancelDeadlineText: 'tonight at 11:00 PM', targetPct: 50, forceChargeTargetPct: null, forceChargeLine: null };
   const body = buildNightChargeMessage(p as never, 'charge', sup as never).body;
-  assert.ok(body.includes(`NOTE: tonight's ${Math.round(p.cushionLineSocPct! * 10) / 10}% outage line is above the 50% the panel accepts as a reserve, and the reserve reads 50%: no write is due while it does, and no force-charge runs without one — residual risk remains.`), body);
-  assert.ok(body.includes('SUPERVISED: the backup reserve reads 50% now, so no write is due while it does, and no force-charge runs without one. A reading under 50% when the window opens lets the armed write go, and it carries no force-charge for the outage line. Cancel from the night-charge card on the panel before tonight at 11:00 PM.'), body);
+  assert.ok(body.includes(`NOTE: tonight's ${Math.round(p.cushionLineSocPct! * 10) / 10}% outage line is above the 50% the panel accepts as a reserve, and the reserve reads 51%: no write is due while it does, and no force-charge runs without one — residual risk remains.`), body);
+  assert.ok(body.includes('SUPERVISED: the backup reserve reads 51% now, so no write is due while it does, and no force-charge runs without one. A reading under 50% when the window opens lets the armed write go, and it carries no force-charge for the outage line. Cancel from the night-charge card on the panel before the window opens.'), body);
   assert.doesNotMatch(body, /raises the backup reserve|switches the panel's force-charge ON/);
   // A cost ceiling armed beside it rides nothing either.
-  const cost = planAt(50, { cost: true });
+  const cost = planAt(51, { cost: true });
   const costBody = buildNightChargeMessage(cost as never, 'charge', { ...sup, forceChargeTargetPct: 80 } as never).body;
   assert.doesNotMatch(costBody, /raises the backup reserve|arms the panel's force-charge|switches the panel's force-charge ON/);
   const row = (cardText as unknown as { outageLineRow: (p: unknown) => string | null }).outageLineRow(p);
-  assert.ok(row != null && row.includes('not claimed tonight (the reserve reads 50%: no write while it does, no force-charge without one)'), String(row));
+  assert.ok(row != null && row.includes('not claimed tonight (the reserve reads 51%: no write while it does, no force-charge without one)'), String(row));
   // The record arms with no line, so no line surface promises one; the 21:30 line says the same.
-  const rec = armFromPlan(emptyActuationState(), '2027-01-04', p as never, p.window!.startMs - 90 * M, 50, false, null, true)!;
+  const rec = armFromPlan(emptyActuationState(), '2027-01-04', p as never, p.window!.startMs - 90 * M, 51, false, null, true)!;
   assert.equal(rec.forceChargeLineAskPct, null);
   assert.ok(INDEX.includes("if (plan?.cushionEnvelopeReason === 'reserveAtTarget') return `Force-charge: none for the line — the reserve reads ${plan.reserveFloorPct}%, so no write is due while it does, and no force-charge runs without one; the plan does not claim tonight's outage line.`;"));
 });
 
 test('★★ U1 the spoken notice of such a plan says the cushion is not met, and promises no raise', () => {
-  const p = planAt(50);
+  const p = planAt(51);
   const { spoken } = eveningAnnouncement({
     cycle: 'overnight', plan: p as never, shape: 'charge', armRefused: null, mode: 'supervised',
     supervised: { cancelDeadlineText: 'tonight at 11:00 PM', cancelDeadlineTextEs: 'esta noche a las 11:00 PM', targetPct: 50, forceChargeTargetPct: null, forceChargeLine: null },
@@ -166,15 +166,15 @@ test('★★ U1 the spoken notice of such a plan says the cushion is not met, an
   assert.doesNotMatch(spoken.en, /raise|force|Charge Now/i);
 });
 
-/** The year at a standing 50 and 4 h of cushion, every case: measured with the fix (each of these armed before, and never could start). */
-const PIN_U1_YEAR = { charge: 815, armed: 0, disclosed: 655 };
+/** The year at a reading above the write and 4 h of cushion, every case: measured with the fix. v1.200.1 — a reading OF the write now arms (lineStandingReserve). */
+const PIN_U1_YEAR = { charge: 816, armed: 0, disclosed: 656 };
 
-test('★★★ U1 the year at a standing 50: every line that armed and could never start is now disclosed, and none arms; at 49 they arm as before', () => {
+test('★★★ U1 the year at a reading above the write: every line that could never start is disclosed, and none arms; at 49 they arm as before', () => {
   let charge = 0;
   let isArmed = 0;
   let disclosed = 0;
   for (const c of CASES) {
-    const p = planAt(50, { label: c.label, hours: 4 });
+    const p = planAt(51, { label: c.label, hours: 4 });
     if (!p.chargeTonight) continue;
     charge++;
     if (p.forceChargeLine != null) isArmed++;
@@ -195,8 +195,8 @@ const noLineStart = (s: NightActuationState): number | null => (nfc as unknown a
 
 test('★★★ U1b the plan reads the reserve once, and the night is decided at the apply: the words hold whichever way the reading goes, the write the record still makes included', () => {
   for (const cost of [false, true]) {
-    const p = planAt(50, { cost });
-    const rec = armFromPlan(emptyActuationState(), '2027-01-04', p as never, p.window!.startMs - 90 * M, 50, cost, null, true)!;
+    const p = planAt(51, { cost });
+    const rec = armFromPlan(emptyActuationState(), '2027-01-04', p as never, p.window!.startMs - 90 * M, 51, cost, null, true)!;
     assert.equal(rec.forceChargeLineAskPct, null);
     const body = buildNightChargeMessage(p as never, 'charge', { ...SUP, forceChargeTargetPct: cost ? 80 : null } as never).body;
     // The record arms a write: at a reading of 50 nothing goes, under it the write goes, so neither is promised.
@@ -240,16 +240,18 @@ test('★★★ U1b a recompute of a window whose armed record carries no line n
   // Only that window, only a live gate, and a reading of the write is still that reason.
   assert.equal(planAt(45, { noLineAt: open + 24 * H }).forceChargeLine != null, true, 'another window');
   assert.equal(planAt(45, { noLineAt: null }).forceChargeLine != null, true, 'no such record');
-  assert.equal(planAt(50, { noLineAt: open }).cushionEnvelopeReason, 'reserveAtTarget');
+  assert.equal(planAt(51, { noLineAt: open }).cushionEnvelopeReason, 'reserveAtTarget');
   assert.equal(planAt(45, { eligible: false, noLineAt: open }).cushionEnvelopeReason, undefined, 'no eligibility: v1.199.1');
   assert.equal(JSON.stringify(planAt(45, { eligible: false, noLineAt: open })), JSON.stringify(planAt(45, { eligible: false })), 'byte for byte');
 });
 
 test('★★★ U1b the real path: the record the evening arms at 50 is what the recompute at 45 reads, and the record it arms at 45 carries its ask', () => {
-  const p = planAt(50);
-  const rec = armFromPlan(emptyActuationState(), '2027-01-04', p as never, p.window!.startMs - 90 * M, 50, false, null, true)!;
+  const p = planAt(51);
+  const rec = armFromPlan(emptyActuationState(), '2027-01-04', p as never, p.window!.startMs - 90 * M, 51, false, null, true)!;
   assert.equal(noLineStart(rec), p.window!.startMs);
   assert.equal(planAt(45, { noLineAt: noLineStart(rec) }).cushionEnvelopeReason, 'armedNoLine');
+  // v1.200.1 — a record of v1.200.0's at a reading of the write keeps its one night: it has no ask, and a recompute says so.
+  assert.equal(planAt(50, { noLineAt: noLineStart(rec) }).cushionEnvelopeReason, 'armedNoLine');
   const q = planAt(45);
   const rec2 = armFromPlan(emptyActuationState(), '2027-01-04', q as never, q.window!.startMs - 90 * M, 45, false, null, true)!;
   assert.ok(rec2.forceChargeLineAskPct != null);
@@ -289,13 +291,13 @@ test('★★★ U1b the year: no plan of the window of a record with no ask arms
 
 test('★★★ U1b the push prices no write it does not make: the projection on such a night says what each figure is, in both shapes; any other night keeps its words', () => {
   for (const cost of [false, true]) {
-    const p = planAt(50, { cost });
+    const p = planAt(51, { cost });
     const body = buildNightChargeMessage(p as never, 'charge', { ...SUP, forceChargeTargetPct: cost ? 80 : null } as never).body;
     assert.doesNotMatch(body, /tonight's write|without this charge/, body);
     assert.match(body, /tomorrow.s low SoC ~[\d.]+% with no charge, ~[\d.]+% with the plan's full buy; the floor\+cushion line is /, body);
   }
   // A pool expected under the reserve: a night the panel's own reserve charges, the charge shape: the same words.
-  const low = { ...planAt(50), expectedBuyKwh: 6, noChargeExpected: false, expectedWriteLevelPct: 50 };
+  const low = { ...planAt(51), expectedBuyKwh: 6, noChargeExpected: false, expectedWriteLevelPct: 50 };
   const lowBody = buildNightChargeMessage(low as never, 'charge', SUP as never).body;
   assert.doesNotMatch(lowBody, /tonight's write|without this charge/, lowBody);
   // A write that goes keeps its own words.
@@ -383,13 +385,13 @@ test('★★★ U1c a recompute of a window whose record can no longer start one
     assert.doesNotMatch(row, /force-charge runs|switches|expected at the close|no write armed/, row);
     assert.ok((cardText as unknown as { outageLineRow: (p: unknown) => string | null }).outageLineRow({ ...q, cushionStartClosedWords: undefined })!.includes('not claimed tonight (no force-charge for it starts)'), 'never a blank from an older server');
   }
-  // Only that window, only a live gate; a reserve reading the write keeps its reason.
+  // Only that window, only a live gate; a reserve reading above the write keeps its reason.
   const noWrite = { windowStartMs: open, why: 'noWrite' };
   assert.equal(JSON.stringify(planAt(45, { closed: { ...noWrite, windowStartMs: open + 24 * H } })), JSON.stringify(armedPlan), 'another window');
   assert.equal(JSON.stringify(planAt(45, { closed: null })), JSON.stringify(armedPlan), 'none');
-  const atWrite = planAt(50, { closed: noWrite });
+  const atWrite = planAt(51, { closed: noWrite });
   assert.equal(atWrite.cushionEnvelopeReason, 'reserveAtTarget');
-  assert.equal(atWrite.rationale, planAt(50).rationale, 'and its words');
+  assert.equal(atWrite.rationale, planAt(51).rationale, 'and its words');
   assert.equal(JSON.stringify(planAt(45, { eligible: false, closed: noWrite })), JSON.stringify(planAt(45, { eligible: false })), 'no eligibility: v1.199.1, byte for byte');
 });
 
@@ -409,7 +411,7 @@ test('★★★ U1c a night with no ask, and a plan with no line above the reser
   assert.ok(low.cushionLineSocPct! <= 50 && low.forceChargeLine == null);
   assert.equal(JSON.stringify(planAt(45, { hours: 1, closed: { windowStartMs: low.window!.startMs, why: 'noWrite' } })), JSON.stringify(low));
   const q = planAt(45);
-  const rec = armFromPlan(emptyActuationState(), '2027-01-04', planAt(50) as never, q.window!.startMs - 90 * M, 50, true, null, true)!;
+  const rec = armFromPlan(emptyActuationState(), '2027-01-04', planAt(51) as never, q.window!.startMs - 90 * M, 51, true, null, true)!;
   assert.equal(rec.forceChargeLineAskPct, null);
   assert.equal(closedRec({ ...rec, cancelled: true }, rec.windowStartMs! + H), null);
   assert.equal(closedRec(rec, rec.windowStartMs! + H), null);
@@ -501,7 +503,7 @@ test('★★★ U1c the banner of a line night whose start is closed says so, ne
   const banner = cardText.actuationBannerState as unknown as (a: unknown, d: string | null, r?: number | null) => { text: string; settled: boolean; cancel: string | null };
   const card = (s: NightActuationState, t: number) => ({ ...s, cancelDeadlineMs: s.windowStartMs, ...status(s, t) });
   const past = OPEN + APPLY_LATE_MS + M;
-  const NO_WRITE = 'No force-charge for the 55.6% outage line starts: it rides a verified reserve write, and none was issued.';
+  const NO_WRITE = 'No force-charge for the 55.6% outage line starts: it rides a verified reserve write or the reserve read at the target, and neither came in the apply window.';
   // Past the apply window with no write: at any reading, nothing left to cancel, and no write "stands".
   assert.deepEqual(status(armed(), past), { lineStartClosed: { text: NO_WRITE, cancel: false } });
   for (const reading of [45, 50, null]) assert.deepEqual(banner(card(armed(), past), '23:00', reading), { text: NO_WRITE, settled: false, cancel: null });
@@ -636,7 +638,9 @@ test('★★ U2 the cycle holds the promotion for a line night\'s push as for a 
 test('★★★ U2 missedApplyReason names an attempt the cloud never confirmed, and a reserve already at the write', () => {
   const ctx = { blockedBy: null, mode: 'supervised' as const, vitalsRed: false, socCoherent: true, currentReservePct: 30, panelBlock: null };
   assert.equal(missedApplyReason(leg(armed({ applyAttemptedAtMs: OPEN + 30 * M })), ctx), 'the EcoFlow cloud did not confirm the reserve write');
-  assert.equal(missedApplyReason(leg(armed()), { ...ctx, currentReservePct: 50 }), 'the backup reserve already read 50%, at or above the 50% this charge sets');
+  // v1.200.1 — on a line ask a reading of the target is no "nothing was due": the ride needed it in the window, with every check clear.
+  assert.equal(missedApplyReason(leg(armed()), { ...ctx, currentReservePct: 50 }), "the panel's reserve reading did not reach the add-on with every check clear while the 30-minute apply window was open");
+  assert.equal(missedApplyReason(leg(armed({ forceChargeLineAskPct: null, forceChargeLinePct: null })), { ...ctx, currentReservePct: 50 }), 'the backup reserve already read 50%, at or above the 50% this charge sets', 'no ask: as ever');
   // An attempt never changes a mid-day or backup leg's reason (it never reaches the push there).
   assert.equal(missedApplyReason(leg(armed({ applyAttemptedAtMs: OPEN, forceChargeLineAskPct: null, forceChargeLinePct: null })), ctx), 'no write was issued in the 30 minutes after the window opened');
 });
@@ -649,7 +653,7 @@ test('★★★ U2 the missed push on a line night: no write went, so no force-c
   const m = buildNightChargeMissedApply({ ...base, reason, linePct: 55.55, targetPct: 50, attempted: false, startClosed: 'noWrite', startByText: '4:40 AM', closeText: '5:00 AM' } as never);
   assert.equal(m.severity, 'warning', 'a person can act');
   assert.match(m.body, SPAN);
-  assert.ok(m.body.endsWith(`charge did not start — ${reason}. Nothing was written; the reserve stays at 50%. No force-charge for tonight's 55.6% outage line starts: it rides a verified reserve write, and none was issued. Charge Now switched on by hand in the EcoFlow app can still lift the pool tonight; switch it off again by ~5:00 AM.`), m.body);
+  assert.ok(m.body.endsWith(`charge did not start — ${reason}. Nothing was written; the reserve stays at 50%. No force-charge for tonight's 55.6% outage line starts: it rides a verified reserve write or the reserve read at the target, and neither came in the apply window. Charge Now switched on by hand in the EcoFlow app can still lift the pool tonight; switch it off again by ~5:00 AM.`), m.body);
   // Past the close nothing can be done by hand: no advice.
   const over = buildNightChargeMissedApply({ ...base, nowMs: CLOSE + H, reason, linePct: 55.55, targetPct: 50, attempted: false, startClosed: 'over', startByText: '4:40 AM', closeText: '5:00 AM' } as never);
   assert.ok(over.body.endsWith("No force-charge for Monday's 55.6% outage line starts: the window has closed."), over.body);
@@ -971,7 +975,7 @@ test('★★★ U6 the served plan of a stopped run claims no ON: the row, the r
   for (const [why, words] of [
     ['stopped', 'the force-charge for it was switched off and does not start again'],
     ['cancelled', 'no force-charge for it starts: the night was cancelled'],
-    ['foreign', 'no force-charge for it starts: the reserve was set outside the add-on'],
+    ['foreign', 'no force-charge for it starts: the reserve was changed'],
     ['reverted', "no force-charge for it starts: the reserve's restore was sent"],
   ] as const) {
     const p = planAt(45, { closed: { windowStartMs: open, why } });
@@ -1012,9 +1016,9 @@ test('★★★ U6 the card leads with a closed start no write stands behind, an
   const lead = (cardText as unknown as { startClosedLead: (p: unknown) => { headline: string; detail: string } | null }).startClosedLead;
   const open = planAt(45).window!.startMs;
   for (const [why, detail] of [
-    ['noWrite', 'No force-charge for it starts: it rides a verified reserve write, and none was issued.'],
+    ['noWrite', 'No force-charge for it starts: it rides a verified reserve write or the reserve read at the target, and neither came in the apply window.'],
     ['cancelled', 'No force-charge for it starts: the night was cancelled.'],
-    ['foreign', 'No force-charge for it starts: the reserve was set outside the add-on.'],
+    ['foreign', 'No force-charge for it starts: the reserve was changed.'],
     ['reverted', "No force-charge for it starts: the reserve's restore was sent."],
     ['noArm', 'No force-charge for it starts: no write is armed for this window.'],
   ] as const) {
@@ -1024,7 +1028,7 @@ test('★★★ U6 the card leads with a closed start no write stands behind, an
   assert.equal(lead(planAt(45, { closed: { windowStartMs: open, why: 'late', writeStands: true } as never })), null, 'a write that stands: its figure is true');
   assert.equal(lead(planAt(45, { closed: { windowStartMs: open, why: 'stopped', writeStands: true } as never })), null);
   assert.equal(lead(planAt(45)), null, 'armed');
-  assert.equal(lead(planAt(50)), null, 'reserveAtTarget');
+  assert.equal(lead(planAt(51)), null, 'reserveAtTarget');
   assert.equal(lead(planAt(45, { noLineAt: open })), null, 'armedNoLine: its write goes');
   const CARD = readFileSync(resolve(HERE, '../../web/src/cards/NightChargeCard.tsx'), 'utf8');
   assert.ok(CARD.includes('const closedLead = startClosedLead(plan);'), CARD);
@@ -1098,7 +1102,7 @@ test('★★★ U6 the push of a window no record holds: once, on a served charg
   assert.equal(due(closure, p, null, 'a prior write is unresolved'), null, 'the refusal: the evening said so');
   assert.equal(due(null, p, null, null), null);
   assert.equal(due({ windowStartMs: open, why: 'cancelled' }, planAt(45, { closed: { windowStartMs: open, why: 'cancelled' } }), null, null), null, 'a record speaks for itself');
-  assert.equal(due(closure, planAt(50, { closed: closure }), null, null), null, 'a disclosed reserve at the write, not this');
+  assert.equal(due(closure, planAt(51, { closed: closure }), null, null), null, 'a disclosed reserve above the write, not this');
   assert.equal(due(closure, planAt(45, { eligible: false, closed: closure }), null, null), null, 'no write mode');
   const build = (notify as unknown as { buildLineNightNotArmed: (o: unknown) => { severity: string; dedupId: string; title: string; body: string } }).buildLineNightNotArmed;
   const m = build({ linePct: 55.55, windowStartMs: OPEN, windowEndMs: CLOSE, closeText: '5:00 AM' });
@@ -1615,8 +1619,8 @@ test('★★★ U8 what stays: another window, an empty input and a closure leav
   const noAsk = { at: WIN_CLOSE - 40 * M, pool: 60, cost: true };
   assert.equal(planAt(30, noAsk).forceChargeLine, undefined);
   assert.deepEqual(planAt(30, { ...noAsk, runOn: WIN_OPEN }), planAt(30, noAsk));
-  // A floor at the write and an advisory plan arm no line.
-  assert.deepEqual(planAt(50, { ...on, runOn: WIN_OPEN }), planAt(50, on));
+  // A floor above the write and an advisory plan arm no line.
+  assert.deepEqual(planAt(51, { ...on, runOn: WIN_OPEN }), planAt(51, on));
   assert.deepEqual(planAt(45, { ...on, eligible: false, runOn: WIN_OPEN }), planAt(45, { ...on, eligible: false }));
   // A plan told of no run keeps its times, to the close and to the ceiling.
   const evening = planAt(30);

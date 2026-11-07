@@ -18,6 +18,8 @@ export interface BannerActuation {
    *  resolved, its write no longer holds the reserve, and there is nothing of it left to cancel. */
   foreignSettledAtMs?: number | null;
   foreignReservePct?: number | null;
+  /** v1.200.1 — the reserve stood at the target (the server's reserveStandingAtMs): no write went and nothing is restored. */
+  reserveStandingAtMs?: number | null;
 }
 
 /** A restore the cloud acknowledged but the panel has not confirmed, and the actuator is retrying
@@ -87,14 +89,19 @@ export function actuationBannerState(a: BannerTextActuation, deadline: string | 
   // the server answers a cancel with 409, so the banner offers none ("Cancel & revert" over a
   // reserve the owner set would read as a promise to restore it).
   if (a.foreignSettledAtMs != null) {
-    return { text: `The reserve was set to ${a.foreignReservePct ?? '—'}% outside the add-on — tonight's write no longer holds it.`, settled: true, cancel: null };
+    // v1.200.1 — a stood night names neither the app nor a write: the add-on's own floor route lands here too, and no write went.
+    const text = a.reserveStandingAtMs != null
+      ? `The reserve was changed to ${a.foreignReservePct ?? '—'}% after it read the night's target — no force-charge runs on it tonight.`
+      : `The reserve was set to ${a.foreignReservePct ?? '—'}% outside the add-on — tonight's write no longer holds it.`;
+    return { text, settled: true, cancel: null };
   }
   if (revertUnconfirmed(a)) {
     return { text: `Restore not confirmed — the panel has not reported the reserve back at ${prior}%.`, settled: false, cancel: null };
   }
   if (a.revertedAtMs != null) return { text: `Completed — reserve restored to ${prior}%.`, settled: true, cancel: null };
   if (a.cancelled) {
-    const text = a.appliedAtMs != null ? 'Cancelled — the applied write reverts within a minute.' : 'Cancelled — no write tonight.';
+    const text = a.appliedAtMs != null ? 'Cancelled — the applied write reverts within a minute.'
+      : a.reserveStandingAtMs != null ? CANCELLED_STOOD_TEXT : 'Cancelled — no write tonight.';
     return { text, settled: true, cancel: null };
   }
   const target = a.targetPct ?? '—';
@@ -105,6 +112,8 @@ export function actuationBannerState(a: BannerTextActuation, deadline: string | 
   }
   // v1.200.0 (Fix10) — a line night whose start is closed: the server's words, never "write armed" past a window no write came of.
   if (a.lineStartClosed != null) return { text: a.lineStartClosed.text, settled: false, cancel: a.lineStartClosed.cancel ? 'Cancel tonight' : null };
+  // v1.200.1 — the reserve stood at the target: no write went and nothing is restored, and the ride can be cancelled to the close.
+  if (a.reserveStandingAtMs != null) return { text: `The reserve stands at ${target}%: no write and nothing to restore.`, settled: false, cancel: 'Cancel tonight' };
   // v1.200.0 (Fix9 review 2) — the panel already reads the write (decideActuation: nothing to raise): armed, and none is due while it does.
   // Cancel stays: a reading under the target lets the write go.
   if (a.targetPct != null && reservePct != null && reservePct >= a.targetPct) {
@@ -151,10 +160,10 @@ export function writeStands(a: BannerTextActuation | null, mode: string, nowMs: 
  * plan is missing or older than the 12 h staleness horizon. With a write standing it says so
  * rather than "nothing will be charged" (the banner beneath carries its Cancel).
  */
-export function noPlanText(basisIncomplete: boolean, stands: boolean): string {
+export function noPlanText(basisIncomplete: boolean, stands: boolean, reserveStood = false): string {
   if (stands) {
     return `${basisIncomplete ? 'No fresh plan — forecast/telemetry basis incomplete.' : 'No fresh night-charge plan — advisor idle or plan stale.'} `
-      + 'The write armed with the announced plan stands; cancel it below.';
+      + (reserveStood ? 'The force-charge armed with the announced plan still rides the standing reserve; cancel it below.' : 'The write armed with the announced plan stands; cancel it below.');
   }
   return basisIncomplete
     ? 'No plan tonight — forecast/telemetry basis incomplete; nothing will be charged.'
@@ -169,6 +178,9 @@ export function cancelRequestInit(leg: 'cost' | 'backup' | null): { method: 'POS
   return leg == null ? { method: 'POST' } : { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ leg }) };
 }
 
+/** v1.200.1 — a cancel on a night whose reserve stood: no write to undo, and true whether or not a force-charge of the night is on. */
+export const CANCELLED_STOOD_TEXT = "Cancelled — no reserve write to undo; any force-charge of tonight's switches off within a minute.";
+
 /**
  * v1.189.0 — what a POST to /api/night-charge/cancel did, in the card's words. 2xx: cancelled
  * (an applied write reverts within a minute); 409: nothing was left to cancel, with the server's
@@ -179,7 +191,8 @@ export function cancelOutcome(httpStatus: number, body: unknown): { ok: boolean;
   const b = rec(body);
   if (httpStatus >= 200 && httpStatus < 300) {
     const applied = typeof rec(b?.actuation)?.appliedAtMs === 'number';
-    return { ok: true, done: true, text: applied ? 'Cancelled — the applied write reverts within a minute.' : 'Cancelled — no write tonight.' };
+    const stood = typeof rec(b?.actuation)?.reserveStandingAtMs === 'number';
+    return { ok: true, done: true, text: applied ? 'Cancelled — the applied write reverts within a minute.' : stood ? CANCELLED_STOOD_TEXT : 'Cancelled — no write tonight.' };
   }
   if (httpStatus === 409) {
     const why = typeof b?.error === 'string' && b.error.length > 0 && b.error.length <= 200 ? b.error : 'nothing is armed';
@@ -480,10 +493,11 @@ export interface HoldSummaryPlan {
  */
 export function holdSummary(
   plan: HoldSummaryPlan,
-  o: { writeStands?: boolean } = {},
+  o: { writeStands?: boolean; reserveStood?: boolean } = {},
 ): { headline: string; detail: string; tone: 'ok' | 'warn' | 'muted' } {
   const stands = o.writeStands === true;
   const hold = holdVerdict(plan, stands ? 'the latest recompute would charge nothing' : 'nothing will be charged');
+  if (stands && o.reserveStood === true) return { headline: RESERVE_STOOD_HEADLINE, detail: `${hold.detail} ${RESERVE_STOOD_NOTE}`, tone: 'warn' };
   return stands ? { headline: WRITE_STANDS_HEADLINE, detail: `${hold.detail} ${WRITE_STANDS_NOTE}`, tone: 'warn' } : hold;
 }
 
@@ -492,6 +506,9 @@ export function holdSummary(
 export const WRITE_STANDS_HEADLINE = 'The latest recompute would not charge — the armed write stands.';
 /** v1.189.0 — appended to the hold's detail while a write stands; the banner beneath carries its Cancel. */
 export const WRITE_STANDS_NOTE = 'A recompute never replaces the write armed with the announced plan; cancel it below.';
+/** v1.200.1 — the same on a night whose reserve stood: no write stands, the night armed on it does. */
+export const RESERVE_STOOD_HEADLINE = 'The latest recompute would not charge — the night armed on the standing reserve stands.';
+export const RESERVE_STOOD_NOTE = 'A recompute never replaces the night armed with the announced plan; cancel it below.';
 
 /** The hold's verdict; `none` closes each shape: "nothing will be charged", or what the latest
  *  recompute would do while a write stands. */

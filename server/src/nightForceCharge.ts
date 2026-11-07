@@ -187,6 +187,11 @@
  *  - ON only rides a night whose reserve write was applied AND readback-verified, so
  *    it inherits every reserve guard (mode, cancel window, vitals, coherence,
  *    multi-panel block) and only runs when the write path is demonstrably working.
+ *    v1.200.1 — or, on a record with a line ask, a reserve that already read the target
+ *    behind those same guards (reserveStandingAtMs) AND reads it, fresh, on the ON's own
+ *    tick (reserveRideReady, ForceChargeOpts.reservePct). No reserve write proves the
+ *    path on such a night: the ceiling sync or the ON may be its first device write, and
+ *    the ON's own readback, re-issue and failure push cover it.
  *  - ON needs grid KNOWN present, a live slot readback, and no slot already ON (an
  *    operator's Charge Now is theirs — we never take ownership of it).
  *  - WRITE-AHEAD: the slots are persisted BEFORE the ON writes, so a lost
@@ -403,6 +408,9 @@ export interface ForceChargeOpts {
   ceilingReadbackPct: number | null;
   /** Slots whose LIVE readback reads FORCE_CHARGE_ON; null = no fresh readback. */
   slotsOn: number[] | null;
+  /** v1.200.1 — the reserve (backupReserveSoc) from the SAME fresh readback as slotsOn; null = no fresh number. Read on a stood night
+   *  alone (reserveStandingAtMs), by strict equality with the target, on the tick of the ceiling sync and the ON. Absent ⇒ no reading. */
+  reservePct?: number | null;
   /** Slots physically connected (hwConnect) — the candidates for ON. */
   connectedSlots: number[];
   /** Host vitals critical — no new device writes from a struggling process. */
@@ -620,6 +628,10 @@ export const FORCE_CHARGE_BLOCKER_WHY = Object.freeze({
   ceilingRefused: 'the panel would not take the ',
   // (Fix9 review 1) index.ts: an ON or a ceiling sync due, refused by multiPanelWriteBlock; the block's own reason follows.
   writeBlock: 'the add-on is not writing to the panel: ',
+  // v1.200.1 — a stood night's reading on the ON's own tick: gone from a fresh panel, or no longer the target. Blockers, so one that
+  // never settles as foreign (out of the envelope) pushes rather than going silent.
+  reserveUnread: 'the panel is not reporting its reserve',
+  reserveMoved: 'the reserve no longer reads the night\'s target',
 });
 
 /** v1.200.0 (review) — the class of a declined start's `why` (a FORCE_CHARGE_BLOCKER_WHY key), or null when it
@@ -667,8 +679,8 @@ export interface LineDeclinedPushMem { day: string | null; st: LineDeclinedPushS
 
 /**
  * v1.200.0 (review 2) — PURE. One tick of the declined-start push, from the record:
- *  - it applies on a LIVE night (the reserve applied AND verified, not reverted or cancelled, no force-charge of
- *    ours ON yet) whose record carries a line ask, with the line gate on and a mode riding it — line mode, or a
+ *  - it applies on a LIVE night (reserveRideReady: the reserve applied AND verified, or stood, not reverted or cancelled, no force-charge
+ *    of ours ON yet) whose record carries a line ask, with the line gate on and a mode riding it — line mode, or a
  *    COST-DOMINANT night (finding 1: its cost force-charge is what carries the line, and a blocker holding its
  *    start all night left the line unheld in silence);
  *  - the memory is SEEDED FROM THE RECORD (forceChargeLineDeclinedPushed) on a new night or after a restart, so
@@ -681,7 +693,7 @@ export function lineDeclinedPushTick(
 ): { mem: LineDeclinedPushMem; push: keyof typeof FORCE_CHARGE_BLOCKER_WHY | null } {
   const st = mem.day === s.day && mem.day != null ? mem.st
     : { ...EMPTY_LINE_DECLINED_PUSH, pushed: [...(s.forceChargeLineDeclinedPushed ?? [])] };
-  const live = s.appliedAtMs != null && s.applyVerifiedAtMs != null && s.revertedAtMs == null && !s.cancelled
+  const live = reserveRideReady(s) && s.revertedAtMs == null && !s.cancelled
     && s.forceChargeOnAtMs == null;
   const applies = live && gates.line && forceChargeLineNightPct(s) != null && forceChargeModeOf(s, gates) != null;
   const step = lineDeclinedPushStep(st, applies ? why : null, nowMs);
@@ -741,7 +753,7 @@ export function lineDeclinedLatestStartMs(o: {
 }
 
 /** v1.200.0 (Fix9) — why no force-charge can START on a record any more (forceChargeStartClosed). */
-export type ForceChargeStartClosed = 'started' | 'cancelled' | 'reverted' | 'foreign' | 'noWindow' | 'over' | 'late' | 'overGuard' | 'lateGuard' | 'noWrite' | 'gatedOff';
+export type ForceChargeStartClosed = 'started' | 'cancelled' | 'reverted' | 'foreign' | 'gridLost' | 'noWindow' | 'over' | 'late' | 'overGuard' | 'lateGuard' | 'noWrite' | 'gatedOff';
 /** v1.200.0 (Fix10 review 1) — why a plan of a window claims no force-charge (armedLineStartClosed, chargeCycle.servedLineClosure):
  *  forceChargeStartClosed's keys less the two that are no such record ('started' may still be running, 'gatedOff' is what advisory
  *  discloses), a run stopped for good ('stopped': an OFF of ours is one-way), and a window no record holds with no evening job left.
@@ -755,8 +767,11 @@ export type LineStartClosed = Exclude<ForceChargeStartClosed, 'started' | 'gated
 export interface LineClosure { windowStartMs: number; why: LineStartClosed; writeStands?: true }
 
 /** v1.200.0 (Fix10 review 1) — PURE. The one-way stamps that end a night for good, whether or not a force-charge of ours ran. */
-function nightSettledKey(s: Pick<NightActuationState, 'cancelled' | 'revertedAtMs' | 'foreignSettledAtMs'>): 'cancelled' | 'reverted' | 'foreign' | null {
-  return s.cancelled ? 'cancelled' : s.revertedAtMs != null ? 'reverted' : s.foreignSettledAtMs != null ? 'foreign' : null;
+function nightSettledKey(
+  s: Pick<NightActuationState, 'cancelled' | 'revertedAtMs' | 'foreignSettledAtMs'> & Partial<Pick<NightActuationState, 'gridLostAtMs'>>,
+): 'cancelled' | 'reverted' | 'foreign' | 'gridLost' | null {
+  return s.cancelled ? 'cancelled' : s.revertedAtMs != null ? 'reverted' : s.foreignSettledAtMs != null ? 'foreign'
+    : s.gridLostAtMs != null ? 'gridLost' : null;
 }
 
 /**
@@ -768,7 +783,8 @@ function nightSettledKey(s: Pick<NightActuationState, 'cancelled' | 'revertedAtM
  * within FORCE_CHARGE_MIN_RUN_MS ('late': "not worth starting"), each with its own key where the on-peak guard is that
  * close ('overGuard', 'lateGuard', as decideForceCharge's why tells them apart: the window itself is still open there);
  * (Fix9 review 1) no write issued and the apply window passed ('noWrite': no apply comes after it, and with no attempt on
- * record no reading is adopted, so appliedAtMs stays null); and last, no mode riding the record under the live
+ * record no reading is adopted, so appliedAtMs stays null; v1.200.1 — nor a stamp: the reserve read at the target in that window, the
+ * one other thing a start rides, and a stood night's grid loss is 'gridLost'); and last, no mode riding the record under the live
  * gates (forceChargeModeOf: the line gate off is NIGHT_CHARGE_MODE advisory, which only an option change and a restart
  * undo). The line-night words that say the force-charge "waits on" a reading of the target (index.ts: the reserve-apply
  * failure and the two proofs that the write never landed; notify.buildNightChargeApplyFailure) are keyed on it: a
@@ -777,7 +793,8 @@ function nightSettledKey(s: Pick<NightActuationState, 'cancelled' | 'revertedAtM
  */
 export function forceChargeStartClosed(
   s: Pick<NightActuationState, 'forceChargeOnAtMs' | 'cancelled' | 'revertedAtMs' | 'foreignSettledAtMs' | 'windowStartMs' | 'windowEndMs'
-    | 'nextOnPeakStartMs' | 'forceChargeCeilingPct' | 'forceChargeLineAskPct' | 'appliedAtMs' | 'applyAttemptedAtMs'>,
+    | 'nextOnPeakStartMs' | 'forceChargeCeilingPct' | 'forceChargeLineAskPct' | 'appliedAtMs' | 'applyAttemptedAtMs'>
+    & Partial<Pick<NightActuationState, 'reserveStandingAtMs' | 'gridLostAtMs'>>,
   nowMs: number, gates: ForceChargeGates,
 ): ForceChargeStartClosed | null {
   const stamped: ForceChargeStartClosed | null = s.forceChargeOnAtMs != null ? 'started'
@@ -787,7 +804,8 @@ export function forceChargeStartClosed(
   const guard = closeMs < s.windowEndMs!; // the on-peak guard ends the writes with the window still open
   if (nowMs >= closeMs) return guard ? 'overGuard' : 'over';
   if (nowMs >= closeMs - FORCE_CHARGE_MIN_RUN_MS) return guard ? 'lateGuard' : 'late';
-  if (s.appliedAtMs == null && s.applyAttemptedAtMs == null && nowMs > s.windowStartMs! + APPLY_LATE_MS) return 'noWrite';
+  // v1.200.1 — a stood night had its apply decision: no write is due on it, and that is no closed start.
+  if (s.appliedAtMs == null && s.applyAttemptedAtMs == null && s.reserveStandingAtMs == null && nowMs > s.windowStartMs! + APPLY_LATE_MS) return 'noWrite';
   return forceChargeModeOf(s, gates) == null ? 'gatedOff' : null;
 }
 
@@ -795,14 +813,16 @@ export function forceChargeStartClosed(
 export const FORCE_CHARGE_START_CLOSED_WHY: Readonly<Record<Exclude<LineStartClosed, 'stopped' | 'notTaken' | 'partTaken' | 'noReOn'>, string>> = Object.freeze({
   cancelled: 'the night was cancelled',
   reverted: "the reserve's restore was sent",
-  foreign: 'the reserve was set outside the add-on',
+  // v1.200.1 — neutral: on a stood night the add-on's own floor route lands here too.
+  foreign: 'the reserve was changed',
+  gridLost: 'the grid was lost during the window',
   noWindow: 'the night has no charge window',
   over: 'the window has closed',
   late: `${Math.round(FORCE_CHARGE_MIN_RUN_MS / 60_000)} min or less of the window is left`,
   // (Fix9 review 1) The guard's own words: the window is still open there (60 min or more of it, a tariff's whole-hour periods).
   overGuard: 'the on-peak guard (an hour before on-peak) has begun',
   lateGuard: `${Math.round(FORCE_CHARGE_MIN_RUN_MS / 60_000)} min or less is left before the on-peak guard (an hour before on-peak)`,
-  noWrite: 'it rides a verified reserve write, and none was issued',
+  noWrite: 'it rides a verified reserve write or the reserve read at the target, and neither came in the apply window',
   noArm: 'no write is armed for this window',
 });
 
@@ -828,13 +848,15 @@ export function lineStartClosedWords(line: string, why: ForceChargeStartClosed |
  * reserve write never applied ('noWrite': the morning's only word for it) or settled as someone else's ('foreign': nothing of
  * ours restores it). A restore sent has its summary; a cancelled night is the person's own act. Active leg only: a leg
  * promoted past (a mid-day cycle: inert until the mid-day switch) has had its missed push.
+ * v1.200.1 — and a stood night ('standing'): no write and no restore, and the morning's summary words its account (index.ts). A reserve
+ * that settled as someone else's goes ahead of it: that night's account is the foreign one.
  */
-export function lineCloseAccountDue(s: NightActuationState, nowMs: number): 'noWrite' | 'foreign' | null {
+export function lineCloseAccountDue(s: NightActuationState, nowMs: number): 'noWrite' | 'foreign' | 'standing' | null {
   if (s.day == null || forceChargeLineNightPct(s) == null || s.lineCloseAccountAtMs != null) return null;
   if (s.cancelled || s.revertedAtMs != null) return null;
   const closeMs = writeWindowEndMs(s);
   if (closeMs == null || nowMs < closeMs) return null;
-  return s.foreignSettledAtMs != null ? 'foreign' : s.appliedAtMs == null ? 'noWrite' : null;
+  return s.foreignSettledAtMs != null ? 'foreign' : s.reserveStandingAtMs != null ? 'standing' : s.appliedAtMs == null ? 'noWrite' : null;
 }
 
 /**
@@ -1361,6 +1383,8 @@ function offReason(s: NightActuationState, nowMs: number, o: ForceChargeOpts): F
   if (s.cancelled) return 'cancelled';
   if (s.revertedAtMs != null) return 'reverted';
   if (s.foreignSettledAtMs != null) return 'foreign';
+  // v1.200.1 — one-way as a written night's abort is ('reverted' above): the grid reading true again does not hold an ON on.
+  if (s.gridLostAtMs != null) return 'gridLoss';
   // A missing window can't say when to stop, so it stops now.
   if (s.windowEndMs == null || nowMs >= s.windowEndMs) return 'windowEnd';
   if (nowMs >= writeWindowEndMs(s)!) return 'onPeakGuard';
@@ -1622,11 +1646,25 @@ export function armedNoLineStartMs(
 }
 
 /** v1.200.0 (Fix10 review 1) — PURE. A verified reserve write of the night still holds: the record's word for what the panel was
- *  last read holding, neither cancelled, restored nor set outside the add-on since. */
+ *  last read holding, neither cancelled, restored nor set outside the add-on since. v1.200.1 — or the reserve stood at the target. */
 export function reserveWriteStands(
-  s: Pick<NightActuationState, 'applyVerifiedAtMs' | 'cancelled' | 'revertedAtMs' | 'foreignSettledAtMs'>,
+  s: Pick<NightActuationState, 'applyVerifiedAtMs' | 'cancelled' | 'revertedAtMs' | 'foreignSettledAtMs'>
+    & Partial<Pick<NightActuationState, 'reserveStandingAtMs' | 'gridLostAtMs'>>,
 ): boolean {
-  return s.applyVerifiedAtMs != null && nightSettledKey(s) == null;
+  return (s.applyVerifiedAtMs != null || s.reserveStandingAtMs != null) && nightSettledKey(s) == null;
+}
+
+/**
+ * v1.200.1 — PURE. What a START rides: the night's reserve write, applied and verified by readback, or a stood night's stamp on a record
+ * that still carries its line, with the grid never read lost since. decideForceCharge asks the stamp's fresh reading on the ON's own
+ * tick as well (ForceChargeOpts.reservePct): the stamp decides the night's path once, and is what a pure record reader can see.
+ */
+export function reserveRideReady(
+  s: Pick<NightActuationState, 'appliedAtMs' | 'applyVerifiedAtMs' | 'forceChargeLineAskPct' | 'forceChargeLinePct'>
+    & Partial<Pick<NightActuationState, 'reserveStandingAtMs' | 'gridLostAtMs'>>,
+): boolean {
+  return (s.appliedAtMs != null && s.applyVerifiedAtMs != null)
+    || (s.reserveStandingAtMs != null && s.gridLostAtMs == null && forceChargeLineNightPct(s) != null);
 }
 
 /** v1.200.0 (Fix10) — PURE. The window open of a record WITH a line whose start is closed (forceChargeStartClosed, the one source),
@@ -1641,7 +1679,8 @@ export function armedLineStartClosed(
   s: Pick<NightActuationState, 'day' | 'forceChargeOnAtMs' | 'cancelled' | 'revertedAtMs' | 'foreignSettledAtMs' | 'windowStartMs' | 'windowEndMs'
     | 'nextOnPeakStartMs' | 'forceChargeCeilingPct' | 'forceChargeLineAskPct' | 'forceChargeLinePct' | 'appliedAtMs' | 'applyAttemptedAtMs'
     | 'applyVerifiedAtMs' | 'forceChargeOffAtMs' | 'forceChargeOnVerifiedAtMs' | 'forceChargeOnFailedAtMs' | 'forceChargeOnFailedSlots'
-    | 'forceChargeSlots' | 'forceChargeLineOffSlots' | 'forceChargeLineReOns' | 'forceChargeLineReOnAtMs'>,
+    | 'forceChargeSlots' | 'forceChargeLineOffSlots' | 'forceChargeLineReOns' | 'forceChargeLineReOnAtMs'>
+    & Partial<Pick<NightActuationState, 'reserveStandingAtMs' | 'gridLostAtMs'>>,
   nowMs: number, gates: ForceChargeGates,
 ): LineClosure | null {
   if (s.day == null || s.windowStartMs == null || forceChargeLineNightPct(s) == null) return null;
@@ -1725,12 +1764,13 @@ export function lineCloseReadingLate(s: Pick<NightActuationState, 'windowEndMs' 
 /** v1.200.0 (Fix10 review 1) — PURE. The line to push at an OFF of ours nothing else reports while a person can act: 'gridLoss' fires on a
  *  gridSta reading alone (offReason: gridStaLost), and the restore's abort needs gridPresent false, so with grid flow still measured, or
  *  the reading unknown, the force-charge ends for good with no restore, no summary and no at-risk push (it needs no OFF of ours yet).
- *  With gridPresent false the abort's own account goes, with the same words. null on a night with no line (v1.199.1). */
+ *  With gridPresent false the abort's own account goes, with the same words. null on a night with no line (v1.199.1).
+ *  v1.200.1 — a stood night has no abort, so this is its account with gridPresent false too. */
 export function lineGridOffPushDue(
-  s: Pick<NightActuationState, 'forceChargeLineAskPct' | 'forceChargeLinePct'>,
+  s: Pick<NightActuationState, 'forceChargeLineAskPct' | 'forceChargeLinePct'> & Partial<Pick<NightActuationState, 'reserveStandingAtMs'>>,
   reason: ForceChargeOffReason, o: Pick<ForceChargeOpts, 'gridPresent'>,
 ): number | null {
-  return reason === 'gridLoss' && o.gridPresent !== false ? forceChargeLineNightPct(s) : null;
+  return reason === 'gridLoss' && (o.gridPresent !== false || s.reserveStandingAtMs != null) ? forceChargeLineNightPct(s) : null;
 }
 
 /** v1.200.0 (review 2) — PURE. The ON-failure push's night fields (notify.buildNightForceChargeOnFailure): a
@@ -2215,7 +2255,7 @@ export function decideForceCharge(s: NightActuationState, nowMs: number, o: Forc
   // Without this an operator's later storm-prep Charge Now silently stops at tonight's
   // 80-90 instead of the 100 the panel was set to. "Done" = our force-charge verified
   // OFF, or — if it never started — the night is over. ──
-  const nightOver = s.cancelled || s.revertedAtMs != null || s.foreignSettledAtMs != null
+  const nightOver = s.cancelled || s.revertedAtMs != null || s.foreignSettledAtMs != null || s.gridLostAtMs != null
     || s.windowEndMs == null || nowMs >= writeWindowEndMs(s)!;
   const forceDone = s.forceChargeOnAtMs != null ? s.forceChargeOffVerifiedAtMs != null : nightOver;
   if (forceDone && s.forceChargeCeilingPriorPct != null && s.forceChargeCeilingRestoredAtMs == null) {
@@ -2230,7 +2270,7 @@ export function decideForceCharge(s: NightActuationState, nowMs: number, o: Forc
     };
   }
 
-  // ── 4. ON. At most once per night, and only riding a VERIFIED reserve write. ──
+  // ── 4. ON. At most once per night, and only riding a VERIFIED reserve write, or (v1.200.1) a stood reserve read again on this tick. ──
   if (s.forceChargeOnAtMs != null) return { kind: 'none' };
   // v1.200.0 — the mode from the LIVE gates (forceChargeModeOf): the cost force-charge, the outage line,
   // or neither. A record with no line ask reads exactly today's gate and target.
@@ -2252,9 +2292,9 @@ export function decideForceCharge(s: NightActuationState, nowMs: number, o: Forc
     return { kind: 'none', why: `tonight's ${c}% target is at or below the ${RESERVE_WRITE_MAX_PCT}% reserve — the reserve alone reaches it` };
   }
   const target = mode.targetPct;
-  if (s.appliedAtMs == null || s.applyVerifiedAtMs == null) return { kind: 'none', why: 'waiting for the reserve write to be verified by readback' };
+  if (!reserveRideReady(s)) return { kind: 'none', why: s.gridLostAtMs != null ? FORCE_CHARGE_START_CLOSED_WHY.gridLost : 'waiting for the reserve write to be verified by readback' };
   if (s.cancelled || s.revertedAtMs != null) return { kind: 'none', why: s.cancelled ? 'the night was cancelled' : 'the reserve has already been reverted' };
-  if (s.foreignSettledAtMs != null) return { kind: 'none', why: 'the reserve was set outside the add-on — the night\'s write no longer holds it' };
+  if (s.foreignSettledAtMs != null) return { kind: 'none', why: s.reserveStandingAtMs != null ? 'the reserve was changed after it read the night\'s target' : 'the reserve was set outside the add-on — the night\'s write no longer holds it' };
   if (s.windowStartMs == null || s.windowEndMs == null) return { kind: 'none', why: 'the night has no charge window' };
   if (nowMs < s.windowStartMs) return { kind: 'none', why: 'the overnight window has not opened yet' };
   // The force-charge ends at the window close, or an hour before on-peak if that is sooner
@@ -2272,6 +2312,9 @@ export function decideForceCharge(s: NightActuationState, nowMs: number, o: Forc
     return { kind: 'none', why: o.gridStaLost ? W.gridSta : `${W.gridPresence}${o.gridPresent === false ? 'ABSENT' : 'unknown'}` };
   }
   if (o.slotsOn == null) return { kind: 'none', why: W.noReadback }; // need a live readback to start
+  // v1.200.1 — a stood night reads the reserve again, here, ahead of the ceiling sync: a moved reserve gets no ceiling write either, and this
+  // closes the dark-panel hole, a person's change first seen on the ON's own tick. A written night never reads this input.
+  if (s.reserveStandingAtMs != null && o.reservePct !== s.targetPct) return { kind: 'none', why: o.reservePct == null ? W.reserveUnread : W.reserveMoved };
   if (o.slotsOn.length > 0) return { kind: 'none', why: `${W.alreadyOn}${o.slotsOn.join(', ')} — that is the operator's, never taken over` }; // someone else's Charge Now — never take ownership
   const slots = o.connectedSlots.filter((n) => Number.isInteger(n) && n >= 1 && n <= SHP2_SOURCE_SLOTS);
   if (slots.length === 0) return { kind: 'none', why: W.noSlots };

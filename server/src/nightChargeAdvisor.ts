@@ -362,8 +362,8 @@ export function lineWalkHolds(closePct: number | null, linePct: number): boolean
 export type CushionShortfallCause = 'envelope' | 'envelope+caps';
 /** v1.200.0 (review; A5) — NightChargePlan.cushionEnvelopeReason: why the plan does not claim a line above the 50%
  *  envelope. Nothing armed: advisory mode, the outage backup leg (it writes the reserve only), (Fix9 review 1) a reserve
- *  that reads the write when the plan reads it ('reserveAtTarget': decideActuation has nothing to raise while it does, and
- *  the force-charge rides only a verified write), or (Fix9 review 2) a recompute of a window whose armed record carries no
+ *  that reads ABOVE the write when the plan reads it, or a mid-day leg's at it ('reserveAtTarget': decideActuation has nothing to raise
+ *  while it does, and v1.200.1's standing reserve rides only a reading equal to an overnight record's target), or (Fix9 review 2) a recompute of a window whose armed record carries no
  *  line ask ('armedNoLine': the evening arm is the only one, so a write that goes carries none), or (Fix10) one whose record has its ask
  *  and can no longer start one, or (review 1) that no record holds with no evening job left ('startClosed', cushionStartClosedWords says why). ARMED, the force-charge runs: a line within 10 points of a full pool or above
  *  it (⌈L⌉ + 10 > 100, 'nearFull': the close guarantee was shown only with a panel ceiling ⌈L⌉ + 10 or more), or a night
@@ -636,6 +636,9 @@ export interface NightChargePlan {
    *  DISCLOSED beside it ('nearFull' / 'closeUnder'). One whole percent and the line — no capacity, no load
    *  (runwayBasisContracts). armFromPlan records the ask beside the cost ceiling. */
   forceChargeLine?: ForceChargeLine;
+  /** v1.200.1 — the panel reads the write when the plan reads it and the night carries its ask (absent otherwise, so a plan's digest does not
+   *  move): the words say no write is due while it does. A reading, not a decision: the record carries the ask either way. */
+  lineReserveStands?: true;
   /** v1.200.0 — 'line' when the expected walk (expectedBuyFromPlan) ran the LINE force-charge (its stop is
    *  not already ⌈L⌉ + 10 or more from the cost ceiling): the start is timed to ⌈L⌉ + 5 at the close less
    *  20 min, it runs to the close, and expectedWriteLevelPct is the expected CLOSE. Every surface states
@@ -2423,14 +2426,6 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   const askIsCost = baselineHolds || (!setpointOnWalk && costMode && costTargetKwh != null
     && round1((costTargetKwh / fullKwh) * 100) > lineAskPct);
   const askName = askIsCost ? "tonight's cost target" : 'the resilience requirement';
-  // v1.187.22 — the third quantity ("the window is only expected to reach ~X%") was the
-  // islanded worst case's arrival, already stated once as such by the sizing sentence just
-  // before; called "expected" it contradicted the Expected: sentence (~5 kWh to 50%, then
-  // "only expected to reach ~27.5%"). The written reserve and the ask remain.
-  const setpointNote = setpointSocPct > targetSocPct + 0.05
-    ? ` The reserve is set to ${writtenPct}%${truncated ? ` — ${askName} asks for ${setpointSocPct}%, but the panel only accepts a backup reserve up to ${RESERVE_WRITE_MAX_PCT}%` : ` (${askName})`}.`
-    : '';
-
   // v1.112.0 — the ANNOUNCED buy carries the learned de-bias; the raw figure
   // stays on buyKwh (ledger + learner input) and still owns chargeTonight.
   const buyDebiasFactor = inputs.buyDebiasFactor ?? 1;
@@ -2451,11 +2446,13 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   const lineAsk = askOf(targetFloorKwh, fullKwh);
   const lineQualifies = cushionBasis === 'islanded-outage' && chargeTonight && !baselineHolds && lineAsk > RESERVE_WRITE_MAX_PCT;
   const lineEligible = backupLeg && inputs.lineForceChargeEligible !== undefined ? false : inputs.lineForceChargeEligible;
-  // (Fix9 review 1) The force-charge rides a VERIFIED reserve write, and a reserve already at the write gets none (decideActuation:
-  // "nothing to raise"): such a line is disclosed, never armed. It armed before, the evening promised the raise and the ON, and the
-  // night then waited on a write that never goes, on every charge night of a plant whose reserve is 50. Riding a standing reserve
-  // would add an ON to what is written, which the evidence rule leaves to the owner.
-  const lineNoWrite = lineQualifies && lineEligible === true && writtenPct <= reserveFloorPct;
+  // (Fix9 review 1) A reserve already at the write gets none (decideActuation: "nothing to raise"). v1.200.1 — the night still carries its
+  // ask: the panel reading the write decides the words, never the record. If it reads the target in the apply window the night rides it
+  // with no write (reserveStandingAtMs); lowered by then, the armed write goes and the ON rides that; so the plan-time reading decides
+  // no write. Mid-day keeps the disclosure: its re-entry rule is a separate change.
+  const lineStanding = lineQualifies && lineEligible === true && !midday && writtenPct === reserveFloorPct;
+  // A reading above the write, or a mid-day leg at it: disclosed, never armed. No force-charge can ride such a night.
+  const lineNoWrite = lineQualifies && lineEligible === true && writtenPct <= reserveFloorPct && !lineStanding;
   // (Fix9 review 2) That reading is the plan's, and the evening job arms once: a record armed with no ask (at a reserve of 50, or with no
   // line yet) stays so if the reserve moves or the line rises, and a write it makes carries no force-charge for the line. A recompute of
   // that window says so, never an ON the record cannot make. Which of the two a night gets is left as it was armed: no write changes.
@@ -2557,36 +2554,38 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
     ? `, from ~${projSocAtWindowStartPct}% at the window open` : ''}, projecting ~${targetSocPct}% by ${fmtLocalHint(windowEnd)}.`;
   // What the write does from the expected start (expectedBuyFromPlan): the reserve leg, then — when
   // force-charge rides the night — the house's drain to the just-in-time start and the fill to the stop.
+  // v1.200.1 — what fills the pool to the reserve on a night that stands: the panel's own, no write.
+  const reserveDoer = lineStanding ? "the panel's own reserve" : "tonight's write";
   const expectedWriteNote = (start: number, level: number): string => {
     if (lineStartClosed != null) return ''; // (Fix10) See chargeHeadline.
     const to = expected.deliverableBound ? `toward ${level}%` : `to ${level}%`;
     const asFar = expected.deliverableBound ? ', as far as the window can deliver' : '';
     // (Fix9 review 1) No write is due on such a night (lineNoWrite): the reserve the panel already holds does what the write would.
-    if (lineNoWrite && level <= writtenPct) return start < level ? `, and the panel's own reserve charges it ${to}${asFar}` : `, already at or above the ${level}% reserve`;
+    if ((lineNoWrite || lineStanding) && level <= writtenPct) return start < level ? `, and the panel's own reserve charges it ${to}${asFar}` : `, already at or above the ${level}% reserve`;
     if (level <= writtenPct) {
       return start < level
         ? `, and tonight's write charges it ${to}${asFar}`
         : `, already at or above the ${level}% tonight's write charges to`;
     }
     const fcAt = expected.forceChargeStartMs;
-    if (fcAt === undefined) return `, and tonight's write charges it ${to}${asFar}`;
+    if (fcAt === undefined) return `, and ${reserveDoer} charges it ${to}${asFar}`;
     if (fcAt === null) {
       // v1.200.0 (review) — a line night names no "force-charge to X%": X is the expected close, not a target.
       if (expected.mode === 'line') {
-        return `${start < writtenPct ? `, and tonight's write charges it to the ${writtenPct}% reserve` : `, above the ${writtenPct}% reserve`}; the force-charge for the outage line is armed but not expected to start (the pool is expected to stay at or above the panel's ${expected.panelCeilingPct}% force-charge ceiling), and the house draws it to ~${level}% by the close`;
+        return `${start < writtenPct ? `, and ${reserveDoer} charges it to the ${writtenPct}% reserve` : `, above the ${writtenPct}% reserve`}; the force-charge for the outage line is armed but not expected to start (the pool is expected to stay at or above the panel's ${expected.panelCeilingPct}% force-charge ceiling), and the house draws it to ~${level}% by the close`;
       }
-      return `${start < writtenPct ? `, and tonight's write charges it to the ${writtenPct}% reserve` : `, above the ${writtenPct}% reserve`}; the just-in-time force-charge to ${level}% is not expected to start`;
+      return `${start < writtenPct ? `, and ${reserveDoer} charges it to the ${writtenPct}% reserve` : `, above the ${writtenPct}% reserve`}; the just-in-time force-charge to ${level}% is not expected to start`;
     }
     const at = fmtSiteDayHm(fcAt, nowMs);
     // v1.200.0 — a line night's force-charge runs to the window close.
     if (expected.mode === 'line') {
       // v1.200.0 (review 2) — unless the walk reaches the panel ceiling, where the panel switches it off itself.
       if (lineCeilingStop != null) {
-        return `${start < writtenPct ? `, and tonight's write charges it to the ${writtenPct}% reserve` : `, above the ${writtenPct}% reserve`}; the force-charge for the outage line ${lineRunOn ? 'is on' : `switches on at ~${at}`} and the panel switches it off at its ${lineCeilingStop.ceilingPct}% ceiling, ~${level}% expected at the close`;
+        return `${start < writtenPct ? `, and ${reserveDoer} charges it to the ${writtenPct}% reserve` : `, above the ${writtenPct}% reserve`}; the force-charge for the outage line ${lineRunOn ? 'is on' : `switches on at ~${at}`} and the panel switches it off at its ${lineCeilingStop.ceilingPct}% ceiling, ~${level}% expected at the close`;
       }
-      return `${start < writtenPct ? `, and tonight's write charges it to the ${writtenPct}% reserve` : `, above the ${writtenPct}% reserve`}; the force-charge for the outage line ${lineRunOn ? 'is on, runs' : `runs from ~${at}`} to the window close and takes it ${to}${asFar}`;
+      return `${start < writtenPct ? `, and ${reserveDoer} charges it to the ${writtenPct}% reserve` : `, above the ${writtenPct}% reserve`}; the force-charge for the outage line ${lineRunOn ? 'is on, runs' : `runs from ~${at}`} to the window close and takes it ${to}${asFar}`;
     }
-    if (start < writtenPct) return `, and tonight's write charges it ${to} (the ${writtenPct}% reserve, then force-charge from ~${at})${asFar}`;
+    if (start < writtenPct) return `, and ${reserveDoer} charges it ${to} (the ${writtenPct}% reserve, then force-charge from ~${at})${asFar}`;
     return fcAt <= effChargeStartMs
       ? `, above the ${writtenPct}% reserve; the force-charge is due at once (~${at}) and charges it ${to}${asFar}`
       : `, above the ${writtenPct}% reserve: the house should draw it to ~${expected.forceChargeFromPct}% before the just-in-time force-charge (~${at}) charges it ${to}${asFar}`;
@@ -2637,7 +2636,10 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   // mode or disclosed — never gated on the setpoint over the arrival (2026-10-29: setpoint = target = 66,
   // and the rationale said nothing of the 50% write). A cost-dominant carried night keeps today's sentence.
   const lineText = `tonight's ${cushionLineSocPct}% outage line is above it`;
-  const envelopeHead = `The reserve is set to ${writtenPct}%, the most the panel accepts as a backup reserve; ${lineText}`;
+  const envelopeHead = `The reserve ${lineStanding ? 'reads' : 'is set to'} ${writtenPct}%, the most the panel accepts as a backup reserve; ${lineText}`;
+  // v1.200.1 — after the window: no restore is due on a night that stands, and what the house then draws is the panel's own reserve to decide.
+  const afterWindowText = lineStanding ? `No restore is due while the reserve reads ${writtenPct}%.`
+    : `After the window the reserve returns to ${round1(reserveFloorPct)}% and the house can draw the pool down as usual.`;
   const lineStartText = lineRunOn ? 'is on and '
     : expected.forceChargeStartMs != null ? `switches on at ~${fmtSiteDayHm(expected.forceChargeStartMs, nowMs)} and ` : 'switches on just in time and ';
   const lineReOnTimesText = lineReOnTimesWords(FORCE_CHARGE_LINE_REON_MAX);
@@ -2657,14 +2659,14 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   const lineModeNote: string | null = expected.mode === 'line' && expected.forceChargeStartMs === null
       // v1.200.0 (review) — armed, not expected to start: the pool stays at or above the panel ceiling, which
       // is above the line. Never "stays on until the window closes" for a force-charge that never switches on.
-      ? ` ${envelopeHead}, so the panel's force-charge is armed for it, but is not expected to start: the pool is expected to stay at or above the panel's ${expected.panelCeilingPct}% force-charge ceiling. After the window the reserve returns to ${round1(reserveFloorPct)}% and the house can draw the pool down as usual.`
+      ? ` ${envelopeHead}, so the panel's force-charge is armed for it, but is not expected to start: the pool is expected to stay at or above the panel's ${expected.panelCeilingPct}% force-charge ceiling. ${afterWindowText}`
       // v1.200.0 (review 2) — a walk that reaches the panel ceiling: the panel switches Charge Now off there by
       // itself, and the add-on switches it back on under the start target before the close (lineReOnDue). Never
       // "stays on until the window closes" for a night expected to see the panel's own stop.
       : expected.mode === 'line' && lineCeilingStop != null
-        ? ` ${envelopeHead}, so the panel's force-charge ${lineStartText}runs until the panel switches it off at its ${lineCeilingStop.ceilingPct}% ceiling; ${lineCeilingStop.noReOnWords ?? `the add-on switches it back on if the pool falls under ${lineCeilingStop.startTargetPct}% before the window closes (at most ${lineReOnTimesText})`}, ~${expected.levelPct}% expected at the close. After the window the reserve returns to ${round1(reserveFloorPct)}% and the house can draw the pool down as usual.`
+        ? ` ${envelopeHead}, so the panel's force-charge ${lineStartText}runs until the panel switches it off at its ${lineCeilingStop.ceilingPct}% ceiling; ${lineCeilingStop.noReOnWords ?? `the add-on switches it back on if the pool falls under ${lineCeilingStop.startTargetPct}% before the window closes (at most ${lineReOnTimesText})`}, ~${expected.levelPct}% expected at the close. ${afterWindowText}`
         : expected.mode === 'line'
-          ? ` ${envelopeHead}, so the panel's force-charge ${lineStartText}stays on until the window closes${expected.levelPct != null && expected.forceChargeStartMs != null ? `, taking the pool to ~${expected.levelPct}%` : ''}. After the window the reserve returns to ${round1(reserveFloorPct)}% and the house can draw the pool down as usual.`
+          ? ` ${envelopeHead}, so the panel's force-charge ${lineStartText}stays on until the window closes${expected.levelPct != null && expected.forceChargeStartMs != null ? `, taking the pool to ~${expected.levelPct}%` : ''}. ${afterWindowText}`
           : null;
   // Nothing armed (advisory, the backup leg): the disclosed sentence. Armed in line mode: what the force-charge does,
   // then what it cannot hold. (The tooHigh wording of the review rounds never shipped.)
@@ -2676,6 +2678,13 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
         : cushionEnvelopeReason === 'armedNoLine' ? 'no write armed for this window carries a force-charge for it, so the cushion is not assured'
           : 'no force-charge runs in advisory mode, so the cushion is not fully held'} — residual risk remains.`
     : lineModeNote != null ? `${lineModeNote}${lineNotHeldNote}` : lineNotHeldNote !== '' ? lineNotHeldNote : null;
+  // v1.187.22 — the third quantity ("the window is only expected to reach ~X%") was the
+  // islanded worst case's arrival, already stated once as such by the sizing sentence just
+  // before; called "expected" it contradicted the Expected: sentence (~5 kWh to 50%, then
+  // "only expected to reach ~27.5%"). The written reserve and the ask remain.
+  const setpointNote = setpointSocPct > targetSocPct + 0.05
+    ? ` The reserve ${lineStanding ? 'reads' : 'is set to'} ${writtenPct}%${truncated ? ` — ${askName} asks for ${setpointSocPct}%, but the panel only accepts a backup reserve up to ${RESERVE_WRITE_MAX_PCT}%` : ` (${askName})`}.`
+    : '';
   const reserveNote = envelopeNote ?? setpointNote;
   const holdReason = starved
     ? `this window can deliver only ~${round1(buyKwh)} kWh, under the ${round1(minBuyKwh)} kWh minimum-buy threshold${holdCapName} — against a requirement of ${meetable ? `~${round1(requiredExtraKwh)} kWh` : 'more than the pool can hold'}. The window cannot serve the need; this is not a night with little worth buying.`
@@ -2711,6 +2720,8 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
     ...(cushionStartClosedWords != null ? { cushionStartClosedWords } : {}),
     ...(lineStartClosed != null && inputs.armedLineStartClosed?.writeStands !== true ? { cushionStartClosedNoWrite: true as const } : {}),
     ...(forceChargeLine != null ? { forceChargeLine } : {}),
+    // v1.200.1 — only where true, so no other plan's digest moves: the panel reads the write and the night carries its ask (the texts read it).
+    ...(lineStanding && forceChargeLine != null ? { lineReserveStands: true as const } : {}),
     ...(expected.mode === 'line' ? { expectedForceChargeMode: 'line' as const } : {}),
     ...(lineCeilingStop != null ? { expectedLineCeilingStop: lineCeilingStop } : {}),
     evContention,

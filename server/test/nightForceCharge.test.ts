@@ -755,7 +755,7 @@ test('★★★ every declined START says WHY — a reserve-only night is a deci
 test('★★ the "why not" line fires only while a night is LIVE, once per reason', () => {
   const fn = INDEX.indexOf('async function runForceChargeTick(');
   const body = INDEX.slice(fn, INDEX.indexOf("if (action.kind === 'syncCeiling')", fn));
-  assert.ok(body.includes('const live = state.appliedAtMs != null && state.revertedAtMs == null && !state.cancelled'),
+  assert.ok(body.includes('const live = (state.appliedAtMs != null || reserveRideReady(state)) && state.revertedAtMs == null && !state.cancelled'),
     'never logged during the day, or after the night is reverted — only while a decision is being made');
   assert.ok(body.includes('if (!forceChargeWhyLogged.reasons.has(action.why)) {'), 'one line per distinct reason');
   assert.ok(body.includes('force-charge NOT starting for'));
@@ -763,7 +763,7 @@ test('★★ the "why not" line fires only while a night is LIVE, once per reaso
 
 test('★★ the 21:30 ARMED line states tonight\'s force-charge decision up front', () => {
   // v1.200.0 — the note reads the plan too (a line night's expected start).
-  assert.ok(INDEX.includes('cancellable until the write moment. ${forceChargeArmNote(armedCandidate, plan)}'));
+  assert.ok(INDEX.includes("'cancellable until the write moment'}. ${forceChargeArmNote(armedCandidate, plan)}"));
   const note = INDEX.slice(INDEX.indexOf('function forceChargeArmNote('), INDEX.indexOf('async function runForceChargeTick('));
   assert.ok(note.includes('which reaches it alone') && note.includes('ELIGIBLE — just in time'), 'both outcomes are named');
 });

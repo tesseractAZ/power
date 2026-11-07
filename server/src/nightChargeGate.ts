@@ -144,6 +144,12 @@ export const CURRENT_ALGO_VERSION = 3;
  *  runMissedApplyStep): the gate reads it on a line night (lineWriteNeverHeld). */
 export const MISSED_APPLY_DISPOSITION = 'missed — ';
 
+/** v1.200.1 — how arm_disposition opens on a line night whose reserve already read the write (index.ts, the 'reserveStanding' action): no
+ *  write went, so `actuated` stays unset and the night gives the graduation, the streak and the buy de-bias nothing, as
+ *  MIN_ACTUATED_NIGHTS' "a bounded reserve write applied" says. It is graded all the same (lineReserveStood). The cancel route rewrites it
+ *  on a record with no ON: a person's cancel is no strike. */
+export const RESERVE_STOOD_DISPOSITION = 'reserve stood — ';
+
 /** Graduation floor: scored ACTUATED nights (a bounded reserve write applied,
  *  delivery measured) before AUTO is considerable. ~3 weeks at one per night. */
 const MIN_ACTUATED_NIGHTS = 21;
@@ -549,8 +555,12 @@ export function computeNightChargeReadiness(
   // cancelled before the write, or never armed, is neither.
   const lineWriteNeverHeld = (r: NightLedgerRow): boolean => asNum(r.cushion_line_force_charge_pct) != null && !truthy(r.actuated)
     && r.force_charge_on_at_ms == null && (asNum(r.actuated) === 0 || String(r.arm_disposition ?? '').startsWith(MISSED_APPLY_DISPOSITION));
+  // v1.200.1 — a line night that rode a standing reserve: no write went, and it is graded as a written one is. Unlike lineWriteNeverHeld it
+  // does not ask for no ON: a ride that ran stays graded by the realized strike, and armedNeverRanUnder keeps its own ON check.
+  const lineReserveStood = (r: NightLedgerRow): boolean => asNum(r.cushion_line_force_charge_pct) != null && !truthy(r.actuated)
+    && String(r.arm_disposition ?? '').startsWith(RESERVE_STOOD_DISPOSITION);
   const armedNeverRanUnder = (r: NightLedgerRow): boolean => {
-    if (asNum(r.cushion_line_force_charge_pct) == null || !(truthy(r.actuated) || lineWriteNeverHeld(r)) || r.force_charge_on_at_ms != null) return false;
+    if (asNum(r.cushion_line_force_charge_pct) == null || !(truthy(r.actuated) || lineWriteNeverHeld(r) || lineReserveStood(r)) || r.force_charge_on_at_ms != null) return false;
     const line = asNum(r.cushion_line_soc_pct);
     const close = asNum(r.window_close_soc_pct);
     if (line != null && close != null) return !holdsLineAtClose(close, Math.min(line, 100));
@@ -559,7 +569,7 @@ export function computeNightChargeReadiness(
   const strikeRows = currentAlgo.filter((r) => {
     if (truthy(r.cushion_shortfall)) return armedNeverRanUnder(r); // disclosed — physics, not fault (A5: unless armed and never ran)
     const trajStrike = trajBreached(r) && trajGradedOnSizingTrough(r);
-    const realizedStrike = (truthy(r.actuated) || lineWriteNeverHeld(r)) && realizedBreached(r);
+    const realizedStrike = (truthy(r.actuated) || lineWriteNeverHeld(r) || lineReserveStood(r)) && realizedBreached(r);
     return trajStrike || realizedStrike;
   });
   const strikeWindowStart = siteYmd(nowMs - STRIKE_WINDOW_DAYS * DAY_MS);
@@ -631,7 +641,7 @@ export function computeNightChargeReadiness(
     // v1.200.0 (A5) — a disclosed row the strike rule still grades counts too: an ARMED, actuated one
     // (armedNeverRanUnder), so a real 0 beside armed line nights does not read as "cannot count".
     strikesMeasurable: currentAlgo.length > 0 && currentAlgo.some((r) => !truthy(r.cushion_shortfall)
-      || (asNum(r.cushion_line_force_charge_pct) != null && (truthy(r.actuated) || lineWriteNeverHeld(r)))) ? 1 : 0,
+      || (asNum(r.cushion_line_force_charge_pct) != null && (truthy(r.actuated) || lineWriteNeverHeld(r) || lineReserveStood(r)))) ? 1 : 0,
     trajStrikesSetAside, // v1.186.0 — see the strike rule
     realizedStrikesSetAside, // v1.196.0 — see realizedCushionBreach
     lineForceChargeStrikes, // v1.200.0 — see the strike rule

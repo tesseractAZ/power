@@ -120,6 +120,8 @@ interface NightActuation {
   /** v1.189.0 — the reserve settled as someone else's (the foreign rule): nothing left to cancel. */
   foreignSettledAtMs?: number | null;
   foreignReservePct?: number | null;
+  /** v1.200.1 — the reserve stood at the target (reserveStandingAtMs): no write went and nothing is restored. */
+  reserveStandingAtMs?: number | null;
   /** v1.200.0 (Fix10) — a line night whose start is closed (lineStartClosedStatus): absent on any other night. */
   lineStartClosed?: { text: string; cancel: boolean };
   /** v1.200.0 (Fix10 review 1) — a line night's write the panel has not read back (lineWriteUnreadStatus). */
@@ -258,7 +260,7 @@ export const NightChargeCard = memo(function NightChargeCard() {
     return (
       <div className="card text-sm">
         <div className="card-title">Night-charge plan</div>
-        <div className={stands ? 'text-warn' : 'text-muted'}>{noPlanText(plan != null && !plan.basisComplete, stands)}</div>
+        <div className={stands ? 'text-warn' : 'text-muted'}>{noPlanText(plan != null && !plan.basisComplete, stands, actuation?.reserveStandingAtMs != null)}</div>
         {banner('mt-3')}
         <MiddayShadowSection shadow={status.middayShadow} preview={status.middayShadowPreview} hhmm={hhmm} />
       </div>
@@ -279,7 +281,7 @@ export const NightChargeCard = memo(function NightChargeCard() {
   // (holdSummary, the evening push's hold shape): the islanded trough labelled as such, and a
   // window that cannot cover the cushion said so rather than "No overnight charge needed."
   if (!plan.chargeTonight) {
-    const hold = holdSummary(plan, { writeStands: stands });
+    const hold = holdSummary(plan, { writeStands: stands, reserveStood: actuation?.reserveStandingAtMs != null });
     return (
       <div className="card text-sm">
         <div className="card-title flex items-center justify-between">
