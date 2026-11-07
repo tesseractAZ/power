@@ -38,6 +38,12 @@ import { FIGURE_FIELDS, figuresOf, measuredFigures, MEASURED_SCALE, type Figures
  * that every consumer agrees with the one line; the legs; the plumbing; the year against the golden
  * at 0.944 (direction, counts and the per-case figures); the explicit-nameplate digests; the ledger
  * and log helpers; the tracker file.
+ *
+ * v1.202.0 — the plan's WALKS are on the measured capacity too (nightChargeAdvisor.ts plannerPoolKwh: the planning pool,
+ * the panel's figure × the scale, every walk and kWh per percent): the line is the same percent, and every write this file
+ * pins is as v1.199.0 wrote it; the kWh figures (requirement, buys, the troughs' walks) are on that pool. The comparisons
+ * against the nameplate plan below therefore hold the writes, the line and the cost ceiling, and pin the kWh figures as
+ * measured; measuredPlannerWalks.test.ts pins the pool itself.
  */
 
 const H = 3_600_000;
@@ -101,14 +107,16 @@ test('★★★ THE DEFECT FIXED: the 30.45% nameplate line (written 31, 18.27 k
   assert.equal(p.cushionTroughSocPct, 31.67);
   assert.equal(p.cushionShortfall, false);
   assert.equal(p.bindingCap, 'requirement');
-  // The lift that reaches the higher line: 0.78 kWh more of pack (not the 1.12 kWh of line — each
-  // extra charging hour rides the grid bypass instead of draining the pack), 0.85 kWh more at the meter.
+  // The lift that reaches the higher line: 0.54 kWh more of pack, 0.59 kWh more at the meter (v1.199.0, with
+  // the walks on nameplate: 0.78 and 0.85). v1.202.0 — the walks count the pool on the measured capacity, so a
+  // point of the line is 0.87 kWh, not 0.92, and the drain to the window open is more points of it.
   assert.equal(before.requiredExtraKwh, 25.55);
-  assert.equal(p.requiredExtraKwh, 26.33);
+  assert.equal(p.requiredExtraKwh, 26.09);
   assert.equal(before.buyKwh, 27.56);
-  assert.equal(p.buyKwh, 28.41);
+  assert.equal(p.buyKwh, 28.15);
+  assert.deepEqual(p.planPool, { kwh: 86.999, standbyW: 0 });
   assert.equal(p.expectedWriteLevelPct, 32);
-  assert.equal(p.expectedBuyKwh, 13.21, 'the expected draw to 32% (12.22 kWh to 31%)');
+  assert.equal(p.expectedBuyKwh, 12.82, 'the expected draw to 32% on the measured pool (12.22 kWh to 31% on nameplate)');
   // Every surface's line is the measured one.
   assert.equal(floorCushionLinePct(p), 31.67);
   assert.match(p.rationale, / The reserve is set to 32% \(the resilience requirement\)\. /);
@@ -156,7 +164,7 @@ test('★★★ THE GUARANTEE (property): wherever the write is under the 50% en
   assert.ok(checked > 40_000 && truncated > 10_000, `${checked} checked, ${truncated} over the envelope`);
 });
 
-test('★★★ THE GUARANTEE on the year: every islanded charge night written under 50% holds its cushion on the measured capacity (114 of 175 did not before)', () => {
+test('★★★ THE GUARANTEE on the year: every islanded charge night written under 50% holds its cushion on the measured capacity (117 of 181 did not before)', () => {
   let held = 0, heldBefore = 0, n = 0;
   for (const c of legacyIdentityCases()) {
     const p = yearPlan(c.deps, MEASURED_SCALE);
@@ -168,7 +176,9 @@ test('★★★ THE GUARANTEE on the year: every islanded charge night written u
     const b = yearPlan(c.deps);
     if (((written(b)! - b.reserveFloorPct) / 100) * c.deps.fullKwh * MEASURED_SCALE.scale >= b.cushionKwh! - 1e-9) heldBefore += 1;
   }
-  assert.deepEqual({ n, held, heldBefore }, { n: 175, held: 175, heldBefore: 61 });
+  // v1.202.0 — 181 charge nights on the measured pool (175 with the walks on nameplate): the deeper drain in points charges
+  // 6 nights that held. Every one holds its cushion.
+  assert.deepEqual({ n, held, heldBefore }, { n: 181, held: 181, heldBefore: 64 });
 });
 
 test('★★ THE GUARANTEE\'S LIMIT — it holds on the capacity the scale states: a held ratio after an unseen drop, or packs under CAPACITY_SCALE_MIN, hold less than the cushion', () => {
@@ -249,50 +259,73 @@ test('★★★ FAIL-SAFE — scale 1 (and float noise above it) moves no number
   assert.match(half.rationale, /asks for 51%, but the panel only accepts a backup reserve up to 50%/);
 });
 
-test('★★★ FAIL-SAFE — on the year, at every scale down to 0.5 nothing falls below the nameplate plan; line, setpoint, write, requirement, buy and cost ceiling are monotone in the scale', () => {
-  // The expected buy and level are NOT monotone between adjacent scales (a higher write can start the
-  // just-in-time force-charge earlier from a level that draws less: 2027-08-09 13:00, 3.38 → 3.32 kWh
-  // from 0.82 to 0.80), so they are held only against the s = 1 plan, which no scale goes under.
+test('★★★ FAIL-SAFE — on the year, at every scale down to 0.5 no write, line, write level or cost ceiling falls below the nameplate plan, and no charge night holds; the kWh figures on the smaller pool, as measured', () => {
+  // v1.202.0 — the walks count the pool on the scale (plannerPoolKwh), so a point holds fewer kWh: the requirement, the
+  // buys and the arrival may fall in kWh (and the arrival and a hold's no-buy prediction in points, the drain being more of
+  // them); what is written, the line, the level the write drives to and the cost ceiling (the cost room at v1.201.0's
+  // percent) do not, and no charge night holds. The expected buy and level are NOT monotone between adjacent scales (a
+  // higher write can start the just-in-time force-charge earlier from a level that draws less), and the cost ceiling only to
+  // its round1 (2026-11-06 13:00, 93.8 → 93.7 at 0.8 and 0.6), so they are held against the s = 1 plan, which no scale goes
+  // under. A disclosed shortfall can vanish: the window's kWh lift more points of the smaller pool (pinned).
   const SCALES = [0.99, 0.97, 0.944, 0.92, 0.9, 0.85, 0.8, 0.7, 0.6, 0.5];
-  const atLeast = ['cushionLineSocPct', 'setpointSocPct', 'buyKwh', 'buyKwhDebiased', 'requiredExtraKwh', 'expectedBuyKwh',
-    'expectedWriteLevelPct', 'costCeilingSocPct', 'targetSocPct'] as const;
-  const monotone = ['cushionLineSocPct', 'setpointSocPct', 'requiredExtraKwh', 'buyKwh', 'costCeilingSocPct'] as const;
+  const atLeast = ['cushionLineSocPct', 'expectedWriteLevelPct', 'costCeilingSocPct'] as const;
+  const kwh = ['buyKwh', 'requiredExtraKwh', 'expectedBuyKwh', 'targetSocPct', 'setpointSocPct'] as const;
+  const fell: Record<string, number> = Object.fromEntries(kwh.map((f) => [f, 0]));
+  let sfVanish = 0, holdToCharge = 0;
   for (const c of legacyIdentityCases()) {
     const one = yearPlan(c.deps);
     let prev = one;
     for (const s of SCALES) {
       const p = yearPlan(c.deps, { scale: s, basis: 'measured' });
-      const holdToCharge = !one.chargeTonight && p.chargeTonight;
+      const toCharge = !one.chargeTonight && p.chargeTonight;
+      if (toCharge) holdToCharge += 1;
       for (const f of atLeast) {
         const a = one[f] as number | null | undefined, b = p[f] as number | null | undefined;
         // A figure only a charge night states (the write level) appears where a hold becomes a charge.
-        if (a == null) { if (!holdToCharge) assert.equal(b ?? null, null, `${c.label} s ${s}: ${f} appeared`); continue; }
+        if (a == null) { if (!toCharge) assert.equal(b ?? null, null, `${c.label} s ${s}: ${f} appeared`); continue; }
         assert.ok(b != null && b >= a - 1e-9, `${c.label} s ${s}: ${f} ${a} → ${b}`);
       }
-      for (const f of monotone) {
-        const a = prev[f] as number | null | undefined, b = p[f] as number | null | undefined;
-        if (a != null) assert.ok(b != null && b >= a - 1e-9, `${c.label} s ${s}: ${f} fell ${a} → ${b} as the scale fell`);
+      for (const f of kwh) {
+        const a = one[f] as number | null | undefined, b = p[f] as number | null | undefined;
+        if (a != null && b != null && b < a - 1e-9) fell[f] += 1;
       }
-      const wa = written(prev), wb = written(p);
+      const lp = prev.cushionLineSocPct, lb = p.cushionLineSocPct;
+      if (lp != null) assert.ok(lb != null && lb >= lp - 1e-9, `${c.label} s ${s}: the line fell ${lp} → ${lb} as the scale fell`);
+      const wa = written(prev), wb = written(p), w1 = written(one);
       if (prev.chargeTonight && p.chargeTonight && wa != null) assert.ok(wb! >= wa, `${c.label} s ${s}: write ${wa} → ${wb}`);
+      if (one.chargeTonight && p.chargeTonight && w1 != null) assert.ok(wb! >= w1, `${c.label} s ${s}: write ${w1} → ${wb} against nameplate`);
       assert.ok(!(one.chargeTonight && !p.chargeTonight), `${c.label} s ${s}: a charge night became a hold`);
-      assert.ok(!(one.cushionShortfall && !p.cushionShortfall), `${c.label} s ${s}: a disclosed shortfall vanished`);
+      if (one.cushionShortfall && !p.cushionShortfall) sfVanish += 1;
       prev = p;
     }
   }
+  assert.deepEqual({ fell, sfVanish, holdToCharge }, {
+    fell: { buyKwh: 2789, requiredExtraKwh: 2833, expectedBuyKwh: 3599, targetSocPct: 1499, setpointSocPct: 906 }, sfVanish: 93, holdToCharge: 273,
+  });
 });
 
 /* ══ the scope of the conversion ══════════════════════════════════════════════ */
 
-test('★★★ SCOPE — the legacy band and a disabled cushion do not move at any scale, and carry no scale', () => {
+test('★★★ SCOPE — the legacy band and a disabled cushion keep their percent line at any scale; v1.202.0, their walks move with the pool and carry its scale', () => {
+  // v1.202.0 — the line converts no cushion on these bases (a percent of the pool, or none), but the plan's walks count the
+  // pool on the scale on every basis (plannerPoolKwh): the line and the write keep their percent; the band's kWh, the
+  // requirement and the buy are on the measured pool, and the plan records the pool's scale and its pool.
   for (const o of [{ islandedLoadKw: null }, { outageCushionHours: 0 }] as const) {
     const base = plan(o);
     for (const s of [0.944, 0.5]) {
       const p = plan({ ...o, cushionPoolScale: { scale: s, basis: 'measured' } });
-      assert.equal(planDigest(p), planDigest(base), `${JSON.stringify(o)} at ${s}`);
-      assert.equal('cushionPoolScale' in p, false);
+      assert.equal(p.cushionLineSocPct, base.cushionLineSocPct, `${JSON.stringify(o)} at ${s}: the line`);
+      assert.equal(written(p), written(base), `${JSON.stringify(o)} at ${s}: the write`);
+      assert.equal(p.cushionBasis, base.cushionBasis);
+      assert.deepEqual(p.cushionPoolScale, { scale: s, basis: 'measured' });
+      assert.deepEqual(p.planPool, { kwh: Math.round(92.16 * s * 1000) / 1000, standbyW: 0 });
+      if (o.islandedLoadKw === null) assert.equal(p.cushionKwh, Math.round(92.16 * s * 15) / 100, 'the 15% band, of the measured pool');
     }
   }
+  // The walks, at 0.944: the band's requirement on the measured pool (87 kWh, the pool-headroom proxy on it) and the
+  // disabled cushion's on its deeper drain (12.84 kWh, against 12.29 on nameplate).
+  assert.deepEqual([plan({ islandedLoadKw: null }).requiredExtraKwh, plan({ islandedLoadKw: null, cushionPoolScale: S944 }).requiredExtraKwh], [92.16, 87]);
+  assert.deepEqual([plan({ outageCushionHours: 0 }).requiredExtraKwh, plan({ outageCushionHours: 0, cushionPoolScale: S944 }).requiredExtraKwh], [12.29, 12.84]);
   assert.equal(cushionLineKwh({ reserveKwh: 9.216, cushionKwh: 13.82, cushionBasis: 'legacy-pct', poolScale: S944 }).kwh, 9.216 + 13.82);
   assert.deepEqual(cushionLineKwh({ reserveKwh: 9.216, cushionKwh: 0, cushionBasis: 'disabled', poolScale: S944 }), { kwh: 9.216, applied: null });
 });
@@ -303,22 +336,29 @@ test('★★★ SCOPE — the cost formula is untouched: a cost target above the
   assert.equal(p.costCeilingSocPct, 40.3);
   assert.equal(p.setpointSocPct, 40.3);
   assert.equal(chargeReservePct(p), 40);
-  assert.equal(p.buyKwh, base.buyKwh, 'the cost target, not the line, sizes the buy');
-  assert.equal(p.expectedBuyKwh, base.expectedBuyKwh);
+  assert.equal(base.costCeilingSocPct, 40.3, 'the cost room at v1.201.0\'s percent (v1.202.0): the same ceiling');
+  // v1.202.0 — the cost target, not the line, sizes the buy: the same 40.3% of the measured pool, 0.6 kWh less at the meter
+  // than of nameplate (the cushion's line it is bounded below by moved).
+  assert.deepEqual([base.buyKwh, p.buyKwh], [34.46, 33.86]);
+  assert.deepEqual([base.expectedBuyKwh, p.expectedBuyKwh], [21.17, 20.33]);
   assert.equal(p.cushionLineSocPct, 31.67, 'the line it is bounded below by moved');
-  assert.equal(p.requiredExtraKwh, 26.33);
+  assert.equal(p.requiredExtraKwh, 26.09);
 });
 
-test('★★ SCOPE — the line equals the planner run with the islanded load ÷ the scale, to the cushion\'s own rounding', () => {
+test('★★ SCOPE — the line equals the planner run with the islanded load ÷ the scale, to the cushion\'s own rounding; v1.202.0, the plan equals the planner run on the measured pool', () => {
   // A cushion of c / s is the same line (the conversion is linear); the rounded cushion differs by at
-  // most 0.005 kWh, under 0.006 points of line on this pool.
+  // most 0.005 kWh, under 0.006 points of line on this pool. v1.202.0 — and since the walks are on the measured pool,
+  // the whole resilience plan is the planner's on a pool of N · s with no scale (the scale applied once).
   for (const s of [0.98, 0.944, 0.9, 0.8]) {
     const p = plan({ cushionPoolScale: { scale: s, basis: 'measured' } });
     const e = plan({ islandedLoadKw: 1.445 / s });
     assert.ok(Math.abs(p.cushionLineSocPct! - e.cushionLineSocPct!) <= 0.01, `${s}: ${p.cushionLineSocPct} vs ${e.cushionLineSocPct}`);
     assert.equal(p.setpointSocPct, e.setpointSocPct);
-    assert.ok(Math.abs(p.requiredExtraKwh! - e.requiredExtraKwh!) <= 0.02);
     assert.equal(p.cushionKwh, 18.85, 'the reported cushion stays the energy');
+    const m = plan({ fullKwh: 92.16 * s });
+    for (const f of ['cushionLineSocPct', 'setpointSocPct', 'requiredExtraKwh', 'buyKwh', 'expectedBuyKwh', 'targetSocPct'] as const) {
+      assert.equal(p[f], m[f], `${s}: ${f} on the measured pool`);
+    }
   }
 });
 
@@ -333,35 +373,39 @@ test('★★★ AGREEMENT — a charge-bound night that held the nameplate line 
   const p = plan({ chargeCapKw: 2.4, cushionPoolScale: S944 });
   assert.equal(p.cushionShortfall, true);
   assert.equal(p.bindingCap, 'chargePower');
-  assert.equal(p.requiredExtraKwh, 92.16, 'unmeetable at full power: the full-pack proxy, as on any unmeetable line');
-  assert.equal(p.cushionTroughSocPct, 30.99);
+  // v1.202.0 — the proxy is the measured pool (86.999 kWh), and the same 13.35 kWh of lift is more of its points (31.35%).
+  assert.equal(p.requiredExtraKwh, 87, 'unmeetable at full power: the full-pack proxy, as on any unmeetable line');
+  assert.equal(p.cushionTroughSocPct, 31.35);
   assert.equal(p.cushionLineSocPct, 31.67);
   assert.equal(p.setpointSocPct, 32);
   assert.equal(chargeReservePct(p), 32);
   assert.match(p.rationale, /NOTE: charge\/pool caps prevent fully meeting the cushion — residual risk remains\./);
-  // A 2 kW charger fell short of both: the arrival is unchanged, the write follows the line.
+  // A 2 kW charger fell short of both: the same lift is a little more of the measured pool's points (28.8%, 28.6 on
+  // nameplate), and the write follows the line.
   const two = plan({ chargeCapKw: 2, cushionPoolScale: S944 });
-  assert.deepEqual([two.targetSocPct, two.setpointSocPct, two.cushionShortfall], [28.6, 32, true]);
+  assert.deepEqual([two.targetSocPct, two.setpointSocPct, two.cushionShortfall], [28.8, 32, true]);
 });
 
 test('★★★ AGREEMENT — a pack at the close between the two lines: the nameplate plan holds, the measured one sizes the gap', () => {
-  // 65% at 21:00 leaves the pack at ~31% at the close: over the 30.45% line, under the 31.67% one.
-  const before = plan({ socNowPct: 65 });
+  // v1.202.0 — the same start closes lower on the measured pool (its drain is more of its points): from 67% at 21:00 the
+  // nameplate walk closes at ~33% (over both lines) and the measured one just under the 31.67% line, a 0.4 kWh gap — under
+  // the 1 kWh minimum buy, a hold that says so (v1.199.0 showed the same at 65%, its walks on nameplate).
+  const before = plan({ socNowPct: 67 });
   assert.equal(before.chargeTonight, false);
   assert.equal(before.requiredExtraKwh, 0);
-  assert.match(before.rationale, /^Hold — the pack at window close \(31%\) already covers the 10% reserve floor/);
-  const p = plan({ socNowPct: 65, cushionPoolScale: S944 });
+  assert.match(before.rationale, /^Hold — the pack at window close \(33%\) already covers the 10% reserve floor/);
+  const p = plan({ socNowPct: 67, cushionPoolScale: S944 });
   assert.equal(p.chargeTonight, false, 'the gap is under the 1 kWh minimum buy');
-  assert.equal(p.requiredExtraKwh, 0.41);
+  assert.equal(p.requiredExtraKwh, 0.4);
   assert.match(p.rationale, /^Hold — the buy this window would make \(~0\.4 kWh\) is under the 1 kWh minimum-buy threshold — the projected need is genuinely small\./);
   // A pack over both lines holds on both, and the hold states the measured line.
-  const over = plan({ socNowPct: 67, cushionPoolScale: S944 });
-  assert.deepEqual([over.chargeTonight, over.requiredExtraKwh, over.cushionLineSocPct, over.cushionTroughSocPct], [false, 0, 31.67, 33.03]);
+  const over = plan({ socNowPct: 68, cushionPoolScale: S944 });
+  assert.deepEqual([over.chargeTonight, over.requiredExtraKwh, over.cushionLineSocPct, over.cushionTroughSocPct], [false, 0, 31.67, 32.02]);
   assert.deepEqual(over.cushionPoolScale, S944);
   assert.match(over.rationale, /already covers the 10% reserve floor plus 8 h of islanded backup load \(18\.9 kWh, 21\.7% of the packs' measured capacity at ×0\.944 of nameplate\)/);
-  // A little lower and the gap is a charge on the measured line only.
+  // Lower, and the gap is a charge on the measured line only.
   const lower = [plan({ socNowPct: 64 }), plan({ socNowPct: 64, cushionPoolScale: S944 })];
-  assert.deepEqual(lower.map((x) => [x.chargeTonight, x.buyKwh]), [[false, 0.29], [true, 1.14]]);
+  assert.deepEqual(lower.map((x) => [x.chargeTonight, x.buyKwh]), [[false, 0.29], [true, 2.41]]);
   assert.equal(chargeReservePct(lower[1]), 32);
 });
 
@@ -387,16 +431,17 @@ test('★★ LEGS — the backup leg\'s walk is held to the measured line; the m
   const b0 = backup();
   const b1 = backup({ cushionPoolScale: S944 });
   // The walk to the horizon end drains the same energy from any start, so the pack it asks for at the
-  // close rises by the line's own 1.22 points (53.8 → 55.0) and the trough reaches each line.
+  // close rises by the line's own 1.22 points and, v1.202.0, by that energy's larger share of the measured pool
+  // (53.8 → 56.4), and the trough reaches each line.
   assert.deepEqual([b0.cushionLineSocPct, b0.setpointSocPct, b0.requiredExtraKwh, b0.cushionTroughSocPct], [30.45, 53.8, 31.6, 30.45]);
-  assert.deepEqual([b1.cushionLineSocPct, b1.setpointSocPct, b1.requiredExtraKwh, b1.cushionTroughSocPct], [31.67, 55, 32.62, 31.67]);
+  assert.deepEqual([b1.cushionLineSocPct, b1.setpointSocPct, b1.requiredExtraKwh, b1.cushionTroughSocPct], [31.67, 56.4, 32.31, 31.67]);
   assert.equal(b1.cushionShortfall, false);
-  // A 3 kW charger cannot lift the walk over either line: the arrival (38.4%) is the same, and the
-  // setpoint is the pack whose walk holds the line, so it rises by the line's own 1.22 points.
+  // A 3 kW charger cannot lift the walk over either line: the arrival is 38.4% (39.2% of the measured pool), and the
+  // setpoint is the pack whose walk holds the line, so it rises by the line's own 1.22 points and the walk's larger share.
   const c0 = backup({ horizon: horizon(2000), chargeCapKw: 3 });
   const c1 = backup({ horizon: horizon(2000), chargeCapKw: 3, cushionPoolScale: S944 });
   assert.deepEqual([c0.targetSocPct, c0.setpointSocPct, c0.cushionShortfall], [38.4, 82.3, true]);
-  assert.deepEqual([c1.targetSocPct, c1.setpointSocPct, c1.cushionShortfall], [38.4, 83.6, true]);
+  assert.deepEqual([c1.targetSocPct, c1.setpointSocPct, c1.cushionShortfall], [39.2, 86.6, true]);
   // A 17 kW charger from 60%, a light house to the close and 2.65 kW after it: a full pack's walk holds
   // the nameplate line (sized: 78.93 kWh, 99.2%) but not the measured one, so the measured plan is
   // unmeetable — the shortfall disclosed, the requirement the pool-headroom proxy, all of the pack asked.
@@ -404,7 +449,7 @@ test('★★ LEGS — the backup leg\'s walk is held to the measured line; the m
   const u0 = backup({ socNowPct: 60, horizon: post, chargeCapKw: 17 });
   const u1 = backup({ socNowPct: 60, horizon: post, chargeCapKw: 17, cushionPoolScale: S944 });
   assert.deepEqual([u0.requiredExtraKwh, u0.setpointSocPct, u0.bindingCap, u0.cushionShortfall], [78.93, 99.2, 'requirement', false]);
-  assert.deepEqual([u1.requiredExtraKwh, u1.setpointSocPct, u1.bindingCap, u1.cushionShortfall], [43.82, 100, 'poolHeadroom', true]);
+  assert.deepEqual([u1.requiredExtraKwh, u1.setpointSocPct, u1.bindingCap, u1.cushionShortfall], [41.76, 100, 'poolHeadroom', true]);
   // The mid-day leg: no load after the window, so R is the line itself and T_mid's line term sets it.
   const mid = (o: Partial<NightChargeInputs> = {}) => plan({
     objectiveMode: 'cost', costMaxSocPct: 90, forceChargeEligible: true, socNowPct: 20,
@@ -454,8 +499,12 @@ test('★★★ the year with an explicit nameplate scale ({ 1, \'nameplate\' })
   assert.equal(n, labels.length);
 });
 
-test('★★★ the year at 0.944 against the golden\'s planner: nothing falls, no charge night holds, and the counts as measured', () => {
+test('★★★ the year at 0.944 against the golden\'s planner: no line, write, write level or cost ceiling falls, no charge night holds, and the counts as measured', () => {
+  // v1.202.0 — the walks count the pool on the scale (plannerPoolKwh), so the kWh figures on the smaller pool (the
+  // requirement, the buys) and a hold's no-buy setpoint may fall: counted, never asserted up. A disclosed shortfall may
+  // vanish where the window's kWh are more points of the measured pool (counted). Every figure a write follows does not.
   let lineUp = 0, buyUp = 0, reqUp = 0, setpointUp = 0, writtenUp = 0, expectedUp = 0, costUp = 0, shortfallOn = 0, islanded = 0, legacy = 0;
+  const down = { buy: 0, req: 0, expected: 0, setpointHold: 0, setpointCharge: 0, shortfallOff: 0 };
   let maxLine = 0, maxBuy = 0, maxReq = 0, maxExpected = 0;
   let maxReqAt = '';
   const env = { base: 0, fix: 0, base2130: 0, fix2130: 0, baseNoFc: 0, fixNoFc: 0 };
@@ -472,22 +521,31 @@ test('★★★ the year at 0.944 against the golden\'s planner: nothing falls, 
     assert.equal(planDigest(b), GOLDEN.digests[c.label], `${c.label}: the base is the golden`);
     const p = yearPlan(c.deps, MEASURED_SCALE);
     if (b.cushionBasis === 'islanded-outage') islanded += 1;
-    if (b.cushionBasis === 'legacy-pct') { legacy += 1; assert.equal(planDigest(p), planDigest(b), `${c.label}: legacy band moved`); }
+    // v1.202.0 — the legacy band's line keeps its percent (its walks move with the pool).
+    if (b.cushionBasis === 'legacy-pct') { legacy += 1; assert.equal(p.cushionLineSocPct, b.cushionLineSocPct, `${c.label}: legacy band moved`); }
     const up = (a: number | null | undefined, z: number | null | undefined, what: string): number => {
-      if (a == null) { assert.equal(z ?? null, null, `${c.label}: ${what} appeared`); return 0; }
+      // A figure only a charge night states appears where a hold becomes a charge (none do here: every charge stays one).
+      if (a == null) { assert.ok(z == null || (!b.chargeTonight && p.chargeTonight), `${c.label}: ${what} appeared`); return 0; }
       assert.ok(z != null && z >= a - 1e-9, `${c.label}: ${what} fell ${a} → ${z}`);
       return z - a > 1e-9 ? z - a : 0;
     };
+    /** A kWh figure on the measured pool: its rise, and a fall counted. */
+    const kwh = (a: number | null | undefined, z: number | null | undefined, k: 'buy' | 'req' | 'expected'): number => {
+      if (a == null || z == null) return 0;
+      if (z < a - 1e-9) down[k] += 1;
+      return z - a > 1e-9 ? z - a : 0;
+    };
     const dl = up(b.cushionLineSocPct, p.cushionLineSocPct, 'line');
-    const db = up(b.buyKwh, p.buyKwh, 'buyKwh');
-    const dr = up(b.requiredExtraKwh, p.requiredExtraKwh, 'requiredExtraKwh');
-    const ds = up(b.setpointSocPct, p.setpointSocPct, 'setpointSocPct');
-    const de = up(b.expectedBuyKwh, p.expectedBuyKwh, 'expectedBuyKwh');
+    const db = kwh(b.buyKwh, p.buyKwh, 'buy');
+    const dr = kwh(b.requiredExtraKwh, p.requiredExtraKwh, 'req');
+    const ds = b.setpointSocPct != null && p.setpointSocPct != null && p.setpointSocPct - b.setpointSocPct > 1e-9 ? 1 : 0;
+    if (b.setpointSocPct != null && p.setpointSocPct != null && p.setpointSocPct < b.setpointSocPct - 1e-9) down[b.chargeTonight ? 'setpointCharge' : 'setpointHold'] += 1;
+    const de = kwh(b.expectedBuyKwh, p.expectedBuyKwh, 'expected');
     const dc = up(b.costCeilingSocPct, p.costCeilingSocPct, 'costCeilingSocPct');
     up(b.expectedWriteLevelPct, p.expectedWriteLevelPct, 'expectedWriteLevelPct');
-    up(b.buyKwhDebiased, p.buyKwhDebiased, 'buyKwhDebiased');
+    if (b.chargeTonight && p.chargeTonight) assert.ok(written(p)! >= written(b)!, `${c.label}: the write fell ${written(b)} → ${written(p)}`);
     assert.ok(!(b.chargeTonight && !p.chargeTonight), `${c.label}: a charge night became a hold`);
-    assert.ok(!(b.cushionShortfall && !p.cushionShortfall), `${c.label}: a shortfall vanished`);
+    if (b.cushionShortfall && !p.cushionShortfall) down.shortfallOff += 1;
     if (dl) { lineUp += 1; maxLine = Math.max(maxLine, dl); }
     if (db) { buyUp += 1; maxBuy = Math.max(maxBuy, db); }
     if (dr) { reqUp += 1; if (dr > maxReq) { maxReq = dr; maxReqAt = c.label; } }
@@ -519,27 +577,32 @@ test('★★★ the year at 0.944 against the golden\'s planner: nothing falls, 
       if (x.costCeilingSocPct == null || x.costCeilingSocPct < x.cushionLineSocPct!) env[`${k}NoFc`] += 1;
     }
   }
-  // Measured when the change was made (v1.199.0). Every islanded-outage line moves (by up to 2.01
-  // points); 452 requirements rise, the largest +72.53 kWh where the measured line is unmeetable
-  // mid-window and the requirement takes the full-pack proxy; 166 worst-case buys (≤ +1.71 kWh), 143
-  // setpoints, 120 writes, 67 expected buys (≤ +1.99 kWh) and 5 cost ceilings rise; 4 nights the
-  // charge rate or a predicted EV holds under the measured line now disclose a shortfall.
+  // Measured when the change was made (v1.199.0), and re-measured at v1.202.0 with the walks on the measured pool
+  // (v1.199.0's figure in brackets where it moved). Every islanded-outage line moves (by up to 2.01 points); 380 (452)
+  // requirements rise, the largest +53.63 kWh (2026-12-30 13:00); 254 (166) worst-case buys rise (≤ +15.08 kWh), 241 (143)
+  // setpoints, 126 (120) writes, 119 (67) expected buys (≤ +3.61 kWh) and 9 (5) cost ceilings; 8 (4) nights the charge rate
+  // or a predicted EV holds under the line now disclose a shortfall. On the smaller pool 274 requirements, 248 worst-case
+  // buys, 336 expected buys and 97 holds' no-buy setpoints fall, and 5 disclosed shortfalls are reached; no write, write
+  // level or cost ceiling falls.
   assert.deepEqual(
-    { islanded, legacy, lineUp, reqUp, buyUp, setpointUp, writtenUp, expectedUp, costUp, shortfallOn },
-    { islanded: 702, legacy: 148, lineUp: 702, reqUp: 452, buyUp: 166, setpointUp: 143, writtenUp: 120, expectedUp: 67, costUp: 5, shortfallOn: 4 },
+    { islanded, legacy, lineUp, reqUp, buyUp, setpointUp, writtenUp, expectedUp, costUp, shortfallOn, down },
+    { islanded: 702, legacy: 148, lineUp: 702, reqUp: 380, buyUp: 254, setpointUp: 241, writtenUp: 126, expectedUp: 119, costUp: 9, shortfallOn: 8,
+      down: { buy: 248, req: 274, expected: 336, setpointHold: 97, setpointCharge: 0, shortfallOff: 5 } },
   );
   assert.ok(Math.abs(maxLine - 2.01) < 0.005, `${maxLine}`);
-  assert.ok(Math.abs(maxBuy - 1.71) < 0.005, `${maxBuy}`);
-  assert.ok(Math.abs(maxExpected - 1.99) < 0.005, `${maxExpected}`);
-  assert.deepEqual([Math.round(maxReq * 100) / 100, maxReqAt], [72.53, '2027-04-07 +1 01:30']);
+  assert.ok(Math.abs(maxBuy - 15.08) < 0.005, `${maxBuy}`);
+  assert.ok(Math.abs(maxExpected - 3.61) < 0.005, `${maxExpected}`);
+  assert.deepEqual([Math.round(maxReq * 100) / 100, maxReqAt], [53.63, '2026-12-30 13:00']);
   // The 50% envelope: a line above it cannot be written (13 such charge plans on the nameplate line,
-  // 24 on the measured one; 5 → 9 at 21:30; 10 → 15 with no force-charge stop at or above the line).
+  // 22 on the measured one — 24 with v1.199.0's walks; 5 → 9 at 21:30; 10 → 14 (15) with no force-charge stop at or above
+  // the line).
   // v1.200.0 — counted here with no line force-charge eligibility passed (the fixture's), so unchanged;
   // with index.ts passing it these are carried by the night force-charge or disclosed
   // (lineForceCharge.test.ts T4).
-  assert.deepEqual(env, { base: 13, fix: 24, base2130: 5, fix2130: 9, baseNoFc: 10, fixNoFc: 15 });
-  // As chapter 15 part 2 counts them: evening charges whose close the realized verdict can strike.
-  assert.deepEqual(evening, { charges: 209, base: 4, fix: 6 });
+  assert.deepEqual(env, { base: 13, fix: 22, base2130: 5, fix2130: 9, baseNoFc: 10, fixNoFc: 14 });
+  // As chapter 15 part 2 counts them: evening charges whose close the realized verdict can strike (212 charges, 209 with
+  // v1.199.0's walks).
+  assert.deepEqual(evening, { charges: 212, base: 4, fix: 6 });
   // A write moves only where the line crosses a whole percent: the shift is (line − floor) × (1/s − 1).
   assert.deepEqual(lineSet, { writes: 154, unchanged: 38 });
 });
@@ -562,24 +625,28 @@ test('★★★ the year at 0.944, case by case: the figures as measured (measur
 test('★★ the ledger columns: the scale and its basis where one applied, null otherwise', () => {
   assert.deepEqual(cushionPoolScaleLedgerColumns(plan({ cushionPoolScale: S944 })), { cushion_pool_scale: 0.944, cushion_pool_scale_basis: 'measured' });
   assert.deepEqual(cushionPoolScaleLedgerColumns(plan({ cushionPoolScale: { scale: 7, basis: 'held' } })), { cushion_pool_scale: 1, cushion_pool_scale_basis: 'implausible' });
-  for (const p of [plan(), plan({ islandedLoadKw: null, cushionPoolScale: S944 }), plan({ basisComplete: false, cushionPoolScale: S944 })]) {
+  for (const p of [plan(), plan({ basisComplete: false, cushionPoolScale: S944 })]) {
     assert.deepEqual(cushionPoolScaleLedgerColumns(p), { cushion_pool_scale: null, cushion_pool_scale_basis: null });
   }
+  // v1.202.0 — a legacy-pct band carries the scale its walks' pool was counted on (plannerPoolKwh).
+  assert.deepEqual(cushionPoolScaleLedgerColumns(plan({ islandedLoadKw: null, cushionPoolScale: S944 })), { cushion_pool_scale: 0.944, cushion_pool_scale_basis: 'measured' });
   // A row is self-describing: the line from its own columns, to the line's rounding.
   const p = plan({ cushionPoolScale: S944 });
   const cols = cushionPoolScaleLedgerColumns(p);
   assert.ok(Math.abs(p.reserveFloorPct + (100 * p.cushionKwh!) / (92.16 * cols.cushion_pool_scale!) - p.cushionLineSocPct!) < 0.005);
 });
 
-test('★★ the log line names the basis and the scale; unavailable and never-measured say the line is on nameplate', () => {
+test('★★ the log line names the basis and the scale; unavailable and never-measured say the plans are on nameplate', () => {
+  // v1.202.0 — the plan's pool is counted on the scale (plannerPoolKwh), and the line with it: the log line says so, as a
+  // rule for the plans that are sized (a refused plan counts no pool).
   assert.equal(cushionScaleLogText({ scale: 0.944, basis: 'measured', connectedCores: 3 }),
-    "night-charge: the outage-cushion line counts the cushion on the packs' measured capacity, ×0.944 of nameplate (measured, 3 connected Core(s))");
+    "night-charge: night-charge plans count the pool and the outage-cushion line on the packs' measured capacity, ×0.944 of nameplate (measured, 3 connected Core(s))");
   assert.equal(cushionScaleLogText({ scale: 0.95, basis: 'held', connectedCores: 3 }),
-    "night-charge: the outage-cushion line counts the cushion on the packs' measured capacity, ×0.950 of nameplate (held, 3 connected Core(s))");
+    "night-charge: night-charge plans count the pool and the outage-cushion line on the packs' measured capacity, ×0.950 of nameplate (held, 3 connected Core(s))");
   assert.equal(cushionScaleLogText({ scale: 1, basis: 'nameplate', connectedCores: 3 }),
-    'night-charge: the outage-cushion line is on nameplate — no pack capacity ratio has been measured yet (3 connected Core(s))');
+    'night-charge: night-charge plans count the pool and the outage-cushion line on nameplate — no pack capacity ratio has been measured yet (3 connected Core(s))');
   assert.equal(cushionScaleLogText(null),
-    "night-charge: the packs' measured capacity is unavailable (capacity tracker error) — the outage-cushion line is on nameplate");
+    "night-charge: the packs' measured capacity is unavailable (capacity tracker error) — night-charge plans count the pool and the outage-cushion line on nameplate");
 });
 
 /** The reference fleet: a panel with three connected Cores of five packs each at `ratio`. */

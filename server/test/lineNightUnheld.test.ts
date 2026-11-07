@@ -167,7 +167,8 @@ test('★★ U1 the spoken notice of such a plan says the cushion is not met, an
 });
 
 /** The year at a reading above the write and 4 h of cushion, every case: measured with the fix. v1.200.1 — a reading OF the write now arms (lineStandingReserve). */
-const PIN_U1_YEAR = { charge: 816, armed: 0, disclosed: 656 };
+// v1.202.0 — re-measured with the walks on the measured pool (v1.201.0: 816 charge nights, 656 disclosed).
+const PIN_U1_YEAR = { charge: 817, armed: 0, disclosed: 658 };
 
 test('★★★ U1 the year at a reading above the write: every line that could never start is disclosed, and none arms; at 49 they arm as before', () => {
   let charge = 0;
@@ -272,7 +273,8 @@ test('★★★ U1b the wiring: every live recompute reads the armed record; the
 });
 
 /** The year's plans that arm at 45 with no armed record, each recomputed against a record with no ask: measured with the fix. */
-const PIN_U1B_YEAR = { armed: 0, disclosed: 628 };
+// v1.202.0 — re-measured with the walks on the measured pool (v1.201.0: 628).
+const PIN_U1B_YEAR = { armed: 0, disclosed: 632 };
 
 test('★★★ U1b the year: no plan of the window of a record with no ask arms or states a start, and none moves a sizing figure', () => {
   let isArmed = 0;
@@ -479,7 +481,8 @@ test('★★★ U1c the ledger keeps its ask: the plan of record carries it, so 
 });
 
 /** The year's plans that arm at 45 with no armed record, each served against a record with its ask whose apply window passed: measured with the fix. */
-const PIN_U1C_YEAR = { armed: 0, disclosed: 628 };
+// v1.202.0 — re-measured with the walks on the measured pool (v1.201.0: 628).
+const PIN_U1C_YEAR = { armed: 0, disclosed: 632 };
 
 test('★★★ U1c the year: no plan of the window of a closed record arms or states a start, and none moves a sizing figure', () => {
   let isArmed = 0;
@@ -1396,9 +1399,10 @@ test('★★★ U7 a run with no re-ON left keeps its line and loses the clause:
   assert.deepEqual(planAt(45, { noReOn: null }), base);
   const closed = planAt(45, { closed: { windowStartMs: open, why: 'noReOn', writeStands: true } as never, noReOn: { windowStartMs: open, words: WORDS_SPENT } });
   assert.deepEqual(closed, planAt(45, { closed: { windowStartMs: open, why: 'noReOn', writeStands: true } as never }), 'the closure says it');
-  const noStop = planAt(30);
+  // v1.202.0 — on the measured pool the walk at a 30% floor reaches the 80% ceiling: a 29% floor stays under it.
+  const noStop = planAt(29);
   assert.equal(noStop.expectedLineCeilingStop, undefined);
-  assert.equal(planAt(30, { noReOn: { windowStartMs: open, words: WORDS_SPENT } }).rationale, noStop.rationale, 'no clause to word: "stays on" is true of a run still on');
+  assert.equal(planAt(29, { noReOn: { windowStartMs: open, words: WORDS_SPENT } }).rationale, noStop.rationale, 'no clause to word: "stays on" is true of a run still on');
 });
 
 test('★★★ U7 the walk books no re-ON the record cannot make', () => {
@@ -1418,7 +1422,7 @@ test('★★★ U7 wiring: the served plan alone reads it, the plan of record st
   assert.ok(fn.includes('  if (!shadowLeg) setLatestNightChargePlan(lineClosed != null || lineNoReOn != null || lineRunOn != null ? computeNightChargePlan({ ...inputs, armedLineStartClosed: lineClosed, armedLineNoReOn: lineNoReOn, armedLineRunOnStartMs: lineRunOn }) : plan);\n'), fn.slice(0, 200));
   assert.ok(fn.includes('  const inputs = buildNightChargeInputs(deps);\n  const plan = computeNightChargePlan(inputs);\n'), 'the plan of record');
   const SRC = readFileSync(resolve(HERE, '../src/nightChargeAdvisor.ts'), 'utf8');
-  assert.ok(SRC.includes('forceChargeLine, lineForceChargeEligible: inputs.lineForceChargeEligible === true, noReOn: lineNoReOn != null, runOn: lineRunOn, tickPoolKwh: fullKwh,'), 'the walk');
+  assert.ok(SRC.includes('forceChargeLine, lineForceChargeEligible: inputs.lineForceChargeEligible === true, noReOn: lineNoReOn != null, runOn: lineRunOn, tickPoolKwh: panelFullKwh,'), 'the walk');
   const CARD = readFileSync(resolve(HERE, '../../web/src/cards/NightChargeCard.tsx'), 'utf8');
   assert.ok(CARD.includes('expectedLineCeilingStop?: { ceilingPct: number; startTargetPct: number; noReOnWords?: string };'), 'the field reaches the card');
 });
@@ -1622,8 +1626,9 @@ test('★★★ U8 what stays: another window, an empty input and a closure leav
   // A floor above the write and an advisory plan arm no line.
   assert.deepEqual(planAt(51, { ...on, runOn: WIN_OPEN }), planAt(51, on));
   assert.deepEqual(planAt(45, { ...on, eligible: false, runOn: WIN_OPEN }), planAt(45, { ...on, eligible: false }));
-  // A plan told of no run keeps its times, to the close and to the ceiling.
-  const evening = planAt(30);
+  // A plan told of no run keeps its times, to the close and to the ceiling (v1.202.0: a 29% floor stays under the ceiling
+  // on the measured pool; 30% reaches it).
+  const evening = planAt(29);
   assert.equal(evening.expectedLineCeilingStop, undefined);
   assert.match(evening.rationale, /the force-charge for the outage line runs from ~\S+ to the window close and takes it to /, evening.rationale);
   assert.match(evening.rationale, /so the panel's force-charge switches on at ~\S+ and stays on until the window closes/, evening.rationale);
@@ -1868,5 +1873,5 @@ test('★★★ U8 wiring: beside the closure and the no-re-ON, on their terms: 
   assert.ok(fn.includes('  const inputs = buildNightChargeInputs(deps);\n  const plan = computeNightChargePlan(inputs);\n'), 'the plan of record');
   assert.ok(fn.includes('  return { plan, extras };\n}'), 'the caller gets the first compute');
   const SRC = readFileSync(resolve(HERE, '../src/nightChargeAdvisor.ts'), 'utf8');
-  assert.ok(SRC.includes('noReOn: lineNoReOn != null, runOn: lineRunOn, tickPoolKwh: fullKwh,'), 'the walk');
+  assert.ok(SRC.includes('noReOn: lineNoReOn != null, runOn: lineRunOn, tickPoolKwh: panelFullKwh,'), 'the walk');
 });

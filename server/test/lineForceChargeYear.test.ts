@@ -45,7 +45,10 @@ import { MEASURED_SCALE } from './fixtures/measuredCushionLineFigures.js';
  * T17 — the identity: every plan A5 must not move is byte-identical to 962e4668 (fixtures/lineForceCharge.a5Identity
  * .json, generated there before the change, per (h, basis, cost gate, eligibility) group). Guarded: eligibility false
  * or absent; at eligibility true, no line ask, the backup leg's disclosure, a carried night in cost mode, and a
- * carried line-mode night that is not deliverable-bound and whose walk holds its line. 4 h — the live shape, no line
+ * carried line-mode night that is not deliverable-bound and whose walk holds its line.
+ * v1.202.0 — re-cut: a cost-mode line night is no longer guarded (its drawback past the stop is walked and disclosed); the
+ * nameplate ('np') groups were regenerated with that guard on c692f30e and on v1.202.0 and are byte-identical; the 0.944
+ * ('m') groups move by design (the walks on the measured pool) and are v1.202.0's own, pinned. 4 h — the live shape, no line
  * above 50 on the year — must be guarded whole. The suite checks a fixed sample of hours; A5_IDENTITY_FULL=1 checks
  * every group (the gates run it), and A5_IDENTITY_WRITE=1 writes the fixture (run on the base only).
  */
@@ -133,13 +136,19 @@ function sweep(basis: Basis, depsOf: (d: Deps) => Deps): Sweep {
       const L = p.cushionLineSocPct ?? null;
       const E = p.expectedWriteLevelPct ?? null;
       const lineMode = p.expectedForceChargeMode === 'line';
+      // v1.202.0 — a night the cost force-charge carries closes where its walk past the stop ends (expectedCloseAfterStopPct,
+      // present where under the line); its level E is the stop.
+      const closeAfter = (p as Plan & { expectedCloseAfterStopPct?: number }).expectedCloseAfterStopPct ?? null;
+      const closeE = lineMode ? E : (closeAfter ?? E);
       const r: Row = {
         line: L, armed: p.forceChargeLine != null, cause: p.cushionShortfallCause ?? null, reason: p.cushionEnvelopeReason ?? null,
         sf: p.cushionShortfall === true, E, buy: p.expectedBuyKwh ?? null, bound: p.expectedDeliverableBound === true,
         target: p.chargeTonight ? nfc.armedWriteLevelPct(p as never, gates) : null,
         ceil: p.chargeTonight && mode != null ? mode.panelCeilingPct : null,
         qual: p.forceChargeLine != null || p.cushionShortfallCause != null,
-        kind: !lineMode || L == null ? null : L > 100 ? 'aboveFull' : !holds(E, L) ? 'closeUnder' : p.cushionEnvelopeReason === 'nearFull' ? 'nearFull' : null,
+        kind: L == null || p.forceChargeLine == null ? null
+          : !lineMode ? (closeAfter != null && !holds(closeAfter, L) ? 'closeUnder' : null)
+            : L > 100 ? 'aboveFull' : !holds(E, L) ? 'closeUnder' : p.cushionEnvelopeReason === 'nearFull' ? 'nearFull' : null,
       };
       const where = `${c.label} ${basis} ${h} h`;
       if (serverKind != null && cardKind != null) {
@@ -155,7 +164,9 @@ function sweep(basis: Basis, depsOf: (d: Deps) => Deps): Sweep {
       if (r.reason === 'nearFull') s.nearFull += 1;
       if (r.reason === 'closeUnder') s.closeUnder += 1;
       if (r.kind != null) s.kinds[r.kind as keyof Sweep['kinds']] += 1;
-      if (r.armed && !r.sf && L != null && !holds(E, L)) { s.undisclosedUnder += 1; note(`${where}: carried, ~${E}% under ${L}%, undisclosed`); }
+      if (r.armed && !r.sf && L != null && !holds(closeE, L)) { s.undisclosedUnder += 1; note(`${where}: carried, ~${closeE}% under ${L}%, undisclosed`); }
+      // v1.202.0 — a cost-carried night disclosed by its walk past the stop says so in the rationale.
+      if (!lineMode && r.kind === 'closeUnder' && !UNDER_NOTE.test(p.rationale)) { s.textMissing += 1; note(`${where}: no under-line NOTE (cost-carried)`); }
       if (r.qual) { qualN[h] = (qualN[h] ?? 0) + 1; buySum[h] = (buySum[h] ?? 0) + (r.buy ?? 0); }
       if (L != null && p.chargeTonight && p.cushionBasis === 'islanded-outage' && Math.min(100, Math.ceil(L - 1e-9)) > 50
         && (p.requiredExtraKwh ?? 0) > 0 && !r.qual) { s.carrierRest += 1; note(`${where}: qualifying, neither armed nor disclosed`); }
@@ -167,7 +178,9 @@ function sweep(basis: Basis, depsOf: (d: Deps) => Deps): Sweep {
         // H1 — the window's reach on a deliverable-bound walk: the window-open pool plus what the window delivers
         // (expectedBuyKwh × legEff on a bound walk), no P50 sun in an overnight window; never under the reserve.
         if (r.bound && E != null && p.expectedStartSocPct != null && r.buy != null) {
-          const reach = p.expectedStartSocPct + ((r.buy * (deps.legEff ?? 0.927)) / deps.fullKwh) * 100;
+          // v1.202.0 — a percent of the plan's own pool (NightChargePlan.planPool: the measured capacity where a scale moved it).
+          const poolKwh = (p as Plan & { planPool?: { kwh: number } }).planPool?.kwh ?? deps.fullKwh;
+          const reach = p.expectedStartSocPct + ((r.buy * (deps.legEff ?? 0.927)) / poolKwh) * 100;
           if (E > Math.max(50, reach) + 0.15) { s.reachOver += 1; note(`${where}: ~${E}% stated, reach ${reach.toFixed(1)}%`); }
           if (p.expectedLineCeilingStop != null && reach < p.expectedLineCeilingStop.ceilingPct - 0.15) {
             s.stopUnreached += 1; note(`${where}: a ${p.expectedLineCeilingStop.ceilingPct}% stop stated, reach ${reach.toFixed(1)}%`);
@@ -237,19 +250,24 @@ const ALL_ZERO = { m1: 0, m2: 0, m3: 0, m4: 0, undisclosedUnder: 0, carrierRest:
  *  93.8 → 50%, 14.81 kWh both; 13:00 the same); `buyFalls` — steps whose expected buy falls, the largest `buyFallMax`;
  *  `closeUnderVanish` — a 'closeUnder' disclosure gone at
  *  the next hour (its walk rose above the rising line); `meanBuyQual` — the mean expected buy per armed or disclosed plan,
- *  per hour (not monotone: the set grows with h). */
+ *  per hour (not monotone: the set grows with h).
+ *  v1.202.0 — re-measured. On nameplate (no scale, no standby: v1.201.0's walks) only the cost-carried nights whose walk past
+ *  the stop closes under their line move: 17 more 'closeUnder' (carried 4819 → 4802, kinds 777 → 794, a disclosure that
+ *  vanishes at the next hour 6 → 11). At 0.944 the walks are on the measured pool too (v1.201.0: armed 5664, carried 5030,
+ *  closeUnder 32, kinds 895 / 194 / 209, eFalls 395, eFallsNonBoundGt5 18, eFallMaxNonBound 19.9, buyFalls 138,
+ *  closeUnderVanish 4, buyFallMax 9.24 at 2027-01-27 21:30 16 → 17 h). */
 const PIN_A5: Record<Basis, ReturnType<typeof PINNED>> = {
   np: {
-    armed: 5262, carried: 4819, nearFull: 418, closeUnder: 25, kinds: { closeUnder: 777, aboveFull: 95, nearFull: 175 },
-    eFalls: 384, eFallsNonBoundGt5: 29, eFallMaxNonBound: 18.9, buyFalls: 136, closeUnderVanish: 6,
+    armed: 5262, carried: 4802, nearFull: 418, closeUnder: 42, kinds: { closeUnder: 794, aboveFull: 95, nearFull: 175 },
+    eFalls: 384, eFallsNonBoundGt5: 29, eFallMaxNonBound: 18.9, buyFalls: 136, closeUnderVanish: 11,
     eFallMax: { d: 40, at: '2026-11-13 13:00 np 15 → 16 h' }, buyFallMax: { d: 9.25, at: '2026-10-13 13:00 np 10 → 11 h' },
     meanBuyQual: { 4: null, 5: 40.35, 6: 29.96, 7: 32.29, 8: 28.89, 9: 30.44, 10: 32.1, 11: 32.09, 12: 32.44, 13: 33.09, 14: 33.23, 15: 34.07, 16: 35.18, 17: 35.87, 18: 36.18, 19: 36.99, 20: 37.66 },
   },
   m: {
-    armed: 5664, carried: 5030, nearFull: 602, closeUnder: 32, kinds: { closeUnder: 895, aboveFull: 194, nearFull: 209 },
-    eFalls: 395, eFallsNonBoundGt5: 18, eFallMaxNonBound: 19.9, buyFalls: 138, closeUnderVanish: 4,
-    eFallMax: { d: 43.8, at: '2027-05-28 21:30 m 19 → 20 h' }, buyFallMax: { d: 9.24, at: '2027-01-27 21:30 m 16 → 17 h' },
-    meanBuyQual: { 4: null, 5: 31.64, 6: 29.19, 7: 30.54, 8: 29.55, 9: 31.86, 10: 32.22, 11: 32.41, 12: 32.38, 13: 33.21, 14: 33.76, 15: 34.86, 16: 35.96, 17: 36.2, 18: 37.14, 19: 37.69, 20: 38.04 },
+    armed: 5687, carried: 5023, nearFull: 602, closeUnder: 62, kinds: { closeUnder: 873, aboveFull: 194, nearFull: 210 },
+    eFalls: 484, eFallsNonBoundGt5: 29, eFallMaxNonBound: 19.6, buyFalls: 163, closeUnderVanish: 15,
+    eFallMax: { d: 43.8, at: '2027-05-28 21:30 m 19 → 20 h' }, buyFallMax: { d: 8.26, at: '2027-01-27 21:30 m 16 → 17 h' },
+    meanBuyQual: { 4: null, 5: 30.41, 6: 27.56, 7: 29.77, 8: 28.8, 9: 31.08, 10: 31.43, 11: 31.35, 12: 31.6, 13: 32.32, 14: 32.88, 15: 33.96, 16: 35.07, 17: 35.29, 18: 36.14, 19: 36.77, 20: 37.01 },
   },
 };
 /** (T22) Measured on the landed change: window-bound line-mode plans of the year at 4-20 h (the live cost gate), and those
@@ -257,7 +275,7 @@ const PIN_A5: Record<Basis, ReturnType<typeof PINNED>> = {
  *  notice says end short. The rest state the capped close, which the window reaches as it closes. */
 const PIN_SPOKEN: Record<Basis, { boundLine: number; endsShort: number; mismatch: number }> = {
   np: { boundLine: 919, endsShort: 206, mismatch: 0 },
-  m: { boundLine: 1037, endsShort: 224, mismatch: 0 },
+  m: { boundLine: 962, endsShort: 226, mismatch: 0 }, // v1.202.0 — on the measured pool (v1.201.0: 1037, 224)
 };
 /** (L1) ARB_COST_MAX_SOC_PCT 100 on the year's cost cases at 90 or more: the start-target falls as a line crosses 90%. */
 const PIN_A5_COST100: Record<Basis, { m1: number }> = { np: { m1: 14 }, m: { m1: 19 } };
@@ -298,12 +316,14 @@ type Gate = 'fixture' | 'live';
 const ELIG: Record<Elig, boolean | undefined> = { true: true, false: false, absent: undefined };
 const GATES: Record<Gate, (d: Deps) => Deps> = { fixture: (d) => d, live: liveGate };
 
-/** A plan A5 must not move (see the header). Plain arithmetic, so the base (962e4668) classifies it alike. */
+/** A plan A5 must not move (see the header). Plain arithmetic, so the base (962e4668) classifies it alike.
+ *  v1.202.0 — a line night the cost force-charge carries is no longer guarded on either side: v1.202.0 walks its drawback past
+ *  the stop and discloses a close under the line (measuredPlannerWalks.test.ts pins those nights). */
 function guarded(p: Plan, elig: Elig): boolean {
   if (elig !== 'true') return true;
   if (p.forceChargeLine == null) return p.cushionShortfallCause == null || p.cushionEnvelopeReason === 'backupLeg';
+  if (p.expectedForceChargeMode !== 'line') return false;
   if (p.cushionShortfallCause != null) return false;
-  if (p.expectedForceChargeMode !== 'line') return true;
   if (p.expectedDeliverableBound === true) return false;
   return holds(p.expectedWriteLevelPct, p.cushionLineSocPct!);
 }
@@ -334,7 +354,7 @@ if (process.env.A5_IDENTITY_WRITE === '1') {
     }
     writeFileSync(FIXTURE, `${JSON.stringify({
       generatedOn: process.env.A5_IDENTITY_BASE ?? 'unknown', cases: CASES.length, plans,
-      guard: 'eligibility false or absent; at eligibility true: no line ask, the backup disclosure, carried in cost mode, carried in line mode not deliverable-bound with E >= L - 0.05',
+      guard: 'eligibility false or absent; at eligibility true: no line ask, the backup disclosure, carried in line mode not deliverable-bound with E >= L - 0.05 (v1.202.0: no cost-mode line night)',
       groups,
     }, null, 1)}\n`);
   });
