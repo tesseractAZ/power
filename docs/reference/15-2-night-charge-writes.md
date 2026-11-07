@@ -397,42 +397,41 @@ fixture (nameplate, 0.944), 10 and 15 of them closing near 50 (`lineForceCharge.
   under the line, above 100% "above a full
   pool", and on a `nearFull` walk that holds "cannot hold it with its usual margin"; never "no
   force-charge". The "charge/pool caps" note needs a sizing that fell short.
-- **At run time** a night whose record carries a line ask, a cost-dominant one too, pushes when something other than the clock or the pool holds its start. The causes
+- **At run time** a night with a line ask, a cost-dominant one too, pushes when anything but the clock or the pool holds its start. The causes
   (`forceChargeBlockerClass`) are the ceiling refused or not read back, Charge Now already on, the grid
-  unknown or absent, red vitals, no slot readback, no slot connected, and an incoherent SoC.
+  unknown or absent, red vitals, no slot read back or connected, and an incoherent SoC.
   Each cause pushes once a night, after 10 minutes unbroken (`lineDeclinedPushTick`), recorded
-  first (`forceChargeLineDeclinedPushed`). The push quotes the latest start that still reaches the line at
-  the rate then, with no live reading from the reserve at the plan rate (`lineDeclinedLatestStartMs`: ⌈L⌉ by the close with a 15-minute buffer, never the last
-  20 minutes): "If it has not started by ~04:24, the pool may close under the line". An ON that never took on any slot says that, unless it
+  first (`forceChargeLineDeclinedPushed`). The push quotes the earlier of the latest starts at the
+  slot-bounded plan rate with the EV's energy and at the live rate without it, from the reserve with no live reading (`lineDeclinedLatestStartMs`: ⌈L⌉ by the close with a 15-minute buffer, never the last
+  20 minutes), and no time already gone: "If it has not started by ~04:24, the pool may close under the line". An ON that never took on any slot says that, unless it
   applies late, the add-on adds nothing above the reserve and the pool may close under the line; one
   that failed on some slots, that the pool may close short of it (`forceChargeOnFailureNight`). Both say what
-  can still lift the pool (Charge Now on for those slots in the app; the add-on switches it
-  off at the close), never "no action needed". A reserve write that never reads back on such a night says that until the panel reads 50% it keeps its own reserve, under the line, and to set 50% in the
+  can still lift the pool (Charge Now on for those slots, switched
+  off at the close), never "no action needed". A reserve write that never reads back on such a night says it keeps its own reserve, under the line, until the panel reads 50%, and to set 50% in the
   app now: the last start, the close less 20 minutes, may close under the line. With no start left
   (`forceChargeStartClosed`: cancelled, too late) it and its logs say why none starts. A write missing its apply window pushes too (`missedApplyDue`): an attempt in those words (no reading: the force-charge waits on one),
   none issued naming Charge Now by hand. A write-blocked ON or ceiling sync is a held start.
 - **The line at risk** (`lineAtRiskPushDue`). After the verified ON the re-ON is the only
   remedy, so a line lost another way (a re-ON not applied or spent, its gates holding, a late load taking
   the grid cap, the ON-reading latch below) pushes once a night, stamped before it goes
-  (`forceChargeLineAtRiskPushedAtMs`). It needs a record with a line ask (a cost-dominant one too) and the line gate on, no OFF issued (its own stop too), over 20 minutes before
+  (`forceChargeLineAtRiskPushedAtMs`). It needs a line ask (a cost-dominant one too) and the line gate on, no OFF issued (its own stop too), over 20 minutes before
   the add-on's close OFF (`FORCE_CHARGE_LINE_AT_RISK_LEAD_MS`, the re-ON's cutoff), a fresh, coherent pool under the start target (⌈L⌉ + 5 on a cost-dominant night) and below a reading at least 10 minutes
-  older, or level with it at or under ⌈L⌉, with no slot off only once the time left no longer covers ⌈L⌉ at the plan rate (`lineFlatPushHeld`; `FORCE_CHARGE_LINE_TREND_MS`, the two-sample trail
+  older, or level with it at or under ⌈L⌉, with no slot off only once the time left no longer covers ⌈L⌉ at the slot-bounded plan rate (`lineFlatPushHeld`; `FORCE_CHARGE_LINE_TREND_MS`, the two-sample trail
   `lineNightObservations` stamps first, with the panel's own stop, anew after a re-ON or a slot seen ON; `lineTrendReference`
   takes only a reading 15 minutes or more after the last ON or re-ON, past one checked not applied, or a
   slot seen ON again that no ON of ours explains, `forceChargeLineOnSeenAtMs`, or an ON verified late), and no re-ON due nor a
-  rate-limited one's retry due a full tick before the cutoff (else `reOnRefused`, judged on its own tick and after a ceiling lowering; "may try once more" only where a tick can). Above a 95% line the re-ON and the push key on 95, under the line; emulated, the push reaches none of the
-  near-full nights that close under. It names the slots: reading OFF, Charge Now on can still lift the pool; reading ON, the pool not
-  rising, off and on again may restart the charge. A cost-dominant night's push names ⌈L⌉ + 5 by its margin over the
-  line and says its cost force-charge is not switched back on. No write rests on the ON-reading shape; when seen (slots of ours ON, their Cores under the ceiling, the pool falling against
+  rate-limited one's retry due a full tick before the cutoff (else `reOnRefused`, judged on its own tick and after a ceiling lowering; "may try once more" only where a tick can). Above a 95% line the re-ON and the push key on 95, under the line; emulated, the push reaches no
+  near-full night that closes under. It names the slots: reading OFF, Charge Now on can still lift the pool; reading ON, the pool not
+  rising, stopping a large load may let it rise; with none on, off and on again may restart the charge. A cost-dominant night's push names ⌈L⌉ + 5 by its margin over the
+  line, and its cost force-charge as not switched back on. No write rests on the ON-reading shape; seen (slots of ours ON, their Cores under the ceiling, the pool falling against
   `lineTrendReference`) one warning is logged a night (`lineOnReadingShape`), never on the measured latch. A `gridLoss` OFF no abort reports is pushed (`lineGridOffPushDue`).
-- **The morning account** of a night whose record carries a line ask says it "ran to the window close
+- **The morning account** of a night with a line ask says it "ran to the window close
   for the 55.6% outage line" only when its OFF was the window's; any other OFF says when and why ("until
-  3:30am (switched off: …)"), and the panel's own stop that
-  ended it "until the panel's own stop switched Charge Now off at 3:10am". It names the re-ONs ("after
+  3:30am (switched off: …)"), and the panel's own stop "until the panel's own stop switched Charge Now off at 3:10am". It names the re-ONs ("after
   the panel's own stop" only with it on record) and those a check found off. The stop ended the charge
-  unless a re-ON after it took (`forceChargeLineReOnAppliedAtMs`) or a slot read ON again; when the last
-  re-ON took on no slot and none read ON after it, it says Charge Now "read off" before the close. The close reading follows, "under the 55.6% outage line"
-  when under, and "the pool was not read at the close" with no fresh reading; over 15 minutes late, the pool "now", no verdict (`lineCloseReadingLate`); a grid loss or cancel gives the reading then. A write never read back is told so, not "raised", there and on the banner (`lineWriteUnreadStatus`). A night with nothing to restore (no write, a foreign reserve) has its own account at the close (`lineCloseAccountDue`). A night with no line ask
+  unless a re-ON after it took (`forceChargeLineReOnAppliedAtMs`) or a slot read ON again; with the last
+  re-ON taking on no slot and none reading ON after it, Charge Now "read off" before the close. The close reading follows, "under the 55.6% outage line"
+  when under, "the pool was not read at the close" with no fresh reading; over 15 minutes late, the pool "now", no verdict (`lineCloseReadingLate`); a grid loss or cancel gives the reading then. A write never read back is told so, not "raised", there and on the banner (`lineWriteUnreadStatus`). A night with nothing to restore (no write, a foreign reserve) has its own account at the close (`lineCloseAccountDue`). A night with no line ask
   reads as v1.199.1, word for word (`fixtures/lineNightCostTexts.v1199.json`).
 - **Strikes.** A carried night whose sizing held (`cushion_shortfall` = 0) is clean at or above its line and
   a strike, fail-closed, under it (a run-time refusal, an ON that never took, a slow pack, a late load taking
