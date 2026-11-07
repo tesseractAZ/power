@@ -31,8 +31,9 @@ import {
  * In the order of the release's items: T1 the reference plant; T2 applied once; T3 the line; T4 / T4b the fail-safes; T5 the
  * resilience floor of every write and the minimum-buy hold's bound; T6 the cost room at v1.201.0's percent; T7 the tick's
  * mirror; T8 the year against v1.201.0 (measuredPlannerWalks.figures.json `main`, frozen on c692f30e); T9 the figures as
- * measured (its `c` part); T10 the shadow's pool; T11 the legacy band and a disabled cushion; T12 the walk standby's
- * monotone set; T13 no line night under its line undisclosed; T14 the cost-carried drawback; T15 the ledger.
+ * measured (its `c` part); T10 the shadow's pool; T11 / T11b the legacy band and a disabled cushion, and as their walks'
+ * standby rises; T12 the walk standby's monotone set; T13 no line night under its line undisclosed; T14 the cost-carried
+ * drawback; T15 the ledger.
  */
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -119,6 +120,24 @@ test('★★★ T2 APPLIED ONCE — on the year (the fixture\'s state, every hou
   }
   assert.ok(plans >= 5000, `${plans} plans`);
   assert.deepEqual(differ.slice(0, 8), [], `${differ.length} figures differ`);
+  // And where the clamp at the pool's top binds: the legacy band's whole-house walk (its setpoint's arm test) on a sunny
+  // day, P10 PV of 12-30 kW from 09:00 to 15:00, fills the pool before the evening trough. On the year the clamp moves no setpoint (measured at ×0.944 and ×0.8, 4-20 h).
+  const sunny: string[] = [];
+  let sunnyPlans = 0;
+  const hourOf = (ms: number): number => new Date(ms - 7 * 3_600_000).getUTCHours();
+  for (const c of CASES) {
+    if (yearPlan(c.deps).cushionBasis !== 'legacy-pct') continue;
+    for (const pv of [12_000, 20_000, 30_000]) {
+      const d = c.deps as NightChargeInputDeps & { bandHours: Array<{ ts: number; pvP10W: number; pvP50W?: number }> };
+      const deps = { ...d, cushionStandbyW: 270, bandHours: d.bandHours.map((x) => (hourOf(x.ts) >= 9 && hourOf(x.ts) <= 15 ? { ...x, pvP10W: pv, pvP50W: Math.max(pv, x.pvP50W ?? 0) } : x)) } as NightChargeInputDeps;
+      const p = yearPlan(deps, { scale: S944 });
+      const q = yearPlan(scaledSurplus(deps, 0.944));
+      sunnyPlans += 1;
+      for (const f of T2_FIELDS) if (JSON.stringify(p[f] ?? null) !== JSON.stringify(q[f] ?? null)) sunny.push(`${c.label} ${pv} W ${f}: ${p[f]} vs ${q[f]}`);
+    }
+  }
+  assert.ok(sunnyPlans >= 400, `${sunnyPlans} sunny plans`);
+  assert.deepEqual(sunny.slice(0, 8), [], `${sunny.length} sunny figures differ`);
 });
 
 /* ══ T3 — the line ══════════════════════════════════════════════════════════════════════════════════════ */
@@ -157,6 +176,8 @@ test('★★★ T4 (pin) FAIL-SAFE — no scale, one that is no reading, or a un
       const p = yearPlan(c.deps, { scale: sc });
       assert.equal(sc == null ? planDigest(p) : withoutScale(p), GOLDEN.digests[c.label], `${c.label} ${JSON.stringify(sc)}`);
       assert.equal('planPool' in p, false, `${c.label} ${JSON.stringify(sc)}: no planPool`);
+      // The key, too, is v1.201.0's: only an islanded-outage line records a unit or ignored scale.
+      if (sc != null && p.cushionBasis !== 'islanded-outage') assert.equal('cushionPoolScale' in p, false, `${c.label} ${JSON.stringify(sc)}: no key`);
     }
   }
 });
@@ -391,6 +412,38 @@ test('★★ T11 THE LEGACY BAND AND A DISABLED CUSHION: the band\'s percent and
     if (base.chargeTonight) assert.ok(p.chargeTonight && written(p)! >= written(base)!, `${c.label}: the write`);
   }
   assert.equal(legacy, 148);
+});
+
+test('★★★ T11b THE LEGACY BAND AND A DISABLED CUSHION AS THE WALKS\' STANDBY RISES (0-1500 W in 30 W steps; no scale, ×0.944 measured, ×0.8 held): the requirement, the worst-case buy, a charge night\'s write and the cost ceiling never fall, and no charge night holds — B\'s hiLift rule extended to the walks\' standby', () => {
+  // Their cushion counts no standby (standbyCounted is false), so only the walks' drain can push a night past the cliff the
+  // legacy proxy sits under (2026-12-02 21:30 on nameplate: from 0 to 30 W the proxy would drop 85.23 kWh to 60.19).
+  let cases = 0, plans = 0, unmeetable = 0;
+  const falls: string[] = [];
+  for (const c of CASES) for (const sc of [null, S944, { scale: 0.8, basis: 'held' } as CushionPoolScale]) {
+    const o = sc != null ? { scale: sc } : {};
+    let prev = yearPlan(c.deps, { ...o, w: 0 });
+    if (prev.cushionBasis === 'islanded-outage') continue;
+    cases += 1;
+    for (let w = 30; w <= 1500; w += 30) {
+      const p = yearPlan(c.deps, { ...o, w });
+      plans += 1;
+      if (p.cushionShortfall && p.requiredExtraKwh != null && p.bindingCap !== 'requirement') unmeetable += 1;
+      const at = `${c.label} ${sc?.scale ?? 'np'} ${w} W`;
+      const fell = (k: string, a: number | null | undefined, b: number | null | undefined) => {
+        if (a != null && (b == null || b < a - 1e-9)) falls.push(`${at} ${k}: ${a} → ${b}`);
+      };
+      fell('requirement', prev.requiredExtraKwh, p.requiredExtraKwh);
+      fell('worst-case buy', prev.buyKwh, p.buyKwh);
+      fell('cost ceiling', prev.costCeilingSocPct, p.costCeilingSocPct);
+      if (prev.chargeTonight) {
+        if (!p.chargeTonight) falls.push(`${at}: a charge night holds`);
+        else fell('write', written(prev), written(p));
+      }
+      prev = p;
+    }
+  }
+  assert.ok(cases > 1000 && unmeetable > 10_000, `${cases} cases, ${unmeetable} unmeetable plans`);
+  assert.deepEqual(falls.slice(0, 8), [], `${falls.length} falls in ${plans} plans`);
 });
 
 /* ══ T12 — the walk standby's monotone set ══════════════════════════════════════════════════════════════ */
