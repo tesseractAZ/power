@@ -822,7 +822,7 @@ export const FORCE_CHARGE_START_CLOSED_WHY: Readonly<Record<Exclude<LineStartClo
   // (Fix9 review 1) The guard's own words: the window is still open there (60 min or more of it, a tariff's whole-hour periods).
   overGuard: 'the on-peak guard (an hour before on-peak) has begun',
   lateGuard: `${Math.round(FORCE_CHARGE_MIN_RUN_MS / 60_000)} min or less is left before the on-peak guard (an hour before on-peak)`,
-  noWrite: 'it rides a verified reserve write or the reserve read at the target, and neither came in the apply window',
+  noWrite: 'no verified reserve write, and no reading of the target with every check clear, came in the apply window',
   noArm: 'no write is armed for this window',
 });
 

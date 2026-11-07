@@ -328,7 +328,7 @@ test('★★★ S5 forceChargeStartClosed: a stamp is no "noWrite"; the grid-los
   assert.equal(nfc.forceChargeStartClosed(stood(), CLOSE - 20 * M, G), 'late');
   assert.equal(nfc.forceChargeStartClosed(stood(), CLOSE, G), 'over');
   assert.equal(nfc.lineStartClosedWords('the 55.6% outage line', 'gridLost'), 'no force-charge for the 55.6% outage line starts: the grid was lost during the window');
-  assert.equal(nfc.lineStartClosedWords('the 55.6% outage line', 'noWrite'), 'no force-charge for the 55.6% outage line starts: it rides a verified reserve write or the reserve read at the target, and neither came in the apply window');
+  assert.equal(nfc.lineStartClosedWords('the 55.6% outage line', 'noWrite'), 'no force-charge for the 55.6% outage line starts: no verified reserve write, and no reading of the target with every check clear, came in the apply window');
   assert.equal(nfc.lineStartClosedWords('the 55.6% outage line', 'foreign'), 'no force-charge for the 55.6% outage line starts: the reserve was changed');
   const closure = nfc.armedLineStartClosed(stood({ gridLostAtMs: t, forceChargeOnAtMs: t - M, forceChargeOffAtMs: t }), t, G);
   assert.deepEqual(closure, { windowStartMs: OPEN, why: 'gridLost' }, 'a run stopped by it: the same key, and no write stands');
@@ -912,7 +912,7 @@ test('★★★ S10 lineCloseAccountDue: the standing account with gridLost, nev
   assert.ok(m.body.includes('the reserve stood at 50%'), m.body);
   assert.ok(m.body.includes('never started (the grid was lost during the window)'), m.body);
   assert.ok(m.body.includes('no restore was due.'), m.body);
-  assert.doesNotMatch(m.body, /no reserve write was confirmed/, m.body);
+  assert.doesNotMatch(m.body, /no verified reserve write/, m.body);
 });
 
 test('★★★ S10 priorArmSuperseded is false: the next arm leaves its disposition, which the gate grades', () => {

@@ -395,7 +395,7 @@ const MUTANTS = [
     why: 'S5: the card and the logs would say no start comes, and one would.',
   },
   {
-    id: 'LS5-d. ★★★ the close says "no reserve write was confirmed"',
+    id: 'LS5-d. ★★★ a stood night takes the noWrite close account',
     file: NFC, tests: [T_S],
     find: "  return s.foreignSettledAtMs != null ? 'foreign' : s.reserveStandingAtMs != null || s.gridLostAtMs != null ? 'standing' : s.appliedAtMs == null ? 'noWrite' : null;",
     to: "  return s.foreignSettledAtMs != null ? 'foreign' : s.gridLostAtMs != null ? 'standing' : s.appliedAtMs == null ? 'noWrite' : null; /* MUTANT */",
@@ -900,7 +900,7 @@ const MUTANTS = [
   {
     id: 'LS8-af. ★★ "noWrite" words say none was issued',
     file: NFC, tests: [T_S],
-    find: "  noWrite: 'it rides a verified reserve write or the reserve read at the target, and neither came in the apply window',\n",
+    find: "  noWrite: 'no verified reserve write, and no reading of the target with every check clear, came in the apply window',\n",
     to: "  noWrite: 'it rides a verified reserve write, and none was issued', /* MUTANT */\n",
     why: 'S5: no longer what a start rides.',
   },
@@ -993,7 +993,7 @@ const MUTANTS = [
     why: 'S10: "no write was issued" would give a false cause, and a second push.',
   },
   {
-    id: 'LS10-i. ★★★ the close says "no reserve write was confirmed" on it',
+    id: 'LS10-i. ★★★ the close gives it the noWrite account',
     file: NFC, tests: [T_S],
     find: "  return s.foreignSettledAtMs != null ? 'foreign' : s.reserveStandingAtMs != null || s.gridLostAtMs != null ? 'standing' : s.appliedAtMs == null ? 'noWrite' : null;",
     to: "  return s.foreignSettledAtMs != null ? 'foreign' : s.reserveStandingAtMs != null ? 'standing' : s.appliedAtMs == null ? 'noWrite' : null; /* MUTANT */",

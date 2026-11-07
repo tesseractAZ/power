@@ -7510,7 +7510,7 @@ function runLineCloseAccountStep(): void {
     });
     return;
   }
-  app.log.warn(`night-charge: the ${state.day} night closed with no restore to account for (${due === 'foreign' ? (state.reserveStandingAtMs != null ? 'the reserve was changed after it read the target' : 'the reserve was set outside the add-on') : 'no reserve write was confirmed'}): the ${lineLogPct(state)}% outage line had ${state.forceChargeOnAtMs != null ? 'a force-charge that was stopped' : 'no force-charge'}, and the pool reads ${freshPoolSocPct(nowMs) ?? 'unknown'}%.`);
+  app.log.warn(`night-charge: the ${state.day} night closed with no restore to account for (${due === 'foreign' ? (state.reserveStandingAtMs != null ? 'the reserve was changed after it read the target' : 'the reserve was set outside the add-on') : 'no verified reserve write, and no reading of the target with every check clear, came in the apply window'}): the ${lineLogPct(state)}% outage line had ${state.forceChargeOnAtMs != null ? 'a force-charge that was stopped' : 'no force-charge'}, and the pool reads ${freshPoolSocPct(nowMs) ?? 'unknown'}%.`);
   void sendNotification(loadNotifyConfig(), buildLineNightCloseAccount({
     day: state.day, linePct: forceChargeLineNightPct(state)!, cause: due,
     closePoolPct: freshPoolSocPct(nowMs),

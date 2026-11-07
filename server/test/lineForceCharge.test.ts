@@ -2637,7 +2637,7 @@ test('★★★ T24 (Fix9) a line night\'s force-charge "waits on" a reading of 
     late: 'no force-charge for the 55.6% outage line starts: 20 min or less of the window is left',
     overGuard: 'no force-charge for the 55.6% outage line starts: the on-peak guard (an hour before on-peak) has begun',
     lateGuard: 'no force-charge for the 55.6% outage line starts: 20 min or less is left before the on-peak guard (an hour before on-peak)',
-    noWrite: 'no force-charge for the 55.6% outage line starts: it rides a verified reserve write or the reserve read at the target, and neither came in the apply window',
+    noWrite: 'no force-charge for the 55.6% outage line starts: no verified reserve write, and no reading of the target with every check clear, came in the apply window',
     gatedOff: 'no force-charge for the 55.6% outage line starts while the options keep it off',
     started: 'the force-charge for the 55.6% outage line was switched on earlier and does not start again',
   };

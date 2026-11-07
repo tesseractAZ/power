@@ -503,7 +503,7 @@ test('★★★ U1c the banner of a line night whose start is closed says so, ne
   const banner = cardText.actuationBannerState as unknown as (a: unknown, d: string | null, r?: number | null) => { text: string; settled: boolean; cancel: string | null };
   const card = (s: NightActuationState, t: number) => ({ ...s, cancelDeadlineMs: s.windowStartMs, ...status(s, t) });
   const past = OPEN + APPLY_LATE_MS + M;
-  const NO_WRITE = 'No force-charge for the 55.6% outage line starts: it rides a verified reserve write or the reserve read at the target, and neither came in the apply window.';
+  const NO_WRITE = 'No force-charge for the 55.6% outage line starts: no verified reserve write, and no reading of the target with every check clear, came in the apply window.';
   // Past the apply window with no write: at any reading, nothing left to cancel, and no write "stands".
   assert.deepEqual(status(armed(), past), { lineStartClosed: { text: NO_WRITE, cancel: false } });
   for (const reading of [45, 50, null]) assert.deepEqual(banner(card(armed(), past), '23:00', reading), { text: NO_WRITE, settled: false, cancel: null });
@@ -653,7 +653,7 @@ test('★★★ U2 the missed push on a line night: no write went, so no force-c
   const m = buildNightChargeMissedApply({ ...base, reason, linePct: 55.55, targetPct: 50, attempted: false, startClosed: 'noWrite', startByText: '4:40 AM', closeText: '5:00 AM' } as never);
   assert.equal(m.severity, 'warning', 'a person can act');
   assert.match(m.body, SPAN);
-  assert.ok(m.body.endsWith(`charge did not start — ${reason}. Nothing was written; the reserve stays at 50%. No force-charge for tonight's 55.6% outage line starts: it rides a verified reserve write or the reserve read at the target, and neither came in the apply window. Charge Now switched on by hand in the EcoFlow app can still lift the pool tonight; switch it off again by ~5:00 AM.`), m.body);
+  assert.ok(m.body.endsWith(`charge did not start — ${reason}. Nothing was written; the reserve stays at 50%. No force-charge for tonight's 55.6% outage line starts: no verified reserve write, and no reading of the target with every check clear, came in the apply window. Charge Now switched on by hand in the EcoFlow app can still lift the pool tonight; switch it off again by ~5:00 AM.`), m.body);
   // Past the close nothing can be done by hand: no advice.
   const over = buildNightChargeMissedApply({ ...base, nowMs: CLOSE + H, reason, linePct: 55.55, targetPct: 50, attempted: false, startClosed: 'over', startByText: '4:40 AM', closeText: '5:00 AM' } as never);
   assert.ok(over.body.endsWith("No force-charge for Monday's 55.6% outage line starts: the window has closed."), over.body);
@@ -770,7 +770,7 @@ test('★★★ U2 the close account: what never ran, and where the pool stands 
   assert.equal(a.severity, 'info');
   assert.equal(a.dedupId, 'night_charge_actuation');
   assert.equal(a.title, 'Night-charge: no force-charge ran for the outage line');
-  assert.equal(a.body, 'Supervised night charge for 2027-01-04: no reserve write was confirmed, so no force-charge ran for the 55.6% outage line. The pool reads 41%, under the line.');
+  assert.equal(a.body, 'Supervised night charge for 2027-01-04: no verified reserve write, and no reading of the target with every check clear, came in the apply window, so no force-charge ran for the 55.6% outage line. The pool reads 41%, under the line.');
   assert.ok(account({ ...base, cause: 'noWrite', closePoolPct: 60 }).body.endsWith('The pool reads 60%, at or above the line.'));
   assert.ok(account({ ...base, cause: 'noWrite', closePoolPct: null }).body.endsWith('The pool was not read (no fresh panel reading).'));
   const f = account({ ...base, cause: 'foreign', closePoolPct: 53 });
@@ -1016,7 +1016,7 @@ test('★★★ U6 the card leads with a closed start no write stands behind, an
   const lead = (cardText as unknown as { startClosedLead: (p: unknown) => { headline: string; detail: string } | null }).startClosedLead;
   const open = planAt(45).window!.startMs;
   for (const [why, detail] of [
-    ['noWrite', 'No force-charge for it starts: it rides a verified reserve write or the reserve read at the target, and neither came in the apply window.'],
+    ['noWrite', 'No force-charge for it starts: no verified reserve write, and no reading of the target with every check clear, came in the apply window.'],
     ['cancelled', 'No force-charge for it starts: the night was cancelled.'],
     ['foreign', 'No force-charge for it starts: the reserve was changed.'],
     ['reverted', "No force-charge for it starts: the reserve's restore was sent."],

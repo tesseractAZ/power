@@ -1168,7 +1168,7 @@ export function buildLineNightCloseAccount(o: {
   const pool = read == null ? 'The pool was not read (no fresh panel reading).'
     : `The pool reads ${read}%, ${read < o.linePct ? 'under' : 'at or above'} the line.`;
   const ran = o.onAtMs != null && Number.isFinite(o.onAtMs);
-  const head = o.cause === 'noWrite' ? 'no reserve write was confirmed'
+  const head = o.cause === 'noWrite' ? 'no verified reserve write, and no reading of the target with every check clear, came in the apply window'
     : o.standing === true ? "the reserve was changed after it read the night's target" : 'the reserve was set outside the add-on';
   const off = o.offAtMs != null && Number.isFinite(o.offAtMs)
     ? (o.offReason == null || o.offReason === 'windowEnd' ? 'to the window close'
