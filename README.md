@@ -67,8 +67,8 @@ power and an energy sensor for every Smart Home Panel 2 circuit; the energy coun
 Energy Dashboard), and opt-in **Home Assistant notifications** with companion-app push.
 
 Every change ships through the test suite, and a guard that a plausible refactor could silently
-disarm is held by a committed mutation harness: **145 harnesses** holding
-**4971 anchor-asserted mutants**. The harness, mutant, test and reference counts, the engine
+disarm is held by a committed mutation harness: **146 harnesses** holding
+**5115 anchor-asserted mutants**. The harness, mutant, test and reference counts, the engine
 floor and group counts, and every engine-index row's code anchor are checked against the tree in
 CI ([Quality & accuracy](#quality--accuracy)).
 
@@ -260,7 +260,7 @@ objectives, the ledger, and the planners that only advise.
     entities, an API, an evening notification (21:30 site time by default) and the
     dashboard's night-charge card.
   - **`supervised`** — one announced, cancellable, bounded reserve write per charge
-    night: armed only after an announcement channel confirms delivery, clamped to
+    night, none when the panel already reads the night's target: armed only after an announcement channel confirms delivery, clamped to
     the panel's 10–50% reserve range, readback-verified on both the apply and the
     revert, restored at the window close (an hour before on-peak at the latest)
     or at once on a cancel or a grid loss, and audit-logged. Nothing is raised
@@ -270,8 +270,10 @@ objectives, the ledger, and the planners that only advise.
     raised reserve. With the `cost` objective and `ARB_COST_MAX_SOC_PCT` above 50,
     the panel's own per-channel force-charge then carries the pack past the reserve
     ceiling toward the night's target: it switches on just in time, in the last
-    stretch of a night whose reserve write has read back, and off — verified off —
-    at the target or the window close.
+    stretch of a night whose reserve write has read back, or whose reserve already
+    read the target, and off — verified off — at the target or the window close. A
+    night whose outage-cushion line is above 50% is force-charged toward it in the
+    same modes, whatever the objective, until the window closes.
   - **`auto`** — behaves exactly as `supervised`. Any behaviour of its own must
     branch on a fail-closed readiness gate that graduates only on actuated-night
     evidence (≥21 scored nights, under-buy ≤10%, sizing bias in [0, 5] kWh, band
@@ -445,7 +447,7 @@ want to do, and the add-on's Configuration tab shows each one's help text.
 ## Development
 
 ```bash
-cd server && npm install && npm test     # 6,266 tests
+cd server && npm install && npm test     # 6,348 tests
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.json      # src
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.test.json # src + tests
 cd web    && npm install && npm run build
