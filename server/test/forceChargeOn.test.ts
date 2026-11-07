@@ -279,7 +279,9 @@ test('★★★ index.ts: the failure is persisted once, logged as a warning and
   // v1.187.22 — the push is built where its text is tested (notify.buildNightForceChargeOnFailure:
   // a warning, deduped on night_charge_force_charge_on_failure — nightChargeExpectedBuy.test.ts).
   // v1.196.0 — with each slot's Core and its own settings (forceChargeFailedCore.test.ts).
-  assert.match(b, /await sendNotification\(loadNotifyConfig\(\), buildNightForceChargeOnFailure\(\{\n\s+day: state\.day, slots: action\.slots, ourSlots: state\.forceChargeSlots, retries: state\.forceChargeOnRetries,\n\s+noRetry: action\.noRetry === true, ceilingPct: state\.forceChargeCeilingPct,\n\s+cores: slotCores,\n\s+\}\)\);/);
+  // v1.200.0 — on a line night it names the line, not a stop (lineForceCharge.test.ts T9); (review 2) on every night
+  // whose RECORD carries a line ask, a cost-dominant one too (forceChargeOnFailureNight; lineForceChargeAtRisk.test.ts W5).
+  assert.match(b, /await sendNotification\(loadNotifyConfig\(\), buildNightForceChargeOnFailure\(\{\n\s+day: state\.day, slots: action\.slots, ourSlots: state\.forceChargeSlots, retries: state\.forceChargeOnRetries,\n\s+noRetry: action\.noRetry === true,\n(\s+\/\/[^\n]*\n)*\s+\.\.\.forceChargeOnFailureNight\(state\),\n\s+cores: slotCores,\n\s+\}\)\);/);
   assert.ok(!b.includes('setChannelForceCharge'), 'the warning writes nothing');
   const v = branch('onVerified');
   assert.ok(v.includes('persistNightActuation({ ...nightActuationMem, forceChargeOnVerifiedAtMs: nowMs });'));

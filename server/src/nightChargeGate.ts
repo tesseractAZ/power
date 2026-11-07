@@ -42,7 +42,7 @@
  * ═════════════════════════════════════════════════════════════════════════ */
 
 import type { NightLedgerRow } from './recorder.js';
-import { PLAN_TRAJ_BREACH_TOLERANCE_PCT } from './nightChargeAdvisor.js';
+import { LINE_CLOSE_EDGE_EPS, PLAN_TRAJ_BREACH_TOLERANCE_PCT } from './nightChargeAdvisor.js';
 import { siteYmd } from './siteTime.js';
 
 const DAY_MS = 86_400_000;
@@ -90,12 +90,24 @@ function maxYmd(a: string, b: string): string { return a >= b ? a : b; }
  *  plan_traj_floor_breached the sized trough against that line, buy_err_kwh its formula
  *  (the line moves the planned buy and the planner's own need together), cushion_breached
  *  the pool at the close against that line. A pool held at ⌈line⌉ reads at or above the
- *  line, EXCEPT where the line is above the 50% reserve envelope: the write is 50, and
- *  with no force-charge stop at or above the line the close can sit under it with no
- *  shortfall disclosed — a realized strike, as before v1.199.0 (13 charge plans of
- *  legacyIdentity's year on the nameplate line, 24 on the measured one at 0.944;
- *  measuredCushionLine.test.ts counts them). (v1.194.0 — the rule stated as practised; it read "bumped on
- *  ANY planner physics/algorithm change", which no change since v1.105.0 followed.)
+ *  line. v1.200.0 — so does a line above the 50% reserve envelope, which the 50% write cannot hold: such a
+ *  charge plan ARMS the night force-charge, which runs to the window close in line mode
+ *  (cushion_line_force_charge_pct records its ask), and is CARRIED, or DISCLOSED (cushion_shortfall = 1 with
+ *  cushion_envelope_shortfall = 1: advisory mode, the backup leg (nothing armed); (A5) a line within 10 points of
+ *  full or a walk closing under the line (armed: both columns set)), and a disclosed row is exempt like any other —
+ *  except an ARMED row whose force-charge never switched on (force_charge_on_at_ms NULL) and that closed under its line
+ *  (capped at a full pool): a strike (armedNeverRanUnder below). v1.200.0 also kept 3: no scored column's formula or sign
+ *  moved — buy_err_kwh (the buy is unchanged), plan_traj_floor_breached (the SIZED trough against the line,
+ *  never capped), cushion_breached (the close against the line), cushion_shortfall (still "the plan
+ *  disclosed it cannot hold its line", now with more causes). A CARRIED night whose sizing held its line
+ *  (cushion_shortfall 0) that closes under it — a run-time refusal (the ceiling refused, Charge Now already
+ *  on, the grid unknown, vitals red), an ON that never took, or a pack slower than the start was timed
+ *  for — remains a STRIKE, fail-closed; a carried night whose sizing fell short (cushion_shortfall 1, the
+ *  caps note, cushion_envelope_shortfall 0) is exempt as any disclosed row is, unless its armed force-charge
+ *  never switched on (armedNeverRanUnder). `lineForceChargeStrikes` counts the strikes with an ask so they
+ *  read apart from the planner's. (v1.194.0 — the rule stated
+ *  as practised; it read "bumped on ANY planner physics/algorithm change", which no change since v1.105.0
+ *  followed.)
  *
  *  v1.194.0 — what the charge leg does to `buy_err_kwh`. The column keeps its
  *  formula, −netMiss/legEff (plannerSizingNeedBuyKwh), which converts every kWh of
@@ -127,6 +139,10 @@ function maxYmd(a: string, b: string): string { return a >= b ? a : b; }
  *  deliberate: 16 nights of an unusable metric are worth less than a clean
  *  start on a sound one. */
 export const CURRENT_ALGO_VERSION = 3;
+
+/** v1.200.0 (Fix9 review 1) — how the ledger's arm_disposition opens on a leg whose apply window passed with no write (index.ts
+ *  runMissedApplyStep): the gate reads it on a line night (lineWriteNeverHeld). */
+export const MISSED_APPLY_DISPOSITION = 'missed — ';
 
 /** Graduation floor: scored ACTUATED nights (a bounded reserve write applied,
  *  delivery measured) before AUTO is considerable. ~3 weeks at one per night. */
@@ -232,6 +248,10 @@ function mean(xs: number[]): number | null {
  *  is rounding, not a pool under its line. The written reserve is the line asked to the whole
  *  percent above it, so a pool held at the reserve reads at or above the line. */
 export const REALIZED_CLOSE_TOLERANCE_PCT = 0.05;
+/** v1.200.0 (A5) — PURE. A reading at or above the line less REALIZED_CLOSE_TOLERANCE_PCT, the edge itself included
+ *  (LINE_CLOSE_EDGE_EPS: in binary 50.35 − 0.05 is 50.300000000000004, so a 50.3 close read as under a 50.35 line). */
+const holdsLineAtClose = (readingPct: number, linePct: number): boolean =>
+  readingPct >= linePct - REALIZED_CLOSE_TOLERANCE_PCT - LINE_CLOSE_EDGE_EPS;
 
 /** v1.196.0 — how close a recorded line must sit to reserve_floor_pct + cushion_pct to be the
  *  legacy band: on `legacy-pct` the line is round2(floor + cushionPct) by construction. An
@@ -277,8 +297,8 @@ export function realizedCushionBreach(
   }
   const line = asNum(r.cushion_line_soc_pct)!;
   const close = asNum(r.window_close_soc_pct);
-  if (close != null) return close < line - REALIZED_CLOSE_TOLERANCE_PCT ? 1 : 0;
-  return low != null && low >= line - REALIZED_CLOSE_TOLERANCE_PCT ? 0 : null;
+  if (close != null) return holdsLineAtClose(close, line) ? 0 : 1;
+  return low != null && holdsLineAtClose(low, line) ? 0 : null;
 }
 
 /** Autocorrelation-adjusted effective sample size (§5.2). Positive lag-1
@@ -515,14 +535,39 @@ export function computeNightChargeReadiness(
     const derived = realizedCushionBreach(r);
     return derived == null ? truthy(r.cushion_breached) : derived === 1;
   };
+  // v1.200.0 (A5, M3) — an ARMED line the plan disclosed (cushion_line_force_charge_pct set beside cushion_shortfall:
+  // 'nearFull', 'closeUnder') whose force-charge never switched on, closing under its line capped at a full pool: a
+  // run-time fault (a refused ceiling, Charge Now already on, the grid unknown, vitals red, an ON that never went), not
+  // the physics the plan disclosed — a strike, fail-closed. With no close reading, the realized verdict as for any row
+  // (the lowest pool after the close where it holds, else the stored flag). The owner's cancel after the apply is not
+  // told apart (the ledger records no cancel: actuation_reverted_at_ms is every early restore's), so such a night is
+  // struck as a carried one is; a cancel before the apply is not actuated. An ON sent that never took is not seen here
+  // (no ON-verified column): the ON-failure push is its run-time word. Any other disclosed row stays exempt.
+  // v1.200.0 (Fix9 review 1) — the night's reserve write never held a line it armed (lineWriteNeverHeld): a write the cloud accepted
+  // and the panel never took (actuated 0, applyFailed) or one that never went or was never confirmed (the missed push's disposition,
+  // on a record with a line ask), with no force-charge of ours on. A run-time refusal, graded like any actuated night; a night
+  // cancelled before the write, or never armed, is neither.
+  const lineWriteNeverHeld = (r: NightLedgerRow): boolean => asNum(r.cushion_line_force_charge_pct) != null && !truthy(r.actuated)
+    && r.force_charge_on_at_ms == null && (asNum(r.actuated) === 0 || String(r.arm_disposition ?? '').startsWith(MISSED_APPLY_DISPOSITION));
+  const armedNeverRanUnder = (r: NightLedgerRow): boolean => {
+    if (asNum(r.cushion_line_force_charge_pct) == null || !(truthy(r.actuated) || lineWriteNeverHeld(r)) || r.force_charge_on_at_ms != null) return false;
+    const line = asNum(r.cushion_line_soc_pct);
+    const close = asNum(r.window_close_soc_pct);
+    if (line != null && close != null) return !holdsLineAtClose(close, Math.min(line, 100));
+    return realizedBreached(r);
+  };
   const strikeRows = currentAlgo.filter((r) => {
-    if (truthy(r.cushion_shortfall)) return false; // disclosed — physics, not fault
+    if (truthy(r.cushion_shortfall)) return armedNeverRanUnder(r); // disclosed — physics, not fault (A5: unless armed and never ran)
     const trajStrike = trajBreached(r) && trajGradedOnSizingTrough(r);
-    const realizedStrike = truthy(r.actuated) && realizedBreached(r);
+    const realizedStrike = (truthy(r.actuated) || lineWriteNeverHeld(r)) && realizedBreached(r);
     return trajStrike || realizedStrike;
   });
   const strikeWindowStart = siteYmd(nowMs - STRIKE_WINDOW_DAYS * DAY_MS);
   const windowStrikes = strikeRows.filter((r) => String(r.plan_date) >= strikeWindowStart);
+  /** v1.200.0 — in-window strikes on rows whose plan armed its line with the night force-charge
+   *  (cushion_line_force_charge_pct set: carried, or (A5) disclosed and never switched on): diagnostic, so a line
+   *  night's miss reads apart. Already in activeStrikes — never exempted. */
+  const lineForceChargeStrikes = windowStrikes.filter((r) => asNum(r.cushion_line_force_charge_pct) != null).length;
   /** v1.186.0 — in-window trajectory flags set aside as graded on the disclosure trough. */
   // v1.186.0 — a stored flag the sizing columns overrule is set aside too, and counted.
   const trajStrikesSetAside = currentAlgo.filter((r) =>
@@ -583,9 +628,13 @@ export function computeNightChargeReadiness(
     // a policy decision, and until it is made, fail-closed with an honest
     // label is the correct posture.
     underBuyMeasurable: actuatedNights > 0 && underBuyPool.length > 0 ? 1 : 0,
-    strikesMeasurable: currentAlgo.length > 0 && currentAlgo.some((r) => !truthy(r.cushion_shortfall)) ? 1 : 0,
+    // v1.200.0 (A5) — a disclosed row the strike rule still grades counts too: an ARMED, actuated one
+    // (armedNeverRanUnder), so a real 0 beside armed line nights does not read as "cannot count".
+    strikesMeasurable: currentAlgo.length > 0 && currentAlgo.some((r) => !truthy(r.cushion_shortfall)
+      || (asNum(r.cushion_line_force_charge_pct) != null && (truthy(r.actuated) || lineWriteNeverHeld(r)))) ? 1 : 0,
     trajStrikesSetAside, // v1.186.0 — see the strike rule
     realizedStrikesSetAside, // v1.196.0 — see realizedCushionBreach
+    lineForceChargeStrikes, // v1.200.0 — see the strike rule
     buyBiasKwh: buyBiasKwh != null ? round(buyBiasKwh) : null,
     pvMae: pvMae != null ? round(pvMae) : null,
     pvBias: pvBias != null ? round(pvBias) : null,

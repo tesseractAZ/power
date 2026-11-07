@@ -111,14 +111,14 @@ const MUTANTS = [
   {
     id: 'C-vi. ★★★ the expected level ignores force-charge',
     file: NCA,
-    find: '      setpointSocPct, costCeilingSocPct, forceChargeEligible: inputs.forceChargeEligible === true,',
+    find: '      setpointSocPct, costCeilingSocPct, forceChargeEligible: inputs.forceChargeEligible === true && !lineNoWrite && lineStartClosed == null,',
     to: '      setpointSocPct, costCeilingSocPct, forceChargeEligible: false, /* MUTANT */',
     why: 'A force-charge night (10-12: to 80%) states only the reserve leg, ~5 kWh, for a ~34 kWh draw.',
   },
   {
     id: 'C-vii. ★★ the expected level assumes force-charge on every night',
     file: NCA,
-    find: '      setpointSocPct, costCeilingSocPct, forceChargeEligible: inputs.forceChargeEligible === true,',
+    find: '      setpointSocPct, costCeilingSocPct, forceChargeEligible: inputs.forceChargeEligible === true && !lineNoWrite && lineStartClosed == null,',
     to: '      setpointSocPct, costCeilingSocPct, forceChargeEligible: true, /* MUTANT */',
     why: 'An advisory or resilience night, where only the reserve is written, states a force-charge draw that never happens.',
   },
@@ -168,7 +168,8 @@ const MUTANTS = [
     id: 'C-xiv. ★★ a night that does not arm states a positive expected buy',
     file: NCA,
     find: '    : { buyKwh: 0, levelPct: null };',
-    to: '    : expectedBuyFromPlan({ setpointSocPct, costCeilingSocPct, forceChargeEligible: inputs.forceChargeEligible === true, startKwh: expectedStartKwh, deliverableKwh: expectedDeliverableKwh, fullKwh, legEff, window: { hours: horizon, fromMs: effChargeStartMs, windowEndMs: windowEnd, dischargeEff, chargeCapKw, envelopeKw } }); /* MUTANT */',
+    // v1.200.0 — the mutant passes the tick's pool too (expectedBuyFromPlan's required tickPoolKwh).
+    to: '    : expectedBuyFromPlan({ setpointSocPct, costCeilingSocPct, forceChargeEligible: inputs.forceChargeEligible === true, tickPoolKwh: fullKwh, startKwh: expectedStartKwh, deliverableKwh: expectedDeliverableKwh, fullKwh, legEff, window: { hours: horizon, fromMs: effChargeStartMs, windowEndMs: windowEnd, dischargeEff, chargeCapKw, envelopeKw } }); /* MUTANT */',
     why: 'A buy under the minimum arms nothing, yet the ledger and the sensor would say ~35 kWh is expected.',
   },
   {
@@ -415,8 +416,9 @@ const MUTANTS = [
   {
     id: 'C-xlvii. ★★ the walk ignores the predicted EV the live start counts',
     file: NCA,
-    find: '      if (t >= forceChargeStartAtMs(o.windowEndMs, o.ceilingPct, poolPct, o.fullKwh, rateKw, evDisplacedKwh)) {',
-    to: '      if (t >= forceChargeStartAtMs(o.windowEndMs, o.ceilingPct, poolPct, o.fullKwh, rateKw, null)) { /* MUTANT */',
+    // v1.200.0 — anchor moved (the outage line above the reserve envelope; mutate-line-force-charge.mjs).
+    find: '      if (t >= forceChargeStartAtMs(o.windowEndMs, o.ceilingPct, poolPct, o.tickPoolKwh, rateKw, evDisplacedKwh)) {',
+    to: '      if (t >= forceChargeStartAtMs(o.windowEndMs, o.ceilingPct, poolPct, o.tickPoolKwh, rateKw, null)) { /* MUTANT */',
     why: 'index.ts times the live start with the plan\'s EV displacement; without it the walk starts later and states more drain than the write allows.',
   },
   {
@@ -657,7 +659,7 @@ const MUTANTS = [
   {
     id: 'C-lxxvi. ★★ the speakers are never told the window bound',
     file: IDX,
-    find: '        toward: chargeIsWindowBound(plan),',
+    find: '        toward: chargeEndsShortOfLevel(plan),',
     to: '        toward: false, /* MUTANT */',
     why: 'The spoken line says "to about 80 percent" on a Friday the push says "toward".',
   },
@@ -773,15 +775,18 @@ const MUTANTS = [
     id: 'C-xcii. ★★ the morning push pairs the force-charge figure with the reserve alone',
     file: NOTIFY,
     // v1.187.22 (recheck) — re-pointed: the shape of a force-charge that ran.
-    find: '      ? `${reserve}, and force-charge ran${toward}${note}; ${restored}`',
-    to: '      ? `${reserve}${note}; ${restored}` /* MUTANT */',
+    // v1.200.0 — anchor moved (the outage line above the reserve envelope; mutate-line-force-charge.mjs).
+    // v1.200.0 (review 2) — again: a cost-dominant line night states its close (`close` is '' on a cost night).
+    find: '        : `${reserve}, and force-charge ran${toward}${close}${note}; ${restored}`)',
+    to: '        : `${reserve}${close}${note}; ${restored}`) /* MUTANT */',
     why: '"reserve raised to 50% (~34.9 kWh expected)": the figure covers the force-charge to 80%, which the push never names.',
   },
   {
     id: 'C-xciii. ★★ the revert never passes what the force-charge did',
     file: IDX,
     // v1.187.22 (recheck) — re-pointed: the outcome from the actuation record.
-    find: '      forceCharge: forceChargeNightOutcome(state, forceChargeOn()),',
+    // v1.200.0 — anchor moved (the outage line above the reserve envelope; mutate-line-force-charge.mjs).
+    find: '      forceCharge: forceChargeNightOutcome(state, forceChargeGatesOn()),',
     to: '      forceCharge: null, /* MUTANT */',
     why: 'The morning push names the 50% reserve beside a figure that covers the force-charge leg, and never says whether it ran.',
   },
@@ -874,8 +879,8 @@ const MUTANTS = [
   {
     id: 'C-cvi. ★★ the held push calls the write "this charge"',
     file: NOTIFY,
-    find: "    + `without ${held ? \"tonight's write\" : 'this charge'}, ~${pct(plan.minProjSocPct)} with it; the floor+cushion line is ${pct(line)}. `",
-    to: "    + `without this charge, ~${pct(plan.minProjSocPct)} with it; the floor+cushion line is ${pct(line)}. ` /* MUTANT */",
+    find: "    : `without ${held ? \"tonight's write\" : 'this charge'}, ~${pct(plan.minProjSocPct)} with it`;",
+    to: "    : `without this charge, ~${pct(plan.minProjSocPct)} with it`; /* MUTANT */",
     why: 'A night that charges nothing is described as having a charge.',
   },
   {
@@ -888,8 +893,8 @@ const MUTANTS = [
   {
     id: 'C-cviii. ★★ the rationale headlines a no-charge night as a charge of ~0 kWh',
     file: NCA,
-    find: '  const chargeHeadline = isNoChargeKwh(expected.buyKwh)',
-    to: '  const chargeHeadline = (expected.buyKwh as number | null) === -1 /* MUTANT */',
+    find: '    : isNoChargeKwh(expected.buyKwh)\n',
+    to: '    : (expected.buyKwh as number | null) === -1 /* MUTANT */\n',
     why: '"Charge to ~50% in the 00:00–05:00 window: ~0 kWh expected."',
   },
   {
@@ -1088,15 +1093,15 @@ const MUTANTS = [
   {
     id: 'C-cxxxv. ★★ the latch drops the refusal in memory',
     file: IDX,
-    find: '  nightChargeLatchMem = { lastNotifyDay: l.lastNotifyDay, armRefused: l.armRefused ?? null };',
-    to: '  nightChargeLatchMem = { lastNotifyDay: l.lastNotifyDay }; /* MUTANT */',
+    find: '    lastNotifyDay: l.lastNotifyDay, armRefused: l.armRefused ?? null,\n',
+    to: '    lastNotifyDay: l.lastNotifyDay, /* MUTANT */\n',
     why: 'The refusal reaches the file but not the route, until a restart.',
   },
   {
     id: 'C-cxxxvi. ★ a restart forgets the refusal',
     file: IDX,
-    find: "    return { lastNotifyDay: typeof d === 'string' ? d : null, armRefused: coerceArmRefusalRecord(raw?.armRefused) };",
-    to: "    return { lastNotifyDay: typeof d === 'string' ? d : null, armRefused: null }; /* MUTANT */",
+    find: "      lastNotifyDay: typeof d === 'string' ? d : null, armRefused: coerceArmRefusalRecord(raw?.armRefused),\n",
+    to: "      lastNotifyDay: typeof d === 'string' ? d : null, armRefused: null, /* MUTANT */\n",
     why: 'After an add-on update mid-evening the card leads with the expected charge again.',
   },
   {
@@ -1139,22 +1144,25 @@ const MUTANTS = [
   {
     id: 'C-cxlii. ★★★ the morning push reads the option at the restore, not the stamp',
     file: FC,
-    find: '  const armedStop = armedForceChargeStopPct(s, s.forceChargeRides ?? enabled);',
-    to: '  const armedStop = armedForceChargeStopPct(s, enabled); /* MUTANT */',
+    // v1.200.0 — anchor moved (the outage line above the reserve envelope; mutate-line-force-charge.mjs).
+    find: '  const armedStop = armedForceChargeStopPct(s, s.forceChargeRides ?? gates.cost);',
+    to: '  const armedStop = armedForceChargeStopPct(s, gates.cost); /* MUTANT */',
     why: 'A restart with force-charge switched off turns an armed-to-ride night into "reserve raised to 50% (~34.9 kWh expected)".',
   },
   {
     id: 'C-cxliii. ★★★ the arm never stamps whether force-charge rides the night',
     file: ACT,
-    find: '      : forceChargeEnabled && ceiling != null && ceiling > RESERVE_WRITE_MAX_PCT,',
-    to: '      : null, /* MUTANT */',
+    // v1.200.0 — anchor moved (the outage line above the reserve envelope; mutate-line-force-charge.mjs).
+    find: '    forceChargeRides: forceChargeEnabled === undefined ? (lineRides ? true : null) : costRides || lineRides,',
+    to: '    forceChargeRides: null, /* MUTANT */',
     why: 'Every record reads as armed before the stamp: the option at the restore decides again.',
   },
   {
     id: 'C-cxliv. ★★ the stamp ignores the armed ceiling',
     file: ACT,
-    find: '      : forceChargeEnabled && ceiling != null && ceiling > RESERVE_WRITE_MAX_PCT,',
-    to: '      : forceChargeEnabled, /* MUTANT */',
+    // v1.200.0 — anchor moved (the outage line above the reserve envelope; mutate-line-force-charge.mjs).
+    find: '  const costRides = forceChargeEnabled === true && ceiling != null && ceiling > RESERVE_WRITE_MAX_PCT;',
+    to: '  const costRides = forceChargeEnabled === true; /* MUTANT */',
     why: 'A 50% ceiling (the reserve reaches it alone) is stamped as riding: the morning says "force-charge … never started".',
   },
   {
@@ -1182,15 +1190,18 @@ const MUTANTS = [
     id: 'C-cxlviii. ★★ index.ts arms without the force-charge gate',
     file: IDX,
     // v1.189.0 — re-pointed: the arm goes through armCycle (chargeCycle.ts), the gate on its leg.
-    find: "        role: 'cost', kind: 'overnight', plan, forceChargeEnabled: forceChargeOn(), nextOnPeakStartMs: armOnPeakStartMs,",
-    to: "        role: 'cost', kind: 'overnight', plan, forceChargeEnabled: undefined, nextOnPeakStartMs: armOnPeakStartMs, /* MUTANT */",
+    // v1.200.0 — anchor moved (the outage line above the reserve envelope; mutate-line-force-charge.mjs).
+    find: "        role: 'cost', kind: 'overnight', plan, forceChargeEnabled: forceChargeOn(), lineForceChargeEnabled: lineForceChargeOn(), nextOnPeakStartMs: armOnPeakStartMs,",
+    to: "        role: 'cost', kind: 'overnight', plan, forceChargeEnabled: undefined, lineForceChargeEnabled: lineForceChargeOn(), nextOnPeakStartMs: armOnPeakStartMs, /* MUTANT */",
     why: 'Every armed record carries no stamp, so the morning reads the option at the restore.',
   },
   {
     id: 'C-cxlix. ★ the evening push names the force-charge from the option, not the stamp',
-    file: IDX,
-    find: '          forceChargeTargetPct: armedCandidate.forceChargeRides === true ? armedCandidate.forceChargeCeilingPct : null,',
-    to: '          forceChargeTargetPct: forceChargeOn() ? armedCandidate.forceChargeCeilingPct : null, /* MUTANT */',
+    file: FC,
+    // v1.200.0 — anchor moved (the outage line above the reserve envelope; mutate-line-force-charge.mjs).
+    // v1.200.0 (review) — anchor moved: index.ts spreads nightForceCharge.armedForceChargeAnnouncement, which reads the stamp.
+    find: '  const rides = armed.forceChargeRides === true;',
+    to: '  const rides = gates.cost; /* MUTANT */',
     why: 'A 50% ceiling is pushed as "It also arms the panel\'s force-charge toward ~50%".',
   },
   // ── a force-charge ON that failed on only some slots ──
@@ -1331,10 +1342,12 @@ const MUTANTS = [
     why: 'A failure on slot 2 alone is pushed as the whole buy above the reserve not happening.',
   },
   {
-    id: 'C-clxix. ★ index.ts builds the ON-failure push without the armed ceiling',
-    file: IDX,
-    find: '        noRetry: action.noRetry === true, ceilingPct: state.forceChargeCeilingPct,',
-    to: '        noRetry: action.noRetry === true, ceilingPct: null, /* MUTANT */',
+    id: 'C-clxix. ★ the ON-failure push is built without the armed ceiling',
+    file: FC,
+    // v1.200.0 — anchor moved (the outage line above the reserve envelope; mutate-line-force-charge.mjs).
+    // v1.200.0 (review 2) — and again: index.ts spreads forceChargeOnFailureNight(state), keyed on the record's line ask.
+    find: '  return line != null ? { ceilingPct: null, lineLinePct: line } : { ceilingPct: s.forceChargeCeilingPct, lineLinePct: null };',
+    to: '  return line != null ? { ceilingPct: null, lineLinePct: line } : { ceilingPct: null, lineLinePct: null }; /* MUTANT */',
     why: 'The warning no longer says where the forfeited force-charge would have stopped.',
   },
   // ── (final review) a spoken detail states its figures whole ──

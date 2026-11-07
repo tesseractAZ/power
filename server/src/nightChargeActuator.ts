@@ -31,7 +31,7 @@
  *    and keeps its own protection throughout.
  * ═════════════════════════════════════════════════════════════════════════ */
 
-import { RESERVE_WRITE_MIN_PCT, RESERVE_WRITE_MAX_PCT, SHP2_SOURCE_SLOTS } from './hwSpec.js';
+import { RESERVE_WRITE_MIN_PCT, RESERVE_WRITE_MAX_PCT, SHP2_SOURCE_SLOTS, FORCE_CHARGE_CEILING_MIN_PCT, FORCE_CHARGE_CEILING_MAX_PCT } from './hwSpec.js';
 
 export type NightChargeMode = 'advisory' | 'supervised' | 'auto';
 
@@ -171,6 +171,11 @@ export function nightChargeSpokenNotice(o: {
   deadlineText: string;
   deadlineTextEs: string;
   cushionShortfall: boolean;
+  /** v1.200.0 — on a LINE night (the force-charge carries the pool above the panel's reserve to the
+   *  window close): the reserve the panel itself holds, RESERVE_WRITE_MAX_PCT. The notice then says so —
+   *  "The panel keeps only 50 percent in reserve." — on the plain charge shape only (neither the shortfall
+   *  clause nor "toward" is spoken), within MAX_SPOKEN_ADVISORY_CHARS. Absent ⇒ today's words. */
+  reserveOnlyPct?: number | null;
 }): { en: string; es: string } {
   // The shortfall clause stays on the audible path — it must never be quieter
   // about residual risk than the text channel — but as a clause, not a sentence,
@@ -197,16 +202,23 @@ export function nightChargeSpokenNotice(o: {
     : kwh < 1 ? ', menos de 1 kilovatio hora'
       : kwh === 1 ? ', alrededor de 1 kilovatio hora' : `, unos ${kwh} kilovatios hora`;
   const toward = o.toward === true;
-  return {
+  const words = (reserveEn: string, reserveEs: string) => ({
     en:
       `Night charge notice. Charging the backup pool ${toward ? 'toward' : 'to about'} ${level} percent${kwhEn}, `
       + `in the charge window that opens ${o.deadlineText}${toward ? ', which ends before it gets there' : ''}.`
-      + `${shortEn} Cancel on the Power panel before then.`,
+      + `${shortEn}${reserveEn} Cancel on the Power panel before then.`,
     es:
       `Aviso de carga nocturna. Se cargarán las baterías de respaldo ${toward ? 'rumbo al' : 'hasta cerca del'} ${level} por ciento`
       + `${kwhEs}, en la ventana de carga que comienza ${o.deadlineTextEs}${toward ? ' y termina antes de alcanzar ese nivel' : ''}.`
-      + `${shortEs} Cancele en el panel Power antes de esa hora.`,
-  };
+      + `${shortEs}${reserveEs} Cancele en el panel Power antes de esa hora.`,
+  });
+  // v1.200.0 — a line night: the panel's own reserve, said on the plain shape only, and only where it fits.
+  const r = o.reserveOnlyPct;
+  if (r != null && Number.isFinite(r) && !o.cushionShortfall && !toward) {
+    const withIt = words(` The panel keeps only ${Math.round(r)} percent in reserve.`, ` El panel solo mantiene el ${Math.round(r)} por ciento en reserva.`);
+    if (withIt.en.length + withIt.es.length <= MAX_SPOKEN_ADVISORY_CHARS) return withIt;
+  }
+  return words('', '');
 }
 
 /**
@@ -585,6 +597,77 @@ export interface NightActuationState {
    *  armed-to-ride night into "reserve only" beside a figure that counts the force-charge leg.
    *  Arming does not change what decideForceCharge does. null = a record armed before the stamp. */
   forceChargeRides: boolean | null;
+  /** v1.200.0 — STAMPED AT ARM TIME: the outage line's ask, ⌈L⌉ (NightChargePlan.forceChargeLine.askPct),
+   *  where the plan carried a line above the 50% reserve and the line force-charge was enabled at the arm
+   *  (lineForceChargeEnabled). A field of its own beside the cost ceiling (forceChargeCeilingPct, whose
+   *  meaning is unchanged): each tick composes the mode from both and the LIVE gates (forceChargeModeOf).
+   *  null = no line tonight, and every record armed before v1.200.0. */
+  forceChargeLineAskPct: number | null;
+  /** v1.200.0 — the line itself, L (texts and the morning summary); null with no ask. */
+  forceChargeLinePct: number | null;
+  /** v1.200.0 — the panel ceiling tonight's sync actually wrote (a line night's is ⌈L⌉ + 10 at least, not
+   *  desiredForceChargeCeilingPct of the cost ceiling): the ON verify's at-the-ceiling exemption and the
+   *  settings-drift own-write list read it. null until a sync, and on a record from before the field (the
+   *  readers then fall back to the value the sync always wrote there). */
+  forceChargeCeilingSyncedPct: number | null;
+  /** v1.200.0 — the mode the force-charge was switched ON in (forceChargeModeOf at the ON): 'cost' or
+   *  'line'. null = never ON, and every record from before v1.200.0. The ledger's force_charge_mode. */
+  forceChargeMode: 'cost' | 'line' | null;
+  /** v1.200.0 (review) — LINE re-ONs spent tonight (nightForceCharge FORCE_CHARGE_LINE_REON_MAX). The panel
+   *  switches a slot's Charge Now OFF by itself when its Core reaches the force-charge ceiling, and it
+   *  stays OFF; on a line night whose pool then falls back under the start target (a late EV after an
+   *  early start), the slots are switched back ON (decideForceCharge 'lineReOn'). Counted write-ahead,
+   *  like the ON re-issue. 0 on every record from before the field. */
+  forceChargeLineReOns: number;
+  /** v1.200.0 (review) — the last line re-ON's writes (finished); the next waits
+   *  FORCE_CHARGE_ON_VERIFY_AFTER_MS from here. null = none tonight. */
+  forceChargeLineReOnAtMs: number | null;
+  /** v1.200.0 (review 2) — the slots the last line re-ON switched, stamped WRITE-AHEAD; its readback check
+   *  (nightForceCharge.lineReOnCheckDue) reads them FORCE_CHARGE_ON_VERIFY_AFTER_MS later. null = none, or a
+   *  re-ON whose every write came back rate-limited (it never reached the panel: nothing to check). */
+  forceChargeLineReOnSlots: number[] | null;
+  /** v1.200.0 (review 2) — when the last line re-ON was readback-checked; a check at or after
+   *  forceChargeLineReOnAtMs means that re-ON is judged. null = none checked tonight. */
+  forceChargeLineReOnCheckedAtMs: number | null;
+  /** v1.200.0 (review 2) — line re-ONs a readback check found NOT applied (a slot of the re-ON still reading
+   *  OFF, its Core under the panel's ceiling): the morning account names them. 0 on older records. */
+  forceChargeLineReOnsNotApplied: number;
+  /** v1.200.0 (review 2) — the LAST check's slots still reading OFF ([] when it applied); null = none checked.
+   *  The line-at-risk push names them. */
+  forceChargeLineReOnNotAppliedSlots: number[] | null;
+  /** v1.200.0 (review 4) — the write time (forceChargeLineReOnAtMs) of the latest line re-ON whose readback check found
+   *  a slot that took it (nightForceCharge.lineReOnCheckedStamp), kept across the next re-ON: a later re-ON that did not
+   *  take effect leaves it the last ON of ours that did — the line-at-risk trend and the morning account read it.
+   *  null = none tonight, and every record from before the field. */
+  forceChargeLineReOnAppliedAtMs: number | null;
+  /** v1.200.0 (review 2) — when a live readback after the verified ON first showed every slot of ours OFF with a
+   *  Core at the panel's stop ceiling (its own stop: 2026-09-23, 2026-10-02), the latest such episode (a second
+   *  latch after a re-ON re-stamps it). The morning account says the panel's stop ended the charge. null = never. */
+  forceChargeLinePanelOffAtMs: number | null;
+  /** v1.200.0 (review 5) — the slots of ours the latest live readback after the verified ON showed reading OFF
+   *  (nightForceCharge.lineNightObservations), persisted when it moves: a slot among them that reads ON again is an ON
+   *  the record has to account for. null = none seen OFF yet, and every record from before the field. */
+  forceChargeLineOffSlots: number[] | null;
+  /** v1.200.0 (review 5) — the latest live readback at which a slot of forceChargeLineOffSlots read ON again outside the
+   *  readback grace of an ON write of ours that reached the panel: an ON no write of ours explains in time (a re-ON
+   *  applied after its check found it not applied, a check that read every slot OFF once, Charge Now switched on in the
+   *  app). The line-at-risk trend and the ON-reading shape wait it out like an ON of ours (lineTrendReference); the
+   *  morning account counts it as Charge Now back on. null = none tonight, and every record from before the field. */
+  forceChargeLineOnSeenAtMs: number | null;
+  /** v1.200.0 (review 2) — the pool trail of a line night while ON: at most two fresh, coherent readings, the
+   *  newer replaced once it is FORCE_CHARGE_LINE_TREND_MS old (nightForceCharge.linePoolSamplesStep), so a
+   *  reading at least that much older is always at hand: "is the pool rising?" for the line-at-risk push. */
+  forceChargeLinePoolSamples: Array<{ pct: number; atMs: number }> | null;
+  /** v1.200.0 (review 2) — when the line-at-risk push went (nightForceCharge.lineAtRiskPushDue), stamped
+   *  WRITE-AHEAD: once a night, and a restart never repeats it. */
+  forceChargeLineAtRiskPushedAtMs: number | null;
+  /** v1.200.0 (Fix8 review 1) — when the ON-reading shape was logged (nightForceCharge.lineOnReadingShape), stamped
+   *  WRITE-AHEAD: once a night across restarts, as the pushes are (it was module memory, and a restart logged it again). */
+  forceChargeLineShapeLoggedAtMs: number | null;
+  /** v1.200.0 (review 2) — the blocker classes whose declined-start push went tonight (lineDeclinedPushStep),
+   *  stamped WRITE-AHEAD: the push is once a night per class across restarts (it was module memory, and a
+   *  crash-looping add-on under red vitals pushed once per restart). [] on older records. */
+  forceChargeLineDeclinedPushed: string[];
   /** STAMPED AT ARM TIME: the start of the first on-peak period at or after the window open
    *  (chargeWindows.nextOnPeakStartMs). Raises stop, and the restore and force-charge OFF fall
    *  due, ON_PEAK_RAISE_GUARD_MS before it. null = no on-peak period ahead, or a record armed
@@ -626,6 +709,9 @@ export interface NightActuationState {
    *  (restoreSummaryDue). A record from before the field had its summary sent on the ACK, and reads
    *  back with revertedAtMs here (coerceActuationState), so an update never sends it again. */
   restoreSummaryAtMs: number | null;
+  /** v1.200.0 (Fix9 review 1) — when the close account of a line night with no restore to summarise went
+   *  (nightForceCharge.lineCloseAccountDue), stamped before it goes: once a record. */
+  lineCloseAccountAtMs: number | null;
   /** v1.190.1 — when the owed summary first waited for this process's first reading of the reserve
    *  (restoreSummaryDue 'hold': a restart across the restore's readback grace). It waits at most
    *  REVERT_DEADLINE_HOLD_MAX_MS from here; on the record, so a second restart inside the wait does
@@ -656,6 +742,12 @@ export function emptyActuationState(): NightActuationState {
     forceChargeCeilingRestoredAtMs: null, forceChargeCeilingRestoreAttempts: 0,
     forceChargeCeilingRestoreLastAttemptMs: null,
     forceChargeRides: null,
+    forceChargeLineAskPct: null, forceChargeLinePct: null, forceChargeCeilingSyncedPct: null, forceChargeMode: null,
+    forceChargeLineReOns: 0, forceChargeLineReOnAtMs: null,
+    forceChargeLineReOnSlots: null, forceChargeLineReOnCheckedAtMs: null,
+    forceChargeLineReOnsNotApplied: 0, forceChargeLineReOnNotAppliedSlots: null, forceChargeLineReOnAppliedAtMs: null,
+    forceChargeLinePanelOffAtMs: null, forceChargeLineOffSlots: null, forceChargeLineOnSeenAtMs: null, forceChargeLinePoolSamples: null,
+    forceChargeLineAtRiskPushedAtMs: null, forceChargeLineShapeLoggedAtMs: null, forceChargeLineDeclinedPushed: [],
     nextOnPeakStartMs: null,
     foreignReservePct: null, foreignSeenAtMs: null, foreignSettledAtMs: null,
     revertDeadlinePagedAtMs: null, revertDeadlineOnPeakPagedAtMs: null,
@@ -664,7 +756,7 @@ export function emptyActuationState(): NightActuationState {
     applyUnlandedAtMs: null,
     revertDeadlineHeldAtMs: null,
     revertGridLossAbort: false,
-    restoreSummaryAtMs: null, restoreSummaryHeldAtMs: null,
+    restoreSummaryAtMs: null, lineCloseAccountAtMs: null, restoreSummaryHeldAtMs: null,
     lastError: null,
   };
 }
@@ -742,6 +834,35 @@ export function coerceActuationState(raw: unknown): NightActuationState {
     forceChargeCeilingRestoreLastAttemptMs: num(o.forceChargeCeilingRestoreLastAttemptMs),
     // v1.187.22 — a record armed before the stamp has none: null, never a guess.
     forceChargeRides: typeof o.forceChargeRides === 'boolean' ? o.forceChargeRides : null,
+    // v1.200.0 — a finite ask is KEPT (never lowered: a corrupt value cannot shrink the line); only a
+    // non-number is dropped, which with the cost gate off is a 'disabled' OFF (fail-closed, a strike).
+    forceChargeLineAskPct: coerceLineAskPct(o.forceChargeLineAskPct),
+    forceChargeLinePct: num(o.forceChargeLinePct),
+    // A synced ceiling the panel cannot hold (outside 80-100) is no ceiling: it would exempt every slot.
+    forceChargeCeilingSyncedPct: num(o.forceChargeCeilingSyncedPct) != null
+      && (o.forceChargeCeilingSyncedPct as number) >= FORCE_CHARGE_CEILING_MIN_PCT && (o.forceChargeCeilingSyncedPct as number) <= FORCE_CHARGE_CEILING_MAX_PCT
+      ? o.forceChargeCeilingSyncedPct as number : null,
+    forceChargeMode: o.forceChargeMode === 'cost' || o.forceChargeMode === 'line' ? o.forceChargeMode : null,
+    // v1.200.0 (review) — as forceChargeOnRetries: a count, so never negative or fractional (the budget is
+    // FORCE_CHARGE_LINE_REON_MAX whatever a corrupt file says).
+    forceChargeLineReOns: Math.max(0, Math.floor(num(o.forceChargeLineReOns) ?? 0)),
+    forceChargeLineReOnAtMs: num(o.forceChargeLineReOnAtMs),
+    // v1.200.0 (review 2) — slots as forceChargeSlots (1-3 integers, else dropped); counts never negative or
+    // fractional; the pool trail finite pairs only, the last two in time order; the pushed classes strings, once.
+    forceChargeLineReOnSlots: slotList(o.forceChargeLineReOnSlots),
+    forceChargeLineReOnCheckedAtMs: num(o.forceChargeLineReOnCheckedAtMs),
+    forceChargeLineReOnsNotApplied: Math.max(0, Math.floor(num(o.forceChargeLineReOnsNotApplied) ?? 0)),
+    forceChargeLineReOnNotAppliedSlots: slotList(o.forceChargeLineReOnNotAppliedSlots),
+    forceChargeLineReOnAppliedAtMs: num(o.forceChargeLineReOnAppliedAtMs),
+    forceChargeLinePanelOffAtMs: num(o.forceChargeLinePanelOffAtMs),
+    forceChargeLineOffSlots: slotList(o.forceChargeLineOffSlots),
+    forceChargeLineOnSeenAtMs: num(o.forceChargeLineOnSeenAtMs),
+    forceChargeLinePoolSamples: coercePoolSamples(o.forceChargeLinePoolSamples),
+    forceChargeLineAtRiskPushedAtMs: num(o.forceChargeLineAtRiskPushedAtMs),
+    forceChargeLineShapeLoggedAtMs: num(o.forceChargeLineShapeLoggedAtMs),
+    forceChargeLineDeclinedPushed: Array.isArray(o.forceChargeLineDeclinedPushed)
+      ? [...new Set(o.forceChargeLineDeclinedPushed.filter((c): c is string => typeof c === 'string' && c.length > 0 && c.length <= 64))]
+      : [],
     nextOnPeakStartMs: num(o.nextOnPeakStartMs),
     foreignReservePct: num(o.foreignReservePct),
     foreignSeenAtMs: num(o.foreignSeenAtMs),
@@ -757,9 +878,39 @@ export function coerceActuationState(raw: unknown): NightActuationState {
     // A record written before the field (v1.189.0 review) sent its summary on the restore's ACK:
     // absent, it reads as sent then, so the update never sends a second one.
     restoreSummaryAtMs: o.restoreSummaryAtMs === undefined ? num(o.revertedAtMs) : num(o.restoreSummaryAtMs),
+    lineCloseAccountAtMs: num(o.lineCloseAccountAtMs),
     restoreSummaryHeldAtMs: num(o.restoreSummaryHeldAtMs),
     lastError: str(o.lastError),
   };
+}
+
+/** v1.200.0 — a line ask as the record keeps it: a finite number, ceiled, in [RESERVE_WRITE_MAX_PCT + 1,
+ *  100] (raised, never lowered, below 51); anything else null. PURE. */
+export function coerceLineAskPct(v: unknown): number | null {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return null;
+  return Math.min(100, Math.max(RESERVE_WRITE_MAX_PCT + 1, Math.ceil(v - 1e-9)));
+}
+
+/** v1.200.0 (review 2) — a slot list as the record keeps it: the 1..SHP2_SOURCE_SLOTS integers of an array, else
+ *  null (never a guess). PURE. */
+function slotList(v: unknown): number[] | null {
+  return Array.isArray(v)
+    ? v.filter((n): n is number => Number.isInteger(n) && (n as number) >= 1 && (n as number) <= SHP2_SOURCE_SLOTS)
+    : null;
+}
+
+/** v1.200.0 (review 2) — the line night's pool trail as the record keeps it: the finite {pct, atMs} pairs, in
+ *  time order, the last two; none ⇒ null. PURE. */
+function coercePoolSamples(v: unknown): Array<{ pct: number; atMs: number }> | null {
+  if (!Array.isArray(v)) return null;
+  const ok = v
+    .filter((x): x is { pct: number; atMs: number } => x != null && typeof x === 'object'
+      && typeof (x as { pct?: unknown }).pct === 'number' && Number.isFinite((x as { pct: number }).pct)
+      && typeof (x as { atMs?: unknown }).atMs === 'number' && Number.isFinite((x as { atMs: number }).atMs))
+    .map((x) => ({ pct: x.pct, atMs: x.atMs }))
+    .sort((a, b) => a.atMs - b.atMs)
+    .slice(-2);
+  return ok.length > 0 ? ok : null;
 }
 
 /** The plan fields the actuator needs at announce time. */
@@ -781,6 +932,9 @@ export interface ArmablePlan {
    *  far it gets. Still clamped to the write envelope below. */
   setpointSocPct: number | null;
   window: { startMs: number; endMs: number } | null;
+  /** v1.200.0 — the outage line above the 50% reserve this plan carries (NightChargePlan.forceChargeLine):
+   *  armFromPlan records its ask where the line force-charge is enabled. Absent/null ⇒ none. */
+  forceChargeLine?: { askPct: number; linePct: number } | null;
 }
 
 /** v1.187.22 — the force-charge ceiling armFromPlan records from a plan: its economic ceiling
@@ -820,6 +974,9 @@ export function armFromPlan(
   /** The start of the on-peak period after the window open (chargeWindows.nextOnPeakStartMs),
    *  stamped as `nextOnPeakStartMs`. Omitted ⇒ null: the window-only schedule. */
   nextOnPeakStartMs?: number | null,
+  /** v1.200.0 — the outage-line force-charge enabled at arm time (index.ts lineForceChargeOn(role)): the
+   *  plan's line ask is recorded only then. Omitted ⇒ no line, today's record. */
+  lineForceChargeEnabled?: boolean,
 ): NightActuationState | null {
   // Unresolved (armOpenItem, below — one definition, which the charge cycle's legResolved reads too):
   //  - applied and not restored — unless the reserve settled as someone else's (foreignSettledAtMs),
@@ -836,6 +993,10 @@ export function armFromPlan(
   if (plan.buyKwh == null || plan.buyKwh <= 0) return null;
   if (plan.window.endMs <= plan.window.startMs || plan.window.startMs <= nowMs - APPLY_LATE_MS) return null;
   const ceiling = armedForceChargeCeilingPct(plan);
+  // v1.200.0 — the line rides on its own gate, in its own field: never folded into the cost ceiling.
+  const lineAsk = lineForceChargeEnabled === true && plan.forceChargeLine != null ? coerceLineAskPct(plan.forceChargeLine.askPct) : null;
+  const lineRides = lineAsk != null;
+  const costRides = forceChargeEnabled === true && ceiling != null && ceiling > RESERVE_WRITE_MAX_PCT;
   return {
     ...emptyActuationState(),
     day,
@@ -847,8 +1008,10 @@ export function armFromPlan(
     forceChargeCeilingPct: ceiling,
     // v1.187.22 — whether force-charge rides this night, as the evening push names it: enabled,
     // and the armed ceiling above the reserve maximum (at or below it the reserve reaches it alone).
-    forceChargeRides: forceChargeEnabled === undefined ? null
-      : forceChargeEnabled && ceiling != null && ceiling > RESERVE_WRITE_MAX_PCT,
+    // v1.200.0 — or the outage line rides it.
+    forceChargeRides: forceChargeEnabled === undefined ? (lineRides ? true : null) : costRides || lineRides,
+    forceChargeLineAskPct: lineAsk,
+    forceChargeLinePct: lineRides && Number.isFinite(plan.forceChargeLine!.linePct) ? plan.forceChargeLine!.linePct : null,
     nextOnPeakStartMs: nextOnPeakStartMs != null && Number.isFinite(nextOnPeakStartMs) ? nextOnPeakStartMs : null,
     // An unrestored original survives the fresh record, so tonight's restore still
     // returns the OWNER's ceiling, never a value we left behind.

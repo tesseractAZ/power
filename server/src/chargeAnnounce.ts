@@ -17,8 +17,8 @@
  * it.
  */
 import { buildNightChargeMessage, type NotifyMessage } from './notify.js';
-import { nightChargeSpokenNotice, type NightChargeMode, type RevertResendOnReport } from './nightChargeActuator.js';
-import { chargeIsWindowBound, chargeLevelPct, statedBuyKwh, type NightChargePlan } from './nightChargeAdvisor.js';
+import { nightChargeSpokenNotice, RESERVE_WRITE_MAX_PCT, type NightChargeMode, type RevertResendOnReport } from './nightChargeActuator.js';
+import { chargeEndsShortOfLevel, chargeLevelPct, statedBuyKwh, type NightChargePlan } from './nightChargeAdvisor.js';
 import {
   buildMiddayPlanMessage, middaySpokenNotice,
   type MiddayAnnounceInput, type MiddayRevertDeadlineText, type MiddaySummaryText,
@@ -37,6 +37,8 @@ export interface OvernightSupervisedCtx {
   cancelDeadlineTextEs: string;
   targetPct: number;
   forceChargeTargetPct?: number | null;
+  /** v1.200.0 — the LINE force-charge riding tonight (notify.buildNightChargeMessage's supervised). */
+  forceChargeLine?: { askPct: number; linePct: number; panelCeilingPct: number } | null;
 }
 
 /** What the evening announces: an overnight cycle's inputs, or a mid-day cycle's. */
@@ -72,10 +74,13 @@ export function eveningAnnouncement(i: EveningAnnounceInput): { push: NotifyMess
       levelPct: chargeLevelPct(plan) ?? supervised.targetPct,
       reservePct: supervised.targetPct,
       expectedKwh: statedBuyKwh(plan),
-      toward: chargeIsWindowBound(plan),
+      toward: chargeEndsShortOfLevel(plan),
       deadlineText: supervised.cancelDeadlineText,
       deadlineTextEs: supervised.cancelDeadlineTextEs,
       cushionShortfall: plan.cushionShortfall === true,
+      // v1.200.0 — a LINE night (the force-charge carries the pool above the panel's reserve to the close):
+      // the reserve the panel itself keeps, said as a clause.
+      ...(supervised.forceChargeLine != null && plan.expectedForceChargeMode === 'line' ? { reserveOnlyPct: RESERVE_WRITE_MAX_PCT } : {}),
     }),
   };
 }

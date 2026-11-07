@@ -127,8 +127,8 @@ const MUTANTS = [
   {
     id: 'T-i. ★★★ an armed write offers no Cancel',
     file: WEB,
-    find: "settled: false, cancel: 'Cancel tonight' };",
-    to: 'settled: false, cancel: null }; /* MUTANT */',
+    find: ": ''}.`, settled: false, cancel: 'Cancel tonight' };",
+    to: ": ''}.`, settled: false, cancel: null }; /* MUTANT */",
     why: 'Between the evening push and the window open the owner has no way to disarm the write.',
   },
   {
@@ -369,8 +369,9 @@ const MUTANTS = [
   {
     id: 'A-iv. ★★★ the backup leg keeps the plan\'s cost ceiling',
     file: CYC,
-    find: '    const plan: ArmablePlan = backup ? { ...c.plan, costCeilingSocPct: null } : c.plan;',
-    to: '    const plan: ArmablePlan = c.plan; /* MUTANT */',
+    // v1.200.0 — anchor moved: the strip also drops the plan's outage line (mutate-line-force-charge A-iii).
+    find: '    const plan: ArmablePlan = backup ? { ...c.plan, costCeilingSocPct: null, forceChargeLine: null } : c.plan;',
+    to: '    const plan: ArmablePlan = backup ? { ...c.plan, forceChargeLine: null } : c.plan; /* MUTANT */',
     why: 'A reserve-only leg arms a force-charge ceiling.',
   },
   {
@@ -533,14 +534,14 @@ const MUTANTS = [
   {
     id: 'M-i. ★★★ a silent missed apply',
     file: CYC,
-    find: "  return leg.leg === 'backup' || leg.windowKind !== 'overnight';",
+    find: "  return line || leg.leg === 'backup' || leg.windowKind !== 'overnight';",
     to: '  return false; /* MUTANT */',
     why: 'Today\'s 10am–3pm charge does not start and nothing says so.',
   },
   {
     id: 'M-ii. ★★★ the overnight cost leg pushes a missed apply',
     file: CYC,
-    find: "  return leg.leg === 'backup' || leg.windowKind !== 'overnight';",
+    find: "  return line || leg.leg === 'backup' || leg.windowKind !== 'overnight';",
     to: '  return true; /* MUTANT */',
     why: 'One leg: a push the overnight cycle never sent.',
   },

@@ -34,9 +34,10 @@ import {
 } from './chargeWindows.js';
 import { saturationThresholdPct, meanChargeCeilingPct, surplusSpanEndMs } from './chargeTaper.js';
 import {
-  chargeIsWindowBound, chargeLevelPct, statedBuyKwh, type NightChargePlan, type WindowSpec, type MiddayReserveBasis,
+  chargeIsWindowBound, chargeLevelPct, statedBuyKwh, lineNotHeldOf, type NightChargePlan, type WindowSpec, type MiddayReserveBasis,
+  type LineNotHeld,
 } from './nightChargeAdvisor.js';
-import { APPLY_LEAD_MS, clampReserveTarget, MAX_SPOKEN_ADVISORY_CHARS, revertDueMs, type NightChargeMode } from './nightChargeActuator.js';
+import { APPLY_LEAD_MS, clampReserveTarget, MAX_SPOKEN_ADVISORY_CHARS, RESERVE_WRITE_MAX_PCT, revertDueMs, type NightChargeMode } from './nightChargeActuator.js';
 import { eveningAnnouncement } from './chargeAnnounce.js';
 import { buildMiddayRefreshMessage, type MiddayAnnounceInput } from './chargeText.js';
 import type { NotifyMessage } from './notify.js';
@@ -301,6 +302,16 @@ export interface ShadowLegSummary {
    *  hold the cushion: what the evening's words say of it. Absent on a record from before R5. */
   toward?: boolean;
   cushionShortfall?: boolean;
+  /** v1.200.0 — the plan's cushionShortfallCause: the line is above the 50% reserve and no force-charge
+   *  carries it on this leg (the backup leg writes the reserve only). Absent where the envelope does not
+   *  contribute, and on a record from before v1.200.0. */
+  cushionShortfallCause?: 'envelope' | 'envelope+caps';
+  /** v1.200.0 — the outage line's ask the leg would carry to its close (the plan's forceChargeLine.askPct):
+   *  a mid-day cost leg in shadow. Absent otherwise. */
+  lineAskPct?: number;
+  /** v1.200.0 (A5) — beside `lineAskPct`: what the leg's own walk cannot hold (nightChargeAdvisor.lineNotHeldOf), the
+   *  kind the evening's words are chosen by. Absent where it holds, and on a record from before it. */
+  lineNotHeld?: LineNotHeld;
   /** v1.196.0 — the gate that refused the leg's plan (plan.basisBlockedBy): on a refused plan that
    *  names one only. Absent on a complete leg, an unsized one and a record from before v1.196.0. */
   basisBlockedBy?: string;
@@ -411,6 +422,9 @@ export function summariseLeg(
     windowPvP50Kwh: fin(sized?.windowPvP50Kwh),
     windowLoadP50Kwh: fin(sized?.windowLoadP50Kwh),
     ...(p != null ? { toward: chargeIsWindowBound(p) === true, cushionShortfall: p.cushionShortfall === true } : {}),
+    ...(p?.cushionShortfallCause != null ? { cushionShortfallCause: p.cushionShortfallCause } : {}),
+    ...(p?.forceChargeLine != null ? { lineAskPct: p.forceChargeLine.askPct } : {}),
+    ...(p != null && lineNotHeldOf(p) != null ? { lineNotHeld: lineNotHeldOf(p)! } : {}),
     ...(p != null && !p.basisComplete && typeof p.basisBlockedBy === 'string' && p.basisBlockedBy !== ''
       ? { basisBlockedBy: p.basisBlockedBy } : {}),
     heldImport: sized?.heldImport ?? null,
@@ -863,7 +877,10 @@ export function middayShadowLogLines(rec: MiddayShadowRecord): string[] {
   const b = rec.backup;
   if (b != null) {
     out.push(`${t} ${rec.day} backup ${at(b.windowStartMs)}→${at(b.windowEndMs)} — ${b.disposition}: reserve ${pct(b.reservePct)}, `
-      + `expected ${kwh(b.expectedBuyKwh)} (worst-case sizing ${kwh(b.buyKwh)}); the islanded walk it is sized on, to the next overnight open, troughs at ${pct(b.cushionTroughSocPct)} against the ${pct(b.cushionLineSocPct)} line.${heldImportText(b.heldImport)} Shadow only: nothing is armed, written or announced for it.`);
+      + `expected ${kwh(b.expectedBuyKwh)} (worst-case sizing ${kwh(b.buyKwh)}); troughs at ${pct(b.cushionTroughSocPct)} against the ${pct(b.cushionLineSocPct)} line (the islanded walk it is sized on, to the next overnight open)`
+      // v1.200.0 — the envelope, where it contributes: the line is above what a reserve write can hold.
+      + `${b.cushionShortfallCause != null ? `; the line is above the ${RESERVE_WRITE_MAX_PCT}% the panel accepts as a reserve, and the backup leg writes the reserve only — residual risk remains` : ''}.`
+      + `${heldImportText(b.heldImport)} Shadow only: nothing is armed, written or announced for it.`);
   }
   const bb = rec.backupB;
   if (bb != null) {
@@ -902,7 +919,10 @@ export function middayShadowAnnounceInput(rec: MiddayShadowRecord, model: Tariff
   // The backup the notice names: the one that would arm; in advisory mode the one the plan calls for;
   // in a refused cycle the one the plan called for ("no outage backup tonight because …").
   const backupNamed = b != null && b.basisComplete && b.chargeTonight && (advisory || refused != null || b.wouldArm);
-  const forceCharge = c.levelPct != null && c.reservePct != null && c.levelPct > c.reservePct + 0.05;
+  // Charge Now rides the leg: its level clears the reserve, or (v1.200.0, A5) the line force-charge is armed on it —
+  // armFromPlan's lineRides, whatever the stated level. lineAskPct is set only where the leg's line gate is on; a line
+  // leg stated at the 50% reserve (H1's floor, or no start expected) is still armed, and Charge Now switched on just in time.
+  const forceCharge = c.lineAskPct != null || (c.levelPct != null && c.reservePct != null && c.levelPct > c.reservePct + 0.05);
   return {
     nowMs: rec.computedAtMs,
     mode: rec.mode,
@@ -912,10 +932,18 @@ export function middayShadowAnnounceInput(rec: MiddayShadowRecord, model: Tariff
       toward: c.toward === true, forceCharge, charges: c.chargeTonight, basisComplete: c.basisComplete,
       basisBlockedBy: c.basisComplete ? null : (c.basisBlockedBy ?? null),
       cushionShortfall: c.cushionShortfall === true,
+      ...(c.cushionShortfallCause != null ? { cushionShortfallCause: c.cushionShortfallCause } : {}),
+      ...(c.lineAskPct != null ? { lineAskPct: c.lineAskPct } : {}),
+      ...(c.lineNotHeld != null ? { lineNotHeld: c.lineNotHeld } : {}),
+      // (Fix7 review 1) The line beside its ask: the plan's forceChargeLine.linePct is its cushionLineSocPct.
+      ...(c.lineAskPct != null && c.cushionLineSocPct != null ? { linePct: c.cushionLineSocPct } : {}),
     },
     backup: backupNamed && b != null ? {
       windowStartMs: b.windowStartMs, windowEndMs: b.windowEndMs, reservePct: b.reservePct,
       expectedKwh: b.expectedBuyKwh, buyKwh: b.buyKwh, cushionShortfall: b.cushionShortfall === true,
+      ...(b.cushionShortfallCause != null ? { cushionShortfallCause: b.cushionShortfallCause } : {}),
+      ...(b.lineAskPct != null ? { lineAskPct: b.lineAskPct } : {}),
+      ...(b.lineNotHeld != null ? { lineNotHeld: b.lineNotHeld } : {}),
     } : null,
     onPeak,
     refreshAtMs: c.windowStartMs - REFRESH_LEAD_MS,
@@ -1003,6 +1031,9 @@ const coerceLeg = (raw: unknown): ShadowLegSummary | null => {
     windowPvP50Kwh: fin(o.windowPvP50Kwh), windowLoadP50Kwh: fin(o.windowLoadP50Kwh),
     ...(typeof o.toward === 'boolean' ? { toward: o.toward } : {}),
     ...(typeof o.cushionShortfall === 'boolean' ? { cushionShortfall: o.cushionShortfall } : {}),
+    ...(o.cushionShortfallCause === 'envelope' || o.cushionShortfallCause === 'envelope+caps' ? { cushionShortfallCause: o.cushionShortfallCause } : {}),
+    ...(fin(o.lineAskPct) != null ? { lineAskPct: fin(o.lineAskPct)! } : {}),
+    ...(o.lineNotHeld === 'closeUnder' || o.lineNotHeld === 'aboveFull' || o.lineNotHeld === 'nearFull' ? { lineNotHeld: o.lineNotHeld } : {}),
     ...(typeof o.basisBlockedBy === 'string' && o.basisBlockedBy !== '' ? { basisBlockedBy: o.basisBlockedBy } : {}),
     ...('heldImport' in o ? { heldImport: coerceHeldImport(o.heldImport) } : {}),
   };

@@ -1,7 +1,8 @@
 import { memo, useEffect, useState } from 'react';
 import {
   actuationBannerState, actuationBannerVisible, actuationKey, cancelOutcome, cancelRequestInit, chargeFigureParts, floorCushionLinePct, fmtLinePct,
-  holdSummary, noChargeExpected, noPlanText, refusedArmLead, reserveWriteLabel, sizingLine, withConfirmedCancel, writeStands,
+  holdSummary, noChargeExpected, noPlanText, refusedArmLead, reserveWriteLabel, sizingLine, startClosedLead, withConfirmedCancel, writeStands,
+  capsShortfallShown, outageLineRow, lineNotHeldOfCard,
   writtenReservePct, middayShadowView, type MiddayShadowStatus, type MiddayShadowPreviewStatus,
 } from './nightChargeText';
 import { apiUrl } from '../api';
@@ -54,6 +55,18 @@ interface NightChargePlan {
   requiredExtraKwh: number | null;
   bindingCap: 'requirement' | 'chargePower' | 'evContention' | 'poolHeadroom' | 'overBuy' | null;
   cushionShortfall: boolean;
+  /** v1.200.0 — the 50% reserve envelope's part in the shortfall, the line the force-charge carries, and
+   *  whether the expected walk ran it (nightChargeText.outageLineRow). Absent on older plans. */
+  cushionShortfallCause?: 'envelope' | 'envelope+caps';
+  /** v1.200.0 (A5) — why the plan does not claim the line (nightChargeText.CushionNotePlan). */
+  cushionEnvelopeReason?: 'advisory' | 'backupLeg' | 'reserveAtTarget' | 'armedNoLine' | 'startClosed' | 'nearFull' | 'closeUnder';
+  cushionStartClosedWords?: string;
+  cushionStartClosedNoWrite?: boolean;
+  forceChargeLine?: { askPct: number; linePct: number } | null;
+  expectedForceChargeMode?: 'line';
+  /** v1.200.0 (review 2) — the expected walk reaches the panel ceiling: the panel switches Charge Now off there and
+   *  the add-on switches it back on under the start target before the close (nightChargeText.outageLineRow). */
+  expectedLineCeilingStop?: { ceilingPct: number; startTargetPct: number; noReOnWords?: string };
   /** v1.60.0 — EV-contention disclosure. `basis: 'unavailable'` means no EVSE
    *  prediction covered the window, so contention was NOT modelled — it is not
    *  a prediction of zero, and the card must not render it as reassurance. */
@@ -107,6 +120,10 @@ interface NightActuation {
   /** v1.189.0 — the reserve settled as someone else's (the foreign rule): nothing left to cancel. */
   foreignSettledAtMs?: number | null;
   foreignReservePct?: number | null;
+  /** v1.200.0 (Fix10) — a line night whose start is closed (lineStartClosedStatus): absent on any other night. */
+  lineStartClosed?: { text: string; cancel: boolean };
+  /** v1.200.0 (Fix10 review 1) — a line night's write the panel has not read back (lineWriteUnreadStatus). */
+  lineWriteUnread?: boolean;
 }
 
 interface NightChargeStatus {
@@ -224,7 +241,7 @@ export const NightChargeCard = memo(function NightChargeCard() {
   const actuation = withConfirmedCancel(status.actuation ?? null, cancelledKey);
   const onCancelled = () => setCancelledKey(actuationKey(actuation));
   const banner = (spacing: 'mt-3' | 'mb-3') => (
-    <ActuationBanner mode={status.mode} actuation={actuation} onCancelled={onCancelled} spacing={spacing} hhmm={hhmm} />
+    <ActuationBanner mode={status.mode} actuation={actuation} onCancelled={onCancelled} spacing={spacing} hhmm={hhmm} reservePct={status.reserveFloorPercent} />
   );
   const stands = writeStands(actuation, status.mode, Date.now());
 
@@ -292,6 +309,10 @@ export const NightChargeCard = memo(function NightChargeCard() {
   const refused = status.mode !== 'advisory' && status.armRefusal
     ? refusedArmLead(status.armRefusal, { mode: status.mode, held: noChargeNight, reservePct: writtenReservePct(plan, status.reserveWriteMaxPct ?? null) })
     : null;
+  // v1.200.0 (Fix10 review 1) — a closed start no write stands behind leads with that, in the refused lead's shape.
+  const closedLead = startClosedLead(plan);
+  // v1.200.0 (Fix10 review 1) — no force-charge row under a refused arm: a disclosed one still says what the lead does not.
+  const lineRow = refused != null && plan.forceChargeLine != null ? null : outageLineRow(plan, status.reserveWriteMaxPct ?? null);
 
   return (
     <div className="card">
@@ -304,6 +325,11 @@ export const NightChargeCard = memo(function NightChargeCard() {
         <div className="mb-3 text-sm">
           <div className="text-warn font-medium">{refused.headline}</div>
           <div className="text-muted mt-1 leading-relaxed">{refused.detail}</div>
+        </div>
+      ) : closedLead ? (
+        <div className="mb-3 text-sm">
+          <div className="text-warn font-medium">{closedLead.headline}</div>
+          <div className="text-muted mt-1 leading-relaxed">{closedLead.detail}</div>
         </div>
       ) : (
         <div className="flex items-baseline gap-4 mb-3 flex-wrap">
@@ -325,9 +351,17 @@ export const NightChargeCard = memo(function NightChargeCard() {
 
       {sizing && <div className="text-xs text-muted mb-3 -mt-2">{sizing}</div>}
 
-      {plan.cushionShortfall && (
+      {capsShortfallShown(plan) && (
         <div className="text-xs text-warn mb-3 -mt-1">
           charge/pool caps prevent fully meeting the cushion — residual risk remains
+        </div>
+      )}
+
+      {/* v1.200.0 — the outage line above the panel's 50% reserve: disclosed, or the force-charge's own row; (A5) a warning
+          wherever the plan does not claim it or its walk cannot hold it (a carried night whose sizing fell short too). */}
+      {lineRow != null && (
+        <div className={`text-xs ${plan.cushionShortfallCause != null || lineNotHeldOfCard(plan) != null ? 'text-warn' : 'text-muted'} mb-3 -mt-1`}>
+          {lineRow}
         </div>
       )}
 
@@ -347,7 +381,7 @@ export const NightChargeCard = memo(function NightChargeCard() {
           .
         </div>
       )}
-      {!noChargeNight && plan.evContention?.basis === 'unavailable' && plan.cushionShortfall && (
+      {!noChargeNight && plan.evContention?.basis === 'unavailable' && capsShortfallShown(plan) && (
         <div className="text-xs text-muted mb-3 -mt-1">
           no EVSE prediction covers this window — EV contention is not modelled; if the car charges
           overnight the packs will receive less than planned
@@ -374,7 +408,8 @@ export const NightChargeCard = memo(function NightChargeCard() {
             [
               'sizing basis',
               // v1.182.0 — what will actually be WRITTEN (clamped to the panel's maximum).
-              reserveWriteLabel(plan.setpointSocPct, plan.targetSocPct, status.reserveWriteMaxPct ?? null),
+              // v1.200.0 (Fix10 review 1) — and on a closed start no write stands behind, nothing: the stat names no reserve set.
+              closedLead != null ? null : reserveWriteLabel(plan.setpointSocPct, plan.targetSocPct, status.reserveWriteMaxPct ?? null),
               plan.bindingCap ? `cap: ${BINDING_CAP_LABEL[plan.bindingCap] ?? plan.bindingCap}` : null,
             ]
               .filter(Boolean)
@@ -398,7 +433,7 @@ export const NightChargeCard = memo(function NightChargeCard() {
  * v1.189.0 — rendered in every card shape; its words and its Cancel come from
  * actuationBannerState.
  */
-function ActuationBanner({ mode, actuation, onCancelled, spacing, hhmm }: {
+function ActuationBanner({ mode, actuation, onCancelled, spacing, hhmm, reservePct }: {
   mode: NightChargeStatus['mode'];
   /** The site-zone clock formatter (siteHHMM). */
   hhmm: ClockFmt;
@@ -406,12 +441,14 @@ function ActuationBanner({ mode, actuation, onCancelled, spacing, hhmm }: {
   onCancelled: () => void;
   /** Its margin in the shape it sits in: above the stats (mb-3), or under the shape's text (mt-3). */
   spacing: 'mt-3' | 'mb-3';
+  /** The panel's reserve now (status.reserveFloorPercent): an armed write it already reads says so. */
+  reservePct: number | null;
 }) {
   const [busy, setBusy] = useState(false);
   const [cancelErr, setCancelErr] = useState<string | null>(null);
   if (mode === 'advisory' || !actuation || !actuationBannerVisible(actuation, Date.now())) return null;
 
-  const state = actuationBannerState(actuation, hhmm(actuation.cancelDeadlineMs));
+  const state = actuationBannerState(actuation, hhmm(actuation.cancelDeadlineMs), reservePct);
   const doCancel = async () => {
     setBusy(true);
     setCancelErr(null);

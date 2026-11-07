@@ -56,6 +56,24 @@ import {
   FORCE_CHARGE_ON_VERIFY_AFTER_MS, FORCE_CHARGE_ON_MAX_RETRIES, FORCE_CHARGE_ON_RETRY_CUTOFF_MS, forceChargeOnReadbackStatus,
   forceChargeNightOutcome, partialForceChargeOnFailureSlots, FORCE_CHARGE_MAX_RUN_MS,
   forceChargeSlotCores, forceChargeFailedSlotsText,
+  // v1.200.0 — the outage line above the reserve envelope: its gate, the mode a tick runs, its texts.
+  lineForceChargeEnabled, forceChargeModeOf, forceChargeLineArmNote,
+  FORCE_CHARGE_MIN_RUN_MS,
+  // v1.200.0 (review) — the ON's write-ahead stamp, the line re-ON's budget.
+  forceChargeOnStamp, FORCE_CHARGE_LINE_REON_MAX, armedForceChargeAnnouncement, lineReOnTimesWords,
+  EMPTY_LINE_DECLINED_PUSH, lineDeclinedLatestStartMs, FORCE_CHARGE_LINE_DECLINED_PERSIST_MS,
+  // v1.200.0 (review 2) — the line at risk after the start, the re-ON's readback check, the night's observations, a
+  // line-ask night's texts whatever its mode, and the declined-start push across restarts.
+  lineDeclinedPushTick, type LineDeclinedPushMem, lineAtRiskPushDue, lineOnReadingShape, lineNightObservations,
+  forceChargeLineNightPct, forceChargeOnFailureNight, lineLogPct, lineCloseAccountDue, FORCE_CHARGE_BLOCKER_WHY, type ForceChargeOpts,
+  // v1.200.0 (Fix9) — a line night's force-charge "waits on" a reading of the target only while a start can still come.
+  forceChargeStartClosed, lineStartClosedWords,
+  // v1.200.0 (Fix9 review 2) — a recompute of a window whose armed record carries no line claims no ON the record cannot make.
+  armedNoLineStartMs, armedLineStartClosed, armedLineNoReOn, armedLineRunOn, lineCloseReadingLate, lineGridOffPushDue, type LineClosure,
+  // v1.200.0 (review 4) — what a line re-ON's readback check stamps, the re-ON that took effect included.
+  lineReOnCheckedStamp,
+  // v1.200.0 (review 6) — the force-charge tick's cadence, which the line-at-risk push's hand-back hold counts.
+  FORCE_CHARGE_TICK_MS,
 } from './nightForceCharge.js';
 import {
   extractSettingsSurface, evaluateDrift, freshDriftState, loadConfirmedSurface,
@@ -205,12 +223,17 @@ import {
   buildCostSurplusLoad, costSurplusLedgerColumns,
   // v1.199.0 — the cushion line's measured capacity scale: its ledger columns and its log line.
   cushionPoolScaleLedgerColumns, cushionScaleLogText, type CushionPoolScale, type CushionScaleBasis,
+  lineForceChargeLedgerColumns,
   // v1.187.22 — the expected buy: its ledger columns, and what a spoken line states (the level
   // the write drives to and the expected draw — never the worst case, which only logs name).
   expectedBuyLedgerColumns, ledgerExpectedBuyKwh, chargeLevelPct, statedBuyKwh, buyFiguresLogText,
-  chargeIsWindowBound,
+  // v1.200.0 (A5, H1) — "toward" on the speakers: a line walk's bound level is the window's reach (chargeIsWindowBound
+  // elsewhere).
+  chargeEndsShortOfLevel,
   // R2 — the leg a plan sizes (every live plan is the overnight cost leg).
   OVERNIGHT_WINDOW_SPEC,
+  // v1.200.0 (A5) — what an armed line night's own walk cannot hold, for the 21:30 line.
+  lineNotHeldOf,
   type NightChargePlan,
   type NightChargeInputDeps,
   type NightForecastHour,
@@ -224,7 +247,7 @@ import {
   getLatestReadiness,
   setLatestReadiness,
   nightChargeGateFields,
-  computeNightChargeReadiness,
+  computeNightChargeReadiness, MISSED_APPLY_DISPOSITION,
   CURRENT_ALGO_VERSION,
   // v1.196.0 — the realized cushion verdict on the claim the plan made.
   realizedCushionBreach,
@@ -258,6 +281,7 @@ import {
   attemptProvedUnlanded, applyProvedUnlanded, revertRetryPending, revertRetryText, REVERT_DEADLINE_HOLD_MAX_MS,
   revertResendOnReport, type RevertResendOnReport, isReserveSetting, restoreSummaryDue, type RestoreSummaryKind, restoreSentWords,
   type RevertDeadlineDecision,
+  writeWindowEndMs,
 } from './nightChargeActuator.js';
 import { nextOnPeakStartMs, onPeakEndMs, nextChargeableOpenMs, legObjective, legForceChargeEligible, planDateOwningCycle, cheapNightOf, type ChargeLegRole } from './chargeWindows.js';
 // R4 — the winter mid-day cycle computed in SHADOW: sized, probed and recorded, never armed,
@@ -289,13 +313,14 @@ import { pvSurplusFromBand, surplusSpanEndMs } from './chargeTaper.js';
 import {
   buildNightChargeMessage, sendNotification, loadNotifyConfig,
   // v1.187.22 — the after-the-fact night-charge pushes, built where their text is tested.
-  buildNightChargeMorningSummary, buildNightChargeApplyFailure, buildNightForceChargeOnFailure,
-  buildNightChargeRevertDeadline, buildNightChargeForeignReserve, buildNightChargeMissedApply,
+  buildNightChargeMorningSummary, buildNightChargeApplyFailure, buildNightForceChargeOnFailure, buildLineForceChargeDeclinedStart,
+  buildLineForceChargeAtRisk, buildLineForceChargeGridOff, buildLineNightNotArmed,
+  buildNightChargeRevertDeadline, buildNightChargeForeignReserve, buildNightChargeMissedApply, buildLineNightCloseAccount,
 } from './notify.js';
 // v1.189.0 — the charge cycle: the legs one evening arms (chargeCycle.ts).
 import {
   coerceCycle, serializeCycle, emptyCycle, asChargeLeg, legRoleOf, armCycle, promoteCycle, cancelLeg, parseCancelLeg,
-  cycleLegsStatus, cycleDriftLeg, missedApplyDue, missedApplyReason, legLedgerFields, supersededLegs, trailingResolved,
+  cycleLegsStatus, lineStartClosedStatus, lineWriteUnreadStatus, noEveningArmLeft, servedLineClosure, lineNotArmedPushDue, priorArmSuperseded, cycleDriftLeg, missedApplyDue, missedApplyReason, legLedgerFields, supersededLegs, trailingResolved,
   departedAfterStep, forceChargeDriftLeg, type DepartedLeg,
   nextForceChargeOpenMs, withLiveTrailing, MISSED_APPLY_FALLBACK_REASON,
   type ChargeCycleState, type ChargeLegState,
@@ -3352,6 +3377,12 @@ const forceChargeOn = (role: ChargeLegRole = 'cost'): boolean => legForceChargeE
   costMaxSocPct: FORCE_CHARGE_COST_MAX_SOC_PCT,
   reserveWriteMaxPct: RESERVE_WRITE_MAX_PCT,
 }));
+// v1.200.0 — the outage-line force-charge's gate (nightForceCharge.lineForceChargeEnabled): any write mode,
+// per leg (never the backup leg). Not ARB_OBJECTIVE, not ARB_COST_MAX_SOC_PCT: those gate the COST
+// force-charge only. Each tick composes the mode from both gates as they read NOW (forceChargeModeOf).
+const lineForceChargeOn = (role: ChargeLegRole = 'cost'): boolean => legForceChargeEligible(role, lineForceChargeEnabled({ mode: NIGHT_CHARGE_MODE }));
+/** v1.200.0 — both force-charge gates for a leg, as they read now. */
+const forceChargeGatesOn = (role: ChargeLegRole = 'cost'): { cost: boolean; line: boolean } => ({ cost: forceChargeOn(role), line: lineForceChargeOn(role) });
 // Restart-persistent per-night actuation record — a raised reserve MUST be
 // findable (and revertable) across an add-on restart mid-window.
 const NIGHT_CHARGE_ACTUATION_PATH =
@@ -3373,14 +3404,19 @@ interface NightChargeLatch {
   /** v1.187.22 — the evening's refused arm (armRefusalReason) and the window it was refused for:
    *  the status route serves it (servedArmRefusal) so the card leads with it. null = none. */
   armRefused?: ArmRefusalRecord | null;
+  /** v1.200.0 (Fix10 review 1) — the window whose no-write push went (chargeCycle.lineNotArmedPushDue), stamped before it goes. */
+  lineNotArmedWindowStartMs?: number | null;
 }
 function readNightChargeLatchFile(): NightChargeLatch {
   try {
     const raw = JSON.parse(readFileSync(NIGHT_CHARGE_LATCH_PATH, 'utf8'));
     const d = raw?.lastNotifyDay;
-    return { lastNotifyDay: typeof d === 'string' ? d : null, armRefused: coerceArmRefusalRecord(raw?.armRefused) };
+    return {
+      lastNotifyDay: typeof d === 'string' ? d : null, armRefused: coerceArmRefusalRecord(raw?.armRefused),
+      lineNotArmedWindowStartMs: typeof raw?.lineNotArmedWindowStartMs === 'number' ? raw.lineNotArmedWindowStartMs : null,
+    };
   } catch {
-    return { lastNotifyDay: null, armRefused: null };
+    return { lastNotifyDay: null, armRefused: null, lineNotArmedWindowStartMs: null };
   }
 }
 // In-memory mirror of the persisted latch, seeded once from disk at module load.
@@ -3393,9 +3429,12 @@ function readNightChargeLatch(): NightChargeLatch {
   return nightChargeLatchMem;
 }
 function writeNightChargeLatch(l: NightChargeLatch): void {
-  nightChargeLatchMem = { lastNotifyDay: l.lastNotifyDay, armRefused: l.armRefused ?? null };
+  nightChargeLatchMem = {
+    lastNotifyDay: l.lastNotifyDay, armRefused: l.armRefused ?? null,
+    lineNotArmedWindowStartMs: l.lineNotArmedWindowStartMs ?? nightChargeLatchMem.lineNotArmedWindowStartMs ?? null,
+  };
   try {
-    atomicWriteFileSync(NIGHT_CHARGE_LATCH_PATH, JSON.stringify(l));
+    atomicWriteFileSync(NIGHT_CHARGE_LATCH_PATH, JSON.stringify(nightChargeLatchMem));
   } catch (e: any) {
     app.log.debug(`night-charge: latch persist failed (${e?.message ?? e})`);
   }
@@ -3539,6 +3578,16 @@ function stampLegOutcome(leg: NightActuationState & { leg?: ChargeLegRole }, fie
   catch (e: any) { app.log.warn(`night-charge: ledger stamp failed for ${leg.day} (${e?.message ?? e})`); }
 }
 
+/** v1.200.0 — the house pool's state of charge from a FRESH, coherent readback, or null (a line night's
+ *  morning summary states where its pool closed). */
+function freshPoolSocPct(nowMs: number): number | null {
+  const shp2 = findShp2(store.get().devices);
+  const sp: any = shp2 && shp2.projection?.kind === 'shp2' && shp2ReadbackFresh(shp2, nowMs) ? shp2.projection : null;
+  const full = sp?.backupFullCapWh, soc = sp?.backupBatPercent, remain = sp?.backupRemainWh;
+  return typeof full === 'number' && full > 0 && typeof soc === 'number' && typeof remain === 'number'
+    && Math.abs((remain / full) * 100 - soc) <= 8 ? soc : null;
+}
+
 /** v1.189.0 — the house panel's backup reserve from a FRESH readback (the reserve step's R3 rule:
  *  a frozen projection never decides), or null. */
 function freshReserveReadingPct(nowMs: number): number | null {
@@ -3656,7 +3705,8 @@ function round1(n: number): number { return Math.round(n * 10) / 10; }
  * update() — buildInputs there is synchronous, but we need awaited analytics).
  */
 async function recomputeNightChargePlan(
-  opts: { allowStalePanel?: boolean; role?: ChargeLegRole; shadowLeg?: ShadowLegSizing; maxWeatherAgeMs?: number } = {},
+  /** `arming`: the evening job's plan, which replaces the record it would otherwise read (armedNoLineStartMs, below). */
+  opts: { allowStalePanel?: boolean; role?: ChargeLegRole; shadowLeg?: ShadowLegSizing; maxWeatherAgeMs?: number; arming?: boolean } = {},
 ): Promise<{ plan: NightChargePlan; extras: NightPlanExtras } | 'panelStale' | null> {
   const nowMs = Date.now();
   // R4 — a mid-day cycle's leg sized in SHADOW (middayShadow.ts): its window, horizon end and PV
@@ -4045,6 +4095,13 @@ async function recomputeNightChargePlan(
     // v1.187.22 — the gate the force-charge itself runs on, so the expected buy reads the level
     // the armed write drives to (armedWriteLevelPct). R2 — the leg's own (forceChargeOn(role)).
     forceChargeEligible: forceChargeOn(legRole),
+    // v1.200.0 — the outage-line force-charge's gate, per leg: a line above the 50% reserve is then armed
+    // (forceChargeLine; (A5) carried, or disclosed beside it) or, the gate off, disclosed (cushionShortfall, cause
+    // 'envelope'). Never absent on a live plan.
+    lineForceChargeEligible: lineForceChargeOn(legRole),
+    // v1.200.0 (Fix9 review 2) — the armed record with no line ask: a recompute of its window claims no ON the record cannot make. Not
+    // the plan the evening job arms from: a Saturday record sharing Sunday's window must not stop Sunday's arm carrying its ask.
+    armedNoLineStartMs: shadowLeg == null && opts.arming !== true ? armedNoLineStartMs(nightActuationMem) : null,
     // R2 — the leg: the overnight window (resolved above) for every live plan, its role the caller's.
     // R4 — a shadow leg's own spec (its pinned window, taper line and backup hold).
     windowSpec: shadowLeg ? shadowLeg.spec : legRole === 'cost' ? OVERNIGHT_WINDOW_SPEC : { kind: 'overnight', role: legRole },
@@ -4056,8 +4113,20 @@ async function recomputeNightChargePlan(
   if (!panel.fresh) {
     plan.rationale += ` NOTE: sized on a panel reading ${panel.ageMs != null ? `~${Math.round(panel.ageMs / 60_000)} min old` : 'of unknown age'} (${panel.why}) — it did not recover before the deferral deadline. The reserve write and force-charge still wait for a live readback.`;
   }
+  // v1.200.0 (Fix10) — a record WITH its ask whose start is closed: the plan the card and the entities serve says so, computed apart, so
+  // `plan` stays the plan of record. The snapshot, the ledger row and its strike rule read that one: disclosing here must never take
+  // the ask off a night whose record carries it. As armedNoLineStartMs, never an arm or a shadow leg. (A stale panel's note above is the
+  // evening job's and a shadow leg's only: this plan has none to carry.)
+  // (Fix10 review 1) And a window no record holds, once no evening job can arm it (chargeCycle.servedLineClosure): read off the plan of
+  // record's window, since a closed record of an earlier night says nothing of this one.
+  const lineClosed = shadowLeg == null && opts.arming !== true ? servedLineClosure(nightCycleView(), plan.window?.startMs ?? null, armedLineStartClosed(nightActuationMem, nowMs, forceChargeGatesOn(legRoleOf(nightActuationMem))), plan.window != null && noEveningArmLeft(plan.window.startMs, nowMs, eveningJobClock(nowMs))) : null;
+  // (Fix10 review 2) And a run still claimed that no re-ON can bring back, on the same terms.
+  const lineNoReOn = shadowLeg == null && opts.arming !== true && nightActuationMem.windowStartMs === plan.window?.startMs ? armedLineNoReOn(nightActuationMem, nowMs) : null;
+  // (Fix11) And a run on, which the plan's walk cannot see: it starts from the run, on the same terms.
+  const lineRunOn = shadowLeg == null && opts.arming !== true && nightActuationMem.windowStartMs === plan.window?.startMs ? armedLineRunOn(nightActuationMem) : null;
   // R4 — never a shadow leg: the holder is the live overnight plan the entities, card and status serve.
-  if (!shadowLeg) setLatestNightChargePlan(plan);
+  if (!shadowLeg) setLatestNightChargePlan(lineClosed != null || lineNoReOn != null || lineRunOn != null ? computeNightChargePlan({ ...inputs, armedLineStartClosed: lineClosed, armedLineNoReOn: lineNoReOn, armedLineRunOnStartMs: lineRunOn }) : plan);
+  if (!shadowLeg) pushLineNotArmedIfDue(getLatestNightChargePlan(), lineClosed, nowMs);
 
   // Ledger diagnostics computed over the authoritative 24 h band (where the
   // P10/P50/P90 percentiles are actually defined).
@@ -4248,6 +4317,9 @@ function recordNightPlanRow(planDate: string, plan: NightChargePlan, extras: Nig
     // v1.199.0 — the measured capacity scale that line was converted on, and its basis. Written
     // unconditionally (null with none), for the same reason.
     ...cushionPoolScaleLedgerColumns(plan),
+    // v1.200.0 — the outage line above the reserve envelope: the ask carried by the night force-charge,
+    // or the envelope disclosed. Written unconditionally (null with none), for the same reason.
+    ...lineForceChargeLedgerColumns(plan),
     // v1.187.22 — the expected buy and start beside buy_kwh (the worst case), so the scorer can
     // grade them. Written unconditionally (null with none) for the same reason as above.
     ...expectedBuyLedgerColumns(plan),
@@ -4866,6 +4938,31 @@ function cancelStalePriorArm(today: string, nowMs: number, reason: string): bool
   return true;
 }
 
+/** v1.200.0 (Fix10 review 1) — where today's evening job stands (chargeCycle.noEveningArmLeft): latched, or past its cutoff. */
+function eveningJobClock(nowMs: number): { consumed: boolean; fireMin: number; nowMin: number } {
+  const nowMin = siteMinuteOfDay(nowMs);
+  const sched = nightScheduleNow();
+  return {
+    consumed: readNightChargeLatch().lastNotifyDay === siteYmd(nowMs) || nowMin >= sched.eveningCutoffMin,
+    fireMin: sched.notify.fireMin,
+    nowMin,
+  };
+}
+
+/** v1.200.0 (Fix10 review 1) — a window no record holds, with no evening job left: nothing re-arms, and no other surface knows the night
+ *  (chargeCycle.lineNotArmedPushDue). Stamped on the latch before it goes, not awaited. By hand until the add-on's close would be. */
+function pushLineNotArmedIfDue(plan: NightChargePlan | null, closure: LineClosure | null, nowMs: number): void {
+  const latch = readNightChargeLatch();
+  const due = lineNotArmedPushDue(closure, plan, latch.lineNotArmedWindowStartMs ?? null, servedArmRefusal(latch.armRefused, plan, NIGHT_CHARGE_MODE, nowMs));
+  if (due == null) return;
+  writeNightChargeLatch({ ...latch, lineNotArmedWindowStartMs: due.windowStartMs });
+  const closeMs = writeWindowEndMs({ windowEndMs: due.windowEndMs, nextOnPeakStartMs: nextOnPeakStartMs(tariffModelFromEnv(), due.windowStartMs) })!;
+  app.log.warn(`night-charge: no write is armed for the ${new Date(due.windowStartMs).toISOString()} window and no evening job is left to arm one: no force-charge runs for the ${round1(due.linePct)}% outage line.`);
+  void sendNotification(loadNotifyConfig(), buildLineNightNotArmed({ ...due, closeText: fmtSiteClock(closeMs) })).catch((e: any) => {
+    app.log.debug(`night-charge: line not-armed notify failed (${e?.message ?? e})`);
+  });
+}
+
 async function runNightChargeEveningJobInner(): Promise<void> {
   const nowMs = Date.now();
   const today = siteYmd(nowMs);
@@ -4929,7 +5026,7 @@ async function runNightChargeEveningJobInner(): Promise<void> {
     // sized on the last reading instead (disclosed on the plan), so staleness alone
     // never costs the night. Only a genuinely missing basis (null) reaches
     // 'insufficient_basis' below.
-    const result = await recomputeNightChargePlan({ allowStalePanel: nowMin >= deferUntilMin });
+    const result = await recomputeNightChargePlan({ allowStalePanel: nowMin >= deferUntilMin, arming: true });
     if (result === 'panelStale') {
       if (nightPlanStaleDeferLoggedDay !== today) {
         nightPlanStaleDeferLoggedDay = today;
@@ -5007,6 +5104,7 @@ async function runNightChargeEveningJobInner(): Promise<void> {
     let supervisedCtx: {
       cancelDeadlineText: string; cancelDeadlineTextEs: string; targetPct: number;
       forceChargeTargetPct?: number | null;
+      forceChargeLine?: { askPct: number; linePct: number; panelCeilingPct: number } | null;
     } | null = null;
     let armedCandidate: NightActuationState | null = null;
     // v1.189.0 — the cycle armCycle built (chargeCycle.ts), persisted only once delivered, and the
@@ -5026,7 +5124,7 @@ async function runNightChargeEveningJobInner(): Promise<void> {
       // overnight cost leg, every cycle until the mid-day switch — it arms what armFromPlan arms
       // against the active leg, and refuses with armRefusalReason's words, unchanged.
       const arm = armCycle(nightCycleView(), today, [{
-        role: 'cost', kind: 'overnight', plan, forceChargeEnabled: forceChargeOn(), nextOnPeakStartMs: armOnPeakStartMs,
+        role: 'cost', kind: 'overnight', plan, forceChargeEnabled: forceChargeOn(), lineForceChargeEnabled: lineForceChargeOn(), nextOnPeakStartMs: armOnPeakStartMs,
         announcedLevelPct: chargeLevelPct(plan), announcedExpectedKwh: statedBuyKwh(plan),
       }], nowMs, plan.reserveFloorPct);
       armedCycle = arm.cycle;
@@ -5041,9 +5139,8 @@ async function runNightChargeEveningJobInner(): Promise<void> {
         // 00:00, one hour, since the weekday rule is evaluated per-instant).
         // The pair that genuinely shares a window is SAT + SUN, both resolving
         // to Mon 00:00 → 05:00, because Saturday has no window of its own.
-        if (nightActuationMem.day != null && nightActuationMem.day !== today &&
-            nightActuationMem.appliedAtMs == null && nightActuationMem.applyAttemptedAtMs == null &&
-            nightActuationMem.targetPct != null) {
+        // v1.200.0 (Fix10 review 1) — the test is chargeCycle.priorArmSuperseded: it leaves a 'missed — ' disposition, the strike's evidence.
+        if (nightActuationMem.day != null && priorArmSuperseded(nightActuationMem, today)) {
           app.log.info(`night-charge: prior ARM for ${nightActuationMem.day} (target ${nightActuationMem.targetPct}%, worst-case sizing ~${nightActuationMem.buyKwh ?? '—'} kWh) superseded by tonight's plan — one write fires at the shared window.`);
           // v1.132.0 — and STAMP it. A log line is not the ledger: the superseded
           // night keeps actuated=null forever, indistinguishable from four other
@@ -5063,6 +5160,9 @@ async function runNightChargeEveningJobInner(): Promise<void> {
         // the active leg is stamped above, as it always was). Stamped once the cycle that replaces
         // it is persisted (below): an undelivered arm replaces nothing.
         supersededPending = supersededLegs(nightCycleView(), arm.legs, today, nowMs).filter(({ leg }) => leg !== nightActuationMem);
+        // v1.200.0 — the mode tonight's force-charge rides (forceChargeModeOf on the armed record and the
+        // gates now, inside armedForceChargeAnnouncement): a LINE night is announced as the line force-charge
+        // to the close, never as a cost stop.
         supervisedCtx = {
           // Day-qualified: a weekend plan's window can be ~28 h out, and a bare
           // clock time would read as tonight (see fmtDeadlineSpoken).
@@ -5070,8 +5170,9 @@ async function runNightChargeEveningJobInner(): Promise<void> {
           cancelDeadlineTextEs: fmtDeadlineSpokenEs(armedCandidate.windowStartMs! - APPLY_LEAD_MS, nowMs),
           targetPct: armedCandidate.targetPct!,
           // v1.165.0 — say so when force-charge will ride this window. v1.187.22 — from the stamp
-          // the morning push reads back (forceChargeRides): one decision, made once.
-          forceChargeTargetPct: armedCandidate.forceChargeRides === true ? armedCandidate.forceChargeCeilingPct : null,
+          // the morning push reads back (forceChargeRides): one decision, made once. v1.200.0 — a LINE night
+          // (the mode the gates now compose) is announced as the line force-charge to the close (review: pinned).
+          ...armedForceChargeAnnouncement(armedCandidate, forceChargeGatesOn()),
         };
       } else if (
         nightActuationMem.forceChargeOnAtMs != null && nightActuationMem.forceChargeOffVerifiedAtMs == null
@@ -5110,10 +5211,13 @@ async function runNightChargeEveningJobInner(): Promise<void> {
         // v1.187.22 — what a night expected to charge nothing holds: the armed reserve.
         reservePct: supervisedCtx.targetPct,
         expectedKwh: statedBuyKwh(plan),
-        toward: chargeIsWindowBound(plan),
+        toward: chargeEndsShortOfLevel(plan),
         deadlineText: supervisedCtx.cancelDeadlineText,
         deadlineTextEs: supervisedCtx.cancelDeadlineTextEs,
         cushionShortfall: plan.cushionShortfall === true,
+        // v1.200.0 — a LINE night (the force-charge carries the pool above the panel's reserve to the close):
+        // the reserve the panel itself keeps, said as a clause.
+        ...(supervisedCtx.forceChargeLine != null && plan.expectedForceChargeMode === 'line' ? { reserveOnlyPct: RESERVE_WRITE_MAX_PCT } : {}),
       });
       const spoken = spokenPair.en;
       const spokenEs = spokenPair.es;
@@ -5143,7 +5247,7 @@ async function runNightChargeEveningJobInner(): Promise<void> {
           stampLegOutcome(leg, { arm_disposition: `superseded by the ${today} plan` });
         }
         app.log.info(
-          `night-charge: supervised write ARMED for ${today} — reserve → ${armedCandidate.targetPct}% at ${new Date(armedCandidate.windowStartMs! - APPLY_LEAD_MS).toISOString()} (${buyFiguresLogText(plan?.expectedBuyKwh, plan?.buyKwhDebiased ?? plan?.buyKwh)}); announced via ${[haNotifyDelivered ? 'HA notify' : null, audibleDelivered ? 'audible' : null].filter(Boolean).join(' + ')}; cancellable until the write moment. ${forceChargeArmNote(armedCandidate)}`,
+          `night-charge: supervised write ARMED for ${today} — reserve → ${armedCandidate.targetPct}% at ${new Date(armedCandidate.windowStartMs! - APPLY_LEAD_MS).toISOString()} (${buyFiguresLogText(plan?.expectedBuyKwh, plan?.buyKwhDebiased ?? plan?.buyKwh)}); announced via ${[haNotifyDelivered ? 'HA notify' : null, audibleDelivered ? 'audible' : null].filter(Boolean).join(' + ')}; cancellable until the write moment. ${forceChargeArmNote(armedCandidate, plan)}`,
         );
       } else {
         app.log.error(
@@ -5234,7 +5338,7 @@ function shadowArmProbe(day: string, nowMs: number): (cands: ShadowArmCandidate[
   return (cands) => {
     const model = tariffModelFromEnv();
     const verdict = armCycle(nightCycleView(), day, cands.map((c) => ({
-      role: c.role, kind: c.kind, plan: c.plan, forceChargeEnabled: forceChargeOn(c.role),
+      role: c.role, kind: c.kind, plan: c.plan, forceChargeEnabled: forceChargeOn(c.role), lineForceChargeEnabled: lineForceChargeOn(c.role),
       nextOnPeakStartMs: c.plan.window != null ? nextOnPeakStartMs(model, c.plan.window.startMs) : null,
     })), nowMs, cands[0]?.plan.reserveFloorPct ?? null);
     return { armed: verdict.legs.map((l) => l.leg), refused: verdict.refused };
@@ -5998,6 +6102,9 @@ async function runNightActuationTick(): Promise<void> {
     // v1.189.0 — a leg whose apply window passed with no write (chargeCycle.missedApplyDue).
     try { await runMissedApplyStep(); }
     catch (e: any) { app.log.warn(`night-charge: missed-apply step failed (${e?.message ?? e})`); }
+    // v1.200.0 (Fix9 review 1) — a line night that closed with no restore to summarise (nightForceCharge.lineCloseAccountDue).
+    try { runLineCloseAccountStep(); }
+    catch (e: any) { app.log.warn(`night-charge: line close-account step failed (${e?.message ?? e})`); }
   } finally {
     nightActuationInFlight = false;
   }
@@ -6005,6 +6112,10 @@ async function runNightActuationTick(): Promise<void> {
 
 /** v1.166.0 — reasons already logged for the current night (one line per reason). */
 let forceChargeWhyLogged: { day: string | null; reasons: Set<string> } = { day: null, reasons: new Set() };
+/** v1.200.0 (review) — a LINE night's declined-start push: the blocker class held and since when, and the
+ *  classes pushed tonight (nightForceCharge.lineDeclinedPushTick). (review 2) The pushed classes are also on the
+ *  night's record, stamped before each push: this memory is re-seeded from it after a restart. */
+let lineDeclinedPush: LineDeclinedPushMem = { day: null, st: EMPTY_LINE_DECLINED_PUSH };
 
 /** The shared grid-input envelope (ARB_GRID_INPUT_CAP_KW; see the planner's note on why
  *  17 kW): ≤0 or unparseable ⇒ null (contention not modelled). One reader for the planner
@@ -6014,8 +6125,27 @@ function gridInputCapKwFromEnv(): number | null {
   return option<number | null>('ARB_GRID_INPUT_CAP_KW');
 }
 
-/** v1.166.0 — tonight's force-charge decision, stated on the 21:30 ARMED line. */
-function forceChargeArmNote(armed: NightActuationState): string {
+/** v1.166.0 — tonight's force-charge decision, stated on the 21:30 ARMED line. v1.200.0 — a LINE night
+ *  (forceChargeModeOf on the armed record and the gates now) says so, with its timed start; (A5) and, where the plan's
+ *  own walk cannot hold the line (lineNotHeldOf), "Line NOT held". */
+function forceChargeArmNote(armed: NightActuationState, plan: NightChargePlan | null): string {
+  // (Fix9 review 1) A reserve at the write when the plan read it: no apply while it does, so nothing rides it (the plan's own disclosure,
+  // reason 'reserveAtTarget'). (Fix9 review 2) A reading, not a promise: a write that goes anyway rides a cost ceiling beside it.
+  if (plan?.cushionEnvelopeReason === 'reserveAtTarget') return `Force-charge: none for the line — the reserve reads ${plan.reserveFloorPct}%, so no write is due while it does, and no force-charge runs without one; the plan does not claim tonight's outage line.`;
+  const mode = forceChargeModeOf(armed, forceChargeGatesOn());
+  if (mode?.kind === 'line' && armed.windowEndMs != null) {
+    const endMs = writeWindowEndMs(armed)!;
+    const startMs = plan?.expectedForceChargeStartMs;
+    const notHeld = lineNotHeldOf(plan);
+    return forceChargeLineArmNote({
+      linePct: armed.forceChargeLinePct ?? mode.askPct, startTargetPct: mode.startTargetPct, panelCeilingPct: mode.panelCeilingPct,
+      expectedStartText: startMs != null ? fmtSiteClock(startMs) : null,
+      timedByText: fmtSiteClock(endMs - FORCE_CHARGE_MIN_RUN_MS),
+      // v1.200.0 (review 2) — a walk that reaches the panel ceiling: no "as backstop", the re-ON named.
+      ceilingStop: plan?.expectedLineCeilingStop != null,
+      notHeld: notHeld != null ? { kind: notHeld, closePct: plan?.expectedWriteLevelPct ?? null } : null,
+    });
+  }
   if (!forceChargeOn()) return 'Force-charge: off (disabled by options).';
   const c = armed.forceChargeCeilingPct;
   if (c == null) return 'Force-charge: none tonight (no economic ceiling announced) — reserve-only.';
@@ -6030,7 +6160,7 @@ function forceChargeArmNote(armed: NightActuationState): string {
  * `forceDisabled` is the master-switch safety tick: it can only ever switch OFF.
  */
 async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promise<void> {
-  const state = nightActuationMem;
+  let state = nightActuationMem;
   if (state.day == null) return;
   const nowMs = Date.now();
   const shp2 = findShp2(store.get().devices);
@@ -6097,9 +6227,11 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
         legEff: fcLeg,
       })
       : null;
-  const action = decideForceCharge(state, nowMs, {
+  const fcOpts: ForceChargeOpts = {
     // v1.189.0 — per leg: a backup leg never force-charges (chargeWindows.legForceChargeEligible).
     enabled: !opts.forceDisabled && forceChargeOn(legRoleOf(state)),
+    // v1.200.0 — the outage line's own gate, read LIVE (forceChargeModeOf composes the mode each tick).
+    lineEnabled: !opts.forceDisabled && lineForceChargeOn(legRoleOf(state)),
     // v1.179.0 — tri-state: null when presence is false only because nothing can be heard.
     gridPresent: gridNow.present ? true : gridNow.presenceUnknown ? null : false,
     // Connected is gridSta === 1 ONLY (docs/reference/02-1-cloud-protocol-and-snapshot.md
@@ -6123,7 +6255,77 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     evDisplacedKwh,
     // v1.191.0 (S6, W5) — the run backstop of the tariff in effect: 7 h on the APS preset.
     maxRunMs: forceChargeMaxRunNow(),
-  });
+  };
+  // v1.200.0 (review 2) — a line night's observations, on the record before the decision reads it: the pool trail
+  // (persisted only when it moves, once per ten minutes) and the panel's own stop (nightForceCharge.lineNightObservations).
+  const obs = lineNightObservations(nightActuationMem, nowMs, fcOpts);
+  if (obs != null) { persistNightActuation({ ...nightActuationMem, ...obs }); state = nightActuationMem; }
+  // v1.200.0 (review 2) — THE LINE AT RISK after the verified ON, while a person can still act and the add-on
+  // cannot (nightForceCharge.lineAtRiskPushDue): once a night, stamped on the record BEFORE the push goes. (review 8) Judged
+  // on a tick that decides nothing, and on a line re-ON's own tick when every write came back rate-limited (handed back):
+  // one on the last tick before the re-ON's cutoff has no later tick for it (the next is past the cutoff and the lead).
+  // (Fix8) And after the line ceiling lowering while ON (and its refusal). (Fix8 review 1) And on a re-ON's readback check (it
+  // writes nothing: the tick's readings stand), where a 'reOnNotApplied' push first becomes due — the unchecked re-ON barred the
+  // trend until then; and on a re-ON the write block refuses (a re-ON due holds the push; the shape log is judged there).
+  // Each through judgeLineNight, with the ON-reading shape. Not judged where neither can be due: before the verified ON (the
+  // ON, its re-issue, its failure), on a re-ON that reached the panel (the last ON of ours: no trend reference yet), at or
+  // after an OFF of ours; nor on the ON's verify (judged from the next tick), a tick lost (the in-flight lock, a restart, a
+  // throw), or with the panel missing from the device list (no reading).
+  const pushLineAtRiskIfDue = (): void => {
+    const risk = lineAtRiskPushDue(nightActuationMem, nowMs, fcOpts);
+    if (risk != null) {
+      persistNightActuation({ ...nightActuationMem, forceChargeLineAtRiskPushedAtMs: nowMs });
+      const reOnCutoffText = fmtSiteClock(risk.closeAtMs - FORCE_CHARGE_ON_RETRY_CUTOFF_MS);
+      const why = risk.cause === 'reOnRefused'
+        ? `its last re-ON was refused by its own write cooldown and ${risk.reOnRetryPossible ? `it may try once more before ${reOnCutoffText}` : `its next try would come after ${reOnCutoffText}, the re-ON's cutoff`} (reOnRefused)`
+        : `the add-on cannot act (${risk.cause})`;
+      app.log.warn(`night-charge: the ${state.day} outage line (${lineLogPct(state)}%) is AT RISK — the pool reads ${risk.poolPct}% (${risk.refPct}% at ${fmtSiteClock(risk.refAtMs)}), under its ${risk.thresholdPct}% at-risk threshold and ${risk.poolPct < risk.refPct ? 'falling' : 'flat'}; ${why}; slot(s) reading OFF: ${risk.offSlots.join(',') || 'none'}, reading ON: ${risk.onSlots.join(',') || 'none'}. Pushed once tonight.`);
+      void sendNotification(loadNotifyConfig(), buildLineForceChargeAtRisk({
+        day: state.day, risk,
+        closeText: fmtSiteClock(risk.closeAtMs),
+        reOnCutoffText,
+      })).catch((e: any) => app.log.debug(`night-charge: line-at-risk notify failed (${e?.message ?? e})`));
+    }
+  };
+  // v1.200.0 (review 2) — the ON-READING SHAPE (unmeasured on this plant): logged once a night when seen, whatever the push
+  // conditions, so its first real occurrence is on record (nightForceCharge.lineOnReadingShape). (Fix8 review 1) Stamped on
+  // the record BEFORE the line is logged (forceChargeLineShapeLoggedAtMs): a restart never logs it again (it was module memory).
+  const logLineOnReadingShapeIfSeen = (): void => {
+    const shape = lineOnReadingShape(nightActuationMem, nowMs, fcOpts);
+    if (shape == null) return;
+    persistNightActuation({ ...nightActuationMem, forceChargeLineShapeLoggedAtMs: nowMs });
+    app.log.warn(`night-charge: ${state.day} — slot(s) ${shape.slots.join(',')} read FORCE_CHARGE_ON with their Cores under the panel's ${shape.stopCeilingPct}% stop ceiling, yet the pool fell from ${shape.refPct}% (${fmtSiteClock(shape.refAtMs)}) to ${shape.poolPct}%: a slot reading ON that does not import (never measured on this plant), or a load taking the grid cap. Logged once a night.`);
+  };
+  // (Fix8 review 1) The push and the shape, judged together on every tick kind that judges either (listed above).
+  const judgeLineNight = (): void => { pushLineAtRiskIfDue(); logLineOnReadingShapeIfSeen(); };
+  // v1.200.0 (L3; review) — a LINE night whose start a non-pool blocker holds (the ceiling refused or unread,
+  // Charge Now already on, the grid unknown, vitals red, no readback, no slot connected, an incoherent SoC; (Fix9 review 1) an ON or
+  // a ceiling sync the write block refuses, on those ticks): each blocker CLASS pushed once a night, once it has held unbroken, with
+  // the time a start must come by to reach the line, where one can be quoted (lineDeclinedLatestStartMs) — time to act. (review 2) On every night whose record carries a
+  // line ask, also a cost-dominant one; and once a night ACROSS RESTARTS: the class is on the record before the push goes
+  // (nightForceCharge.lineDeclinedPushTick).
+  const pushLineDeclinedIfDue = (why: string | null | undefined): void => {
+    const dp = lineDeclinedPushTick(lineDeclinedPush, state, why, nowMs, { cost: forceChargeOn(legRoleOf(state)), line: !opts.forceDisabled && lineForceChargeOn(legRoleOf(state)) });
+    lineDeclinedPush = dp.mem;
+    const declinedLinePct = forceChargeLineNightPct(state);
+    if (dp.push != null && why != null && declinedLinePct != null) {
+      persistNightActuation({ ...nightActuationMem, forceChargeLineDeclinedPushed: [...dp.mem.st.pushed] });
+      // (Fix14) The rate and the EV as the start takes them; the helper makes each input err early (lineDeclinedLatestStartMs). On a stale panel
+      // connectedSlots is empty: the frozen projection's connected count, on the same terms as its capacity (a sentence, never a write).
+      const latestAt = lineDeclinedLatestStartMs({
+        nowMs, closeAtMs: writeWindowEndMs(state), askPct: state.forceChargeLineAskPct!, poolSocPct: socCoherent ? socNowPct : null,
+        liveFullWh: fullWh, frozenFullWh: shp2.projection?.kind === 'shp2' ? shp2.projection.backupFullCapWh : null,
+        rateKw: chargeRateKw, evDisplacedKwh,
+        slotCount: sp != null ? connectedSlots.length : shp2.projection?.kind === 'shp2' ? (shp2.projection.sources ?? []).filter((c) => c?.hwConnect === true).length : 0,
+      });
+      void sendNotification(loadNotifyConfig(), buildLineForceChargeDeclinedStart({
+        day: state.day, linePct: declinedLinePct, why,
+        latestStartText: latestAt != null ? fmtSiteClock(latestAt) : null,
+      })).catch((e: any) => app.log.debug(`night-charge: line force-charge declined-start notify failed (${e?.message ?? e})`));
+      app.log.warn(`night-charge: the force-charge for ${state.day}'s ${lineLogPct(state)}% outage line cannot start yet — ${why}; held ${Math.round(FORCE_CHARGE_LINE_DECLINED_PERSIST_MS / 60_000)} min, pushed once tonight for this cause.`);
+    }
+  };
+  const action = decideForceCharge(state, nowMs, fcOpts);
   if (action.kind === 'none') {
     // v1.166.0 — "chose not to" must never read like "broke". While a night is live
     // (reserve applied, not reverted, force-charge not started), say WHY the start
@@ -6137,21 +6339,32 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
         app.log.info(`night-charge: force-charge NOT starting for ${state.day} — ${action.why}.`);
       }
     }
+    pushLineDeclinedIfDue(action.why);
+    judgeLineNight();
     return;
   }
 
   if (action.kind === 'syncCeiling') {
+    // v1.200.0 (review) — while ON it is the line mode lowering a cost ceiling (lineCeilingLoweringDue). (Fix8) The line-at-risk
+    // push is judged on this tick too, after the lowering (or its refusal): the lowering writes the ceiling only, so this tick's slot
+    // and pool readings stand, and a hand-back's hold judged here is not skipped as on a lost tick. (Fix8 review 1) The shape too
+    // (judgeLineNight): a lowering the write block refuses is due again on every tick while the block lasts.
+    const whileOn = state.forceChargeOnAtMs != null;
     const blocked = multiPanelWriteBlock();
-    if (blocked) { app.log.warn(`night-charge: force-charge ceiling sync refused — ${blocked}`); return; }
+    if (blocked) { app.log.warn(`night-charge: force-charge ceiling sync refused — ${blocked}`); if (whileOn) judgeLineNight(); else pushLineDeclinedIfDue(`${FORCE_CHARGE_BLOCKER_WHY.writeBlock}${blocked}`); return; }
     const retry = state.forceChargeCeilingAttemptedAtMs != null;
     persistNightActuation({
       ...nightActuationMem,
       forceChargeCeilingAttemptedAtMs: nowMs,
       forceChargeCeilingSyncRetries: retry ? nightActuationMem.forceChargeCeilingSyncRetries + 1 : 0,
       forceChargeCeilingPriorPct: nightActuationMem.forceChargeCeilingPriorPct ?? action.prior,
+      // v1.200.0 — the value written (a line night's ⌈L⌉ + 10 at least): the ON verify and the
+      // settings-drift own-write list read it.
+      forceChargeCeilingSyncedPct: action.pct,
     });
     const rc = await setForceChargeCeiling({ sn: shp2.sn, pct: action.pct, source: { ua: 'night-force-charge' } });
-    app.log.info(`night-charge: force-charge ceiling → ${action.pct}% (panel's own was ${action.prior ?? '?'}%, restored after the night)${retry ? ' — retry' : ''}: ${rc.outcome === 'success' ? 'ACK' : `${rc.code}: ${rc.message}`}. Force-charge waits for it to read back.`);
+    app.log.info(`night-charge: force-charge ceiling → ${action.pct}% (panel's own was ${action.prior ?? '?'}%, restored after the night)${retry && !whileOn ? ' — retry' : ''}: ${rc.outcome === 'success' ? 'ACK' : `${rc.code}: ${rc.message}`}.${whileOn ? ` Lowered while ON: the cost force-charge is off, so tonight runs for the ${lineLogPct(state) ?? '?'}% outage line under its own ceiling.` : ' Force-charge waits for it to read back.'}`);
+    if (whileOn) judgeLineNight();
     return;
   }
 
@@ -6179,10 +6392,14 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
 
   if (action.kind === 'on') {
     const blocked = multiPanelWriteBlock();
-    if (blocked) { app.log.warn(`night-charge: force-charge ON refused — ${blocked}`); return; }
+    if (blocked) { app.log.warn(`night-charge: force-charge ON refused — ${blocked}`); pushLineDeclinedIfDue(`${FORCE_CHARGE_BLOCKER_WHY.writeBlock}${blocked}`); return; }
     // WRITE-AHEAD: persist the intent BEFORE the writes. A lost confirmation can
     // then never orphan a force-charge — the OFF covers every slot attempted.
-    persistNightActuation({ ...nightActuationMem, forceChargeOnAtMs: nowMs, forceChargeSlots: action.slots });
+    // v1.200.0 — and the mode it is switched ON in (forceChargeModeOf now): the ledger and the morning push;
+    // (review) and the panel ceiling this tick read back, which the ON verify then reads (forceChargeOnStamp).
+    const onStamp = forceChargeOnStamp(state, nowMs, action.slots, forceChargeGatesOn(legRoleOf(state)));
+    const onMode = onStamp.forceChargeMode;
+    persistNightActuation({ ...nightActuationMem, ...onStamp });
     const results: string[] = [];
     let rejected = 0;
     for (const slot of action.slots) {
@@ -6194,7 +6411,7 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     // above: each slot's cooldown starts when its own write goes out, so slow PUTs measured
     // from the stamp let the one re-issue land inside a later slot's cooldown, rate-limited.
     persistNightActuation({ ...nightActuationMem, forceChargeOnLastAttemptMs: Date.now() });
-    stampLegOutcome(state, { force_charge_on_at_ms: nowMs }); // v1.189.0 — the ledger's force-charge stamps
+    stampLegOutcome(state, { force_charge_on_at_ms: nowMs, force_charge_mode: onMode }); // v1.189.0 — the ledger's force-charge stamps; v1.200.0 — and its mode
     const slotsNow = connectedSlots.filter((n) => n >= 1 && n <= SHP2_SOURCE_SLOTS).length;
     const unboundedKw = gridCapKw != null ? (gridCapKw - Math.max(0, houseLoadKw ?? 0)) * Math.sqrt(DISPATCH_ROUND_TRIP_EFFICIENCY) : null;
     const rateNote = (chargeRateKw != null
@@ -6208,7 +6425,12 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
       + (evDisplacedKwh != null && evDisplacedKwh > 0 ? `, plus ~${evDisplacedKwh.toFixed(1)} kWh the predicted EV will take` : '');
     // v1.186.0 — a rejected ON is no longer an info-level footnote: it is verified by
     // readback like an accepted one, re-issued once, then warned about.
-    const onLine = `night-charge: FORCE-CHARGE ON for ${state.day} — ${results.join(', ')}; just in time to reach ${state.forceChargeCeilingPct}% by the window close (${new Date(state.windowEndMs!).toISOString()}), ${rateNote} — stops at the target, with the panel's ${desiredForceChargeCeilingPct(state.forceChargeCeilingPct!)}% ceiling as the backstop. Also OFF on window end, cancel, revert, grid loss or disable. Verifying ON by readback${rejected > 0 ? ` (${rejected} write(s) REJECTED — re-issued once if the slot does not read ON within ${Math.round(FORCE_CHARGE_ON_VERIFY_AFTER_MS / 60_000)} min)` : ''}.`;
+    const onLineMode = onMode === 'line' ? forceChargeModeOf(state, { cost: forceChargeOn(legRoleOf(state)), line: true }) : null;
+    const onLine = onLineMode?.kind === 'line'
+      // v1.200.0 — a LINE night: on to the window close for the outage line, no software stop. (A5, L3) The panel's own
+      // OFF at its ceiling is a stop, not a backstop: the line ARMED says the walk reaches it, and the tick re-ONs after it.
+      ? `night-charge: FORCE-CHARGE ON for ${state.day} — ${results.join(', ')}; for the ${lineLogPct(state) ?? onLineMode.askPct}% outage line: timed to reach ~${onLineMode.startTargetPct}% ${Math.round(FORCE_CHARGE_MIN_RUN_MS / 60_000)} min before the window close (${new Date(state.windowEndMs!).toISOString()}), ${rateNote}, and ON until the close (no software stop) unless the panel switches it off at its ${onLineMode.panelCeilingPct}% ceiling (switched back on under ${onLineMode.startTargetPct}% before the close, at most ${lineReOnTimesWords(FORCE_CHARGE_LINE_REON_MAX)}). Also OFF on cancel, revert, grid loss or disable. Verifying ON by readback${rejected > 0 ? ` (${rejected} write(s) REJECTED — re-issued once if the slot does not read ON within ${Math.round(FORCE_CHARGE_ON_VERIFY_AFTER_MS / 60_000)} min)` : ''}.`
+      : `night-charge: FORCE-CHARGE ON for ${state.day} — ${results.join(', ')}; just in time to reach ${state.forceChargeCeilingPct}% by the window close (${new Date(state.windowEndMs!).toISOString()}), ${rateNote} — stops at the target, with the panel's ${desiredForceChargeCeilingPct(state.forceChargeCeilingPct!)}% ceiling as the backstop. Also OFF on window end, cancel, revert, grid loss or disable. Verifying ON by readback${rejected > 0 ? ` (${rejected} write(s) REJECTED — re-issued once if the slot does not read ON within ${Math.round(FORCE_CHARGE_ON_VERIFY_AFTER_MS / 60_000)} min)` : ''}.`;
     if (rejected > 0) app.log.warn(onLine); else app.log.info(onLine);
     return;
   }
@@ -6251,6 +6473,61 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     return;
   }
 
+  if (action.kind === 'lineReOnChecked') {
+    // v1.200.0 (review 2) — a line re-ON's readback check, its grace after it (nightForceCharge.lineReOnCheckDue):
+    // the slots still reading OFF did not take it. Recorded for the line-at-risk push and the morning account; the
+    // budget's next re-ON (if any is left) is the retry. Writes nothing. (review 4) The stamp is the pure
+    // lineReOnCheckedStamp's: a re-ON that took effect is kept as the latest that did (forceChargeLineReOnAppliedAtMs).
+    // (Fix8 review 1) "has NOT taken effect": a late apply is still seen (lineNightObservations).
+    const failedReOn = action.notApplied.length > 0;
+    persistNightActuation({ ...nightActuationMem, ...lineReOnCheckedStamp(nightActuationMem, nowMs, action) });
+    if (failedReOn) {
+      app.log.warn(`night-charge: LINE force-charge re-ON for ${state.day} has NOT taken effect — slot(s) ${action.notApplied.join(',')} of ${action.slots.join(',')} still read FORCE_CHARGE_OFF ${Math.round((nowMs - (state.forceChargeLineReOnAtMs ?? nowMs)) / 60_000)}m after it, their Cores under the panel's ceiling (re-ON ${state.forceChargeLineReOns}/${FORCE_CHARGE_LINE_REON_MAX}).`);
+    } else {
+      app.log.info(`night-charge: LINE force-charge re-ON VERIFIED by device readback for ${state.day} — slot(s) ${action.slots.join(',')} took it.`);
+    }
+    // (Fix8 review 1) Judged on the check's own tick, after its stamp: a 'reOnNotApplied' push first becomes due here, and on the
+    // last tick before the push's lead it has no later tick (the round-7 reviewer's night: the check 20m30s before the close).
+    judgeLineNight();
+    return;
+  }
+
+  if (action.kind === 'lineReOn') {
+    // v1.200.0 (review) — a LINE night the panel switched off at its ceiling, its pool back under the start
+    // target (nightForceCharge.lineReOnDue). Write-ahead like the re-issue: the budget is spent BEFORE the
+    // writes, so a cloud that keeps refusing cannot loop; one whose every write came back rate-limited
+    // never reached the panel and is handed back. (review 2) And the slots it switches, for its readback check
+    // (lineReOnCheckDue) — none on a re-ON handed back (it never reached the panel: nothing to check).
+    const blocked = multiPanelWriteBlock();
+    // (Fix8 review 1) Judged (judgeLineNight) when the write block refuses it: the re-ON due holds the push, and the shape log is
+    // judged on every tick while the block lasts.
+    if (blocked) { app.log.warn(`night-charge: line force-charge re-ON refused — ${blocked}`); judgeLineNight(); return; }
+    persistNightActuation({
+      ...nightActuationMem,
+      forceChargeLineReOns: nightActuationMem.forceChargeLineReOns + 1,
+      forceChargeLineReOnAtMs: nowMs,
+      forceChargeLineReOnSlots: [...action.slots],
+    });
+    const results: string[] = [];
+    let limited = 0;
+    for (const slot of action.slots) {
+      const r = await setChannelForceCharge({ sn: shp2.sn, slot, on: true, source: { ua: 'night-force-charge-line-reon' } });
+      if (r.rateLimited === true) limited++;
+      results.push(`ch${slot} ${r.outcome === 'success' ? 'ok' : `${r.code}`}`);
+    }
+    const allLimited = limited === action.slots.length;
+    persistNightActuation({
+      ...nightActuationMem,
+      forceChargeLineReOnAtMs: Date.now(),
+      ...(allLimited ? { forceChargeLineReOns: Math.max(0, nightActuationMem.forceChargeLineReOns - 1), forceChargeLineReOnSlots: null } : {}),
+    });
+    if (allLimited) results.push('all rate-limited — re-ON not counted');
+    app.log.warn(`night-charge: LINE force-charge re-ON for ${state.day} — slot(s) ${action.slots.join(',')} read FORCE_CHARGE_OFF (the panel switches a slot off at its ${state.forceChargeCeilingSyncedPct ?? '?'}% ceiling) and the pool reads ${socNowPct ?? '?'}%, back under the start target for the ${lineLogPct(state) ?? '?'}% outage line; switching them back ON (${state.forceChargeLineReOns + 1}/${FORCE_CHARGE_LINE_REON_MAX}): ${results.join(', ')}.`);
+    // (review 8) A re-ON handed back is judged for the line-at-risk push on this, its own tick (after the stamp above).
+    if (allLimited) judgeLineNight();
+    return;
+  }
+
   if (action.kind === 'onFailed') {
     // v1.186.0 — the buy above the reserve is forfeited on these slots. A cost, not a
     // safety, matter: the reserve write is verified on its own, and the OFF side (window
@@ -6264,12 +6541,20 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     // read (onFailed needs one); each Core's settings are its last reported DPU projection.
     const slotCores = forceChargeSlotCores(sources, store.get().devices);
     const failedSlots = forceChargeFailedSlotsText(action.slots, state.forceChargeSlots, slotCores);
-    app.log.warn(`night-charge: force-charge ON NEVER TOOK EFFECT for ${state.day} — slot(s) ${failedSlots.text} still read FORCE_CHARGE_OFF after ${state.forceChargeOnRetries} re-issue(s)${action.noRetry ? ` (none sent: under ${Math.round(FORCE_CHARGE_ON_RETRY_CUTOFF_MS / 60_000)} min of the window left, so the window-end OFF is never held behind one)` : ''}, and their Cores do not read at the panel's ceiling. Tonight's buy above the ${RESERVE_WRITE_MAX_PCT}% reserve is forfeited${all ? '' : ' on those slot(s)'}; the reserve charge is unaffected, and the OFF at the window close still runs.`);
+    // v1.200.0 (Fix8 review 2) — on a night whose record carries a line ask (keyed as its push is: forceChargeOnFailureNight), in
+    // words true in every outcome: the ON is still read after this line, and a late apply is verified (verifyForceChargeOn reads
+    // onVerified before its failure guard: "after the warning — it applied late"), so "has NOT taken effect", never "NEVER TOOK
+    // EFFECT" nor "forfeited". A night with no line ask keeps v1.199.1's line, word for word.
+    if (lineLogPct(state) != null) app.log.warn(`night-charge: force-charge ON for ${state.day}'s ${lineLogPct(state)}% outage line has NOT taken effect — slot(s) ${failedSlots.text} still read FORCE_CHARGE_OFF after ${state.forceChargeOnRetries} re-issue(s)${action.noRetry ? ` (none sent: under ${Math.round(FORCE_CHARGE_ON_RETRY_CUTOFF_MS / 60_000)} min of the window left, so the window-end OFF is never held behind one)` : ''}, and their Cores do not read at the panel's ceiling. Unless it applies late (a late apply is still verified), the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve${all ? '' : ' on those slot(s)'}; the reserve charge is unaffected, and the OFF at the window close still runs.`);
+    else app.log.warn(`night-charge: force-charge ON NEVER TOOK EFFECT for ${state.day} — slot(s) ${failedSlots.text} still read FORCE_CHARGE_OFF after ${state.forceChargeOnRetries} re-issue(s)${action.noRetry ? ` (none sent: under ${Math.round(FORCE_CHARGE_ON_RETRY_CUTOFF_MS / 60_000)} min of the window left, so the window-end OFF is never held behind one)` : ''}, and their Cores do not read at the panel's ceiling. Tonight's buy above the ${RESERVE_WRITE_MAX_PCT}% reserve is forfeited${all ? '' : ' on those slot(s)'}; the reserve charge is unaffected, and the OFF at the window close still runs.`);
     try {
       // v1.187.22 — toward where it stops (~80%), as every other surface names it, not the ceiling.
       await sendNotification(loadNotifyConfig(), buildNightForceChargeOnFailure({
         day: state.day, slots: action.slots, ourSlots: state.forceChargeSlots, retries: state.forceChargeOnRetries,
-        noRetry: action.noRetry === true, ceilingPct: state.forceChargeCeilingPct,
+        noRetry: action.noRetry === true,
+        // v1.200.0 — a LINE night has no stop to name ("toward"); it names the line instead. (review 2) Keyed on the
+        // record's line ask, never the stamped mode: a cost-dominant night (stamped 'cost') carries its line too.
+        ...forceChargeOnFailureNight(state),
         cores: slotCores,
       }));
     } catch (e: any) {
@@ -6280,6 +6565,8 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
 
   if (action.kind === 'off' || action.kind === 'offRetry') {
     const isRetry = action.kind === 'offRetry';
+    // (Fix10 review 1) An OFF on a grid-status reading no abort reports, on its first tick only (the stamp below is one-way).
+    const gridOffLine = action.kind === 'off' && state.forceChargeOffAtMs == null ? lineGridOffPushDue(state, action.reason, fcOpts) : null;
     persistNightActuation({
       ...nightActuationMem,
       forceChargeOffAtMs: nightActuationMem.forceChargeOffAtMs ?? nowMs,
@@ -6312,6 +6599,12 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
         : state.forceChargeOnFailedAtMs != null ? ' (the ON never took effect — see the earlier warning)'
           : ' (the ON was never verified by readback)';
       app.log.info(`night-charge: FORCE-CHARGE OFF for ${state.day} (${action.reason === 'target' ? `reached the ${state.forceChargeCeilingPct}% target` : action.reason}) — ${results.join(', ')}; verifying by readback${onNote}.`);
+    }
+    if (gridOffLine != null) {
+      app.log.warn(`night-charge: the force-charge for ${state.day}'s ${lineLogPct(state)}% outage line stopped on the panel's grid reading, with no abort to report it; pushed once.`);
+      void sendNotification(loadNotifyConfig(), buildLineForceChargeGridOff({ linePct: gridOffLine, poolPct: fcOpts.poolSocPct ?? null, closeText: fmtSiteClock(writeWindowEndMs(state)!) })).catch((e: any) => {
+        app.log.debug(`night-charge: line grid-off notify failed (${e?.message ?? e})`);
+      });
     }
     return;
   }
@@ -6507,13 +6800,15 @@ function sendRestoreSummary(state: ChargeLegState, restore: RestoreSummaryKind, 
   const restorePct = state.priorReservePct;
   if (restorePct == null || state.revertedAtMs == null) return;
   const endedBy = state.revertGridLossAbort ? 'gridLoss' as const : state.cancelled ? 'cancelled' as const : 'window' as const;
+  // v1.200.0 (review 2) — the outage line the record carries (line mode or cost-dominant), for the overnight account.
+  const lineNight = forceChargeLineNightPct(state);
   // R5 — a winter mid-day leg gets the mid-day summary (chargeText.ts, the window named from its
   // record); nothing arms one before the mid-day switch. The overnight leg's summary is the other branch.
   if (isMiddayLeg(state)) {
     const onPeakAt = state.nextOnPeakStartMs ?? null;
     void sendNotification(loadNotifyConfig(), buildMiddayChargeSummary(middaySummaryFromLeg(state, {
       restorePct, restoredAtMs: state.revertedAtMs, expectedKwh: armedExpectedBuyKwh(state.day),
-      forceCharge: forceChargeNightOutcome(state, forceChargeOn(state.leg)),
+      forceCharge: forceChargeNightOutcome(state, forceChargeGatesOn(state.leg)),
       onPeak: onPeakAt != null ? { startMs: onPeakAt, endMs: onPeakEndMs(tariffModelFromEnv(), onPeakAt) } : null,
       ended: endedBy, restore,
     }))).catch((e: any) => {
@@ -6523,8 +6818,19 @@ function sendRestoreSummary(state: ChargeLegState, restore: RestoreSummaryKind, 
     void sendNotification(loadNotifyConfig(), buildNightChargeMorningSummary({
       day: state.day, targetPct: state.targetPct, restorePct,
       expectedKwh: armedExpectedBuyKwh(state.day),
-      forceCharge: forceChargeNightOutcome(state, forceChargeOn()),
+      forceCharge: forceChargeNightOutcome(state, forceChargeGatesOn()),
       ended: endedBy, restore,
+      // v1.200.0 — where a line night's pool closed: the panel's own fresh reading at the restore. (review 2) On every
+      // night whose record carries a line ask (a cost-dominant one too), and its line: a close under it, or one not
+      // read, is said so.
+      closePoolPct: lineNight != null ? freshPoolSocPct(nowMs) : null,
+      linePct: lineNight,
+      // (Fix9 review 1) While the add-on's close has not passed: a grid loss's push says what can still lift the pool.
+      closeText: lineNight != null && state.windowEndMs != null && nowMs < writeWindowEndMs(state)! ? fmtSiteClock(writeWindowEndMs(state)!) : null,
+      // (Fix10 review 1) Sent hours after the close (a process down across it, a restore refused): that reading is not the close's.
+      closeReadLate: lineNight != null && lineCloseReadingLate(state, nowMs),
+      // (Fix10 review 1) A write the panel never read back is not told as raised. A night with no line keeps its words.
+      writeUnread: lineNight != null && state.applyVerifiedAtMs == null,
     })).catch((e: any) => {
       app.log.debug(`night-charge: morning summary notify failed (${e?.message ?? e})`);
     });
@@ -6536,6 +6842,16 @@ function sendRestoreSummary(state: ChargeLegState, restore: RestoreSummaryKind, 
  *  started (runNightActuationTickInner): what the revertDeadline's deadline stage waits on after a
  *  restart across it (restoreAwaitingFirstChance). */
 let nightReserveReadSinceBoot = false;
+
+/** v1.200.0 (Fix9 review 1) — what the settled foreign reserve does to a line night (notify.buildNightChargeForeignReserve), read from the
+ *  record it stamps: a record with a line ask, before the add-on's close, with no OFF of ours sent: a force-charge of ours on is
+ *  switched off (offReason 'foreign'), one not yet on never starts. Past the close, or after an OFF, the night's own account says it. */
+function foreignLineWords(state: NightActuationState, nowMs: number): { linePct: number; started: boolean; closeText: string } | null {
+  const linePct = forceChargeLineNightPct(state);
+  const closeMs = writeWindowEndMs(state);
+  if (linePct == null || closeMs == null || nowMs >= closeMs || state.forceChargeOffAtMs != null) return null;
+  return { linePct, started: state.forceChargeOnAtMs != null, closeText: fmtSiteClock(closeMs) };
+}
 
 async function runNightActuationTickInner(): Promise<void> {
   let state = nightActuationMem;
@@ -6574,7 +6890,14 @@ async function runNightActuationTickInner(): Promise<void> {
   // reading can make it outstanding again.
   if (attemptProvedUnlanded(state, currentReservePct, nowMs)) {
     persistNightActuation({ ...state, attemptUnlandedAtMs: nowMs });
-    app.log.info(`night-charge: the ${state.day} write attempt never landed — after its apply window the panel still reads the ${state.attemptBaselinePct}% it read before the attempt; nothing of ours holds the reserve.`);
+    // v1.200.0 (Fix8 review 2) — on a night whose record carries a line ask, in words true in every outcome: a later reading of the
+    // target still adopts the attempt (attemptAdoptable reads no stamp) — "has NOT landed", never "never landed". (Fix9) The
+    // force-charge for the line waits on that reading only while a start can still come (forceChargeStartClosed: the checks
+    // decideForceCharge makes before one); a cancelled night, or one at or past its close less 20 min (this proof has no upper time
+    // bound), says no force-charge for the line starts, and why. A night with no line ask keeps v1.199.1's line, word for word.
+    const attemptStartClosed = forceChargeStartClosed(state, nowMs, forceChargeGatesOn(legRoleOf(state)));
+    if (lineLogPct(state) != null) app.log.info(`night-charge: the ${state.day} write attempt has NOT landed — after its apply window the panel still reads the ${state.attemptBaselinePct}% it read before the attempt: nothing of ours holds the reserve, and ${attemptStartClosed == null ? `the force-charge for the ${lineLogPct(state)}% outage line waits on a reading of the target` : lineStartClosedWords(`the ${lineLogPct(state)}% outage line`, attemptStartClosed)}.`);
+    else app.log.info(`night-charge: the ${state.day} write attempt never landed — after its apply window the panel still reads the ${state.attemptBaselinePct}% it read before the attempt; nothing of ours holds the reserve.`);
     state = nightActuationMem;
     if (state.day == null) return;
   }
@@ -6583,7 +6906,14 @@ async function runNightActuationTickInner(): Promise<void> {
   // the reserve unless a later reading verifies the write.
   if (applyProvedUnlanded(state, currentReservePct, nowMs)) {
     persistNightActuation({ ...state, applyUnlandedAtMs: nowMs });
-    app.log.info(`night-charge: the ${state.day} write never took effect — after its re-issues the panel still reads the ${state.attemptBaselinePct}% it read before the write; its restore is a no-op and nothing of ours holds the reserve.`);
+    // v1.200.0 (Fix8 review 2) — on a night whose record carries a line ask, in words true in every outcome: a later reading of the
+    // target still verifies the write (applyVerified; the apply-failure push asks for the reserve set by hand) — "has NOT taken
+    // effect", never "never took effect". (Fix9) The force-charge for the line waits on it only while a start can still come
+    // (forceChargeStartClosed); otherwise — a cancelled night (its restore goes on this tick), one at or past its close less 20 min —
+    // no force-charge for the line starts, and why. A night with no line ask keeps v1.199.1's line.
+    const applyStartClosed = forceChargeStartClosed(state, nowMs, forceChargeGatesOn(legRoleOf(state)));
+    if (lineLogPct(state) != null) app.log.info(`night-charge: the ${state.day} write has NOT taken effect — after its re-issues the panel still reads the ${state.attemptBaselinePct}% it read before the write; ${applyStartClosed == null ? `until a reading of the target verifies it (a late apply, or the reserve set in the EcoFlow app), its restore is a no-op, nothing of ours holds the reserve, and the force-charge for the ${lineLogPct(state)}% outage line waits on it` : `nothing of ours holds the reserve, and ${lineStartClosedWords(`the ${lineLogPct(state)}% outage line`, applyStartClosed)}`}.`);
+    else app.log.info(`night-charge: the ${state.day} write never took effect — after its re-issues the panel still reads the ${state.attemptBaselinePct}% it read before the write; its restore is a no-op and nothing of ours holds the reserve.`);
     state = nightActuationMem;
     if (state.day == null) return;
   }
@@ -6703,6 +7033,7 @@ async function runNightActuationTickInner(): Promise<void> {
     app.log.warn(`night-charge: foreign reserve SETTLED — the panel has read ${action.pct}% since ${state.foreignSeenAtMs != null ? new Date(state.foreignSeenAtMs).toISOString() : '?'}: neither the ${state.targetPct}% set for ${state.day} nor the ${state.priorReservePct ?? '?'}% it restores. Taken as set outside the add-on; nothing more is written to the reserve for this night${state.revertedAtMs != null ? ' (the restore was sent and did not read back)' : ' (no restore is sent)'}.`);
     void sendNotification(loadNotifyConfig(), buildNightChargeForeignReserve({
       day: state.day, pct: action.pct, targetPct: state.targetPct, restorePct: state.priorReservePct,
+      line: foreignLineWords(state, nowMs),
     })).catch((e: any) => {
       app.log.debug(`night-charge: foreign-reserve notify failed (${e?.message ?? e})`);
     });
@@ -6774,10 +7105,22 @@ async function runNightActuationTickInner(): Promise<void> {
     // v1.187.22 — the push states the armed day's EXPECTED figure, or none (never the worst case,
     // state.buyKwh); the log keeps both, labelled.
     const expectedKwh = armedExpectedBuyKwh(state.day);
-    app.log.error(`night-charge: write NEVER TOOK EFFECT — the cloud ACK'd backupReserveSoc ${state.targetPct}% but the device still reads ${currentReservePct ?? 'unknown'}% after ${state.applyRetries} retries. Tonight's charge (${buyFiguresLogText(expectedKwh, state.buyKwh)}) is forfeited; ledger corrected to actuated:0.`);
+    // v1.200.0 (Fix8 review 2) — on a night whose record carries a line ask (keyed as its push is: forceChargeLineNightPct), in
+    // words true in every outcome: the apply ladder still verifies a reading of the target after this (a late apply, or the
+    // reserve set in the app as the push asks) — "has NOT taken effect", never "NEVER TOOK EFFECT" nor "forfeited". (Fix9) The
+    // force-charge for the line waits on it only while a start can still come (forceChargeStartClosed, keyed as the push is): with
+    // its re-issues stopping at the write end less 5 min, applyFailed also falls inside the start's last 20 min, or past the close.
+    // A night with no line ask keeps v1.199.1's line, word for word.
+    const lineStartClosed = forceChargeStartClosed(state, nowMs, forceChargeGatesOn(legRoleOf(state)));
+    if (lineLogPct(state) != null) app.log.error(`night-charge: write has NOT taken effect — the cloud ACK'd backupReserveSoc ${state.targetPct}% but the device still reads ${currentReservePct ?? 'unknown'}% after ${state.applyRetries} retries. Tonight's charge (${buyFiguresLogText(expectedKwh, state.buyKwh)}) has not taken effect${lineStartClosed == null ? `: until the panel reads ${state.targetPct}% (a late apply, or the reserve set in the EcoFlow app, is still verified) the force-charge for the ${lineLogPct(state)}% outage line waits on it` : `, and ${lineStartClosedWords(`the ${lineLogPct(state)}% outage line`, lineStartClosed)}`}; ledger corrected to actuated:0.`);
+    else app.log.error(`night-charge: write NEVER TOOK EFFECT — the cloud ACK'd backupReserveSoc ${state.targetPct}% but the device still reads ${currentReservePct ?? 'unknown'}% after ${state.applyRetries} retries. Tonight's charge (${buyFiguresLogText(expectedKwh, state.buyKwh)}) is forfeited; ledger corrected to actuated:0.`);
     try {
       await sendNotification(loadNotifyConfig(), buildNightChargeApplyFailure({
         day: state.day, currentReservePct, targetPct: state.targetPct, applyRetries: state.applyRetries, expectedKwh,
+        linePct: forceChargeLineNightPct(state),
+        // v1.200.0 (Fix9) — whether a start can still come, and until when (decideForceCharge's last: the close less 20 min).
+        startClosed: lineStartClosed,
+        startByText: state.windowEndMs != null ? fmtSiteClock(writeWindowEndMs(state)! - FORCE_CHARGE_MIN_RUN_MS) : null,
       }));
     } catch (e: any) {
       app.log.warn(`night-charge: apply-failure notify failed (${e?.message ?? e})`);
@@ -7043,8 +7386,10 @@ async function runTrailingLegTick(): Promise<void> {
  * The missed apply (plan §4.8; chargeCycle.missedApplyDue): a leg the overnight-only cycle never
  * had — a mid-day leg, or the outage backup before one — whose apply window passed with no write
  * sends ONE info push naming why (missedApplyReason, read from this tick's inputs) and the reserve
- * in force. The leg is stamped before the push goes, and the push is not awaited. The overnight
- * cost leg never sends it: there only a write that never took effect pushes (applyFailed).
+ * in force. The leg is stamped before the push goes, and the push is not awaited. An overnight
+ * cost leg with no line ask never sends it: there only a write that never took effect pushes (applyFailed).
+ * v1.200.0 (Fix9 review 1) — a leg whose record carries a line ask does (missedApplyDue), an attempt the cloud never confirmed included,
+ * in the line's words: the force-charge for the line rides this write, and nothing else says it never came.
  */
 async function runMissedApplyStep(): Promise<void> {
   const nowMs = Date.now();
@@ -7079,13 +7424,40 @@ async function runMissedApplyStep(): Promise<void> {
   const stamped: ChargeLegState = { ...leg, missedApplyPushedAtMs: nowMs };
   if (pending) persistCycle({ ...nightCycleView(), pendingLegs: nightCyclePending.map((p, i) => (i === at - 1 ? stamped : p)) });
   else persistNightActuation(stamped);
-  stampLegOutcome(leg, { arm_disposition: `missed — ${reason}` });
-  app.log.warn(`night-charge: the ${leg.leg} leg for ${leg.day} (${leg.windowStartMs != null ? new Date(leg.windowStartMs).toISOString() : '?'}) did not start — ${reason}. Nothing was written; the reserve reads ${currentReservePct ?? 'unknown'}%.`);
+  stampLegOutcome(leg, { arm_disposition: `${MISSED_APPLY_DISPOSITION}${reason}` });
+  const missedLinePct = forceChargeLineNightPct(leg);
+  const missedStartClosed = forceChargeStartClosed(leg, nowMs, forceChargeGatesOn(legRoleOf(leg)));
+  if (missedLinePct != null) app.log.warn(`night-charge: the ${leg.day} reserve write for the ${lineLogPct(leg)}% outage line ${leg.applyAttemptedAtMs != null ? 'has not been confirmed' : 'was not issued'} — ${reason}; the reserve reads ${currentReservePct ?? 'unknown'}%, and ${missedStartClosed == null ? 'the force-charge for the line waits on a reading of the target' : lineStartClosedWords('the line', missedStartClosed)}.`);
+  else app.log.warn(`night-charge: the ${leg.leg} leg for ${leg.day} (${leg.windowStartMs != null ? new Date(leg.windowStartMs).toISOString() : '?'}) did not start — ${reason}. Nothing was written; the reserve reads ${currentReservePct ?? 'unknown'}%.`);
   void sendNotification(loadNotifyConfig(), buildNightChargeMissedApply({
     day: leg.day, role: leg.leg, windowStartMs: leg.windowStartMs ?? nowMs, windowEndMs: leg.windowEndMs ?? nowMs,
     reason, reservePct: currentReservePct, nowMs,
+    linePct: missedLinePct, targetPct: leg.targetPct, attempted: leg.applyAttemptedAtMs != null,
+    startClosed: missedStartClosed,
+    startByText: leg.windowEndMs != null ? fmtSiteClock(writeWindowEndMs(leg)! - FORCE_CHARGE_MIN_RUN_MS) : null,
+    closeText: leg.windowEndMs != null ? fmtSiteClock(writeWindowEndMs(leg)!) : null,
   })).catch((e: any) => {
     app.log.debug(`night-charge: missed-apply notify failed (${e?.message ?? e})`);
+  });
+}
+
+/**
+ * v1.200.0 (Fix9 review 1) — the account of a line night that closed with no restore to summarise (nightForceCharge.lineCloseAccountDue): a
+ * reserve write that never applied, or a reserve someone else set. Stamped before it goes, not awaited; the pool as it reads now.
+ */
+function runLineCloseAccountStep(): void {
+  const nowMs = Date.now();
+  const state = nightActuationMem;
+  const due = lineCloseAccountDue(state, nowMs);
+  if (due == null) return;
+  persistNightActuation({ ...state, lineCloseAccountAtMs: nowMs });
+  app.log.warn(`night-charge: the ${state.day} night closed with no restore to account for (${due === 'foreign' ? 'the reserve was set outside the add-on' : 'no reserve write was confirmed'}): the ${lineLogPct(state)}% outage line had ${state.forceChargeOnAtMs != null ? 'a force-charge that was stopped' : 'no force-charge'}, and the pool reads ${freshPoolSocPct(nowMs) ?? 'unknown'}%.`);
+  void sendNotification(loadNotifyConfig(), buildLineNightCloseAccount({
+    day: state.day, linePct: forceChargeLineNightPct(state)!, cause: due,
+    closePoolPct: freshPoolSocPct(nowMs),
+    onAtMs: state.forceChargeOnAtMs, offAtMs: state.forceChargeOffAtMs, offReason: state.forceChargeOffReason,
+  })).catch((e: any) => {
+    app.log.debug(`night-charge: line close-account notify failed (${e?.message ?? e})`);
   });
 }
 
@@ -7290,7 +7662,7 @@ if (nightChargeEnabled) {
   nightEveningTick.unref();
   // v1.50.0 — supervised-write actuator (v1.187.0: apply at window open, revert at
   // window close — APPLY_LEAD_MS / REVERT_LAG_MS are 0; both fail-closed, both audited).
-  const nightActuationTick = setInterval(() => { void runNightActuationTick(); }, 60 * 1000);
+  const nightActuationTick = setInterval(() => { void runNightActuationTick(); }, FORCE_CHARGE_TICK_MS);
   nightActuationTick.unref();
   // R4 — the winter mid-day cycle in shadow: computed and recorded, never written (middayShadow.ts).
   const nightMiddayShadowTick = setInterval(() => { void runMiddayShadowTick(); }, 60 * 1000);
@@ -7322,7 +7694,7 @@ const forceChargeSafetyTick = setInterval(() => {
   runForceChargeTick({ forceDisabled: true })
     .catch((e: any) => app.log.warn(`night-charge: force-charge safety tick failed (${e?.message ?? e})`))
     .finally(() => { nightActuationInFlight = false; });
-}, 60 * 1000);
+}, FORCE_CHARGE_TICK_MS);
 forceChargeSafetyTick.unref();
 
 // v1.91.0 — these four engines are independent of night charge and must run
@@ -7373,6 +7745,10 @@ app.get('/api/night-charge/status', async () => {
       // v1.186.0 — beside forceChargeOnAtMs (and forceChargeOnVerifiedAtMs /
       // forceChargeOnFailedAtMs, spread above): did the ON actually take?
       forceChargeOnVerify: forceChargeOnReadbackStatus(nightActuationMem),
+      // v1.200.0 (Fix10) — a line night whose start is closed: the banner's words (absent on any other night).
+      ...lineStartClosedStatus(nightActuationMem, Date.now(), forceChargeGatesOn(legRoleOf(nightActuationMem))),
+      // (Fix10 review 1) A line night's write the panel has not read back: the banner's words (absent on any other night).
+      ...lineWriteUnreadStatus(nightActuationMem),
     },
     // v1.189.0 — the charge cycle's legs, in order: a trailing leg, the active one (the record
     // above), the pending ones (chargeCycle.cycleLegsStatus). One entry with one leg.

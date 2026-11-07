@@ -94,7 +94,9 @@ test('the gate is made visible, NOT loosened', () => {
   // policy call, so fail-closed remains the posture.
   assert.match(GATE, /const underBuyPool = actuated\.filter\(\(r\) => !truthy\(r\.cushion_shortfall\)\);/,
     'the under-buy exemption must still be in force');
-  assert.match(GATE, /if \(truthy\(r\.cushion_shortfall\)\) return false; \/\/ disclosed — physics, not fault/,
+  // v1.200.0 (A5) — narrowed, never widened: a disclosed row is exempt unless its plan ARMED the line force-charge and it
+  // never switched on (armedNeverRanUnder: a strike, fail-closed; lineForceCharge.test.ts T10b).
+  assert.match(GATE, /if \(truthy\(r\.cushion_shortfall\)\) return armedNeverRanUnder\(r\); \/\/ disclosed — physics, not fault/,
     'the strike exemption must still be in force');
 });
 

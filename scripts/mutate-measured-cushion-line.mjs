@@ -162,8 +162,9 @@ const MUTANTS = [
   {
     id: 'A-vii. ★★★ the setpoint asks the nameplate line',
     file: NCA, tests: [T_LINE],
-    find: '    ? Math.min(100, Math.ceil((targetFloorKwh / fullKwh) * 100 - 1e-9)) : 0;',
-    to: '    ? Math.min(100, Math.ceil(((reserveKwh + cushionKwh) / fullKwh) * 100 - 1e-9)) : 0; /* MUTANT */',
+    // v1.200.0 (review) — anchor moved: the reserve path's ask reads askOf (the one expression).
+    find: '  const lineAskPct = !setpointOnWalk && !baselineHolds ? askOf(targetFloorKwh, fullKwh) : 0;',
+    to: '  const lineAskPct = !setpointOnWalk && !baselineHolds ? askOf(reserveKwh + cushionKwh, fullKwh) : 0; /* MUTANT */',
     why: 'The ask is ⌈30.45⌉ = 31 under a 31.67% line: the arrival (31.7) carries the write, to one decimal.',
   },
   {

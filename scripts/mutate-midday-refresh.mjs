@@ -543,8 +543,9 @@ const MUTANTS = [
   {
     id: 'A-ii. ★★★ the overnight route drops the cushion clause',
     file: RT,
-    find: '      cushionShortfall: plan.cushionShortfall === true,\n    }),',
-    to: '      cushionShortfall: false, /* MUTANT */\n    }),',
+    // v1.200.0 — anchor moved: the reserve clause of a line night follows the cushion clause.
+    find: '      cushionShortfall: plan.cushionShortfall === true,\n      // v1.200.0 — a LINE night',
+    to: '      cushionShortfall: false, /* MUTANT */\n      // v1.200.0 — a LINE night',
     why: 'The overnight speech changes: not byte-identical.',
   },
   {

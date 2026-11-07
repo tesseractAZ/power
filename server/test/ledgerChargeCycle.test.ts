@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -44,14 +44,19 @@ process.env.DB_PATH = DB;
 
 const { createRecorder, CHARGE_CYCLE_LEDGER_SCHEMA } = await import('../src/recorder.js');
 const { SnapshotStore } = await import('../src/snapshot.js');
-const { legLedgerFields, BACKUP_LEDGER_COLUMN } = await import('../src/chargeCycle.js');
+const { legLedgerFields, BACKUP_LEDGER_COLUMN, asChargeLeg, armCycle, emptyCycle, missedApplyDue, priorArmSuperseded, supersededLegs } = await import('../src/chargeCycle.js');
+const { armFromPlan, emptyActuationState, APPLY_LATE_MS } = await import('../src/nightChargeActuator.js');
+const { computeNightChargeReadiness, CURRENT_ALGO_VERSION, MISSED_APPLY_DISPOSITION, phoenixYmd } = await import('../src/nightChargeGate.js');
+
+after(() => rmSync(tmp, { recursive: true, force: true }));
 
 test('★★★ an old-schema ledger gains every charge-cycle column with its type; the old row reads NULL; writes round-trip', () => {
   const rec = createRecorder(new SnapshotStore(), () => {});
   try {
     const info = new DatabaseSync(DB).prepare('PRAGMA table_info(night_charge_ledger)').all() as Array<{ name: string; type: string }>;
     const types = new Map(info.map((c) => [c.name, c.type]));
-    assert.equal(CHARGE_CYCLE_LEDGER_SCHEMA.length, 26);
+    // v1.200.0 — 27: force_charge_mode (the mode the force-charge was switched ON in).
+    assert.equal(CHARGE_CYCLE_LEDGER_SCHEMA.length, 27);
     for (const [c, t] of CHARGE_CYCLE_LEDGER_SCHEMA) assert.equal(types.get(c), t, `${c} ${t} added by the migration`);
     const at = (d: string) => rec.readNightLedger(3650).find((r) => r.plan_date === d) as unknown as Record<string, unknown>;
     assert.equal(at('2026-09-01').buy_kwh, 30.5, 'kept as recorded');
@@ -83,7 +88,7 @@ test('★★★ an old-schema ledger gains every charge-cycle column with its ty
     rec.recordNightOutcome('2026-11-22', legLedgerFields('cost', { arm_disposition: 'cancelled by the 2026-11-23 plan — hold' }) as never);
     const can = at('2026-11-22');
     assert.deepEqual([can.backup_arm_disposition, can.arm_disposition], ['cancelled by the 2026-11-23 plan — hold', 'cancelled by the 2026-11-23 plan — hold']);
-  } finally { rec.close(); rmSync(tmp, { recursive: true, force: true }); }
+  } finally { rec.close(); }
 });
 
 test('★★★ SOURCE PIN: the supersede and stale-cancel stamps of the active leg go through its leg mapping, with their own messages', () => {
@@ -95,4 +100,59 @@ test('★★★ SOURCE PIN: the supersede and stale-cancel stamps of the active 
   assert.ok(idx.includes('app.log.warn(`night-charge: supersede stamp failed for ${nightActuationMem.day} (${e?.message ?? e})`);'));
   // No other arm_disposition is written to the recorder directly.
   assert.equal((idx.match(/recorder\.recordNightOutcome\([^)]*\{\s*arm_disposition/g) ?? []).length, 0);
+});
+
+test('★★★ (v1.200.0 Fix10 review 1) the next evening\'s arm leaves a missed line night its disposition, so the strike stands; a record that never missed is superseded as ever', () => {
+  const rec = createRecorder(new SnapshotStore(), () => {});
+  try {
+    const M = 60_000;
+    const H = 60 * M;
+    const OPEN = Date.UTC(2027, 0, 5, 6); // 23:00 MST
+    const CLOSE = OPEN + 6 * H;
+    const DAY = phoenixYmd(OPEN - H);
+    const NEXT = phoenixYmd(OPEN + 23 * H);
+    const armedRec = {
+      ...emptyActuationState(), day: DAY, announcedAtMs: OPEN - 90 * M, targetPct: 50, buyKwh: 28, windowStartMs: OPEN, windowEndMs: CLOSE,
+      forceChargeRides: true, forceChargeLineAskPct: 56, forceChargeLinePct: 55.55,
+    };
+    rec.recordNightPlan({
+      plan_date: DAY, issued_at_ms: OPEN - 90 * M, algo_version: String(CURRENT_ALGO_VERSION), confidence_tier: 'forecast', reserve_floor_pct: 30, cushion_pct: 15,
+      cushion_line_soc_pct: 55.55, cushion_trough_soc_pct: 55.55, window_kind: 'overnight', cushion_line_force_charge_pct: 56, cushion_shortfall: 0, cushion_envelope_shortfall: 0,
+    } as never);
+    // Red vitals: no attempt, the missed push, the stamp index.ts makes, then the close reading the row gets at close + 16 h.
+    const leg = asChargeLeg(armedRec as never);
+    assert.equal(missedApplyDue(leg, OPEN + APPLY_LATE_MS + 1), true);
+    const missed = { ...leg, missedApplyPushedAtMs: OPEN + APPLY_LATE_MS + 1 };
+    rec.recordNightOutcome(DAY, legLedgerFields('cost', { arm_disposition: `${MISSED_APPLY_DISPOSITION}the add-on's host was under critical load` }) as never);
+    rec.recordNightOutcome(DAY, {
+      outcome_captured_at_ms: CLOSE + 16 * H, scored: 1, cushion_breached: 1, plan_traj_floor_breached: 0, window_close_soc_pct: 41, actual_min_soc_pct: 40,
+      buy_err_kwh: 0.5, pv_err_frac: 0.05, load_err_frac: -0.05, pv_in_band: 1, load_in_band: 1, grid_home_coverage_frac: 0.95,
+    } as never);
+    const NOW = CLOSE + 17 * H;
+    const strikes = () => computeNightChargeReadiness(rec.readNightLedger(400), NOW).metrics.lineForceChargeStrikes;
+    assert.equal(strikes(), 1, 'closed under its line, its write never issued');
+    // The next evening arms over the record; the job's test for its stamp, and the cycle's, read it as no supersede.
+    const plan = { chargeTonight: true, basisComplete: true, buyKwh: 20, setpointSocPct: 50, costCeilingSocPct: null, window: { startMs: OPEN + 24 * H, endMs: CLOSE + 24 * H } };
+    const next = armCycle({ ...emptyCycle(), active: missed }, NEXT, [{
+      role: 'cost', kind: 'overnight', plan: plan as never, forceChargeEnabled: false, lineForceChargeEnabled: true, nextOnPeakStartMs: null, announcedLevelPct: 50, announcedExpectedKwh: 20,
+    }], OPEN + 22 * H, 30);
+    assert.ok(next.cycle != null, 'the arm goes on');
+    assert.equal(priorArmSuperseded(missed, NEXT), false, 'no stamp: its window passed, and no later arm shares it');
+    assert.deepEqual(supersededLegs({ ...emptyCycle(), active: missed }, next.legs, NEXT, OPEN + 22 * H), []);
+    const at = rec.readNightLedger(400).find((r) => r.plan_date === DAY) as unknown as Record<string, unknown>;
+    assert.ok(String(at.arm_disposition).startsWith(MISSED_APPLY_DISPOSITION), String(at.arm_disposition));
+    assert.equal(strikes(), 1, 'it stays one');
+    // Saturday's arm for the window Sunday re-arms: stamped as ever, the active leg and a record of no line alike.
+    const sat = asChargeLeg({ ...armedRec, windowStartMs: OPEN + 24 * H, windowEndMs: CLOSE + 24 * H } as never);
+    assert.equal(priorArmSuperseded(sat, NEXT), true);
+    assert.equal(priorArmSuperseded(asChargeLeg({ ...armedRec, forceChargeLineAskPct: null, forceChargeLinePct: null } as never), NEXT), true, 'a cost night is never stamped missed: its ledger stays as it was');
+    assert.equal(priorArmSuperseded({ ...sat, day: NEXT }, NEXT), false, "today's own");
+    assert.equal(priorArmSuperseded({ ...sat, appliedAtMs: OPEN }, NEXT), false);
+    assert.equal(priorArmSuperseded({ ...sat, applyAttemptedAtMs: OPEN }, NEXT), false);
+    assert.equal(priorArmSuperseded({ ...sat, targetPct: null }, NEXT), false);
+    assert.equal(priorArmSuperseded({ ...sat, day: null }, NEXT), false);
+    assert.equal(supersededLegs({ ...emptyCycle(), active: sat }, next.legs, NEXT, OPEN + 22 * H).length, 1);
+    const idx = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
+    assert.ok(idx.includes('if (nightActuationMem.day != null && priorArmSuperseded(nightActuationMem, today)) {'), 'the job reads the one test');
+  } finally { rec.close(); }
 });

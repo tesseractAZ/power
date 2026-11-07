@@ -54,7 +54,7 @@ test('★★★ recomputeNightChargePlan gates on the verdict BEFORE it reads th
   assert.ok(gate > 0);
   assert.ok(b.indexOf("if (!panel.use) return 'panelStale';") > gate);
   assert.ok(gate < b.indexOf('const sp: any = shp2.projection;'));
-  assert.ok(b.indexOf('if (!panel.fresh) {') < b.indexOf('setLatestNightChargePlan(plan);'), 'a stale-sized plan says so before anyone reads it');
+  assert.ok(b.indexOf('if (!panel.fresh) {') < b.indexOf('if (!shadowLeg) setLatestNightChargePlan('), 'a stale-sized plan says so before anyone reads it');
   assert.ok(b.includes('panelSampleAgeS: panel.ageMs != null ? Math.round(panel.ageMs / 1000) : null,'));
 });
 
@@ -62,7 +62,7 @@ test('★★★ the evening job DEFERS a stale panel: no latch, no notify, no ca
   const b = fnBody('async function runNightChargeEveningJobInner(');
   // v1.191.0 (S6) — the deferral end is the schedule's (NIGHT_PLAN_STALE_DEFER_UNTIL_MIN on the APS preset).
   assert.ok(b.includes('const deferUntilMin = sched.staleDeferUntilMin;'));
-  assert.ok(b.includes('await recomputeNightChargePlan({ allowStalePanel: nowMin >= deferUntilMin })'));
+  assert.ok(b.includes('await recomputeNightChargePlan({ allowStalePanel: nowMin >= deferUntilMin, arming: true })'));
   const i = b.indexOf("if (result === 'panelStale') {");
   assert.ok(i > 0);
   const block = b.slice(i, b.indexOf('return;', i));

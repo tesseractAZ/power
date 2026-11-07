@@ -37,11 +37,15 @@
  * foreign rule, R1): a change of their value is theirs.
  */
 import {
-  APPLY_LATE_MS, RESERVE_WRITE_MAX_PCT, RESERVE_WRITE_MIN_PCT,
+  APPLY_LATE_MS, APPLY_VERIFY_AFTER_MS, RESERVE_WRITE_MAX_PCT, RESERVE_WRITE_MIN_PCT,
   armFromPlan, armOpenItem, armRefusalReason, coerceActuationState, emptyActuationState, onPeakGuardActive,
   type ArmablePlan, type NightActuationState,
 } from './nightChargeActuator.js';
-import { forceChargeInFlight, FORCE_CHARGE_CEILING_RESTORE_ATTEMPTS } from './nightForceCharge.js';
+import {
+  forceChargeInFlight, forceChargeLineNightPct, FORCE_CHARGE_CEILING_RESTORE_ATTEMPTS,
+  // v1.200.0 (Fix10) — a line night whose start is closed, in the status route's words.
+  armedLineStartClosed, lineStartClosedWords, lineAboveReserveWords, type ForceChargeGates, type LineClosure,
+} from './nightForceCharge.js';
 import type { ChargeLegRole, ChargeWindowKind } from './chargeWindows.js';
 
 /** What names a leg, beside its per-night actuation record. */
@@ -276,6 +280,9 @@ export interface LegCandidate {
   plan: ArmablePlan;
   /** Force-charge enabled for this leg (index.ts forceChargeOn(role)); a backup leg never is. */
   forceChargeEnabled?: boolean;
+  /** v1.200.0 — the outage-line force-charge enabled for this leg (index.ts lineForceChargeOn(role)); a
+   *  backup leg never is. */
+  lineForceChargeEnabled?: boolean;
   /** The on-peak start after the leg's window open (chargeWindows.nextOnPeakStartMs). */
   nextOnPeakStartMs?: number | null;
   announcedLevelPct?: number | null;
@@ -312,7 +319,8 @@ export function onlyForceChargeOffOpen(prev: NightActuationState, liveReservePct
  *  - Any other open item refuses every leg, with the same words.
  *  - Later legs arm from an empty record (the open-item check is the cycle's, made once); the
  *    first leg that arms carries the ceiling original, so one leg owns its restore.
- *  - A backup leg never force-charges: its ceiling is null and force-charge never rides it.
+ *  - A backup leg never force-charges: its ceiling is null, it carries no outage line (v1.200.0), and
+ *    force-charge never rides it.
  * With one cost leg this is armFromPlan / armRefusalReason against the active leg, unchanged.
  */
 export function armCycle(
@@ -335,12 +343,13 @@ export function armCycle(
   const legs: ChargeLegState[] = [];
   candidates.forEach((c, i) => {
     const backup = c.role === 'backup';
-    const plan: ArmablePlan = backup ? { ...c.plan, costCeilingSocPct: null } : c.plan;
+    const plan: ArmablePlan = backup ? { ...c.plan, costCeilingSocPct: null, forceChargeLine: null } : c.plan;
     const fc = backup ? false : c.forceChargeEnabled;
+    const lineFc = backup ? false : c.lineForceChargeEnabled;
     // The trailing exception: only when the backup itself arms. A backup that does not leaves the
     // open item in place, and every later leg is refused on it.
     const over = i === 0 && backup && onlyForceChargeOffOpen(prev.active, liveReservePct) ? emptyActuationState() : carrier;
-    const armed = armFromPlan(over, day, plan, nowMs, liveReservePct, fc, c.nextOnPeakStartMs);
+    const armed = armFromPlan(over, day, plan, nowMs, liveReservePct, fc, c.nextOnPeakStartMs, lineFc);
     if (armed == null) {
       refused.push({ role: c.role, reason: armRefusalReason(over, plan, nowMs, liveReservePct) ?? 'the plan does not arm' });
       return;
@@ -376,11 +385,23 @@ export function withLiveTrailing(armed: ChargeCycleState, liveActive: ChargeLegS
 }
 
 /**
+ * The rule the evening job has stamped a prior arm 'superseded' by since v1.79.0: an earlier evening's, neither applied nor attempted,
+ * with a target (Saturday's arm for the Monday window Sunday re-arms). PURE. v1.200.0 (Fix10 review 1) — not a leg whose missed push
+ * went: its window passed, no later arm shares it, and the stamp would replace the 'missed — ' disposition, the only evidence the
+ * strike rule has of a night whose write never went (nightChargeGate lineWriteNeverHeld). A cost overnight leg with no ask is never
+ * stamped missed, so its ledger stays as it was.
+ */
+export function priorArmSuperseded(
+  a: Pick<ChargeLegState, 'day' | 'appliedAtMs' | 'applyAttemptedAtMs' | 'targetPct' | 'missedApplyPushedAtMs'>, today: string,
+): boolean {
+  return a.day != null && a.day !== today && a.appliedAtMs == null && a.applyAttemptedAtMs == null && a.targetPct != null
+    && a.missedApplyPushedAtMs == null;
+}
+
+/**
  * The prior legs a newly armed cycle replaces without their having written anything (the
  * supersede stamp, plan §3.2 "Supersede compares legs"). PURE.
- *  - the active leg, by the rule the evening job has applied since v1.79.0: an earlier evening's,
- *    neither applied nor attempted, with a target (Saturday's arm for the Monday window Sunday
- *    re-arms);
+ *  - the active leg, by that rule (priorArmSuperseded);
  *  - a pending leg whose apply window has not passed.
  * `sharedWindow` = a leg of the new cycle has the same window.
  */
@@ -393,9 +414,7 @@ export function supersededLegs(
   const shares = (l: ChargeLegState): boolean => next.some((n) => n.windowStartMs === l.windowStartMs && n.windowEndMs === l.windowEndMs);
   const out: Array<{ leg: ChargeLegState; sharedWindow: boolean }> = [];
   const a = prev.active;
-  if (a.day != null && a.day !== today && a.appliedAtMs == null && a.applyAttemptedAtMs == null && a.targetPct != null) {
-    out.push({ leg: a, sharedWindow: shares(a) });
-  }
+  if (priorArmSuperseded(a, today)) out.push({ leg: a, sharedWindow: shares(a) });
   for (const p of prev.pendingLegs) {
     if (p.day == null || p.day === today || p.applyAttemptedAtMs != null || p.appliedAtMs != null) continue;
     if (p.windowStartMs != null && nowMs > p.windowStartMs + APPLY_LATE_MS) continue;
@@ -493,6 +512,76 @@ export function legStatusState(s: NightActuationState, nowMs: number): LegStatus
   if (s.cancelled) return 'cancelled';
   if (s.applyAttemptedAtMs == null && s.windowStartMs != null && nowMs > s.windowStartMs + APPLY_LATE_MS) return 'missed';
   return 'armed';
+}
+
+/** v1.200.0 (Fix10) — the status route's words for a line night whose start is closed (armedLineStartClosed): the banner names why in
+ *  place of "write armed", and keeps its Cancel only while something can still come of the write (a leg 'missed' has neither a write
+ *  to stop nor an attempt to adopt). `{}` on any other night, so its status is as it was. PURE. */
+export function lineStartClosedStatus(
+  s: NightActuationState, nowMs: number, gates: ForceChargeGates,
+): { lineStartClosed?: { text: string; cancel: boolean } } {
+  const closed = armedLineStartClosed(s, nowMs, gates);
+  if (closed == null) return {};
+  const words = lineStartClosedWords(lineAboveReserveWords(forceChargeLineNightPct(s)!, 'the ', ' outage line'), closed.why);
+  return { lineStartClosed: { text: `${words.charAt(0).toUpperCase()}${words.slice(1)}.`, cancel: legStatusState(s, nowMs) !== 'missed' } };
+}
+
+/** v1.200.0 (Fix10 review 1) — the status route's word for a write the cloud acknowledged and the panel has not read back, on a line
+ *  night: the banner says so, never "raised" (the 2026-08-16 phantom write: the push says the reserve never moved). Its words hold in the
+ *  apply's normal grace too. `{}` on any other night, so its status is as it was. PURE. */
+export function lineWriteUnreadStatus(
+  s: Pick<ChargeLegState, 'appliedAtMs' | 'applyVerifiedAtMs' | 'forceChargeLineAskPct' | 'forceChargeLinePct'>,
+): { lineWriteUnread?: true } {
+  return s.appliedAtMs != null && s.applyVerifiedAtMs == null && forceChargeLineNightPct(s) != null ? { lineWriteUnread: true } : {};
+}
+
+/**
+ * v1.200.0 (Fix10 review 1) — no evening job can still arm a window opening at `windowStartMs`. PURE. The job fires once a site day,
+ * at `fireMin`; `consumed` is today's latched, or its cutoff passed (eveningCutoffMin: at the open at the latest). Its next run is then
+ * tomorrow's, else today's, and a job that fires at or after the open cannot arm that window. The weekend's shared Monday window keeps Sunday's job on Saturday
+ * evening; past midnight inside a window the new day's job fires after that window opened. A clock change moves a fire by an hour,
+ * which this does not read: what a true here discloses, that no write is armed, holds as it is said.
+ */
+export function noEveningArmLeft(
+  windowStartMs: number, nowMs: number, job: { consumed: boolean; fireMin: number; nowMin: number },
+): boolean {
+  const fireTodayMs = nowMs + (job.fireMin - job.nowMin) * 60_000;
+  return (job.consumed ? fireTodayMs + 24 * 3_600_000 : fireTodayMs) >= windowStartMs;
+}
+
+/**
+ * v1.200.0 (Fix10 review 1) — what the plan the card and the entities serve reads of the window `windowStartMs`: the active record's
+ * closure where it is that window's (armedLineStartClosed); else nothing where any leg of the cycle holds the window (a record with no
+ * ask is armedNoLine's, one with a start to come is armed); else, with no evening job left (noEveningArmLeft), 'noArm': the job was
+ * missed, held, or refused, nothing re-arms after it, and no later surface knows the night (no record: no missed push, no close
+ * account). No write stands behind it. PURE.
+ */
+export function servedLineClosure(
+  c: ChargeCycleState, windowStartMs: number | null, recordClosure: LineClosure | null, noArmLeft: boolean,
+): LineClosure | null {
+  if (windowStartMs == null) return null;
+  if (recordClosure?.windowStartMs === windowStartMs) return recordClosure;
+  const legs = [c.active, ...c.pendingLegs, ...(c.trailing != null ? [c.trailing] : [])];
+  if (legs.some((l) => l.windowStartMs === windowStartMs)) return null;
+  return noArmLeft ? { windowStartMs, why: 'noArm' } : null;
+}
+
+/**
+ * v1.200.0 (Fix10 review 1) — the one push of a window no record holds: on a served plan that claims no force-charge for its line for
+ * that reason (`plan`, disclosed 'startClosed' by a 'noArm' closure: a write mode, a charge plan, a line above the reserve), once a
+ * window (`pushedWindowStartMs`, the latch's), and not where the evening's push already said so (`refusal`, servedArmRefusal). PURE.
+ */
+export function lineNotArmedPushDue(
+  closure: LineClosure | null,
+  plan: { cushionEnvelopeReason?: string | null; cushionLineSocPct?: number | null; window: { startMs: number; endMs: number } | null } | null,
+  pushedWindowStartMs: number | null,
+  refusal: string | null,
+): { windowStartMs: number; windowEndMs: number; linePct: number } | null {
+  if (closure?.why !== 'noArm' || plan == null || plan.cushionEnvelopeReason !== 'startClosed') return null;
+  const w = plan.window;
+  const linePct = plan.cushionLineSocPct;
+  if (w == null || linePct == null || refusal != null || pushedWindowStartMs === w.startMs) return null;
+  return { windowStartMs: w.startMs, windowEndMs: w.endMs, linePct };
 }
 
 /** The cycle's legs in order — trailing (if any), active, pending — for the status route. PURE. */
@@ -610,15 +699,23 @@ export function forceChargeDriftLeg(
 /**
  * A leg's apply window passed with no write: armed, not cancelled, no attempt, past
  * windowStartMs + APPLY_LATE_MS, not yet pushed. Only for a leg the overnight-only cycle never had
- * — a backup leg, or a mid-day leg: the overnight cost leg keeps today's behaviour (only a write
- * that never took effect pushes, applyFailed). PURE.
+ * — a backup leg, or a mid-day leg: an overnight cost leg with no line ask keeps today's behaviour
+ * (only a write that never took effect pushes, applyFailed). PURE.
+ *
+ * v1.200.0 (Fix9 review 1) — and any leg whose record carries a line ask (forceChargeLineNightPct): the force-charge for the
+ * line rides a verified reserve write, so no write leaves the line unheld, and nothing else says so (applyFailed needs an
+ * accepted write, the declined start and the at-risk push a verified one, the summary a restore). There too an attempt the
+ * cloud never confirmed: the apply stops for good at the window's end, so its push falls due once the last attempt has had
+ * its readback grace (a write that landed with its confirmation lost is adopted on its reading first).
  */
 export function missedApplyDue(leg: ChargeLegState, nowMs: number): boolean {
   if (leg.day == null || leg.announcedAtMs == null || leg.cancelled) return false;
   if (leg.missedApplyPushedAtMs != null) return false;
-  if (leg.applyAttemptedAtMs != null || leg.appliedAtMs != null) return false;
+  if (leg.appliedAtMs != null) return false;
+  const line = forceChargeLineNightPct(leg) != null;
+  if (leg.applyAttemptedAtMs != null && !(line && nowMs - leg.applyAttemptedAtMs >= APPLY_VERIFY_AFTER_MS)) return false;
   if (leg.windowStartMs == null || nowMs <= leg.windowStartMs + APPLY_LATE_MS) return false;
-  return leg.leg === 'backup' || leg.windowKind !== 'overnight';
+  return line || leg.leg === 'backup' || leg.windowKind !== 'overnight';
 }
 
 /** The missed apply's reason when no guard names one (or the tick could not read them). */
@@ -643,6 +740,8 @@ export interface MissedApplyContext {
  * after the cycle's own: a leg still pending behind an unresolved one.
  */
 export function missedApplyReason(leg: ChargeLegState, ctx: MissedApplyContext): string {
+  // v1.200.0 (Fix9 review 1) — an attempt on record is the cloud's answer, whatever the guards read now (missedApplyDue: a line ask).
+  if (leg.applyAttemptedAtMs != null && forceChargeLineNightPct(leg) != null) return 'the EcoFlow cloud did not confirm the reserve write';
   if (ctx.blockedBy != null) {
     const b = ctx.blockedBy;
     const what = b.leg === 'backup' ? 'the outage backup before it' : 'the leg before it';

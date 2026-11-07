@@ -758,6 +758,17 @@ export interface NightLedgerRow {
    *  whose line is on the nameplate pool. */
   cushion_pool_scale: number | null;
   cushion_pool_scale_basis: string | null;
+  /** v1.200.0 — the outage line above the 50% reserve the plan CARRIES with the night force-charge to the
+   *  window close: its ask, ⌈line⌉ (NightChargePlan.forceChargeLine.askPct; lineForceChargeLedgerColumns).
+   *  NULL where the plan carries none, on a null plan, and on every row written before v1.200.0. A strike on
+   *  such a row is legible beside force_charge_mode / force_charge_off_reason: never started, ran to the
+   *  close and still closed under, or turned off early (nightChargeGate lineForceChargeStrikes). */
+  cushion_line_force_charge_pct: number | null;
+  /** v1.200.0 — the plan DISCLOSED that its line is above the 50% the panel accepts as a reserve and no
+   *  force-charge carries it (NightChargePlan.cushionShortfallCause present): 1/0, NULL on a null plan and
+   *  on rows written before v1.200.0. cushion_shortfall is then 1 on the row: true when the sized trough is
+   *  under the line OR this envelope applies (cushion_trough_soc_pct stays the sized trough). */
+  cushion_envelope_shortfall: number | null;
 
   // ── OUTCOME (NULL until ~21:30 next evening) ──
   outcome_captured_at_ms: number | null;
@@ -913,6 +924,9 @@ export interface NightLedgerRow {
   force_charge_off_at_ms: number | null;
   force_charge_off_reason: string | null;
   force_charge_off_verified_at_ms: number | null;
+  /** v1.200.0 — the mode the cost leg's force-charge was switched ON in (nightForceCharge forceChargeModeOf
+   *  at the ON): 'cost' or 'line'. NULL when it never switched ON, and on rows written before v1.200.0. */
+  force_charge_mode: string | null;
   /** When an unconfirmed restore of the cost leg first paged (nightChargeActuator
    *  decideRevertDeadline). */
   revert_deadline_paged_at_ms: number | null;
@@ -1056,6 +1070,8 @@ export const CHARGE_CYCLE_LEDGER_SCHEMA: ReadonlyArray<readonly [keyof NightLedg
   ['refreshed_reserve_pct', 'REAL'], ['refresh_disposition', 'TEXT'], ['refresh_weather_age_s', 'REAL'],
   ['force_charge_on_at_ms', 'INTEGER'], ['force_charge_off_at_ms', 'INTEGER'], ['force_charge_off_reason', 'TEXT'],
   ['force_charge_off_verified_at_ms', 'INTEGER'], ['revert_deadline_paged_at_ms', 'INTEGER'],
+  // v1.200.0 — see NightLedgerRow.force_charge_mode.
+  ['force_charge_mode', 'TEXT'],
   ['chg_max_soc_pct', 'REAL'], ['pack_accept_kw', 'REAL'],
 ];
 /** v1.189.0 (R4) — the mid-day cycle in shadow (NightLedgerRow.shadow_cycle_why onward), in the same
@@ -1128,6 +1144,8 @@ const NIGHT_LEDGER_COLUMNS: readonly (keyof NightLedgerRow)[] = [
   'window_close_soc_pct',
   // v1.199.0 — the measured capacity scale the cushion line was converted on.
   'cushion_pool_scale', 'cushion_pool_scale_basis',
+  // v1.200.0 — the outage line above the reserve envelope: carried (its ask) or disclosed.
+  'cushion_line_force_charge_pct', 'cushion_envelope_shortfall',
   // v1.189.0 — the charge cycle (NightLedgerRow.window_kind).
   ...CHARGE_CYCLE_LEDGER_COLUMNS,
 ];
@@ -1408,6 +1426,8 @@ export function createRecorder(
     'window_close_soc_pct REAL',
     // v1.199.0 — see NightLedgerRow.cushion_pool_scale.
     'cushion_pool_scale REAL', 'cushion_pool_scale_basis TEXT',
+    // v1.200.0 — see NightLedgerRow.cushion_line_force_charge_pct.
+    'cushion_line_force_charge_pct REAL', 'cushion_envelope_shortfall INTEGER',
     // v1.189.0 — the charge cycle, from the list the allowlist reads (CHARGE_CYCLE_LEDGER_SCHEMA).
     ...CHARGE_CYCLE_LEDGER_SCHEMA.map(([c, t]) => `${c} ${t}`),
     // v1.189.0 (R4) — the mid-day cycle in shadow (MIDDAY_SHADOW_LEDGER_SCHEMA).

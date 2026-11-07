@@ -77,8 +77,9 @@ const MUTANTS = [
   {
     id: 'S-ii. ★★★ the line is asked at one decimal, not the whole percent above it',
     file: NCA, tests: [T_SET],
-    find: '    ? Math.min(100, Math.ceil((targetFloorKwh / fullKwh) * 100 - 1e-9)) : 0;',
-    to: '    ? Math.min(100, round1((targetFloorKwh / fullKwh) * 100)) : 0; /* MUTANT */',
+    // v1.200.0 (review) — anchor moved: the reserve path's ask reads askOf (the one expression).
+    find: '  const lineAskPct = !setpointOnWalk && !baselineHolds ? askOf(targetFloorKwh, fullKwh) : 0;',
+    to: '  const lineAskPct = !setpointOnWalk && !baselineHolds ? Math.min(100, round1((targetFloorKwh / fullKwh) * 100)) : 0; /* MUTANT */',
     why: 'clampReserveTarget rounds: a 30.45% line is written as 30, under the line the plan was sized on.',
   },
   {
@@ -435,8 +436,8 @@ const MUTANTS = [
   {
     id: 'R-i. ★★★ the gate trusts every stored realized flag (the defect, gate side)',
     file: GATE, tests: [T_REAL],
-    find: '    const realizedStrike = truthy(r.actuated) && realizedBreached(r);',
-    to: '    const realizedStrike = truthy(r.actuated) && truthy(r.cushion_breached); /* MUTANT */',
+    find: '    const realizedStrike = (truthy(r.actuated) || lineWriteNeverHeld(r)) && realizedBreached(r);',
+    to: '    const realizedStrike = (truthy(r.actuated) || lineWriteNeverHeld(r)) && truthy(r.cushion_breached); /* MUTANT */',
     why: 'Every M5 night an older scorer stored on the legacy band stays an engine-fault strike: BLOCKED for good.',
   },
   {
@@ -449,28 +450,28 @@ const MUTANTS = [
   {
     id: 'R-iii. ★★★ the close reading is never compared with the line',
     file: GATE, tests: [T_REAL],
-    find: '  if (close != null) return close < line - REALIZED_CLOSE_TOLERANCE_PCT ? 1 : 0;',
+    find: '  if (close != null) return holdsLineAtClose(close, line) ? 0 : 1;',
     to: '  if (close != null) return 0; /* MUTANT */',
     why: 'A pool that never reached its line at the close is no strike: the detector cannot fire.',
   },
   {
     id: 'R-iv. ★★ the close verdict drops its rounding tolerance',
     file: GATE, tests: [T_REAL],
-    find: '  if (close != null) return close < line - REALIZED_CLOSE_TOLERANCE_PCT ? 1 : 0;',
+    find: '  if (close != null) return holdsLineAtClose(close, line) ? 0 : 1;',
     to: '  if (close != null) return close < line ? 1 : 0; /* MUTANT */',
     why: 'A 31.1% reading against a 31.13% line (the reading\'s half step) is an engine-fault strike.',
   },
   {
     id: 'R-v. ★★ the close verdict forgives a whole point',
     file: GATE, tests: [T_REAL],
-    find: '  if (close != null) return close < line - REALIZED_CLOSE_TOLERANCE_PCT ? 1 : 0;',
+    find: '  if (close != null) return holdsLineAtClose(close, line) ? 0 : 1;',
     to: '  if (close != null) return close < line - 1 ? 1 : 0; /* MUTANT */',
     why: 'A pool 0.13 points under the line it claimed reads as held.',
   },
   {
     id: 'R-vi. ★★★ a row without the close reading is clean on silence',
     file: GATE, tests: [T_REAL],
-    find: '  return low != null && low >= line - REALIZED_CLOSE_TOLERANCE_PCT ? 0 : null;',
+    find: '  return low != null && holdsLineAtClose(low, line) ? 0 : null;',
     to: '  return 0; /* MUTANT */',
     why: 'No reading in the window\'s last 15 minutes overrules every stored flag: absence read as success.',
   },

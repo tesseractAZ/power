@@ -186,7 +186,8 @@ test('★★★ index.ts: the evening job\'s overnight calls are the route\'s ov
     const body = src.slice(at, src.indexOf('})', at));
     return body.split('\n').slice(1).map((l) => l.trim()).filter((l) => l.length > 0 && !l.startsWith('//')).map((l) => l.split(ctx).join('CTX'));
   };
-  assert.equal(args(ROUTE, 'supervised.').length, 7, 'the seven arguments are read');
+  // v1.200.0 — eight: the reserve clause on a line night (reserveOnlyPct) joined them.
+  assert.equal(args(ROUTE, 'supervised.').length, 8, 'the eight arguments are read');
   assert.deepEqual(args(INDEX, 'supervisedCtx.'), args(ROUTE, 'supervised.'));
   // Spoken only beside an armed write, in both.
   assert.match(INDEX, /if \(supervisedCtx && plan\) \{\n/);

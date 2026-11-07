@@ -534,6 +534,9 @@ test('★★★ the year at 0.944 against the golden\'s planner: nothing falls, 
   assert.deepEqual([Math.round(maxReq * 100) / 100, maxReqAt], [72.53, '2027-04-07 +1 01:30']);
   // The 50% envelope: a line above it cannot be written (13 such charge plans on the nameplate line,
   // 24 on the measured one; 5 → 9 at 21:30; 10 → 15 with no force-charge stop at or above the line).
+  // v1.200.0 — counted here with no line force-charge eligibility passed (the fixture's), so unchanged;
+  // with index.ts passing it these are carried by the night force-charge or disclosed
+  // (lineForceCharge.test.ts T4).
   assert.deepEqual(env, { base: 13, fix: 24, base2130: 5, fix2130: 9, baseNoFc: 10, fixNoFc: 15 });
   // As chapter 15 part 2 counts them: evening charges whose close the realized verdict can strike.
   assert.deepEqual(evening, { charges: 209, base: 4, fix: 6 });

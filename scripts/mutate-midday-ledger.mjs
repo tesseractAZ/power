@@ -292,8 +292,8 @@ const MUTANTS = [
   {
     id: 'S-i. ★★★ a shadow leg becomes the latest plan',
     file: IDX,
-    find: '  if (!shadowLeg) setLatestNightChargePlan(plan);',
-    to: '  setLatestNightChargePlan(plan); /* MUTANT */',
+    find: '  if (!shadowLeg) setLatestNightChargePlan(lineClosed != null || lineNoReOn != null || lineRunOn != null ? computeNightChargePlan({ ...inputs, armedLineStartClosed: lineClosed, armedLineNoReOn: lineNoReOn, armedLineRunOnStartMs: lineRunOn }) : plan);',
+    to: '  setLatestNightChargePlan(lineClosed != null || lineNoReOn != null || lineRunOn != null ? computeNightChargePlan({ ...inputs, armedLineStartClosed: lineClosed, armedLineNoReOn: lineNoReOn, armedLineRunOnStartMs: lineRunOn }) : plan); /* MUTANT */',
     why: 'The night-charge entities, the card and an advisory automation read the mid-day plan as tonight\'s.',
   },
   {
@@ -477,8 +477,9 @@ const MUTANTS = [
   {
     id: 'B-iv. ★★ the backup leg\'s "would arm" line does not say "Shadow only"',
     file: MS,
-    find: " troughs at ${pct(b.cushionTroughSocPct)} against the ${pct(b.cushionLineSocPct)} line.${heldImportText(b.heldImport)} Shadow only: nothing is armed, written or announced for it.`);",
-    to: " troughs at ${pct(b.cushionTroughSocPct)} against the ${pct(b.cushionLineSocPct)} line.${heldImportText(b.heldImport)}`); /* MUTANT */",
+    // v1.200.0 — anchor moved: the backup line names its walk after the trough, and the envelope where present.
+    find: "      + `${heldImportText(b.heldImport)} Shadow only: nothing is armed, written or announced for it.`);",
+    to: "      + `${heldImportText(b.heldImport)}`); /* MUTANT */",
     why: 'A log search for "Shadow only" misses the backup\'s "would arm".',
   },
   {

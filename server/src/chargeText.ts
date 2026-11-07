@@ -25,7 +25,8 @@
  */
 import type { NotifyMessage } from './notify.js';
 import type { ForceChargeNightOutcome } from './nightForceCharge.js';
-import { MAX_SPOKEN_ADVISORY_CHARS, NO_CHARGE_EXPECTED_KWH, revertRetryText, type RevertResendOnReport, type RestoreSummaryKind } from './nightChargeActuator.js';
+import type { LineNotHeld } from './nightChargeAdvisor.js';
+import { MAX_SPOKEN_ADVISORY_CHARS, NO_CHARGE_EXPECTED_KWH, RESERVE_WRITE_MAX_PCT, revertRetryText, type RevertResendOnReport, type RestoreSummaryKind } from './nightChargeActuator.js';
 
 // v1.191.0 (lane A, T18) — the site zone (siteTime.ts), read at call time; it was a literal here.
 import { siteTimeZone } from './siteTime.js';
@@ -196,7 +197,9 @@ export interface MiddayCostText {
   buyKwh: number | null;
   /** The window closes before the level is reached (chargeIsWindowBound). */
   toward: boolean;
-  /** Charge Now rides the leg: switched on just in time to reach `levelPct`. */
+  /** Charge Now rides the leg: switched on just in time to reach `levelPct`, or (v1.200.0, A5) for the outage line the
+   *  leg's force-charge is armed for (`lineAskPct`), whatever the stated level. (A5 final 2) A leg expected to draw nothing
+   *  (the reserve-hold shape) names it by `lineAskPct` alone: armed for the line (`linePct`), not expected to start. */
   forceCharge: boolean;
   /** The plan calls for a charge (its worst case reaches the minimum buy). */
   charges: boolean;
@@ -205,6 +208,15 @@ export interface MiddayCostText {
    *  overnight "no plan tonight" push states it. null/omitted ⇒ the basis sentence alone. */
   basisBlockedBy?: string | null;
   cushionShortfall: boolean;
+  /** v1.200.0 — the plan's cushionShortfallCause (the 50% reserve envelope); absent ⇒ the caps alone. */
+  cushionShortfallCause?: 'envelope' | 'envelope+caps';
+  /** v1.200.0 (A5) — the outage line's ask the leg's force-charge is armed for (the plan's forceChargeLine.askPct), and
+   *  what its own walk cannot hold (nightChargeAdvisor.lineNotHeldOf). Absent ⇒ nothing armed / held. */
+  lineAskPct?: number;
+  lineNotHeld?: LineNotHeld;
+  /** v1.200.0 (Fix7 review 1) — beside `lineAskPct`: the outage line itself (the plan's forceChargeLine.linePct, its
+   *  cushionLineSocPct), the number the words give the line, round1 as the overnight clause gives it — never the ask ⌈L⌉. */
+  linePct?: number;
 }
 
 /** The overnight outage-backup leg as the evening announces it (reserve only). */
@@ -215,6 +227,11 @@ export interface MiddayBackupText {
   expectedKwh: number | null;
   buyKwh: number | null;
   cushionShortfall: boolean;
+  /** v1.200.0 — the plan's cushionShortfallCause (the 50% reserve envelope); absent ⇒ the caps alone. */
+  cushionShortfallCause?: 'envelope' | 'envelope+caps';
+  /** v1.200.0 (A5) — as MiddayCostText's (a backup leg is never armed: absent). */
+  lineAskPct?: number;
+  lineNotHeld?: LineNotHeld;
 }
 
 /** What the evening's mid-day notice is told. */
@@ -285,8 +302,28 @@ export function buildMiddayPlanMessage(i: MiddayAnnounceInput): NotifyMessage {
     ? `${dayTextCap(day)} (${phxParts(c.windowStartMs).weekdayShort}) ${span}, APS super off-peak`
     : `${dayTextCap(day)} ${span}, APS super off-peak`;
   const supervised = i.mode !== 'advisory' && i.refused == null;
-  const shortNote = c.cushionShortfall || i.backup?.cushionShortfall
-    ? ' NOTE: charge/pool limits prevent fully meeting the cushion — residual risk remains.' : '';
+  // v1.200.0 — keyed on the cause: the caps note where a leg's SIZING fell short, the envelope note where a
+  // leg's line is above the 50% the panel accepts as a reserve and no force-charge carries it. (A5) A cost leg with a
+  // line ask is ARMED: its note says what its own walk cannot hold (lineNotHeld), never "no force-charge carries it" —
+  // and, the kind lost (a record from before it), that it runs and the line is not claimed (keyed on the ask, not the
+  // reason, L4). A leg with no ask reads as before, byte for byte.
+  const capsShort = (l: { cushionShortfall: boolean; cushionShortfallCause?: string } | null | undefined): boolean =>
+    l != null && l.cushionShortfall && l.cushionShortfallCause !== 'envelope';
+  const notCarried = (which: string): string =>
+    ` NOTE: the outage line is above the ${RESERVE_WRITE_MAX_PCT}% the panel accepts as a reserve and no force-charge carries it on ${which} — residual risk remains.`;
+  const armedNote = (l: { cushionShortfallCause?: string; lineNotHeld?: LineNotHeld }): string =>
+    l.lineNotHeld === 'closeUnder' ? " NOTE: on the median load this leg's pool is expected to close under its outage line — residual risk remains."
+      : l.lineNotHeld === 'aboveFull' ? " NOTE: this leg's outage line is above a full pool, so no charge can hold it — residual risk remains."
+        : l.lineNotHeld === 'nearFull' ? " NOTE: this leg's outage line is within 10 points of a full pool, so the force-charge cannot hold it with its usual margin — residual risk remains."
+          : l.cushionShortfallCause != null
+            ? ` NOTE: this leg's outage line is above the ${RESERVE_WRITE_MAX_PCT}% the panel accepts as a reserve; its force-charge runs, but the plan does not claim the line — residual risk remains.`
+            : '';
+  const shortNote = (capsShort(c) || capsShort(i.backup)
+    ? ' NOTE: charge/pool limits prevent fully meeting the cushion — residual risk remains.' : '')
+    + (c.lineAskPct != null
+      ? armedNote(c) + (i.backup?.cushionShortfallCause != null ? notCarried('the backup leg') : '')
+      : c.cushionShortfallCause != null || i.backup?.cushionShortfallCause != null
+        ? notCarried(c.cushionShortfallCause != null ? 'this leg' : 'the backup leg') : '');
   const backupLine = i.backup != null ? ` ${backupPushLine(i.backup, i.backupApplyAtMs, now, supervised)}` : '';
   if (!c.basisComplete) {
     // v1.196.0 — what refused the plan, as the overnight push says it (notify.buildNightChargeMessage).
@@ -326,8 +363,16 @@ export function buildMiddayPlanMessage(i: MiddayAnnounceInput): NotifyMessage {
   const restore = `${phxClock(i.costRestoreAtMs)}${i.onPeak != null && i.onPeak.endMs != null ? `, before the ${onPeakSpanText(i.onPeak.startMs, i.onPeak.endMs)} on-peak` : ''}`;
   const cancel = ` Cancel from the charge card before ${phxClock(i.costApplyAtMs)} ${dayText(dayWord(i.costApplyAtMs, now))}.`;
   if (isHeld(c.expectedKwh)) {
+    // v1.200.0 (A5 final 2) — a leg the line force-charge is armed on (lineAskPct) is armed here too (armFromPlan's
+    // lineRides, whatever the expected draw), and the actuator switches Charge Now on if the sun falls short: named, armed and
+    // not expected to start, as the overnight held line clause says it (notify.buildNightChargeMessage). No ask: as before.
+    // (Fix7 review 1) The line's number is the line's (linePct, round1), as that clause and the rationale give it, not the
+    // ask ⌈L⌉ (up to a point higher); a record without it names the line unnumbered.
+    const armedLine = c.lineAskPct != null
+      ? `, and Charge Now is armed for the ${c.linePct != null ? `${Math.round(c.linePct * 10) / 10}% ` : ''}outage line (not expected to start); both are restored at ${restore}`
+      : `; it is restored at ${restore}`;
     const tail = supervised
-      ? ` SUPERVISED: at ${phxClock(i.costApplyAtMs)} the backup reserve is held at ${reserve}; it is restored at ${restore}.${cancel}`
+      ? ` SUPERVISED: at ${phxClock(i.costApplyAtMs)} the backup reserve is held at ${reserve}${armedLine}.${cancel}`
       : ' Advisory only — the add-on will NOT charge.';
     return {
       ...base,

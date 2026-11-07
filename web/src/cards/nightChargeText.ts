@@ -55,6 +55,12 @@ export function actuationBannerVisible(a: BannerActuation | null, nowMs: number)
 export interface BannerTextActuation extends BannerActuation {
   targetPct: number | null;
   priorReservePct: number | null;
+  /** v1.200.0 (Fix10) — the server's chargeCycle.lineStartClosedStatus: a line night whose start is closed, its words, and whether
+   *  anything is left to cancel. Absent on any other night. */
+  lineStartClosed?: { text: string; cancel: boolean };
+  /** v1.200.0 (Fix10 review 1) — the server's chargeCycle.lineWriteUnreadStatus: a line night's write the panel has not read back.
+   *  Absent on any other night. */
+  lineWriteUnread?: boolean;
 }
 
 /** v1.189.0 — the banner's words, its tone and its Cancel control. */
@@ -70,12 +76,12 @@ export interface BannerState {
 /**
  * v1.189.0 — the actuation banner, by the write's state, in this order: a restore the panel has
  * not confirmed (never "Completed", never muted; nothing left to cancel — the actuator is retrying
- * it), completed, cancelled, applied ("Cancel & revert") or armed ("Cancel tonight"). The card
+ * it), completed, cancelled, applied ("Cancel & revert"), a line night's closed start (the server's words) or armed ("Cancel tonight"). The card
  * renders the button whenever `cancel` is set, in every shape it has: a recompute that holds, an
  * incomplete basis or a stale plan does not disarm the write (writeStands), so none of them may
  * hide its Cancel. `deadline` is the cancel deadline as HH:MM, or null.
  */
-export function actuationBannerState(a: BannerTextActuation, deadline: string | null): BannerState {
+export function actuationBannerState(a: BannerTextActuation, deadline: string | null, reservePct: number | null = null): BannerState {
   const prior = a.priorReservePct ?? '—';
   // v1.189.0 — first: once the reserve has settled as someone else's, nothing of ours holds it and
   // the server answers a cancel with 409, so the banner offers none ("Cancel & revert" over a
@@ -93,7 +99,16 @@ export function actuationBannerState(a: BannerTextActuation, deadline: string | 
   }
   const target = a.targetPct ?? '—';
   if (a.appliedAtMs != null) {
-    return { text: `Reserve raised to ${target}% (was ${prior}%); auto-restores after the window closes.`, settled: false, cancel: 'Cancel & revert' };
+    // v1.200.0 (Fix10 review 1) — never "raised" on a line night's write no reading has shown: true in the apply's grace too.
+    const raised = a.lineWriteUnread === true ? `Reserve write to ${target}% has not read back` : `Reserve raised to ${target}%`;
+    return { text: `${raised} (was ${prior}%); auto-restores after the window closes.`, settled: false, cancel: 'Cancel & revert' };
+  }
+  // v1.200.0 (Fix10) — a line night whose start is closed: the server's words, never "write armed" past a window no write came of.
+  if (a.lineStartClosed != null) return { text: a.lineStartClosed.text, settled: false, cancel: a.lineStartClosed.cancel ? 'Cancel tonight' : null };
+  // v1.200.0 (Fix9 review 2) — the panel already reads the write (decideActuation: nothing to raise): armed, and none is due while it does.
+  // Cancel stays: a reading under the target lets the write go.
+  if (a.targetPct != null && reservePct != null && reservePct >= a.targetPct) {
+    return { text: `Supervised write armed${deadline ? ` for ${deadline}` : ''} — the reserve reads ${reservePct}%, so none is due while it does.`, settled: false, cancel: 'Cancel tonight' };
   }
   return { text: `Supervised write armed — reserve → ${target}%${deadline ? ` at ${deadline}` : ''}.`, settled: false, cancel: 'Cancel tonight' };
 }
@@ -206,6 +221,134 @@ export interface ChargeFigurePlan {
   setpointSocPct: number | null;
   /** v1.198.0 — the plan was sized on the provisional solar band; absent on the full basis. */
   pvBandWiden?: PvBandWidenText | null;
+}
+
+/** v1.200.0 — the plan fields the card's outage-cushion notes read (/api/night-charge/status → plan). */
+export interface CushionNotePlan {
+  cushionShortfall?: boolean;
+  /** The server's NightChargePlan.cushionShortfallCause: the 50% reserve envelope contributes. */
+  cushionShortfallCause?: 'envelope' | 'envelope+caps';
+  /** The server's NightChargePlan.cushionEnvelopeReason: why the plan does not claim the line (review; A5: armed
+   *  'nearFull' / 'closeUnder', or nothing armed 'advisory' / 'backupLeg' / 'reserveAtTarget' / 'armedNoLine' / 'startClosed'). */
+  cushionEnvelopeReason?: 'advisory' | 'backupLeg' | 'reserveAtTarget' | 'armedNoLine' | 'startClosed' | 'nearFull' | 'closeUnder';
+  /** The server's words for 'startClosed' (NightChargePlan.cushionStartClosedWords). */
+  cushionStartClosedWords?: string;
+  /** No verified write stands behind 'startClosed', or a partial ON runs beside it (NightChargePlan.cushionStartClosedNoWrite): the card leads with the words. */
+  cushionStartClosedNoWrite?: boolean;
+  /** The reserve the plan read: what 'reserveAtTarget' names. */
+  reserveFloorPct?: number;
+  cushionLineSocPct?: number | null;
+  /** The outage line the night force-charge is armed for (A5: carried, or disclosed beside it). */
+  forceChargeLine?: { askPct: number; linePct: number } | null;
+  /** 'line' when the expected walk ran the line force-charge (never on a cost-dominant night). */
+  expectedForceChargeMode?: 'line';
+  /** The server's NightChargePlan.expectedLineCeilingStop (review 2): the expected walk reaches the panel ceiling,
+   *  where the panel switches Charge Now off, and the add-on switches it back on under the start target. */
+  expectedLineCeilingStop?: { ceilingPct: number; startTargetPct: number; noReOnWords?: string };
+  expectedWriteLevelPct?: number | null;
+  expectedForceChargeStartMs?: number | null;
+}
+
+/** v1.200.0 (review 2) — the server's FORCE_CHARGE_LINE_REON_MAX in words (nightForceCharge.lineReOnTimesWords): the
+ *  re-ONs a line night may spend after the panel's own stop. lineForceCharge.test.ts pins the card's row against the
+ *  server's rationale, so a change of the budget there shows here. */
+export const LINE_REON_TIMES_TEXT = 'twice';
+
+/** v1.200.0 — the "charge/pool caps" row: only where the plan's SIZING fell short (the server's
+ *  cushionShortfall less an envelope-only cause), never on a plan whose only shortfall is the envelope. */
+export function capsShortfallShown(plan: CushionNotePlan): boolean {
+  return plan.cushionShortfall === true && plan.cushionShortfallCause !== 'envelope';
+}
+
+/** v1.200.0 (A5) — the server's nightChargeAdvisor.lineNotHeldOf, mirrored: what an ARMED line-mode night's own walk
+ *  cannot hold — 'aboveFull' (a line above a full pool), 'closeUnder' (its expected close under the line less the
+ *  scorer's 0.05, whatever the reason or cause), 'nearFull' (held, within 10 points of full) — or null. The server's
+ *  lineForceChargeYear.test.ts holds the two equal on every plan of the year, and lineForceCharge.test.ts T20 at the
+ *  edge: a close exactly at L − 0.05 holds (1e-9 of float slack, the server's LINE_CLOSE_EDGE_EPS: in binary 50.35 −
+ *  0.05 is 50.300000000000004). */
+export function lineNotHeldOfCard(plan: CushionNotePlan): 'closeUnder' | 'aboveFull' | 'nearFull' | null {
+  if (plan.forceChargeLine == null || plan.expectedForceChargeMode !== 'line') return null;
+  const l = plan.cushionLineSocPct;
+  if (l == null || !Number.isFinite(l)) return null;
+  if (l > 100) return 'aboveFull';
+  const e = plan.expectedWriteLevelPct;
+  if (e != null && e < l - 0.05 - 1e-9) return 'closeUnder';
+  return plan.cushionEnvelopeReason === 'nearFull' ? 'nearFull' : null;
+}
+
+/**
+ * v1.200.0 — the outage line above the panel's 50% reserve, in one row: disclosed with nothing armed ("not held
+ * tonight": advisory mode, the backup leg), or the force-charge's own row (line mode only, with the expected close —
+ * the level the charge figure names) — (A5) followed, on an armed night, by what its walk cannot hold
+ * (lineNotHeldOfCard). null otherwise, a cost-dominant night included. `maxPct` is the panel's reserve maximum
+ * (status.reserveWriteMaxPct); 50 when unknown.
+ */
+export function outageLineRow(plan: CushionNotePlan, maxPct: number | null = null): string | null {
+  const r1 = (n: number): number => Math.round(n * 10) / 10;
+  const max = maxPct ?? 50;
+  // (Fix8) The server's lineAboveReserveWords (nightForceCharge.ts), mirrored: the line beside the reserve maximum and a full pool,
+  // round1 or two decimals where one reads as either ("outage line 50.03% is above the 50% reserve", never "50%"); a line stated at
+  // the reserve, unnumbered.
+  const lineText = (l: number | null | undefined): string => {
+    if (l == null || !Number.isFinite(l)) return '';
+    const r = r1(l);
+    const n = r === max || r === 100 ? Math.round(l * 100) / 100 : r;
+    return n > max ? `${n}% ` : '';
+  };
+  const armed = plan.forceChargeLine != null;
+  if (plan.cushionShortfallCause != null && !armed) {
+    const l = plan.cushionLineSocPct;
+    const why = plan.cushionEnvelopeReason === 'backupLeg' ? 'not held tonight (the backup leg writes the reserve only)'
+      : plan.cushionEnvelopeReason === 'advisory' ? 'not held tonight (advisory mode)'
+        : plan.cushionEnvelopeReason === 'reserveAtTarget' ? `not claimed tonight (the reserve reads ${plan.reserveFloorPct ?? max}%: no write while it does, no force-charge without one)`
+          : plan.cushionEnvelopeReason === 'armedNoLine' ? 'not claimed tonight (no write armed for this window carries a force-charge for it)'
+            : plan.cushionEnvelopeReason === 'startClosed' ? `not claimed tonight (${plan.cushionStartClosedWords ?? 'no force-charge for it starts'})` : 'not held tonight';
+    return `outage line ${lineText(l)}is above the ${max}% the panel accepts as a reserve — ${why}; residual risk remains`;
+  }
+  // A5 — an ARMED night: the force-charge's row (what it does), then what its walk cannot hold. Never "not held tonight".
+  const kind = lineNotHeldOfCard(plan);
+  const notHeld = kind === 'closeUnder' ? ' — under the line; residual risk remains'
+    : kind === 'aboveFull' ? ' — the line is above a full pool; residual risk remains'
+      : kind === 'nearFull' ? ' — within 10 points of a full pool, not held with its usual margin; residual risk remains' : '';
+  const row = outageLineArmedRow(plan, max, r1, lineText);
+  if (row == null && armed && plan.cushionShortfallCause != null) {
+    // Never silent on a disclosed night, whatever the walk's mode (a plan this build does not make).
+    const l = plan.cushionLineSocPct;
+    return `outage line ${lineText(l)}is above the ${max}% the panel accepts as a reserve — its force-charge runs, but the line is not claimed; residual risk remains`;
+  }
+  return row == null ? null : `${row}${notHeld}`;
+}
+
+/** v1.200.0 (Fix10 review 1) — the card's lead on a closed start no write stands behind: the plan's expected figures and the write's
+ *  level are the reserve-alone figures of a write nothing holds, so "reserve held as a floor" or "expected charge to ~50%" would state
+ *  what will not happen, above the banner that says why. A write that stands keeps its figure, which is true. (Fix12) Not on 'partTaken':
+ *  its write stands, and "no charge expected" is false while two slots charge. null otherwise. */
+export function startClosedLead(plan: CushionNotePlan): { headline: string; detail: string } | null {
+  if (plan.cushionEnvelopeReason !== 'startClosed' || plan.cushionStartClosedNoWrite !== true) return null;
+  const words = plan.cushionStartClosedWords ?? 'no force-charge for it starts';
+  return { headline: 'The outage line is not claimed tonight', detail: `${words.charAt(0).toUpperCase()}${words.slice(1)}.` };
+}
+
+/** v1.200.0 — the armed line force-charge's own row (outageLineRow): line mode only. */
+function outageLineArmedRow(plan: CushionNotePlan, max: number, r1: (n: number) => number, lineText: (l: number) => string): string | null {
+  if (plan.expectedForceChargeMode === 'line' && plan.forceChargeLine != null) {
+    // v1.200.0 (review) — armed but not expected to start (the pool stays at or above the panel ceiling):
+    // never "stays on to the window close" for a force-charge that does not switch on.
+    if (plan.expectedForceChargeStartMs === null) {
+      return `outage line ${lineText(plan.forceChargeLine.linePct)}is above the ${max}% reserve — the panel's force-charge is armed for it, not expected to start (the pool stays at or above its ceiling)`;
+    }
+    const lvl = plan.expectedWriteLevelPct;
+    const tail = lvl != null && Number.isFinite(lvl) && plan.expectedForceChargeStartMs != null ? `, ~${r1(lvl)}% expected at the close` : '';
+    // v1.200.0 (review 2) — a walk that reaches the panel ceiling: the panel switches Charge Now off there, and the
+    // add-on switches it back on under the start target before the close. Never "stays on to the window close".
+    const stop = plan.expectedLineCeilingStop;
+    if (stop != null) {
+      return `outage line ${lineText(plan.forceChargeLine.linePct)}is above the ${max}% reserve — the panel's force-charge runs until the panel `
+        + `switches it off at its ${stop.ceilingPct}% ceiling, and ${stop.noReOnWords ?? `the add-on switches it back on under ${stop.startTargetPct}% before the close (at most ${LINE_REON_TIMES_TEXT})`}${tail}`;
+    }
+    return `outage line ${lineText(plan.forceChargeLine.linePct)}is above the ${max}% reserve — the panel's force-charge stays on to the window close${tail}`;
+  }
+  return null;
 }
 
 /** v1.198.0 — the server's PvBandWiden (nightChargeAdvisor.ts): how far a provisional plan's P10 PV
