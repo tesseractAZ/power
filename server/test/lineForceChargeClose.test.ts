@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import * as nfc from '../src/nightForceCharge.js';
 import { decideForceCharge, forceChargeRateKw, evDisplacedPackKwh, EMPTY_LINE_DECLINED_PUSH, type ForceChargeOpts, type LineDeclinedPushMem } from '../src/nightForceCharge.js';
 import { emptyActuationState, type NightActuationState } from '../src/nightChargeActuator.js';
-import { buildNightChargeMorningSummary } from '../src/notify.js';
+import { buildLineForceChargeDeclinedStart, buildNightChargeMorningSummary } from '../src/notify.js';
 import { withEnv } from './golden/support/env.js';
 
 /**
@@ -28,7 +28,7 @@ import { withEnv } from './golden/support/env.js';
  *    until an ON of ours (the tick's 'on', 'onRetry' or 'lineReOn') takes effect;
  *  - the tick's evDisplacedKwh is the plan's predicted (P90) window EV through evDisplacedPackKwh, as index.ts passes it, so a predicted
  *    EV pulls the start early. The plant holds that figure constant through the night; index.ts reads it from the latest plan, whose
- *    window EV shrinks on each recompute as the hours pass;
+ *    window EV shrinks on each recompute as the hours pass (the knob `predRemaining`, on the grids of the quoted time);
  *  - the panel's ceiling reads back the minute after a sync; an ON takes effect after `onDelayMin`;
  *    readings are whole percents (rounded, or floored), `staleMin` old; each slot's Core reads the pool;
  *  - the close is the median of the last 15 minutes' readings (the scorer's window_close_soc_pct), and a
@@ -121,10 +121,13 @@ interface Knobs {
   blockFromMin: number | null;
   /** (Fix13) Charge Now on from this instant, whoever's: the plant takes it, under the blocker; what a start at a quoted time closes at. */
   startAtMs: number | null;
+  /** (Fix14) The window EV shrinking through the night, as index.ts reads it from the latest plan: this share of the session's energy still to
+   *  come at each tick, in place of predEvKwh (null: predEvKwh, held constant, every cell before Fix14). */
+  predRemaining: number | null;
 }
 const BASE: Knobs = {
   p0: 50, evFromMin: null, evKw: 7, standbyKw: 0, onDelayMin: 0, staleMin: 0, floor: false, predEvKwh: null, costPct: null, phaseMs: 0, lagMs: 0, judgeCheck: true, evEndMin: 0, lateKw: null, lateFromMin: 0,
-  slots: 3, nameKwh: NAME, capKw: 17, restartMin: null, blockFromMin: null, startAtMs: null,
+  slots: 3, nameKwh: NAME, capKw: 17, restartMin: null, blockFromMin: null, startAtMs: null, predRemaining: null,
 };
 
 type LineState = NightActuationState & {
@@ -210,8 +213,11 @@ function night(L: number, houseKw: number, k: number, kn: Knobs, variant: Varian
     const load = houseKw + ev;
     const chargeRateKw = forceChargeRateKw({ gridCapKw: kn.capKw, houseLoadKw: load, legEff: LEG, slotCount: kn.slots });
     // index.ts: the plan's P90 window EV, through evDisplacedPackKwh, on every tick of this window.
-    const evDisplacedKwh = pred != null && pred > 0
-      ? evDisplacedPackKwh({ evKwh: pred, peakEvKw: kn.evKw, rateKw: chargeRateKw, unboundedRateKw: Math.max(1, (kn.capKw - load) * LEG), legEff: LEG })
+    const predNow = kn.predRemaining != null && kn.evFromMin != null
+      ? kn.evKw * (Math.max(0, W1 - kn.evEndMin * MIN - Math.max(t, W1 - kn.evFromMin * MIN)) / H) * kn.predRemaining
+      : pred;
+    const evDisplacedKwh = predNow != null && predNow > 0
+      ? evDisplacedPackKwh({ evKwh: predNow, peakEvKw: kn.evKw, rateKw: chargeRateKw, unboundedRateKw: Math.max(1, (kn.capKw - load) * LEG), legEff: LEG })
       : null;
     if (onEffectiveMs != null && t >= onEffectiveMs) {
       chargeNowOn = true; importing = true; onEffectiveMs = null;
@@ -808,42 +814,56 @@ test('★★★ T7 (Fix13) the named nights: a one-Core home on a line of 90 is 
   assert.deepEqual([at(90), at(70.55)], PIN_ONE_CORE_NAMED);
 });
 
-/* ══ (Fix13) the time the declined-start push quotes ══════════════════════════════════════════════════════════════════════════════
- * A blocker of the start, 10 min unbroken: lineDeclinedPushTick pushes, and lineDeclinedLatestStartMs quotes. The EV counted twice quoted
- * hours before the push, and the EV counted never loses the line on an EV still ahead. The plant walks a start at the quoted time. */
+/* ══ (Fix14) the time the declined-start push quotes: one figure, each input erring early ═════════════════════════════════════════════════
+ * A blocker of the start, 10 min unbroken: lineDeclinedPushTick pushes, and lineDeclinedLatestStartMs quotes. A late clock loses the line, and
+ * an early one costs only urgency: a time gone by the push is words with no clock. The plant walks a start at the quoted time. */
 
 /** The EV on at the push (from the open), and still ahead of it (the last 2 hours). */
 const EV_ON = { ...BASE, ...session(EV_MAX_KW, 0, 150, 'exact', false) };
 const EV_AHEAD = { ...BASE, ...session(EV_MAX_KW, 240, 120, 'exact', false) };
+const NO_CLOCK = 'The later it starts, the lower the pool may close, perhaps under the line; if it never starts, the add-on adds nothing above the 50% reserve.';
 
-test('★★★ T7 (Fix13) the 23:10 push with the EV on quotes a future time, not ~18:59: the EV counted once, never twice', () => {
+/** Walk one blocked night: its push, and where a start at the quoted time closes. Every clock is after the push, and such a start reaches the ask. */
+const quoteHolds = (name: string, L: number, h: number, K: Knobs, stats: { started: number; pushes: number; clocks: number; none: number; reached: number }): void => {
+  const r = night(L, h, 1, K, 'real');
+  if (r.declinedAtMs == null) { assert.ok(r.onAtMs != null, `${name} ${L} ${h}: the timed start came before the blocker`); stats.started += 1; return; }
+  stats.pushes += 1;
+  if (r.quotedAtMs == null) { stats.none += 1; return; }
+  stats.clocks += 1;
+  assert.ok(r.quotedAtMs > r.declinedAtMs!, `${name} ${L} ${h}: quoted ${(W1 - r.quotedAtMs) / MIN} pushed ${(W1 - r.declinedAtMs!) / MIN}`);
+  const close = night(L, h, 1, { ...K, startAtMs: r.quotedAtMs }, 'real').close;
+  assert.ok(close >= Math.ceil(L - 1e-9), `${name} ${L} ${h}: a start at T-${(W1 - r.quotedAtMs) / MIN} closes ${close}`);
+  stats.reached += 1;
+};
+
+test('★★★ T7 (Fix14) the 23:10 push with the EV on: the double count errs early and is gone by the push, so no clock and the no-clock words, never ~18:59', () => {
   // The finding's night: house 2, 11.52 kW from the open, a 28 kWh figure, a blocker from the open.
   const kn = { ...BASE, ...session(EV_MAX_KW, 0, 150, 28, false), blockFromMin: 360 };
   const r = night(55.55, 2, 1, kn, 'real');
   assert.equal(r.declinedAtMs, W0 + 10 * MIN, 'pushed at 23:10');
   const twice = nfc.lineLatestStartMs(W1, 56, 50, NAME, r.declinedRateKw, r.declinedEvKwh, 3);
-  assert.ok(twice < W0, 'the double count: hours before the window opened');
-  const q = r.quotedAtMs!;
-  assert.ok(q > r.declinedAtMs!, 'a time still to come');
-  assert.equal(q, nfc.lineLatestStartMs(W1, 56, 50, NAME, 10, r.declinedEvKwh, 3), 'the plan rate, with the EV\'s energy, once');
-  assert.ok(q < nfc.lineLatestStartMs(W1, 56, 50, NAME, r.declinedRateKw, null, 3), 'earlier than the live rate alone');
-  assert.equal(Math.round((W1 - q) / MIN), PIN_QUOTE_EV_ON_MIN);
-  assert.ok(night(55.55, 2, 1, { ...kn, startAtMs: q }, 'real').close >= 56, 'and a start then reaches the ask');
+  assert.ok(twice < W0, 'the figure: hours before the window opened');
+  assert.equal(r.quotedAtMs, null, 'so no clock');
+  const body = buildLineForceChargeDeclinedStart({ day: '2027-01-04', linePct: 55.55, why: 'host vitals are critical', latestStartText: r.quotedAtMs }).body;
+  assert.ok(body.endsWith(NO_CLOCK), body);
+  assert.doesNotMatch(body, /by ~/);
+  assert.ok(night(55.55, 2, 1, { ...kn, startAtMs: r.declinedAtMs }, 'real').close >= 56, 'the words are true: a start at the push still reaches the ask');
 });
 
-test('★★★ T7 (Fix13) the EV still ahead: a start at the quoted time holds the line, and the EV-null form does not: it is why neither form stands alone', () => {
+test('★★★ T7 (Fix14) the EV still ahead: a start at the quoted time reaches the ask, and with no EV energy it does not: the energy is always in the figure', () => {
   const kn = { ...EV_AHEAD, blockFromMin: 360 };
   const r = night(55.55, 2, 1, kn, 'real');
   assert.ok(r.quotedAtMs != null && r.quotedAtMs > r.declinedAtMs!);
-  assert.ok(night(55.55, 2, 1, { ...kn, startAtMs: r.quotedAtMs }, 'real').close >= 56, 'the quoted time holds');
+  assert.equal(r.quotedAtMs, nfc.lineLatestStartMs(W1, 56, 50, NAME, 10, r.declinedEvKwh, 3), 'from the reserve, at the lower rate, with the EV\'s energy');
+  assert.ok(night(55.55, 2, 1, { ...kn, startAtMs: r.quotedAtMs }, 'real').close >= 56, 'the quoted time reaches the ask');
   const evNull = nfc.lineLatestStartMs(W1, 56, 50, NAME, r.declinedRateKw, null, 3);
   assert.ok(evNull > r.quotedAtMs, 'the live rate cannot see an EV ahead');
-  assert.ok(night(55.55, 2, 1, { ...kn, startAtMs: evNull }, 'real').close < 55.5, 'the EV-null form closes under the line');
+  assert.ok(night(55.55, 2, 1, { ...kn, startAtMs: evNull }, 'real').close < 55.5, 'with no EV energy it closes under the line');
   const planNull = nfc.lineLatestStartMs(W1, 56, 50, NAME, null, null, 3);
-  assert.ok(night(55.55, 2, 1, { ...kn, startAtMs: planNull }, 'real').close < 55.5, 'nor the plan rate with no EV energy');
+  assert.ok(night(55.55, 2, 1, { ...kn, startAtMs: planNull }, 'real').close < 55.5, 'nor at the plan rate with no EV energy');
 });
 
-test('★★★ T7 (Fix13) the grid: the quoted time is never at or before the push; with the EV on or ahead, a start at it reaches the ask; a low pool beside a large EV quotes no clock', () => {
+test('★★★ T7 (Fix14) the grid: every clock is after the push, and with the EV on or ahead a start at it reaches the ask; a low pool beside a large EV quotes no clock', () => {
   const stats = { started: 0, pushes: 0, clocks: 0, none: 0, reached: 0 };
   for (const [name, kn] of [['EV on', EV_ON], ['EV ahead', EV_AHEAD]] as const) {
     for (const blockFromMin of [360, 300, 240]) for (const L of [...YEAR_LINES, ...HIGH_LINES]) for (const h of HOUSES) for (const k of KS) for (const floor of [false, true]) {
@@ -861,11 +881,55 @@ test('★★★ T7 (Fix13) the grid: the quoted time is never at or before the p
     }
   }
   assert.deepEqual(stats, PIN_QUOTE_GRID);
-  // Pool 40, L 65.95, a large EV: the lead runs past the push, so no clock: the guard.
+  // Pool 40, L 65.95, a large EV: the figure is gone by the push, so no clock: the guard.
   const low = night(65.95, 2, 1, { ...BASE, ...session(EV_MAX_KW, 0, 300, 'exact', false), p0: 40, blockFromMin: 360 }, 'real');
   assert.equal(low.declinedAtMs, W0 + 10 * MIN);
   assert.equal(low.quotedAtMs, null, 'no clock');
-  assert.ok(nfc.lineLatestStartMs(W1, 66, 40, NAME, low.declinedRateKw, low.declinedEvKwh, 3) <= low.declinedAtMs!, 'the double count would have quoted the past');
+  assert.ok(nfc.lineLatestStartMs(W1, 66, 40, NAME, low.declinedRateKw, low.declinedEvKwh, 3) <= low.declinedAtMs!, 'gone by the push');
+});
+
+test('★★★ T7 (Fix14) the finding, L 59.1, pool 62 at the open, house 2: a person who starts at the quoted time holds the line, and a clock from the reading loses it', () => {
+  const kn = { ...BASE, p0: 62, blockFromMin: 350 };
+  const r = night(59.1, 2, 1, kn, 'real');
+  assert.equal(r.declinedAtMs, W0 + 20 * MIN, 'pushed at 11:20 PM');
+  assert.equal(Math.round((W1 - r.quotedAtMs!) / MIN), 70, '~3:49 AM, from the reserve');
+  assert.equal(night(59.1, 2, 1, { ...kn, startAtMs: r.quotedAtMs }, 'real').close, 67, 'the line held, and the ask');
+  // Timed from the reading at the push, the pool already over the ask: ~4:40 AM, by when the house has drawn it to about 50.
+  const fromReading = nfc.lineLatestStartMs(W1, 60, 62, NAME, 10, null, 3);
+  assert.equal((W1 - fromReading) / MIN, 20);
+  assert.equal(night(59.1, 2, 1, { ...kn, startAtMs: fromReading }, 'real').close, 53, 'the clock the reading gives closes 6 points under');
+});
+
+test('★★★ T7 (Fix14) the finding, a 10 kW cap, house 2, L 65.95, a 7 kW EV ahead for the last 2 h: a person who starts at the quoted time holds the line, and neither the plan rate with the energy nor the live rate without it does', () => {
+  const kn = { ...BASE, capKw: 10, evKw: 7, evFromMin: 120, predRemaining: 1, blockFromMin: 360 };
+  const r = night(65.95, 2, 1, kn, 'real');
+  assert.equal(r.declinedAtMs, W0 + 10 * MIN, 'pushed at 11:10 PM');
+  assert.equal(Math.round((W1 - r.quotedAtMs!) / MIN), 239, '~1:00 AM');
+  assert.equal(night(65.95, 2, 1, { ...kn, startAtMs: r.quotedAtMs }, 'real').close, 69, 'the line held, and the ask');
+  const planT = nfc.lineLatestStartMs(W1, 66, 50, NAME, 10, r.declinedEvKwh, 3);
+  assert.equal(Math.round((W1 - planT) / MIN), 181, '~1:58 AM, the slow rate unseen');
+  assert.equal(night(65.95, 2, 1, { ...kn, startAtMs: planT }, 'real').close, 61, 'closes about 5 points under');
+  const liveT = nfc.lineLatestStartMs(W1, 66, 50, NAME, r.declinedRateKw, null, 3);
+  assert.ok(liveT > planT, 'the EV unseen: later still');
+  assert.ok(night(65.95, 2, 1, { ...kn, startAtMs: liveT }, 'real').close < 65.9);
+});
+
+test('★★★ T7 (Fix14) PIN_QUOTE_POOL_GRID: a pool above the reserve at the open, which the house draws down before the quoted time: every clock is after the push, and a start at it reaches the ask', () => {
+  const stats = { started: 0, pushes: 0, clocks: 0, none: 0, reached: 0 };
+  for (const p0 of [52, 56, 60, 62, 66, 70, 75, 90]) for (const L of [52.62, 55.55, 59.1, 62.3, 65.95, 70.55]) for (const h of [0.6, 2, 2.8, 5]) for (const blockFromMin of [350, 330, 270, 180, 90, 60]) {
+    quoteHolds(`pool ${p0} from ${blockFromMin}`, L, h, { ...BASE, p0, blockFromMin }, stats);
+  }
+  assert.deepEqual(stats, PIN_QUOTE_POOL_GRID);
+});
+
+test('★★★ T7 (Fix14) PIN_QUOTE_CAP_GRID: a live rate under 10 kW on caps of 12, 10 and 9.6 and beside a steady 8.4-10 kW house, an EV ahead shrinking as index.ts reads it: every clock is after the push, and a start at it reaches the ask', () => {
+  const stats = { started: 0, pushes: 0, clocks: 0, none: 0, reached: 0 };
+  const plants: Array<[number, number[]]> = [[12, [1.2, 2, 2.8, 3.6, 5]], [10, [1.2, 2, 2.8, 3.6, 5]], [9.6, [1.2, 2, 2.8, 3.6, 5]], [17, [8.4, 10]]];
+  const evs: Array<Partial<Knobs>> = [{ evKw: 7, evFromMin: 120, evEndMin: 0 }, { evKw: 9.6, evFromMin: 180, evEndMin: 60 }];
+  for (const [capKw, houses] of plants) for (const h of houses) for (const ev of evs) for (const L of [52.62, 55.55, 59.1, 65.95, 70.55]) for (const blockFromMin of [360, 330, 270, 210, 150]) {
+    quoteHolds(`cap ${capKw} EV ${ev.evKw} from ${blockFromMin}`, L, h, { ...BASE, capKw, ...ev, predRemaining: 1, blockFromMin }, stats);
+  }
+  assert.deepEqual(stats, PIN_QUOTE_CAP_GRID);
 });
 
 test('★★★ T7 the line force-charge actually runs: ON to the close on a 50% pool, no OFF before it', () => {
@@ -1146,10 +1210,12 @@ const PIN_STUCK_PLANTS: Record<string, { under: number; pushed: number; reach: [
 };
 /** (Fix13) A one-Core home, house 2: [ON, the push, minutes before the close, the close of a restart 5 min after it], L 90 then L 70.55. */
 const PIN_ONE_CORE_NAMED = [[185, 154, 95], [122, 91, 75]];
-/** (Fix13) The 23:10 push beside an EV: minutes before the close. */
-const PIN_QUOTE_EV_ON_MIN = 204;
-/** (Fix13) The grid: nights started before the blocker, pushes, those with a clock, those with none, and of the clocks those a start at reaches the ask. */
-const PIN_QUOTE_GRID = { started: 1592, pushes: 2488, clocks: 1944, none: 544, reached: 1944 };
+/** (Fix14) The grid: nights started before the blocker, pushes, those with a clock, those with none, and of the clocks those a start at reaches the ask. */
+const PIN_QUOTE_GRID = { started: 1592, pushes: 2488, clocks: 1520, none: 968, reached: 1520 };
+/** (Fix14) Pools above the reserve: the same counts. */
+const PIN_QUOTE_POOL_GRID = { started: 217, pushes: 935, clocks: 876, none: 59, reached: 876 };
+/** (Fix14) A live rate under 10 kW with an EV ahead: the same counts. */
+const PIN_QUOTE_CAP_GRID = { started: 479, pushes: 371, clocks: 354, none: 17, reached: 354 };
 /** (Fix12) An early 11.52 kW session from the open, then an 11.52 kW load from 60-150 min before the close: 32,000 nights a shape, the
  *  under nights with their one push after the load came, before it, or none. Before lineFlatPushHeld: real 189 / 0 / 45, onLatch
  *  3,595 / 10,429 / 45, reOnInert 2,036 / 10,429 / 1,604. The push no longer spends itself before the cause, and a night it reached only

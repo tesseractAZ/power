@@ -1177,7 +1177,7 @@ test('★★★ T9 (Fix12) a stale panel is pushed as no readback, the fact it i
   assert.ok(readFileSync(resolve(HERE, '../src/nightForceCharge.ts'), 'utf8').includes("  if (!o.socCoherent) return { kind: 'none', why: o.slotsOn == null ? W.noReadback : W.incoherent };\n"));
 });
 
-test('★★★ T9 (Fix13) the time the declined-start push quotes: the earlier of the deliverable rate with the EV\'s energy and the live rate with none; from the reserve with no reading, on the frozen nameplate; no time at or before now; the close less 20 min only with no capacity at all', () => {
+test('★★★ T9 (Fix14) the time the declined-start push quotes: one figure, each input erring early: a reading never above the reserve, the lower of the live and the deliverable rate, the EV\'s energy always; no time at or before now; the close less 20 min only with no capacity at all', () => {
   const latest = nfc.lineDeclinedLatestStartMs;
   const base = { nowMs: WIN_START, closeAtMs: WIN_END, askPct: 56, poolSocPct: null, liveFullWh: null, frozenFullWh: 92_160, rateKw: null, evDisplacedKwh: null, slotCount: 0 };
   // The finding: pool 50 to ask 56 at 10 kW: 33.2 min + the 15-min buffer: 04:11, where the fallback said 04:40.
@@ -1185,25 +1185,37 @@ test('★★★ T9 (Fix13) the time the declined-start push quotes: the earlier 
   assert.equal(stale, nfc.lineLatestStartMs(WIN_END, 56, 50, 92.16, 10, null, 0));
   assert.equal(Math.round((WIN_END - stale) / M), 48);
   assert.ok(stale < WIN_END - nfc.FORCE_CHARGE_MIN_RUN_MS, 'earlier than the last start');
-  // A coherent reading is the pool; a live capacity is the capacity, never the frozen one.
-  assert.equal(latest({ ...base, poolSocPct: 53 }), nfc.lineLatestStartMs(WIN_END, 56, 53, 92.16, 10, null, 0));
+  // The pool: a reading under the reserve is timed from the reading, which is earlier; at or above it, from the reserve, whatever it reads
+  // at the push: the house draws it down there before the quoted time.
+  const low = latest({ ...base, poolSocPct: 47 })!;
+  assert.equal(low, nfc.lineLatestStartMs(WIN_END, 56, 47, 92.16, 10, null, 0));
+  assert.ok(low < stale, 'earlier than from the reserve');
+  for (const poolSocPct of [50, 50.5, 53, 56, 60, 62, 90]) assert.equal(latest({ ...base, poolSocPct }), stale, `pool ${poolSocPct}`);
+  // A live capacity is the capacity, never the frozen one.
   assert.equal(latest({ ...base, liveFullWh: 80_000 }), nfc.lineLatestStartMs(WIN_END, 56, 50, 80, 10, null, 0));
   assert.equal(latest({ ...base, liveFullWh: 0 }), stale, 'a live zero is no capacity');
-  // The two figures, each counting the EV once. A live 14 kW is over the deliverable 10: the 10 kW figure is the earlier.
+  // The rate: the lower of the two, either way round, on a live panel.
   const live = { ...base, poolSocPct: 53, liveFullWh: 92_160, slotCount: 3 };
-  const plan = (ev: number | null) => nfc.lineLatestStartMs(WIN_END, 56, 53, 92.16, 10, ev, 3);
-  const at = (rate: number) => nfc.lineLatestStartMs(WIN_END, 56, 53, 92.16, rate, null, 3);
-  assert.equal(latest({ ...live, rateKw: 14 }), plan(null));
-  assert.equal(latest({ ...live, rateKw: 14, evDisplacedKwh: 4 }), plan(4), 'the EV ahead: its energy, which the live rate cannot see');
-  assert.equal(latest({ ...live, rateKw: 3.2 }), at(3.2), 'the EV on: the live rate, which carries it');
-  assert.equal(latest({ ...live, rateKw: 3.2, evDisplacedKwh: 1 }), at(3.2), 'the earlier of the two');
-  assert.equal(latest({ ...live, rateKw: 14, evDisplacedKwh: 20 }), Math.min(plan(20), at(14)));
-  assert.notEqual(latest({ ...live, rateKw: 3.2, evDisplacedKwh: 20 }), nfc.lineLatestStartMs(WIN_END, 56, 53, 92.16, 3.2, 20, 3), 'never the two together');
+  const at = (rate: number, ev: number | null) => nfc.lineLatestStartMs(WIN_END, 56, 50, 92.16, rate, ev, 3);
+  assert.equal(latest({ ...live, rateKw: 14 }), at(10, null), 'a live 14 kW is over the deliverable 10: never later than it');
+  assert.equal(latest({ ...live, rateKw: 10 }), at(10, null));
+  assert.equal(latest({ ...live, rateKw: 7.42 }), at(7.42, null), 'a cap, a house or an EV on: the live rate sees it, the deliverable rate does not');
+  assert.ok(at(7.42, null) < at(10, null), 'and it is the earlier');
+  // The EV's energy, always: with a live rate on either side of the bound, and with none, where the plan rate stands.
+  assert.equal(latest({ ...live, rateKw: 14, evDisplacedKwh: 4 }), at(10, 4), 'an EV ahead: the energy, which the live rate cannot see');
+  assert.equal(latest({ ...live, rateKw: 7.42, evDisplacedKwh: 13 }), at(7.42, 13), 'the finding: the slow rate AND the energy');
+  assert.ok(at(7.42, 13) < Math.min(at(10, 13), at(7.42, null)), 'earlier than either alone: neither runs late');
+  assert.equal(latest({ ...live, evDisplacedKwh: 4 }), at(10, 4), 'no live rate: the plan rate, with the energy');
+  assert.equal(latest({ ...base, evDisplacedKwh: 4 }), nfc.lineLatestStartMs(WIN_END, 56, 50, 92.16, 10, 4, 0));
   assert.notEqual(latest({ ...base, evDisplacedKwh: 4 }), stale);
-  // The slots bound the deliverable rate: a one-Core home's frozen count moves the time, where its live rate is gone.
+  // The EV on: the live rate carries it and its energy counts it again. That errs early, and where it is gone by the push the guard has it.
+  const twice = at(3.2, 20);
+  assert.ok(twice < at(3.2, null));
+  assert.equal(latest({ ...live, rateKw: 3.2, evDisplacedKwh: 20, nowMs: twice - 1 }), twice);
+  assert.equal(latest({ ...live, rateKw: 3.2, evDisplacedKwh: 20, nowMs: twice }), null, 'no clock, never a time before the window');
+  // The slots bound the rate: a one-Core home's frozen count moves the time, where its live rate is gone, and a live rate above what it delivers.
   assert.equal(latest({ ...base, frozenFullWh: 30_720, slotCount: 1 }), nfc.lineLatestStartMs(WIN_END, 56, 50, 30.72, 5.5, null, 1));
-  // Past the ask a reading needs no charge: the last start, as lineLatestStartMs caps it.
-  assert.equal(latest({ ...base, poolSocPct: 60 }), WIN_END - nfc.FORCE_CHARGE_MIN_RUN_MS);
+  assert.equal(latest({ ...live, slotCount: 1, rateKw: 7.42 }), nfc.lineLatestStartMs(WIN_END, 56, 50, 92.16, 5.5, null, 1));
   // No time at or before now: to the millisecond.
   assert.equal(latest({ ...base, nowMs: stale - 1 }), stale);
   assert.equal(latest({ ...base, nowMs: stale }), null, 'at now');
@@ -1259,7 +1271,7 @@ const staleNight = (pool: number, staleFromMin: number) => {
     ? fo({ poolSocPct: pool, slotsOn: [], slotSocPct: { 1: pool, 2: pool, 3: pool }, ceilingReadbackPct: 81, chargeRateKw: 14 })
     : fo({ ...STALE_PANEL }));
 };
-const NO_CLOCK = 'A start now may already close under the line; if it never starts, the add-on adds nothing above the 50% reserve.';
+const NO_CLOCK = 'The later it starts, the lower the pool may close, perhaps under the line; if it never starts, the add-on adds nothing above the 50% reserve.';
 
 test('★★★ T9 (Fix13) a stale panel on a pool above the reserve: no clock already gone, words true in every outcome; the clock while it is still ahead', () => {
   for (const [pool, staleFromMin, pushedMin] of [[65, 85, 70], [62, 100, 85], [60, 110, 95]] as const) {
@@ -1275,7 +1287,7 @@ test('★★★ T9 (Fix13) a stale panel on a pool above the reserve: no clock a
   assert.equal(ahead.quoted, nfc.lineLatestStartMs(WIN_END, 71, 50, 92.16, 10, null, 3), 'from the reserve at the plan rate');
   assert.ok(ahead.quoted! > ahead.t);
   assert.ok(ahead.body.includes('If it has not started by ~'), ahead.body);
-  assert.doesNotMatch(ahead.body, /A start now/);
+  assert.doesNotMatch(ahead.body, /The later it starts/);
 });
 
 test('★★★ T9 (Fix13) one Core on a stale panel: its frozen count times the quote at what it delivers, where an empty slot list reads 10 kW', () => {
