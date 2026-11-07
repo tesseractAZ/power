@@ -120,6 +120,9 @@
  * declined push's time counts an EV once, as the earlier of two figures, never at or before now, with the frozen connected count, and
  * words with no clock where none can be given (F13-b); the at-risk body names a load first, conditionally, on every body with a slot
  * reading on (F13-c). F12-a(viii), (ix), (xiv), F12-b(x)-(xiii) re-anchored.
+ * (Fix14) The quote is one figure, each input erring early, and the no-clock words name no close a start would make (F14). F13-b(iii)-(vii)
+ * retired: the two figures they mutated are gone. F12-b(x)-(xiii) and F13-b(xiv)-(xvi) re-anchored, and (x), (xii), (xiii) moved to the
+ * tick's call, the helper's own line being F14's now.
  *
  *   node scripts/mutate-line-force-charge.mjs [--only <id prefix>]
  *
@@ -4911,31 +4914,31 @@ const MUTANTS = [
   },
   {
     id: 'F12-b(x). ★★★ the live reading is ignored',
-    file: NFC, tests: [T_LINE],
-    find: "  const pool = o.poolSocPct ?? RESERVE_WRITE_MAX_PCT;\n",
-    to: "  const pool = RESERVE_WRITE_MAX_PCT; /* MUTANT */\n",
-    why: 'A pool at 70 is told a start time from 50.',
+    file: IDX, tests: [T_LINE],
+    find: "askPct: state.forceChargeLineAskPct!, poolSocPct: socCoherent ? socNowPct : null,\n",
+    to: "askPct: state.forceChargeLineAskPct!, poolSocPct: null, /* MUTANT */\n",
+    why: 'A pool under the reserve is told a start time from the reserve: the T9 tick wiring pin.',
   },
   {
     id: 'F12-b(xi). ★★★ no reading reads as the ask (the time from the later end)',
     file: NFC, tests: [T_LINE],
-    find: "  const pool = o.poolSocPct ?? RESERVE_WRITE_MAX_PCT;\n",
+    find: "  const pool = Math.min(o.poolSocPct ?? RESERVE_WRITE_MAX_PCT, RESERVE_WRITE_MAX_PCT);\n",
     to: "  const pool = o.poolSocPct ?? o.askPct; /* MUTANT */\n",
     why: 'The later, less safe time, on the one night with no reading.',
   },
   {
     id: 'F12-b(xii). ★★★ the rate the tick has is dropped',
-    file: NFC, tests: [T_LINE],
-    find: "  const liveT = o.rateKw != null ? lineLatestStartMs(o.closeAtMs, o.askPct, pool, fullWh / 1000, o.rateKw, null, o.slotCount) : planT;\n",
-    to: "  const liveT = planT; /* MUTANT */\n",
-    why: 'The live rate stops moving the time: an EV on the grid cap, or a heavy house, is quoted at 10 kW.',
+    file: IDX, tests: [T_LINE],
+    find: "        rateKw: chargeRateKw, evDisplacedKwh,\n",
+    to: "        rateKw: null, evDisplacedKwh, /* MUTANT */\n",
+    why: 'The live rate stops moving the time: an EV on the grid cap, or a heavy house, is quoted at 10 kW: the T9 tick wiring pin.',
   },
   {
     id: 'F12-b(xiii). ★★★ the EV the tick counts is dropped',
-    file: NFC, tests: [T_LINE],
-    find: "  const planT = lineLatestStartMs(o.closeAtMs, o.askPct, pool, fullWh / 1000, lineDeliverableRateKw(o.slotCount), o.evDisplacedKwh, o.slotCount);\n",
-    to: "  const planT = lineLatestStartMs(o.closeAtMs, o.askPct, pool, fullWh / 1000, lineDeliverableRateKw(o.slotCount), null, o.slotCount); /* MUTANT */\n",
-    why: 'The EV-null form: an EV still ahead, which the live rate cannot see, and a start at the quoted time closes under the line.',
+    file: IDX, tests: [T_LINE],
+    find: "        rateKw: chargeRateKw, evDisplacedKwh,\n",
+    to: "        rateKw: chargeRateKw, evDisplacedKwh: null, /* MUTANT */\n",
+    why: 'An EV still ahead, which the live rate cannot see, and a start at the quoted time closes under the line: the T9 tick wiring pin.',
   },
   {
     id: 'F12-b(xiv). ★★★ no capacity quotes nothing',
@@ -5054,41 +5057,6 @@ const MUTANTS = [
     why: 'A time at the push is no time to act.',
   },
   {
-    id: 'F13-b(iii). ★★★ the later of the two',
-    file: NFC, tests: [T_LINE, T_CLOSE],
-    find: "  const t = Math.min(planT, liveT);\n",
-    to: "  const t = Math.max(planT, liveT); /* MUTANT */\n",
-    why: 'The less safe time on both shapes: the EV-ahead start closes under the line.',
-  },
-  {
-    id: 'F13-b(iv). ★★★ the live figure alone wherever there is one',
-    file: NFC, tests: [T_LINE, T_CLOSE],
-    find: "  const t = Math.min(planT, liveT);\n",
-    to: "  const t = o.rateKw != null ? liveT : planT; /* MUTANT */\n",
-    why: 'The verifier\'s walk: EV 03:00-05:00, quote ~04:21, a start then closes 52.2 under a 55.55 line.',
-  },
-  {
-    id: 'F13-b(v). ★★★ the live figure counts the EV again (the finding: ~18:59 pushed at 23:10)',
-    file: NFC, tests: [T_LINE, T_CLOSE],
-    find: "  const liveT = o.rateKw != null ? lineLatestStartMs(o.closeAtMs, o.askPct, pool, fullWh / 1000, o.rateKw, null, o.slotCount) : planT;\n",
-    to: "  const liveT = o.rateKw != null ? lineLatestStartMs(o.closeAtMs, o.askPct, pool, fullWh / 1000, o.rateKw, o.evDisplacedKwh, o.slotCount) : planT; /* MUTANT */\n",
-    why: 'The double count stays for the start alone.',
-  },
-  {
-    id: 'F13-b(vi). ★★★ the plan figure on the live rate (the same double count, through the other figure)',
-    file: NFC, tests: [T_LINE, T_CLOSE],
-    find: "  const planT = lineLatestStartMs(o.closeAtMs, o.askPct, pool, fullWh / 1000, lineDeliverableRateKw(o.slotCount), o.evDisplacedKwh, o.slotCount);\n",
-    to: "  const planT = lineLatestStartMs(o.closeAtMs, o.askPct, pool, fullWh / 1000, o.rateKw ?? lineDeliverableRateKw(o.slotCount), o.evDisplacedKwh, o.slotCount); /* MUTANT */\n",
-    why: 'The EV counted twice, hours before the push.',
-  },
-  {
-    id: 'F13-b(vii). ★★★ the plan figure at the fallback rate',
-    file: NFC, tests: [T_LINE],
-    find: "  const planT = lineLatestStartMs(o.closeAtMs, o.askPct, pool, fullWh / 1000, lineDeliverableRateKw(o.slotCount), o.evDisplacedKwh, o.slotCount);\n",
-    to: "  const planT = lineLatestStartMs(o.closeAtMs, o.askPct, pool, fullWh / 1000, null, o.evDisplacedKwh, o.slotCount); /* MUTANT */\n",
-    why: 'A one-Core home quoted 10 kW, where it delivers 5.5.',
-  },
-  {
     id: 'F13-b(viii). ★★★ the frozen connected count does not reach the quote (the finding: a one-Core home on a stale panel quotes 10 kW)',
     file: IDX, tests: [T_LINE],
     find: "        slotCount: sp != null ? connectedSlots.length : shp2.projection?.kind === 'shp2' ? (shp2.projection.sources ?? []).filter((c) => c?.hwConnect === true).length : 0,\n",
@@ -5133,22 +5101,22 @@ const MUTANTS = [
   {
     id: 'F13-b(xiv). ★★★ with no clock, the words claim a close',
     file: NTF, tests: [T_LINE],
-    find: "          : `A start now may already close under the line; if it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.`\n",
-    to: "          : `A start now will close under the line; if it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.` /* MUTANT */\n",
-    why: 'On every emulated no-clock push a start at that instant still reached the ask: only "may" is true in every outcome.',
+    find: "          : `The later it starts, the lower the pool may close, perhaps under the line; if it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.`\n",
+    to: "          : `The later it starts, the lower the pool will close, under the line; if it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.` /* MUTANT */\n",
+    why: 'On every walked no-clock push a start at that instant still reached the ask: only "may" is true in every outcome.',
   },
   {
     id: 'F13-b(xv). ★★ with no clock, the words drop what a start that never comes means',
     file: NTF, tests: [T_LINE],
-    find: "          : `A start now may already close under the line; if it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.`\n",
-    to: "          : 'A start now may already close under the line.' /* MUTANT */\n",
+    find: "          : `The later it starts, the lower the pool may close, perhaps under the line; if it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.`\n",
+    to: "          : 'The later it starts, the lower the pool may close, perhaps under the line.' /* MUTANT */\n",
     why: 'The push\'s second half, on the night it matters most.',
   },
   {
     id: 'F13-b(xvi). ★★ a line the reserve holds told it may close under',
     file: NTF, tests: [T_LINE],
     find: "        : `If it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.`),",
-    to: "        : o.latestStartText == null ? 'A start now may already close under the line.' : `If it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.`), /* MUTANT */",
+    to: "        : o.latestStartText == null ? 'The later it starts, the lower the pool may close, perhaps under the line.' : `If it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.`), /* MUTANT */",
     why: 'The reserve holds a line stated at 50.00.',
   },
   // (c) the at-risk body
@@ -5207,6 +5175,91 @@ const MUTANTS = [
     find: "A large load such as an EV shares the grid input:",
     to: "A large load such as an EV takes the grid cap:",
     why: '"shares the grid input" is the phrase of the app\'s pushes and card.',
+  },
+  /* ── F14: the quote, one figure, each input erring early; the no-clock words ── */
+  {
+    id: 'F14(i). ★★★ the pool not capped at the reserve (the finding: a 59.1 line, pool 62, quoted ~4:40 AM, a start then closes 53)',
+    file: NFC, tests: [T_CLOSE],
+    find: "  const pool = Math.min(o.poolSocPct ?? RESERVE_WRITE_MAX_PCT, RESERVE_WRITE_MAX_PCT);\n",
+    to: "  const pool = o.poolSocPct ?? RESERVE_WRITE_MAX_PCT; /* MUTANT */\n",
+    why: 'Killed by T7 (Fix14) the finding, L 59.1, and PIN_QUOTE_POOL_GRID: the house draws the pool down before the quoted time.',
+  },
+  {
+    id: 'F14(ii). ★★★ the pool always the reserve (a reading below it is quoted late)',
+    file: NFC, tests: [T_LINE],
+    find: "  const pool = Math.min(o.poolSocPct ?? RESERVE_WRITE_MAX_PCT, RESERVE_WRITE_MAX_PCT);\n",
+    to: "  const pool = RESERVE_WRITE_MAX_PCT; /* MUTANT */\n",
+    why: 'Killed by T9 (Fix14) the time the declined-start push quotes: a pool of 47 has three more points to lift.',
+  },
+  {
+    id: 'F14(iii). ★★★ the live rate alone (the deliverable bound dropped: a cap on a slot-bounded plant)',
+    file: NFC, tests: [T_LINE],
+    find: "  const rateKw = o.rateKw != null ? Math.min(o.rateKw, planKw) : planKw;\n",
+    to: "  const rateKw = o.rateKw != null ? o.rateKw : planKw; /* MUTANT */\n",
+    why: 'Killed by T9 (Fix14) the time the declined-start push quotes: a live 14 kW over the deliverable 10, and one Core read at 7.42 kW where it delivers 5.5.',
+  },
+  {
+    id: 'F14(iv). ★★★ the deliverable rate alone (the finding: the live rate dropped, ~1:58 AM on a 10 kW cap, a start then closes 61)',
+    file: NFC, tests: [T_CLOSE],
+    find: "  const rateKw = o.rateKw != null ? Math.min(o.rateKw, planKw) : planKw;\n",
+    to: "  const rateKw = planKw; /* MUTANT */\n",
+    why: 'Killed by T7 (Fix14) the finding, a 10 kW cap, and PIN_QUOTE_CAP_GRID: a plant under 10 kW with an EV ahead.',
+  },
+  {
+    id: 'F14(v). ★★★ the higher of the two rates',
+    file: NFC, tests: [T_LINE],
+    find: "  const rateKw = o.rateKw != null ? Math.min(o.rateKw, planKw) : planKw;\n",
+    to: "  const rateKw = o.rateKw != null ? Math.max(o.rateKw, planKw) : planKw; /* MUTANT */\n",
+    why: 'Killed by T9 (Fix14) the time the declined-start push quotes: the later time on every plant, either way round.',
+  },
+  {
+    id: 'F14(vi). ★★★ the EV\'s energy dropped',
+    file: NFC, tests: [T_CLOSE],
+    find: "  const t = lineLatestStartMs(o.closeAtMs, o.askPct, pool, fullWh / 1000, rateKw, o.evDisplacedKwh, o.slotCount);\n",
+    to: "  const t = lineLatestStartMs(o.closeAtMs, o.askPct, pool, fullWh / 1000, rateKw, null, o.slotCount); /* MUTANT */\n",
+    why: 'Killed by T7 (Fix14) the EV still ahead: the rate cannot see an EV that has not come.',
+  },
+  {
+    id: 'F14(vii). ★★★ the EV\'s energy dropped with a live rate only',
+    file: NFC, tests: [T_CLOSE],
+    find: "  const t = lineLatestStartMs(o.closeAtMs, o.askPct, pool, fullWh / 1000, rateKw, o.evDisplacedKwh, o.slotCount);\n",
+    to: "  const t = lineLatestStartMs(o.closeAtMs, o.askPct, pool, fullWh / 1000, rateKw, o.rateKw != null ? null : o.evDisplacedKwh, o.slotCount); /* MUTANT */\n",
+    why: 'Killed by T7 (Fix14) the EV still ahead: a live rate is the usual night, and it still cannot see the EV.',
+  },
+  {
+    id: 'F14(viii). ★★ the guard < for <=',
+    file: NFC, tests: [T_LINE],
+    find: "  return t <= o.nowMs ? null : t;\n",
+    to: "  return t < o.nowMs ? null : t; /* MUTANT */\n",
+    why: 'Killed by T9 (Fix14) the time the declined-start push quotes, to the millisecond: a time at the push is no time to act.',
+  },
+  {
+    id: 'F14(ix). ★★★ the old no-clock sentence back',
+    file: NTF, tests: [T_LINE],
+    find: "          : `The later it starts, the lower the pool may close, perhaps under the line; if it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.`\n",
+    to: "          : `A start now may already close under the line; if it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.` /* MUTANT */\n",
+    why: 'Killed by T9 (Fix13) the body: untrue on the measured nights: on all 1,983 no-clock pushes a start at the push reached the ask.',
+  },
+  {
+    id: 'F14(x). ★★★ a no-clock sentence with no line clause',
+    file: NTF, tests: [T_LINE],
+    find: "          : `The later it starts, the lower the pool may close, perhaps under the line; if it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.`\n",
+    to: "          : `The later it starts, the lower the pool may close; if it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.` /* MUTANT */\n",
+    why: 'Killed by T9 (Fix13) the body: the line is what the person is told the time is for.',
+  },
+  {
+    id: 'F14(xi). ★★★ a no-clock sentence with no reserve clause',
+    file: NTF, tests: [T_LINE],
+    find: "          : `The later it starts, the lower the pool may close, perhaps under the line; if it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.`\n",
+    to: "          : `The later it starts, the lower the pool may close, perhaps under the line; if it never starts, the add-on adds nothing more.` /* MUTANT */\n",
+    why: 'Killed by T9 (Fix13) the body: the floor a start that never comes leaves, named as the clock branch names it.',
+  },
+  {
+    id: 'F14(xii). ★★ the plan rate at the fallback, not the deliverable one',
+    file: NFC, tests: [T_LINE],
+    find: "  const planKw = lineDeliverableRateKw(o.slotCount);\n",
+    to: "  const planKw = planRateFallbackKw(o.slotCount); /* MUTANT */\n",
+    why: 'Killed by T9 (Fix14) the time the declined-start push quotes and T9 (Fix13) one Core on a stale panel: a one-Core home quoted 10 kW, where it delivers 5.5.',
   },
   /* ── R: the ledger ── */
   {
