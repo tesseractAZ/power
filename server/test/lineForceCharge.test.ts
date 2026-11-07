@@ -1288,6 +1288,15 @@ test('★★★ T9 (Fix13) one Core on a stale panel: its frozen count times the
   assert.equal(Math.round((WIN_END - one.quoted!) / M), 85, '6.45 kWh at 5.5 kW + the buffer');
 });
 
+test('★★★ T9 (Fix13) no capacity at all: the last start, and no push reaches it, for the decision declines on the clock from there and the clock is no blocker', () => {
+  const s = night({ forceChargeLineAskPct: 71, forceChargeLinePct: 70.55 });
+  const blind = { fullWh: 0, slots: 0 };
+  const last = WIN_END - FORCE_CHARGE_MIN_RUN_MS;
+  const r = declinedChain(s, WIN_END - 31 * M, WIN_END - M, () => fo({ ...STALE_PANEL }), blind)!;
+  assert.deepEqual([r.t, r.quoted], [WIN_END - 21 * M, last], 'the last push there is: a minute before it');
+  assert.equal(declinedChain(s, WIN_END - 30 * M, WIN_END - M, () => fo({ ...STALE_PANEL }), blind), null, 'a held 10 min that ends at the last start pushes nothing');
+});
+
 test('★★★ T9 (Fix13) the body: a line above the reserve with no time has no clock and no "the window close"; a line the reserve holds keeps its own sentence with or without one', () => {
   const build = (notify as unknown as { buildLineForceChargeDeclinedStart: (o: unknown) => { body: string } }).buildLineForceChargeDeclinedStart;
   const b = (linePct: number, latestStartText: string | null) => build({ day: '2026-09-16', linePct, why: 'grid presence is unknown', latestStartText }).body;

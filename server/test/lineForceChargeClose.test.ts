@@ -678,7 +678,7 @@ test('★★★ T7 (review 8) identity: no night without a hand-back changes —
  * Every cell above has its EV run to the close, so no cell had a session overlapping the ON under the ask, which is what a predicted EV
  * arriving at the open does: a pack importing under about 5 kW beside it reads flat, and the push said "not rising" hours before a close
  * well over the line, and spent its one go of the night. lineFlatPushHeld holds a flat pool with every slot reading ON until the time left
- * no longer covers the charge to the ask at the plan rate. */
+ * no longer covers the charge to the ask at a rate the plant can deliver. */
 
 const EV_ENDS_KW = [7.68, 9.6, 11, EV_MAX_KW];
 /** The session's start, minutes after the open, and its length: every pair that ends before the close (120 + 240 and 180 + 240 do not). */

@@ -41,7 +41,7 @@ import { withEnv } from './golden/support/env.js';
  *       before the cutoff after each hold; a 'reOnRefused' push may be followed by the retry, and its words say it may —
  *       or, where no tick can bring it (its spacing ends at or past the cutoff), that its next try comes after the cutoff,
  *       and then none does (reOnRetryPossible). (Fix12) A pool FLAT with every slot that counts reading ON waits until the time
- *       left no longer covers the charge to ⌈L⌉ at the plan rate (lineFlatPushHeld): a slow charge beside an EV reads level hours
+ *       left no longer covers the charge to ⌈L⌉ at a deliverable rate (lineFlatPushHeld): a slow charge beside an EV reads level hours
  *       before the close.
  *  W2 — a line re-ON is readback-checked FORCE_CHARGE_ON_VERIFY_AFTER_MS after it, like the first ON. (review 4) The check
  *       keeps the latest re-ON that took effect (lineReOnCheckedStamp), across the next re-ON and a restart.
