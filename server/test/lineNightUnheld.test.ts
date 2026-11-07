@@ -801,7 +801,7 @@ test('★★★ U2 the close account is wired after the missed step, on the acti
   const stamp = step.indexOf('persistNightActuation({ ...state, lineCloseAccountAtMs: nowMs });');
   assert.ok(stamp > 0 && stamp < step.indexOf('sendNotification('), step);
   assert.ok(step.includes('const due = lineCloseAccountDue(state, nowMs);'), step);
-  assert.ok(step.includes('closePoolPct: freshPoolSocPct(nowMs),'), step);
+  assert.ok(step.includes('    closePoolPct: freshPoolSocPct(nowMs),\n    onAtMs: state.forceChargeOnAtMs,'), step);
   assert.ok(step.includes('onAtMs: state.forceChargeOnAtMs, offAtMs: state.forceChargeOffAtMs, offReason: state.forceChargeOffReason,'), step);
 });
 
