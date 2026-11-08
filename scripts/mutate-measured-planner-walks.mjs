@@ -12,7 +12,8 @@
  * flag's too, the de-bias bound on the panel's figure. (J) THE MIRROR: the tick's pool is the panel's figure.
  * (SB) THE WALK STANDBY: B's one figure, 0 W with none, on every discharge leg and nowhere else; (H) B's hiLift rule
  * extended to it. (S) THE SHADOW on the plan's pool and standby. (D) THE CONTRACT. (R) THE LEDGER. (F2) the minimum-buy
- * hold's bound. (X) THE DRAWBACK a cost-carried line night walks past its stop, and its disclosure.
+ * hold's bound. (X) THE DRAWBACK a cost-carried line night walks past its stop, and its disclosure: the close named
+ * whatever the sizing, the card's outage-line row included.
  *
  *   node scripts/mutate-measured-planner-walks.mjs [--only <id prefix>]
  *
@@ -34,6 +35,7 @@ const CARD = resolve(REPO, 'web/src/cards/nightChargeText.ts');
 const T_MPW = 'test/measuredPlannerWalks.test.ts';
 const T_SCOPE = 'test/runwayBasisContracts.test.ts';
 const T_YEAR = 'test/lineForceChargeYear.test.ts';
+const T_LFC = 'test/lineForceCharge.test.ts';
 
 const SEAM = '  const pool = plannerPoolKwh(panelFullKwh, inputs.cushionPoolScale);';
 const POOL_RET = '  return { kwh: panelKwh * scale, lineScale: null, applied: { scale, basis: poolScale.basis } };';
@@ -400,6 +402,27 @@ const MUTANTS = [
     find: '    return c != null && Number.isFinite(c) && c < l - 0.05 - 1e-9 ? \'closeUnder\' : null;',
     to: '    return null; /* MUTANT */',
     why: 'The card disagrees with the server on every disclosed cost-carried night.',
+  },
+  {
+    id: 'MPW-X-vii. ★★★ the close past the stop named only where the sizing held the line (the gate before the fix)',
+    file: NCA, tests: [T_MPW],
+    find: '  const closeAfterStopField = lineArmed && lineCloseAfterStopPct != null && !lineWalkHolds(lineCloseAfterStopPct, cushionLineSocPct)',
+    to: '  const closeAfterStopField = lineCloseUnder && lineCloseAfterStopPct != null /* MUTANT */',
+    why: 'A cost-carried night sized short closes up to ~22 points under its line with only the caps note: no surface names the close (70 nights on nameplate, 57 at ×0.944).',
+  },
+  {
+    id: 'MPW-X-viii. ★★★ the card\'s outage-line row names no close on a cost-carried night',
+    file: CARD, tests: [T_MPW, T_LFC],
+    find: '    if (kind === \'closeUnder\' && c != null && Number.isFinite(c)) {',
+    to: '    if ((false as boolean) && kind === \'closeUnder\' && c != null && Number.isFinite(c)) { /* MUTANT */',
+    why: 'The card says only that the line is not claimed; its one percent is the ~70% stop, read as the close above the line.',
+  },
+  {
+    id: 'MPW-X-ix. ★★ the card\'s row keyed on the envelope cause alone',
+    file: CARD, tests: [T_MPW, T_LFC],
+    find: '  if (row == null && armed && (plan.cushionShortfallCause != null || kind === \'closeUnder\')) {',
+    to: '  if (row == null && armed && plan.cushionShortfallCause != null) { /* MUTANT */',
+    why: 'A cost-carried night sized short (no envelope cause) shows no outage-line row though its close is under the line.',
   },
 ];
 
