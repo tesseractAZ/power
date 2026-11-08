@@ -16,7 +16,8 @@ import { buildNightChargeMessage } from '../src/notify.js';
 import * as cardText from '../../web/src/cards/nightChargeText.js';
 import { legacyIdentityCases, planDigest } from './fixtures/legacyIdentityFixtures.js';
 import {
-  FIG_GROUPS, FIG_HOURS, figKey, figGroups, figPlan, parseToken, stateDeps, PLANNER_WALKS_FIGURES_PATH, type FigState, type FigBasis,
+  FIG_GROUPS, FIG_HOURS, FIG_STANDBY_EXTRA_W, FIG_STANDBY_GROUPS, figKey, figStandbyKey, figGroups, figPlan, figToken, parseToken, stateDeps,
+  PLANNER_WALKS_FIGURES_PATH, type FigState, type FigBasis,
 } from './fixtures/measuredPlannerWalksFigures.js';
 
 /**
@@ -31,7 +32,8 @@ import {
  * it closes under the line.
  *
  * In the order of the release's items: T1 the reference plant; T2 applied once; T3 the line; T4 / T4b the fail-safes; T5 the
- * resilience floor of every write and the minimum-buy hold's bound; T6 the cost room at v1.201.0's percent; T7 the tick's
+ * resilience floor of every write and the minimum-buy hold's bound; T6 the cost room's conversion at v1.201.0's percent, and
+ * T6b the de-bias's gate at 0, 90 and 336 W (measuredPlannerWalks.figures.json `mainStandby`, frozen on c692f30e); T7 the tick's
  * mirror; T8 the year against v1.201.0 (measuredPlannerWalks.figures.json `main`, frozen on c692f30e); T9 the figures as
  * measured (its `c` part); T10 the shadow's pool; T11 / T11b the legacy band and a disabled cushion, and as their walks'
  * standby rises; T12 the walk standby's monotone set; T13 no line night under its line undisclosed; T14 the cost-carried
@@ -255,10 +257,11 @@ test('★★★ T5 THE RESILIENCE FLOOR OF EVERY WRITE at s ∈ {1, 0.97, 0.944,
  *  pool (the bound at a 1 kWh minimum buy is about 1.07 points on the measured pool, 1.26 at ×0.8). */
 const PIN_T5_MINBUY = { starved: 0, minBuyHolds: 85, maxGapPts: 1.194 };
 
-/* ══ T6 — the cost room at v1.201.0's percent ═══════════════════════════════════════════════════════════ */
+/* ══ T6 / T6b — the cost room's conversion at v1.201.0's percent; the de-bias's gate at other standby figures ══════════ */
 
 const FIG = JSON.parse(readFileSync(PLANNER_WALKS_FIGURES_PATH, 'utf8')) as {
   cases: number; main: { generatedAt: string; groups: Record<string, string> }; c: { generatedAt: string; groups: Record<string, string> };
+  mainStandby: { generatedAt: string; groups: Record<string, string> };
 };
 /** The groups as this tree plans them, computed once for T6, T8 and T9. */
 let nowGroups: Record<string, string> | null = null;
@@ -279,7 +282,7 @@ const PIN_T6_WRITE_FALLS: ReadonlyArray<{ label: string; h: number; basis: Cushi
   { label: '2027-07-12 +1 01:30', h: 7, basis: 'min-known', scale: 0.9, written: 43 },
 ];
 
-test('★★★ T6 THE COST ROOM AT v1.201.0\'s PERCENT: COST55\'s 40.3% and the reference plant\'s 80.4% ceilings; against v1.201.0 in its figures no cost write falls, and every stop that does is the de-bias\'s gate (pinned), as are the substitute scales\' three cost write falls; every cost write at or above ⌈line⌉', () => {
+test('★★★ T6 THE COST ROOM\'S CONVERSION IS v1.201.0\'s: COST55\'s 40.3% and the reference plant\'s 80.4% ceilings; against v1.201.0 in its figures no cost write falls, and every stop that does is the de-bias\'s gate (pinned), as are the substitute scales\' three cost write falls; every cost write at or above ⌈line⌉', () => {
   const i = (o: Partial<NightChargeInputs> = {}): NightChargeInputs => ({
     nowMs: Date.UTC(2026, 9, 20, 4), fullKwh: N, socNowPct: 25, reserveFloorPct: 10, cushionPct: 15, socCoherent: true,
     islandedLoadKw: 1.445, outageCushionHours: 8, islandedLoadSafety: 1.5, legEff: 0.927, dischargeEff: 0.92, chargeCapKw: 10, gridInputCapKw: null,
@@ -329,6 +332,125 @@ test('★★★ T6 THE COST ROOM AT v1.201.0\'s PERCENT: COST55\'s 40.3% and the
     assert.equal(written(p), Math.ceil(p.cushionLineSocPct! - 1e-9), `${at}: the write is ⌈line⌉`);
     assert.ok(!p.cushionShortfall && p.costCeilingSurplusKwh! > p.costCeilingSurplusRawKwh! + 0.005, `${at}: the de-bias applied on a night that holds its line`);
   }
+});
+
+/** Measured against c692f30e (v1.201.0) in a write mode over 4-20 h at 0, 90 and 336 W (270 W is T6's), on every plausible
+ *  basis: every cost stop and cost write that falls, v1.201.0's value (`was`) and v1.202.0's (`is`), and (`line`) every cost
+ *  stop the lowered ceiling hands to the line force-charge (the ceiling's stop now within 10 points of the line's ask: the
+ *  night is carried in line mode to the window close; `is` is that ceiling's stop). Each is the de-bias's gate — a night
+ *  v1.201.0's walks sized short of its line, so its de-bias kept the raw surplus, that the walks on the pool and the standby
+ *  hold — none of a resilience night, none on nameplate, no charge night held. */
+type GateFall = { label: string; h: number; basis: CushionPoolScale['basis']; scale: number; w: number; kind: 'stop' | 'write' | 'line'; was: number; is: number };
+const PIN_T6B_FALLS: ReadonlyArray<GateFall> = [
+  { label: '2027-05-28 21:30', h: 9, basis: 'measured', scale: 0.944, w: 0, kind: 'stop', was: 93.8, is: 93.5 },
+  { label: '2027-07-12 13:00', h: 10, basis: 'measured', scale: 0.944, w: 0, kind: 'stop', was: 60, is: 58.5 },
+  { label: '2027-05-07 21:30', h: 12, basis: 'measured', scale: 0.944, w: 90, kind: 'line', was: 73.8, is: 68.2 },
+  { label: '2026-11-30 +1 01:30', h: 14, basis: 'measured', scale: 0.944, w: 0, kind: 'stop', was: 75.9, is: 75.5 },
+  { label: '2027-07-12 +1 01:30', h: 8, basis: 'measured', scale: 0.944, w: 90, kind: 'write', was: 45, is: 44 },
+  { label: '2026-10-13 +1 01:30', h: 6, basis: 'measured', scale: 0.944, w: 336, kind: 'write', was: 50, is: 43 },
+  { label: '2027-05-28 21:30', h: 8, basis: 'measured', scale: 0.944, w: 336, kind: 'stop', was: 93.8, is: 93.5 },
+  { label: '2026-11-30 +1 01:30', h: 12, basis: 'measured', scale: 0.944, w: 336, kind: 'stop', was: 75.9, is: 75.5 },
+  { label: '2027-03-19 21:30', h: 7, basis: 'held', scale: 0.92, w: 0, kind: 'stop', was: 61.5, is: 53.1 },
+  { label: '2026-10-13 13:00', h: 10, basis: 'held', scale: 0.92, w: 0, kind: 'line', was: 70.7, is: 62.4 },
+  { label: '2027-07-12 +1 01:30', h: 8, basis: 'held', scale: 0.92, w: 0, kind: 'write', was: 45, is: 44 },
+  { label: '2026-11-30 +1 01:30', h: 14, basis: 'held', scale: 0.92, w: 0, kind: 'stop', was: 75.9, is: 75.5 },
+  { label: '2027-07-12 +1 01:30', h: 8, basis: 'held', scale: 0.92, w: 90, kind: 'write', was: 45, is: 44 },
+  { label: '2026-11-30 +1 01:30', h: 13, basis: 'held', scale: 0.92, w: 90, kind: 'stop', was: 75.9, is: 75.5 },
+  { label: '2026-11-30 +1 01:30', h: 14, basis: 'held', scale: 0.92, w: 90, kind: 'stop', was: 75.9, is: 75.5 },
+  { label: '2027-02-05 21:30', h: 19, basis: 'held', scale: 0.92, w: 90, kind: 'stop', was: 89, is: 87 },
+  { label: '2027-07-12 +1 01:30', h: 7, basis: 'held', scale: 0.92, w: 336, kind: 'write', was: 45, is: 43 },
+  { label: '2026-11-30 +1 01:30', h: 12, basis: 'held', scale: 0.92, w: 336, kind: 'stop', was: 75.9, is: 75.5 },
+  { label: '2027-02-05 21:30', h: 17, basis: 'held', scale: 0.92, w: 336, kind: 'stop', was: 89, is: 87 },
+  { label: '2027-07-12 +1 01:30', h: 8, basis: 'min-known', scale: 0.9, w: 0, kind: 'write', was: 45, is: 44 },
+  { label: '2027-05-07 21:30', h: 12, basis: 'min-known', scale: 0.9, w: 0, kind: 'line', was: 73.8, is: 68.2 },
+  { label: '2026-11-30 +1 01:30', h: 13, basis: 'min-known', scale: 0.9, w: 0, kind: 'stop', was: 75.9, is: 75.5 },
+  { label: '2026-11-30 +1 01:30', h: 14, basis: 'min-known', scale: 0.9, w: 0, kind: 'stop', was: 75.9, is: 75.5 },
+  { label: '2027-02-10 +1 01:30', h: 8, basis: 'min-known', scale: 0.9, w: 90, kind: 'stop', was: 80, is: 76.6 },
+  { label: '2027-02-19 21:30', h: 10, basis: 'min-known', scale: 0.9, w: 90, kind: 'stop', was: 82.9, is: 81.8 },
+  { label: '2026-11-30 +1 01:30', h: 13, basis: 'min-known', scale: 0.9, w: 90, kind: 'stop', was: 75.9, is: 75.5 },
+  { label: '2026-11-30 +1 01:30', h: 14, basis: 'min-known', scale: 0.9, w: 90, kind: 'stop', was: 75.9, is: 75.5 },
+  { label: '2027-07-12 +1 01:30', h: 7, basis: 'min-known', scale: 0.9, w: 336, kind: 'write', was: 45, is: 44 },
+  { label: '2026-11-30 +1 01:30', h: 12, basis: 'min-known', scale: 0.9, w: 336, kind: 'stop', was: 75.9, is: 75.5 },
+];
+const costStopOf = (p: NightChargePlan, deps: NightChargeInputDeps): number | null => parseToken(figToken(p, deps)).stop;
+
+test('★★★ T6b THE DE-BIAS\'S GATE AT 0, 90 AND 336 W: against v1.201.0 at ×0.944 in its figures (the frozen `mainStandby`) no resilience write falls and no charge night holds, and every cost write or stop that falls, or that a lowered ceiling hands to the line force-charge, is pinned; over 4-20 h on every plausible basis each pinned fall is the gate, a write to ⌈line⌉ and a stop at or above it; every cost write at or above min(50, ⌈line⌉) and every de-biased ceiling of a night that holds its line at or above it', () => {
+  assert.equal(FIG.mainStandby.generatedAt.startsWith('c692f30e'), true);
+  // The frozen figures' hours at ×0.944: the falls there are exactly the pinned ones.
+  const atHours: string[] = [];
+  let groups = 0;
+  for (const [st, b] of FIG_STANDBY_GROUPS) for (const w of FIG_STANDBY_EXTRA_W) for (const h of FIG_HOURS) {
+    const k = figStandbyKey(st, b, h, w);
+    const mainT = FIG.mainStandby.groups[k].split(',');
+    assert.equal(mainT.length, CASES.length, k);
+    groups += 1;
+    CASES.forEach((c, idx) => {
+      const p = figPlan(c.deps, st, b, h, w);
+      const x = parseToken(mainT[idx]), y = parseToken(figToken(p, stateDeps(c.deps, st)));
+      assert.ok(!(x.charge && !y.charge), `${k} ${c.label}: a charge night held`);
+      if (x.charge && y.charge && y.written! < x.written!) {
+        assert.equal(p.objective, 'cost_arbitrage', `${k} ${c.label}: a resilience write fell ${x.written} → ${y.written}`);
+        atHours.push(`${c.label}|${h}|${w}|write|${x.written}|${y.written}`);
+      }
+      if (x.stop != null && y.stop != null && y.stop < x.stop - 1e-9) atHours.push(`${c.label}|${h}|${w}|stop|${x.stop}|${y.stop}`);
+      // A cost stop gone while the write stands: handed to the line force-charge. A fall where the ceiling's own stop is lower.
+      if (x.stop != null && y.charge && y.stop == null && y.written === x.written && p.costCeilingSocPct != null) {
+        const s = forceChargeStopPct(p.costCeilingSocPct);
+        if (s < x.stop - 1e-9) {
+          assert.equal(p.expectedForceChargeMode, 'line', `${k} ${c.label}: a cost stop gone with no line force-charge`);
+          atHours.push(`${c.label}|${h}|${w}|line|${x.stop}|${s}`);
+        }
+      }
+    });
+  }
+  assert.equal(groups, 15);
+  const pinnedAtHours = PIN_T6B_FALLS.filter((f) => f.basis === 'measured' && (FIG_HOURS as readonly number[]).includes(f.h))
+    .map((f) => `${f.label}|${f.h}|${f.w}|${f.kind}|${f.was}|${f.is}`);
+  assert.deepEqual(atHours.sort(), pinnedAtHours.sort());
+  // Every pinned fall, between the hours and on the substitute scales: the gate, a write at ⌈line⌉, a stop at or above it.
+  for (const f of PIN_T6B_FALLS) {
+    const deps = { ...stateDeps(caseOf(f.label).deps, 'write'), outageCushionHours: f.h, cushionStandbyW: f.w, cushionPoolScale: { scale: f.scale, basis: f.basis } } as NightChargeInputDeps;
+    const p = computeNightChargePlan(buildNightChargeInputs(deps));
+    const at = `${f.label} ${f.h} h ${f.basis} ${f.w} W`;
+    const ceilL = Math.ceil(p.cushionLineSocPct! - 1e-9);
+    assert.equal(p.objective, 'cost_arbitrage', at);
+    assert.ok(!p.cushionShortfall && p.costCeilingSurplusKwh! > p.costCeilingSurplusRawKwh! + 0.005, `${at}: the de-bias applied on a night that holds its line`);
+    if (f.kind === 'write') {
+      assert.equal(written(p), f.is, at);
+      assert.equal(written(p), ceilL, `${at}: the write is ⌈line⌉`);
+    } else if (f.kind === 'line') {
+      assert.equal(p.expectedForceChargeMode, 'line', `${at}: carried in line mode`);
+      assert.equal(costStopOf(p, stateDeps(caseOf(f.label).deps, 'write')), null, at);
+      assert.equal(forceChargeStopPct(p.costCeilingSocPct!), f.is, at);
+      assert.ok(f.is >= ceilL, `${at}: the ceiling's stop ${f.is} under ⌈${p.cushionLineSocPct}⌉`);
+    } else {
+      assert.equal(costStopOf(p, stateDeps(caseOf(f.label).deps, 'write')), f.is, at);
+      assert.ok(f.is >= ceilL, `${at}: the stop ${f.is} under ⌈${p.cushionLineSocPct}⌉`);
+    }
+    assert.ok(f.is < f.was, at);
+  }
+  // The class, on every cost night of the 4-20 h year at these figures and scales.
+  let costNights = 0, debiased = 0;
+  for (const sc of [S944, { scale: 0.92, basis: 'held' } as CushionPoolScale, { scale: 0.9, basis: 'min-known' } as CushionPoolScale]) {
+    for (const w of FIG_STANDBY_EXTRA_W) for (const h of HOURS) for (const c of CASES) {
+      if (c.deps.objectiveMode !== 'cost') continue;
+      const p = yearPlan(c.deps, { scale: sc, w, st: 'write', h });
+      if (p.cushionLineSocPct == null || (p.cushionBasis !== 'islanded-outage' && p.cushionBasis !== 'disabled')) continue;
+      const at = `${c.label} ${h} h ${sc.basis} ${w} W`;
+      if (p.chargeTonight) {
+        costNights += 1;
+        assert.ok(written(p)! >= Math.min(RESERVE_WRITE_MAX_PCT, Math.ceil(p.cushionLineSocPct - 1e-9)), `${at}: line ${p.cushionLineSocPct}, written ${written(p)}`);
+      }
+      // The bound is on the morning-solar headroom: an owner's SoC ceiling under the line ('max-soc') is the owner's.
+      if (p.costCeilingSocPct != null && p.costCeilingBasis === 'pv-headroom' && !p.cushionShortfall && p.costCeilingSurplusKwh != null
+        && p.costCeilingSurplusRawKwh != null && p.costCeilingSurplusKwh > p.costCeilingSurplusRawKwh + 0.005 && p.requiredExtraKwh! > 0) {
+        debiased += 1;
+        // (round1 of a ceiling at least the arrival, at or above the line.)
+        assert.ok(p.costCeilingSocPct >= p.cushionLineSocPct - 0.05 - 1e-9, `${at}: a de-biased ceiling ${p.costCeilingSocPct} under the ${p.cushionLineSocPct}% line`);
+      }
+    }
+  }
+  assert.ok(costNights > 10_000 && debiased > 1_000, `${costNights} cost nights, ${debiased} de-biased ceilings`);
 });
 
 /* ══ T7 — the tick's mirror ═════════════════════════════════════════════════════════════════════════════ */

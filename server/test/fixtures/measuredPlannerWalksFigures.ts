@@ -8,10 +8,12 @@
  *    stops the de-bias's own gate lowers aside, pinned there).
  *  - `c`: the planner as it is, the walks on the measured pool and draining the standby — regenerated for a deliberate,
  *    reviewed change to overnight sizing, said so in the commit; the test holds every later planner to it.
+ *  - `mainStandby`: c692f30e's planner again, in a write mode at ×0.944 with the other standby figures (FIG_STANDBY_EXTRA_W:
+ *    0, 90 and 336 W) at the same hours — generated there once, frozen. measuredPlannerWalks.test.ts T6b holds v1.202.0 to it.
  *
- *   cd server && node --import tsx test/fixtures/measuredPlannerWalksFigures.ts --write <main|c> "<generatedAt>"
+ *   cd server && node --import tsx test/fixtures/measuredPlannerWalksFigures.ts --write <main|c|mainStandby> "<generatedAt>"
  *
- * (The `main` part is written by running this file, copied, on a c692f30e tree.)
+ * (The `main` and `mainStandby` parts are written by running this file, copied, on a c692f30e tree.)
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -34,6 +36,12 @@ export const FIG_GROUPS: ReadonlyArray<readonly [FigState, FigBasis]> = Object.f
   ['write', 'm'], ['write', 'held'], ['write', 'mk'], ['write', 'np'], ['advisory', 'm'], ['stand', 'm'], ['fixture', 'm'],
 ] as const);
 export const figKey = (st: FigState, b: FigBasis, h: number): string => `${st}|${b}|${h}`;
+/** The other standby figures (W) of the `mainStandby` part: none, one Core's 90 W, and the top of the three later spans'
+ *  implied overhead (336 W). 270 W is FIG_STANDBY_W's, in `main`. */
+export const FIG_STANDBY_EXTRA_W = [0, 90, 336] as const;
+/** The `mainStandby` groups: a write mode at ×0.944. */
+export const FIG_STANDBY_GROUPS: ReadonlyArray<readonly [FigState, FigBasis]> = Object.freeze([['write', 'm']] as const);
+export const figStandbyKey = (st: FigState, b: FigBasis, h: number, w: number): string => `${st}|${b}|${h}|${w}W`;
 
 /** The live cost gate (index.ts forceChargeOn): the cost objective and ARB_COST_MAX_SOC_PCT above the reserve maximum. */
 const costGate = (d: NightChargeInputDeps): boolean => d.objectiveMode === 'cost' && (d.costMaxSocPct ?? 90) > 50;
@@ -45,11 +53,11 @@ export function stateDeps(d: NightChargeInputDeps, st: FigState): NightChargeInp
   if (st === 'advisory') return { ...d, lineForceChargeEligible: false, forceChargeEligible: false } as NightChargeInputDeps;
   return { ...d, lineForceChargeEligible: true, forceChargeEligible: costGate(d), reserveFloorPct: 50 } as NightChargeInputDeps;
 }
-/** One case of a group, as planned. */
-export function figPlan(d: NightChargeInputDeps, st: FigState, b: FigBasis, h: number): NightChargePlan {
+/** One case of a group, as planned (at FIG_STANDBY_W, or the standby figure `w`). */
+export function figPlan(d: NightChargeInputDeps, st: FigState, b: FigBasis, h: number, w: number = FIG_STANDBY_W): NightChargePlan {
   const sc = FIG_SCALES[b];
   return computeNightChargePlan(buildNightChargeInputs({
-    ...stateDeps(d, st), outageCushionHours: h, cushionStandbyW: FIG_STANDBY_W, ...(sc != null ? { cushionPoolScale: sc } : {}),
+    ...stateDeps(d, st), outageCushionHours: h, cushionStandbyW: w, ...(sc != null ? { cushionPoolScale: sc } : {}),
   } as NightChargeInputDeps));
 }
 /** The token of a plan: "" a hold; the written reserve; and "/stop" where the cost force-charge rides the night. */
@@ -73,6 +81,15 @@ export function figGroups(): Record<string, string> {
   }
   return out;
 }
+/** The `mainStandby` groups' tokens, as figGroups. */
+export function figStandbyGroups(): Record<string, string> {
+  const out: Record<string, string> = {};
+  const cases = legacyIdentityCases();
+  for (const [st, b] of FIG_STANDBY_GROUPS) for (const w of FIG_STANDBY_EXTRA_W) for (const h of FIG_HOURS) {
+    out[figStandbyKey(st, b, h, w)] = cases.map((c) => figToken(figPlan(c.deps, st, b, h, w), stateDeps(c.deps, st))).join(',');
+  }
+  return out;
+}
 /** A token read back: [charge, written, stop]. */
 export function parseToken(t: string): { charge: boolean; written: number | null; stop: number | null } {
   if (t === '') return { charge: false, written: null, stop: null };
@@ -86,16 +103,18 @@ export const PLANNER_WALKS_FIGURES_PATH = resolve(HERE, 'measuredPlannerWalks.fi
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const at = process.argv.indexOf('--write');
   const part = process.argv[at + 1];
-  if (at < 0 || (part !== 'main' && part !== 'c') || !process.argv[at + 2]) {
-    console.error('usage: node --import tsx test/fixtures/measuredPlannerWalksFigures.ts --write <main|c> "<generatedAt>"');
+  if (at < 0 || (part !== 'main' && part !== 'c' && part !== 'mainStandby') || !process.argv[at + 2]) {
+    console.error('usage: node --import tsx test/fixtures/measuredPlannerWalksFigures.ts --write <main|c|mainStandby> "<generatedAt>"');
     process.exit(2);
   }
   const prev = existsSync(PLANNER_WALKS_FIGURES_PATH) ? JSON.parse(readFileSync(PLANNER_WALKS_FIGURES_PATH, 'utf8')) as Record<string, unknown> : {};
   const about = 'Each legacyIdentityFixtures.ts case per group (state|basis|hours, ' + `${FIG_STANDBY_W} W, ${FIG_HOURS.join('/')} h` + '), as tokens joined by ",": "" a hold, the reserve as written, '
-    + '"/stop" where the cost force-charge rides. "main": c692f30e (v1.201.0), frozen; "c": v1.202.0, regenerable (measuredPlannerWalksFigures.ts). measuredPlannerWalks.test.ts reads both.';
-  const doc = { _about: about, cases: legacyIdentityCases().length, main: prev.main, c: prev.c, [part]: { generatedAt: process.argv[at + 2], groups: figGroups() } };
+    + '"/stop" where the cost force-charge rides. "main": c692f30e (v1.201.0), frozen; "c": v1.202.0, regenerable (measuredPlannerWalksFigures.ts). '
+    + `"mainStandby": c692f30e again, write|m|hours|W at ${FIG_STANDBY_EXTRA_W.join('/')} W, frozen. measuredPlannerWalks.test.ts reads all three.`;
+  const groups = part === 'mainStandby' ? figStandbyGroups() : figGroups();
+  const doc = { _about: about, cases: legacyIdentityCases().length, main: prev.main, c: prev.c, mainStandby: prev.mainStandby, [part]: { generatedAt: process.argv[at + 2], groups } };
   const text = `${JSON.stringify(doc, null, 1)}\n`;
   JSON.parse(text);
   writeFileSync(PLANNER_WALKS_FIGURES_PATH, text);
-  console.log(`${part}: ${FIG_GROUPS.length * FIG_HOURS.length} groups → ${PLANNER_WALKS_FIGURES_PATH}`);
+  console.log(`${part}: ${Object.keys(groups).length} groups → ${PLANNER_WALKS_FIGURES_PATH}`);
 }
