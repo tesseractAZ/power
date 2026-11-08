@@ -30,6 +30,10 @@ import { emptyLegState, LEGACY_LEG_FIELDS, type ChargeLegState } from '../src/ch
  * resilience night writes its cushion line, not 50% (setpointOneTest.test.ts), one reserve-only
  * "toward" case was added to keep that shape, and the "no plan tonight" push names what refused the
  * plan (noPlanReason.test.ts). The morning, revert-deadline and missed-apply words are unchanged.
+ *
+ * v1.203.0 — amended again (the golden's `_amended`), only in the six evening entries whose resilience night writes its line:
+ * the panel holds the pool one point under a reserve it charged up to, so the 31.1% line is written at 33%, not 32%, and the
+ * expected draw rises by the point (legacyIdentity.test.ts accounts the +1 night by night). No other word moved.
  */
 
 const GOLDEN = JSON.parse(readFileSync(new URL('./fixtures/overnightTextGolden.json', import.meta.url), 'utf8')) as {
@@ -49,9 +53,10 @@ test('★★★ the golden was captured before R5 and covers every shape', () =>
   const titles = GOLDEN.evening.map((g) => (g.push as { title: string }).title);
   // v1.196.0 — a reserve-only (resilience) night writes its 31.1% cushion line to the whole percent
   // above it, 32%, where it wrote 50% (setpointOneTest.test.ts): its shapes are reached at 32%.
+  // v1.203.0 — and one point more, 33%: the panel holds the pool one point under a reserve it charged up to.
   for (const re of [
-    /^Night-charge: charging to ~80% tonight \(~34\.9 kWh\)$/, /^Night-charge: charging to ~32% tonight/, /^Night-charge: charging toward ~80% tonight/,
-    /^Night-charge: charging toward ~32% tonight/, /^Night-charge: reserve held at 32% tonight — no charge expected$/,
+    /^Night-charge: charging to ~80% tonight \(~34\.9 kWh\)$/, /^Night-charge: charging to ~33% tonight/, /^Night-charge: charging toward ~80% tonight/,
+    /^Night-charge: charging toward ~33% tonight/, /^Night-charge: reserve held at 33% tonight — no charge expected$/,
     /^Night-charge: hold \(no charge needed\)$/, /^Night-charge: hold \(the need is under the minimum buy\)$/,
     /^Night-charge: no charge tonight \(the window cannot cover the cushion\)$/, /recommended tonight/,
     /^Night-charge: planned charge NOT armed tonight$/, /^Night-charge: planned reserve hold NOT armed tonight$/,

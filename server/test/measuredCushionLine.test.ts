@@ -61,7 +61,13 @@ const inputs = (o: Partial<NightChargeInputs> = {}): NightChargeInputs => ({
   objectiveMode: 'resilience',
   ...o,
 });
-const plan = (o: Partial<NightChargeInputs> = {}): NightChargePlan => computeNightChargePlan(inputs(o));
+/** v1.203.0 — this file measures the cushion line on the packs' measured capacity (v1.199.0), so its plans are the planner's with no
+ *  hold point (computeNightChargePlan's holdUndershootPct 0, v1.202.0's writes), against the digests before it
+ *  (legacyIdentity.v1202.golden.json). The point the panel holds under a reserve it charged up to is accounted on the same year by
+ *  reserveHoldPoint.test.ts (THE GUARANTEE there is this file's, at the pool the panel holds), and the figures below are the
+ *  planner's own (measuredCushionLine.figures.json, regenerated for it). */
+const HOLD0 = 0;
+const plan = (o: Partial<NightChargeInputs> = {}): NightChargePlan => computeNightChargePlan(inputs(o), HOLD0);
 const S944: CushionPoolScale = { scale: 0.944, basis: 'measured' };
 const MEASURED_KWH = 92.16 * 0.944; // 86.99904
 const COST55 = { objectiveMode: 'cost', costMaxSocPct: 90, morningPvSurplusP50Kwh: 55, morningPvSurplusP90Kwh: 70, forceChargeEligible: true } as const;
@@ -72,6 +78,9 @@ const digestWithoutScale = (p: NightChargePlan): string => {
   return planDigest(rest as NightChargePlan);
 };
 const yearPlan = (deps: Parameters<typeof buildNightChargeInputs>[0], scale?: CushionPoolScale | null): NightChargePlan =>
+  computeNightChargePlan(buildNightChargeInputs(scale === undefined ? deps : { ...deps, cushionPoolScale: scale }), HOLD0);
+/** v1.203.0 — the planner's own plan (its hold point), for the regenerated figures. */
+const yearPlanNow = (deps: Parameters<typeof buildNightChargeInputs>[0], scale?: CushionPoolScale | null): NightChargePlan =>
   computeNightChargePlan(buildNightChargeInputs(scale === undefined ? deps : { ...deps, cushionPoolScale: scale }));
 
 /* ══ the defect, fixed ════════════════════════════════════════════════════════ */
@@ -482,7 +491,8 @@ test('★★ PLUMBING — buildNightChargeInputs forwards the scale; absent, the
 /* ══ the year at 0.944 ════════════════════════════════════════════════════════ */
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const GOLDEN = JSON.parse(readFileSync(resolve(HERE, 'fixtures/legacyIdentity.golden.json'), 'utf8')) as { digests: Record<string, string> };
+// v1.203.0 — the digests of the planner with no hold point (HOLD0): v1.202.0's, kept as legacyIdentity.v1202.golden.json.
+const GOLDEN = JSON.parse(readFileSync(resolve(HERE, 'fixtures/legacyIdentity.v1202.golden.json'), 'utf8')) as { digests: Record<string, string> };
 const FIGURES = JSON.parse(readFileSync(resolve(HERE, 'fixtures/measuredCushionLine.figures.json'), 'utf8')) as {
   generatedAt: string; scale: CushionPoolScale; fields: string[]; figures: Record<string, Figures>;
 };
@@ -616,8 +626,9 @@ test('★★★ the year at 0.944, case by case: the figures as measured (measur
   const moved = labels.filter((l) => JSON.stringify(got[l]) !== JSON.stringify(FIGURES.figures[l]));
   assert.deepEqual(moved.map((l) => [l, FIGURES.figures[l], got[l]]).slice(0, 5), [], `${moved.length} case(s) moved`);
   // The figures are what figuresOf says of the plan: spot one by hand (the live-shaped resilience night).
-  assert.deepEqual(FIGURES.figures['2026-10-12 resilience'].slice(0, 4), [1, 32.02, 33, 33]);
-  assert.deepEqual(figuresOf(yearPlan(legacyIdentityCases()[2].deps, MEASURED_SCALE)), FIGURES.figures['2026-10-12 resilience']);
+  // v1.203.0 — written 34: the 32.02% line's whole percent and the panel's point (33 on v1.202.0).
+  assert.deepEqual(FIGURES.figures['2026-10-12 resilience'].slice(0, 4), [1, 32.02, 34, 34]);
+  assert.deepEqual(figuresOf(yearPlanNow(legacyIdentityCases()[2].deps, MEASURED_SCALE)), FIGURES.figures['2026-10-12 resilience']);
 });
 
 /* ══ the ledger, the log, the tracker ═════════════════════════════════════════ */

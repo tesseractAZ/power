@@ -24,6 +24,13 @@ export const DPU_PACK_GUARD_WH = 6200;
 /** The panel's backup-reserve write range: the 10 % floor is a safety rule, the 50 % ceiling is firmware. */
 export const RESERVE_WRITE_MIN_PCT = 10;
 export const RESERVE_WRITE_MAX_PCT = 50;
+/** v1.203.0 — the panel holds the pool ONE POINT UNDER a backup reserve it charged up to. Measured: all 11 reserve-only
+ *  charge-ups to a 50% reserve from 2026-08-31 to 2026-09-17 closed at 49 (2026-09-04: the pool read 50 at 08:09 UTC, 49 from
+ *  08:10 to 12:06, all three slots at 49% and 0 W with the house on the grid, the Cores' own BMS at 49.31/49.30/49.28%; on
+ *  09-03 and 09-07..09-10 it never read above 49), with the Cores' own charge limit at 100. So a reserve written at the outage
+ *  line's whole percent (⌈line⌉) holds ⌈line⌉ − 1, under the line, and a line night writes ⌈line⌉ + this
+ *  (nightChargeAdvisor.ts lineReserveAskPct). ★ Measured at a 50% reserve only: no charge-up to a lower reserve is on record. */
+export const PANEL_RESERVE_HOLD_UNDERSHOOT_PCT = 1;
 /** The panel's documented force-charge ceiling range (`foceChargeHight`). */
 export const FORCE_CHARGE_CEILING_MIN_PCT = 80;
 export const FORCE_CHARGE_CEILING_MAX_PCT = 100;

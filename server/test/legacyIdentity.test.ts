@@ -48,6 +48,13 @@ import {
  * pass no scale, and a plan without one (or with a scale of 1) reproduces the digests byte for byte;
  * measuredCushionLine.test.ts holds the same year at the reference fleet's 0.944 to its own per-case
  * figures (measuredCushionLine.figures.json) and to its direction against these digests.
+ *
+ * v1.203.0 — REGENERATED, deliberately, for one change: the panel holds the pool one point under a reserve it charged up to
+ * (PANEL_RESERVE_HOLD_UNDERSHOOT_PCT; 11 of 11 charge-ups to 50 closed at 49), so a line the reserve write holds is written at
+ * its whole percent and one point more (lineReserveAskPct), and a line whose ⌈line⌉ + 1 is above 50 is the line force-charge's.
+ * The digests before it are legacyIdentity.v1202.golden.json: computeNightChargePlan(inputs, 0) — the planner with no hold
+ * point — reproduces every one, and the 166 that move are accounted for night by night below (the +1 and nothing else). The
+ * v1.194.0 and v1.196.0 tests below measure their own changes, so they run on that planner too.
  */
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -70,8 +77,52 @@ const BEFORE_CHARGE_LEG = JSON.parse(readFileSync(resolve(HERE, 'fixtures/legacy
   generatedAt: string;
   figures: PlanFigures;
 };
+/** v1.203.0 — the digests before the reserve hold's point: v1.202.0's (v1.196.0's, unchanged since). */
+const GOLDEN_V1202 = JSON.parse(readFileSync(resolve(HERE, 'fixtures/legacyIdentity.v1202.golden.json'), 'utf8')) as {
+  generatedAt: string;
+  digests: Record<string, string>;
+};
 const H = 3_600_000;
 const plan = (deps: Parameters<typeof buildNightChargeInputs>[0]): NightChargePlan => computeNightChargePlan(buildNightChargeInputs(deps));
+/** v1.203.0 — the planner with no hold point (computeNightChargePlan's holdUndershootPct 0): v1.202.0's plans. */
+const plan0 = (deps: Parameters<typeof buildNightChargeInputs>[0]): NightChargePlan => computeNightChargePlan(buildNightChargeInputs(deps), 0);
+
+test('★★★ v1.203.0 — THE +1, night by night: with no hold point every digest is v1.202.0\'s; with it 166 move, each a line the reserve write held, written ⌈line⌉ + 1, and nothing else', () => {
+  assert.equal(GOLDEN_V1202.generatedAt, 'v1.196.0 (v1.195.0 + the islanded-outage write setpoint, basisBlockedBy, the PV factor)');
+  const moved: string[] = [];
+  const keys = new Map<string, number>();
+  for (const c of legacyIdentityCases()) {
+    const inputs = buildNightChargeInputs(c.deps);
+    const p0 = computeNightChargePlan(inputs, 0);
+    const p1 = computeNightChargePlan(inputs);
+    assert.equal(planDigest(p0), GOLDEN_V1202.digests[c.label], `${c.label}: the planner with no hold point is v1.202.0's`);
+    if (planDigest(p1) === planDigest(p0)) continue;
+    moved.push(c.label);
+    const diff = Object.keys({ ...p0, ...p1 }).filter((k) => JSON.stringify((p0 as never)[k]) !== JSON.stringify((p1 as never)[k]));
+    for (const k of diff) keys.set(k, (keys.get(k) ?? 0) + 1);
+    // Each one: the overnight leg's line, held by the reserve (the setpoint was ⌈line⌉, under 50), now one point above it.
+    const ask0 = Math.ceil(((p0.cushionLineSocPct ?? NaN) * 1) - 1e-9);
+    assert.equal(p0.cushionBasis, 'islanded-outage', c.label);
+    assert.ok(p0.setpointSocPct === ask0 || p0.setpointSocPct === ask0 + 1 || (p0.setpointSocPct! > ask0 - 1 && p0.setpointSocPct! < ask0 + 1),
+      `${c.label}: the setpoint was the line's whole percent, or a cost target within a point of it (${p0.setpointSocPct}, line ${p0.cushionLineSocPct})`);
+    assert.ok(p1.setpointSocPct! <= 50 && p1.setpointSocPct! > p0.setpointSocPct!, `${c.label}: ${p0.setpointSocPct} → ${p1.setpointSocPct}`);
+    // (A line stated at a whole percent may lie a hair above it, as 42.00: its whole percent is 43, written 44.)
+    assert.ok(Number.isInteger(p1.setpointSocPct) && p1.setpointSocPct! - 1 >= p1.cushionLineSocPct! - 1e-9 && p1.setpointSocPct! - 2 < p1.cushionLineSocPct! + 0.01,
+      `${c.label}: written ⌈line⌉ + 1 (${p1.setpointSocPct}, line ${p1.cushionLineSocPct})`);
+    assert.deepEqual(diff.filter((k) => !['setpointSocPct', 'expectedWriteLevelPct', 'expectedBuyKwh', 'expectedDeliverableBound', 'rationale'].includes(k)), [], c.label);
+    // The rationale moves only in the sentences that name the write: the headline (the level, the expected draw — a night that
+    // expected no charge at the lower write can charge up to the higher one: 2027-04-24 +1 01:30, ~0.03 → ~1 kWh), the Expected:
+    // clause and the reserve sentence, which names the point (and appears where the higher write first stands above the worst-case
+    // arrival). Every other sentence — the sizing basis and worst-case buy, the cushion, the notes — is v1.202.0's word for word.
+    const words = (p: NightChargePlan) => p.rationale
+      .replace(/^(Charge (to|toward) ~[\d.]+% in the .+? window(: ~[\d.]+ kWh expected)?|Hold the reserve at \d+% in the .+? window: no charge expected)\./, '')
+      .replace(/ Expected: [^]*?(?= Sized on )/, '')
+      .replace(/ The reserve is set to \d+% \(the resilience requirement(: one point above the [\d.]+% outage line's whole percent, since the panel holds the pool one point under a reserve it charges up to)?\)\./g, '');
+    assert.equal(words(p1), words(p0), `${c.label}: the rationale moves by its figures and the point's clause alone`);
+  }
+  assert.equal(moved.length, 166);
+  assert.deepEqual(Object.fromEntries([...keys].sort()), { expectedBuyKwh: 90, expectedDeliverableBound: 2, expectedWriteLevelPct: 161, rationale: 161, setpointSocPct: 166 });
+});
 
 test('★★★ a year of overnight plans is byte-identical to the golden (no spec)', () => {
   const got = legacyIdentityDigests();
@@ -128,7 +179,8 @@ test('★★★ v1.194.0 — the charge leg moves the year only toward buying mo
   const labels = Object.keys(GOLDEN.digests);
   assert.equal(BEFORE_CHARGE_LEG.generatedAt, '7f78fd6e');
   assert.deepEqual(Object.keys(BEFORE_CHARGE_LEG.figures), labels, 'the same cases, in the same order');
-  const plans = new Map(legacyIdentityCases().map((c) => [c.label, plan(c.deps)]));
+  // v1.203.0 — on the planner with no hold point (plan0): this test measures the charge leg, and the +1 is accounted above.
+  const plans = new Map(legacyIdentityCases().map((c) => [c.label, plan0(c.deps)]));
   const ge = (a: number | null | undefined, b: number | null, what: string, l: string): void => {
     if (b == null) { assert.equal(a ?? null, null, `${l}: ${what} appeared`); return; }
     assert.ok(a != null && a >= b - 1e-9, `${l}: ${what} ${b} → ${a}`);
@@ -181,7 +233,8 @@ test('★★★ v1.196.0 — against v1.192.0, the charge leg and the write setp
   const labels = Object.keys(GOLDEN.digests);
   assert.equal(AT_V1192.generatedAt, '3fc751c3');
   assert.deepEqual(Object.keys(AT_V1192.figures), labels, 'the same cases, in the same order');
-  const plans = new Map(legacyIdentityCases().map((c) => [c.label, plan(c.deps)]));
+  // v1.203.0 — on the planner with no hold point (plan0), as the test above.
+  const plans = new Map(legacyIdentityCases().map((c) => [c.label, plan0(c.deps)]));
   let expectedFell = 0, setpointFell = 0;
   for (const l of labels) {
     const [charge0, buy0, exp0, sp0, req0, tgt0] = AT_V1192.figures[l];

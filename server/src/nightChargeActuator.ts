@@ -31,7 +31,7 @@
  *    and keeps its own protection throughout.
  * ═════════════════════════════════════════════════════════════════════════ */
 
-import { RESERVE_WRITE_MIN_PCT, RESERVE_WRITE_MAX_PCT, SHP2_SOURCE_SLOTS, FORCE_CHARGE_CEILING_MIN_PCT, FORCE_CHARGE_CEILING_MAX_PCT } from './hwSpec.js';
+import { RESERVE_WRITE_MIN_PCT, RESERVE_WRITE_MAX_PCT, PANEL_RESERVE_HOLD_UNDERSHOOT_PCT, SHP2_SOURCE_SLOTS, FORCE_CHARGE_CEILING_MIN_PCT, FORCE_CHARGE_CEILING_MAX_PCT } from './hwSpec.js';
 
 export type NightChargeMode = 'advisory' | 'supervised' | 'auto';
 
@@ -323,6 +323,8 @@ export function resetReserveArbitrageRaised(): void { reserveArbitrageRaised = f
  * (P6): neither is an option.
  */
 export { RESERVE_WRITE_MIN_PCT, RESERVE_WRITE_MAX_PCT };
+/** v1.203.0 — the panel's hold one point under a reserve it charged up to (hwSpec.ts), re-exported beside the envelope. */
+export { PANEL_RESERVE_HOLD_UNDERSHOOT_PCT };
 
 export function clampReserveTarget(targetSocPct: number): number {
   return Math.min(RESERVE_WRITE_MAX_PCT, Math.max(RESERVE_WRITE_MIN_PCT, Math.round(targetSocPct)));

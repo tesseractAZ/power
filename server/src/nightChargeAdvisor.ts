@@ -92,7 +92,7 @@
 // clamp). Imported rather than re-stated so the value published to the HA
 // automation and the value the supervised path writes can never drift apart.
 // (nightChargeActuator.ts imports nothing — no cycle.)
-import { clampReserveTarget, RESERVE_WRITE_MAX_PCT, armedForceChargeCeilingPct, isNoChargeKwh } from './nightChargeActuator.js';
+import { clampReserveTarget, RESERVE_WRITE_MAX_PCT, PANEL_RESERVE_HOLD_UNDERSHOOT_PCT, armedForceChargeCeilingPct, isNoChargeKwh } from './nightChargeActuator.js';
 // v1.187.22 — the level an armed write drives the pool to, and the just-in-time start the
 // force-charge times itself by, for the expected-buy disclosure.
 // (nightForceCharge.ts imports only nightChargeActuator.ts — no cycle.)
@@ -107,6 +107,8 @@ import {
   lineReOnTimesWords,
   // v1.200.0 (Fix10) — a closed start, in the words its pushes use.
   lineStartClosedWords, type LineClosure, type LineNoReOn,
+  // v1.203.0 — the level a line in (49, 50] is above: the 49% the panel holds under a 50% reserve.
+  lineOverReserveText,
 } from './nightForceCharge.js';
 // R2 — the window resolver and the per-leg rules live with the cycle chooser; the taper ceiling
 // with the curtailment engine's taper band. (chargeWindows.ts imports only tariff.ts;
@@ -438,6 +440,26 @@ export function lineNotHeldOf(p: Pick<NightChargePlan, 'forceChargeLine' | 'expe
  */
 export function askOf(targetFloorKwh: number, fullKwh: number): number {
   return Math.min(100, Math.ceil((targetFloorKwh / fullKwh) * 100 - 1e-9));
+}
+
+/**
+ * ★★★ v1.203.0 — PURE. The RESERVE a line held by the reserve write asks for, %: the line's whole percent (askOf) and the
+ * point the panel holds under a reserve it charged up to (PANEL_RESERVE_HOLD_UNDERSHOOT_PCT, hwSpec.ts: 11 of 11 charge-ups
+ * to 50 closed at 49), so the pool the panel holds, ⌈line⌉, is at or above the line. Where that is above the 50% the panel
+ * accepts as a reserve the reserve cannot hold the line at all, and the ask stays the line's whole percent: such a line, one
+ * in (49, 50] included, is the line force-charge's (lineNeedsForceCharge). `undershootPct` is the panel's hold (the default);
+ * 0 is v1.202.0's ask, for the identity tests that account for the +1 night by night.
+ */
+export function lineReserveAskPct(targetFloorKwh: number, fullKwh: number, undershootPct: number = PANEL_RESERVE_HOLD_UNDERSHOOT_PCT): number {
+  const ask = askOf(targetFloorKwh, fullKwh);
+  return ask + undershootPct <= RESERVE_WRITE_MAX_PCT ? ask + undershootPct : ask;
+}
+
+/** v1.203.0 — PURE. A line whose reserve ask (its whole percent and the panel's hold under it) is above the 50% the panel
+ *  accepts as a reserve: the reserve write cannot hold it, so the line force-charge carries it. A line in (49, 50] counts:
+ *  its 50% reserve holds 49. With `undershootPct` 0, v1.202.0's test (⌈line⌉ above 50). */
+export function lineNeedsForceCharge(lineAskPct: number, undershootPct: number = PANEL_RESERVE_HOLD_UNDERSHOOT_PCT): boolean {
+  return lineAskPct + undershootPct > RESERVE_WRITE_MAX_PCT;
 }
 
 /** v1.198.0 — how a plan's PROVISIONAL solar band was widened (buildNightChargeInputs). */
@@ -1716,8 +1738,13 @@ export function buyFiguresLogText(expectedKwh: number | null | undefined, worstK
   return `expected buy ${fmt(expectedKwh)}, islanded worst-case sizing ${fmt(worstKwh)}`;
 }
 
-export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
-  const plan = sizeNightChargePlan(inputs);
+export function computeNightChargePlan(
+  inputs: NightChargeInputs,
+  /** v1.203.0 — the panel's hold under a reserve it charged up to (PANEL_RESERVE_HOLD_UNDERSHOOT_PCT, the default every
+   *  caller takes). 0 reproduces v1.202.0's line nights: the identity tests account for the +1 against it. */
+  holdUndershootPct: number = PANEL_RESERVE_HOLD_UNDERSHOOT_PCT,
+): NightChargePlan {
+  const plan = sizeNightChargePlan(inputs, holdUndershootPct);
   // v1.198.0 — a plan sized on the PROVISIONAL band says so: the field (absent on the full basis, so
   // that plan's JSON is unchanged) and the rationale's closing sentence. Only a plan that was sized
   // — a charge or a hold (requiredExtraKwh set): a refused plan, or a night with no window, was
@@ -1729,7 +1756,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
 }
 
 /** The sizing itself (computeNightChargePlan's body before v1.198.0, unchanged). */
-function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
+function sizeNightChargePlan(inputs: NightChargeInputs, holdUndershootPct: number): NightChargePlan {
   const {
     nowMs, fullKwh: panelFullKwh, socNowPct, reserveFloorPct, cushionPct, socCoherent,
     legEff, dischargeEff, chargeCapKw, gridInputCapKw, window, horizon,
@@ -2547,7 +2574,13 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   // v1.201.0 — and the cushion counts the Cores' standby for its hours (header), so ⌈line⌉ − floor points of the
   // measured capacity hold the safety-factored load AND the runway's standby figure for the configured hours.
   // v1.200.0 (review) — askOf, the ONE expression the line force-charge's ask reads too (forceChargeLine.askPct).
-  const lineAskPct = !setpointOnWalk && !baselineHolds ? askOf(targetFloorKwh, fullKwh) : 0;
+  // ★★★ v1.203.0 — AND ONE POINT MORE (lineReserveAskPct): the panel holds the pool a point under a reserve it charged up to
+  // (PANEL_RESERVE_HOLD_UNDERSHOOT_PCT; 11 of 11 charge-ups to 50 closed at 49), so a write of ⌈line⌉ held ⌈line⌉ − 1, under
+  // the line, on every charge night the reserve carried. The write is ⌈line⌉ + 1, and the pool the panel holds is ⌈line⌉. Where
+  // that is above the 50% envelope the ask stays ⌈line⌉ (the write is 50 either way) and the line force-charge carries it.
+  // The outage line only: a disabled cushion's line is the reserve floor itself, which no write raises.
+  const lineAskPct = !setpointOnWalk && !baselineHolds
+    ? lineReserveAskPct(targetFloorKwh, fullKwh, cushionBasis === 'islanded-outage' ? holdUndershootPct : 0) : 0;
   const setpointSocPct = middayReserve != null ? middayReserve.pct : Math.max(
     targetSocPct,
     round1((requiredPackAtWindowEndKwh / fullKwh) * 100),
@@ -2590,6 +2623,12 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   const askIsCost = baselineHolds || (!setpointOnWalk && costMode && costTargetKwh != null
     && round1((costTargetKwh / fullKwh) * 100) > lineAskPct);
   const askName = askIsCost ? "tonight's cost target" : 'the resilience requirement';
+  // v1.203.0 — the point the write adds above the line's whole percent (lineReserveAskPct), named where it set the write.
+  const holdPointAdded = holdUndershootPct > 0 && !askIsCost && lineAskPct > 0 && setpointSocPct === lineAskPct
+    && lineAskPct > askOf(targetFloorKwh, fullKwh);
+  const askWords = holdPointAdded
+    ? `${askName}: one point above the ${cushionLineSocPct}% outage line's whole percent, since the panel holds the pool one point under a reserve it charges up to`
+    : askName;
   // v1.112.0 — the ANNOUNCED buy carries the learned de-bias; the raw figure
   // stays on buyKwh (ledger + learner input) and still owns chargeTonight.
   const buyDebiasFactor = inputs.buyDebiasFactor ?? 1;
@@ -2608,7 +2647,13 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   // the setpoint and the written reserve are above. Mid-day and backup qualification read askOf directly
   // (lineAskPct is 0 where the setpoint is on the walk).
   const lineAsk = askOf(targetFloorKwh, fullKwh);
-  const lineQualifies = cushionBasis === 'islanded-outage' && chargeTonight && !baselineHolds && lineAsk > RESERVE_WRITE_MAX_PCT;
+  // ★★★ v1.203.0 — on the pack-at-close leg, a line the reserve cannot hold (lineNeedsForceCharge): its reserve ask above the
+  // envelope, a line in (49, 50] included (its 50% reserve holds 49). The walk legs keep ⌈line⌉ above 50 (their setpoint is the walk's).
+  const lineQualifies = cushionBasis === 'islanded-outage' && chargeTonight && !baselineHolds
+    && (setpointOnWalk ? lineAsk > RESERVE_WRITE_MAX_PCT : lineNeedsForceCharge(lineAsk, holdUndershootPct));
+  // v1.203.0 — the force-charge's ask: the line's whole percent, and at least one point above the 50% reserve, the most the
+  // panel's line force-charge rides on (forceChargeModeOf reads an ask above 50): 51 for a line in (49, 50], ⌈line⌉ above it.
+  const lineForceAsk = Math.max(lineAsk, RESERVE_WRITE_MAX_PCT + holdUndershootPct);
   const lineEligible = backupLeg && inputs.lineForceChargeEligible !== undefined ? false : inputs.lineForceChargeEligible;
   // (Fix9 review 1) A reserve already at the write gets none (decideActuation: "nothing to raise"). v1.200.1 — the night still carries its
   // ask: the panel reading the write decides the words, never the record. If it reads the target in the apply window the night rides it
@@ -2626,7 +2671,7 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   const lineStartClosed = lineQualifies && lineEligible === true && !lineNoWrite && inputs.armedLineStartClosed?.windowStartMs === window.startMs
     ? inputs.armedLineStartClosed.why : null;
   const lineArmed = lineQualifies && lineEligible === true && !lineNoWrite && !lineNotOnRecord && lineStartClosed == null;
-  const forceChargeLine: ForceChargeLine | null = lineArmed ? { askPct: lineAsk, linePct: cushionLineSocPct } : null;
+  const forceChargeLine: ForceChargeLine | null = lineArmed ? { askPct: lineForceAsk, linePct: cushionLineSocPct } : null;
   // (Fix10 review 2) A run still claimed that no re-ON can bring back: none is walked, and its clause says so. Nothing written reads this.
   const lineNoReOn = inputs.armedLineNoReOn?.windowStartMs === window.startMs ? inputs.armedLineNoReOn : null;
   // (Fix11) A run on: the walk starts from it. Only a line walk reads this, so a closure, a cost-dominant night and a night with no line
@@ -2649,7 +2694,7 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   // force-charge runs as far as the panel allows) or not ('advisory', 'backupLeg'). The envelope is OR-ed in here,
   // AFTER the cost block: the cost ceiling and its de-bias bound (debiasedCostSurplusKwh) read the sized flag alone. The
   // trough stays the sized one (never capped). Above the mid-day re-entry hold, which reads only `expected`.
-  const lineNearFull = lineAsk + 2 * FORCE_CHARGE_LINE_HEADROOM_PCT > 100;
+  const lineNearFull = lineForceAsk + 2 * FORCE_CHARGE_LINE_HEADROOM_PCT > 100;
   // v1.202.0 — a night the COST force-charge carries is judged on its close past the stop (expected.closePct), not the stop.
   const lineCloseAfterStopPct = expected.mode !== 'line' ? expected.closePct ?? null : null;
   const lineCloseUnder = lineArmed && !lineNearFull && !cushionShortfall
@@ -2712,7 +2757,7 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   // "Charge to", "Hold the reserve at" and "tonight's write" are false of a record whose write never went or came back down.
   const cushionStartClosedWords = lineStartClosed != null ? lineStartClosedWords('it', lineStartClosed) : null;
   const chargeHeadline = cushionStartClosedWords != null
-    ? `Tonight's ${cushionLineSocPct}% outage line is above the ${RESERVE_WRITE_MAX_PCT}% the panel accepts as a reserve, and ${cushionStartClosedWords}, so the cushion is not assured — residual risk remains.`
+    ? `Tonight's ${cushionLineSocPct}% outage line is above ${lineOverReserveText(cushionLineSocPct, 'accepts')}, and ${cushionStartClosedWords}, so the cushion is not assured — residual risk remains.`
     : isNoChargeKwh(expected.buyKwh)
     ? `Hold the reserve at ${writtenPct}% in the ${windowText}: no charge expected.`
     : `Charge ${expected.deliverableBound ? 'toward' : 'to'} ~${headlineLevelPct}% in the ${windowText}`
@@ -2802,7 +2847,11 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   // force-charge to the window close), or that nothing does. Emitted whenever the line is carried in line
   // mode or disclosed — never gated on the setpoint over the arrival (2026-10-29: setpoint = target = 66,
   // and the rationale said nothing of the 50% write). A cost-dominant carried night keeps today's sentence.
-  const lineText = `tonight's ${cushionLineSocPct}% outage line is above it`;
+  // v1.203.0 — a line at or under the reserve (one in (49, 50], its whole percent 50): the reserve is not under it, the pool the
+  // panel holds at it is. Keyed on the ask, which knows the side of 50 a line stated at 50.00 lies on.
+  const lineText = lineAsk <= RESERVE_WRITE_MAX_PCT
+    ? `the panel holds a pool it charges to that reserve at ${RESERVE_WRITE_MAX_PCT - PANEL_RESERVE_HOLD_UNDERSHOOT_PCT}%, under tonight's ${cushionLineSocPct}% outage line`
+    : `tonight's ${cushionLineSocPct}% outage line is above it`;
   const envelopeHead = `The reserve ${lineStanding ? 'reads' : 'is set to'} ${writtenPct}%, the most the panel accepts as a backup reserve; ${lineText}`;
   // v1.200.1 — after the window: no restore is due on a night that stands, and what the house then draws is the panel's own reserve to decide.
   const afterWindowText = lineStanding ? `No restore is due while the reserve reads ${writtenPct}%.`
@@ -2856,7 +2905,7 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   // before; called "expected" it contradicted the Expected: sentence (~5 kWh to 50%, then
   // "only expected to reach ~27.5%"). The written reserve and the ask remain.
   const setpointNote = setpointSocPct > targetSocPct + 0.05
-    ? ` The reserve ${lineStanding ? 'reads' : 'is set to'} ${writtenPct}%${truncated ? ` — ${askName} asks for ${setpointSocPct}%, but the panel only accepts a backup reserve up to ${RESERVE_WRITE_MAX_PCT}%` : ` (${askName})`}.`
+    ? ` The reserve ${lineStanding ? 'reads' : 'is set to'} ${writtenPct}%${truncated ? ` — ${askName} asks for ${setpointSocPct}%, but the panel only accepts a backup reserve up to ${RESERVE_WRITE_MAX_PCT}%` : ` (${askWords})`}.`
     : '';
   // v1.202.0 — a night the cost force-charge carries keeps the reserve sentence, and adds what its walk past the stop cannot
   // hold (lineNotHeldNote: under the line at the close).

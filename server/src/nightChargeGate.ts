@@ -264,7 +264,10 @@ function mean(xs: number[]): number | null {
 
 /** v1.196.0 — the close reading is persisted to 0.1 (measuredWindowCloseSocPct): half its step
  *  is rounding, not a pool under its line. The written reserve is the line asked to the whole
- *  percent above it, so a pool held at the reserve reads at or above the line. */
+ *  percent above it, so a pool held at the reserve reads at or above the line. v1.203.0 — the panel
+ *  holds the pool one point UNDER a reserve it charged up to (hwSpec PANEL_RESERVE_HOLD_UNDERSHOOT_PCT:
+ *  11 of 11 charge-ups to 50 closed at 49), so the write is the line's whole percent and one point
+ *  more, and the pool the panel holds — the reserve less that point — reads at or above the line. */
 export const REALIZED_CLOSE_TOLERANCE_PCT = 0.05;
 /** v1.200.0 (A5) — PURE. A reading at or above the line less REALIZED_CLOSE_TOLERANCE_PCT, the edge itself included
  *  (LINE_CLOSE_EDGE_EPS: in binary 50.35 − 0.05 is 50.300000000000004, so a 50.3 close read as under a 50.35 line). */

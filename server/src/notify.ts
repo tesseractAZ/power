@@ -16,8 +16,10 @@ import {
   forceChargeStopPct, partialForceChargeOnFailureSlots, forceChargeFailedSlotsText, FORCE_CHARGE_LINE_REON_MAX, lineReOnTimesWords,
   lineAboveReserveWords, lineBesidePct, type ForceChargeNightOutcome, type ForceChargeSlotCore, type LineAtRisk,
   lineStartClosedWords, type ForceChargeStartClosed,
+  // v1.203.0 — the level a line in (49, 50] is above: the 49% the panel holds under a 50% reserve.
+  lineOverReserveText,
 } from './nightForceCharge.js';
-import { isNoChargeKwh, revertRetryText, RESERVE_WRITE_MAX_PCT, type NightChargeMode, type RevertResendOnReport, type RestoreSummaryKind } from './nightChargeActuator.js';
+import { isNoChargeKwh, revertRetryText, RESERVE_WRITE_MAX_PCT, PANEL_RESERVE_HOLD_UNDERSHOOT_PCT, type NightChargeMode, type RevertResendOnReport, type RestoreSummaryKind } from './nightChargeActuator.js';
 // R5 — the day-aware formatter's clocks (chargeText.ts), shared with the mid-day texts.
 import { phxParts, phxShortClock } from './chargeText.js';
 
@@ -616,7 +618,7 @@ export function buildNightChargeMessage(
     : `After the window the reserve returns to ${round1(plan.reserveFloorPct)}% and the house uses the pool as usual. `;
   const lineClause = (l: { linePct: number; panelCeilingPct: number }): string => {
     // (Fix8) The line beside the reserve (and the note's full pool) as lineBesidePct names it; a line stated at the reserve unnumbered.
-    const why = `${lineAboveReserveWords(l.linePct, "for tonight's ", ' outage line')} (above the ${RESERVE_WRITE_MAX_PCT}% the panel holds as a reserve)`;
+    const why = `${lineAboveReserveWords(l.linePct, "for tonight's ", ' outage line')} (above ${lineOverReserveText(l.linePct, 'holds')})`;
     const lineStartMs = plan.expectedForceChargeStartMs;
     if (held || lineStartMs === null) {
       // v1.200.0 (review) — armed, never switched on: nothing "on until the window closes".
@@ -1119,8 +1121,9 @@ export function buildNightChargeForeignReserve(o: {
     : (l.started
       ? ` The force-charge for tonight's ${named}% outage line rode ${stood ? 'that reading' : 'that write'}, so the add-on switches it off, and it does not start again, whatever the reserve reads later.`
       : ` No force-charge for tonight's ${named}% outage line starts: the reserve was ${stood ? 'changed' : 'set outside the add-on'}, and setting it back does not change that.`)
-      // (Fix8) Only a line named above the reserve can the pool close under.
-      + `${named! > RESERVE_WRITE_MAX_PCT ? ' The pool may close under the line.' : ''} ${lineChargeNowByHandWords(l.closeText)}`;
+      // (Fix8) Only a line named above the reserve can the pool close under. v1.203.0 — above the pool the panel holds at it: one point
+      // under a reserve it charged up to (PANEL_RESERVE_HOLD_UNDERSHOOT_PCT), so a line in (49, 50] too.
+      + `${l.linePct > RESERVE_WRITE_MAX_PCT - PANEL_RESERVE_HOLD_UNDERSHOOT_PCT ? ' The pool may close under the line.' : ''} ${lineChargeNowByHandWords(l.closeText)}`;
   if (stood) {
     return {
       severity: l == null ? 'info' : 'warning',
@@ -1454,7 +1457,7 @@ function envelopeShortfallNote(plan: Pick<NightChargePlan, 'cushionShortfallCaus
     if (kind === 'nearFull') return ` NOTE: ${line} is within 10 points of a full pool, so the force-charge cannot hold it with its usual margin — residual risk remains.`;
     // Armed and disclosed with no walk that says why (a plan this build does not make): armed, not claimed.
     if (plan.cushionShortfallCause != null) {
-      return ` NOTE: ${line} is above the ${RESERVE_WRITE_MAX_PCT}% the panel accepts as a reserve; its force-charge runs, but the plan does not claim the line — residual risk remains.`;
+      return ` NOTE: ${line} is above ${lineOverReserveText(plan.cushionLineSocPct ?? Infinity, 'accepts')}; its force-charge runs, but the plan does not claim the line — residual risk remains.`;
     }
     return '';
   }
@@ -1463,7 +1466,7 @@ function envelopeShortfallNote(plan: Pick<NightChargePlan, 'cushionShortfallCaus
     : plan.cushionEnvelopeReason === 'advisory' ? 'and no force-charge runs in advisory mode'
       : plan.cushionEnvelopeReason === 'reserveAtTarget' ? `and the reserve reads ${round1(plan.reserveFloorPct)}%: no write is due while it does, and no force-charge runs without one`
         : 'and no force-charge carries it to the window close';
-  return ` NOTE: ${line} is above the ${RESERVE_WRITE_MAX_PCT}% the panel accepts as a reserve, ${why} — residual risk remains.`;
+  return ` NOTE: ${line} is above ${lineOverReserveText(plan.cushionLineSocPct ?? Infinity, 'accepts')}, ${why} — residual risk remains.`;
 }
 
 /** One-decimal rounding for the human-facing advisory strings. */

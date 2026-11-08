@@ -274,7 +274,8 @@ test('★★★ U1b the wiring: every live recompute reads the armed record; the
 
 /** The year's plans that arm at 45 with no armed record, each recomputed against a record with no ask: measured with the fix. */
 // v1.202.0 — re-measured with the walks on the measured pool (v1.201.0: 628).
-const PIN_U1B_YEAR = { armed: 0, disclosed: 632 };
+// v1.203.0 — 637: five lines in (49, 50], which the 50% reserve holds at 49, now carry an ask too.
+const PIN_U1B_YEAR = { armed: 0, disclosed: 637 };
 
 test('★★★ U1b the year: no plan of the window of a record with no ask arms or states a start, and none moves a sizing figure', () => {
   let isArmed = 0;
@@ -482,7 +483,8 @@ test('★★★ U1c the ledger keeps its ask: the plan of record carries it, so 
 
 /** The year's plans that arm at 45 with no armed record, each served against a record with its ask whose apply window passed: measured with the fix. */
 // v1.202.0 — re-measured with the walks on the measured pool (v1.201.0: 628).
-const PIN_U1C_YEAR = { armed: 0, disclosed: 632 };
+// v1.203.0 — 637: five lines in (49, 50], which the 50% reserve holds at 49, now carry an ask too.
+const PIN_U1C_YEAR = { armed: 0, disclosed: 637 };
 
 test('★★★ U1c the year: no plan of the window of a closed record arms or states a start, and none moves a sizing figure', () => {
   let isArmed = 0;
@@ -869,9 +871,12 @@ test('★★★ U3 the foreign push on a line night says what happens to the for
   assert.equal(not.body.slice(plain.body.length), " No force-charge for tonight's 55.6% outage line starts: the reserve was set outside the add-on, and setting it back does not change that. The pool may close under the line. Charge Now switched on by hand in the EcoFlow app can still lift the pool tonight; switch it off again by ~5:00 AM.");
   const on = buildNightChargeForeignReserve({ ...base, line: { linePct: 55.55, started: true, closeText: '5:00 AM' } } as never);
   assert.equal(on.body.slice(plain.body.length), " The force-charge for tonight's 55.6% outage line rode that write, so the add-on switches it off, and it does not start again, whatever the reserve reads later. The pool may close under the line. Charge Now switched on by hand in the EcoFlow app can still lift the pool tonight; switch it off again by ~5:00 AM.");
-  // A line the reserve holds is never said to close under it.
+  // A line the reserve holds is never said to close under it. v1.203.0 — the panel holds the pool one point under a reserve it
+  // charged up to, so a 50% reserve holds 49: a line at 49 is held, and one at 50 is not (the pool may close under it).
+  const at49 = buildNightChargeForeignReserve({ ...base, line: { linePct: 49, started: false, closeText: '5:00 AM' } } as never);
+  assert.doesNotMatch(at49.body, /under the line/);
   const at50 = buildNightChargeForeignReserve({ ...base, line: { linePct: 50, started: false, closeText: '5:00 AM' } } as never);
-  assert.doesNotMatch(at50.body, /under the line/);
+  assert.match(at50.body, / The pool may close under the line\. /);
 });
 
 test('★★★ U3 the claims hold on the real decisions: the force-charge stops or never starts, and a reserve set back restarts nothing', () => {
