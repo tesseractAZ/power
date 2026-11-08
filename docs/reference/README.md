@@ -28,7 +28,8 @@ it stood in the single-file manual.
 
 Section numbers are chapter-local. A `§N` or `§N.M` inside a chapter means that chapter's own numbered
 heading unless it names another chapter (`§15.8b` is section 8b of chapter 15). Chapters 2, 8 and 15 are
-split into parts, and their section numbers run on across the parts.
+split into parts, and their section numbers run on across the parts, except that chapter 15's part 3
+(§6–7) prints after part 2 (§8–13).
 
 ## Chapters
 
