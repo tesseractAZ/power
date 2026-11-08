@@ -265,8 +265,9 @@ export interface CushionNotePlan {
   expectedLineCeilingStop?: { ceilingPct: number; startTargetPct: number; noReOnWords?: string };
   expectedWriteLevelPct?: number | null;
   expectedForceChargeStartMs?: number | null;
-  /** v1.202.0 — a line night the cost force-charge carries whose walk past its stop closes under the line: that close
-   *  (NightChargePlan.expectedCloseAfterStopPct). Absent otherwise. */
+  /** v1.202.0 — a line night the cost force-charge carries whose walk past its stop closes under the line, whether or not
+   *  its sizing fell short: that close (NightChargePlan.expectedCloseAfterStopPct; the outage-line row names it). Absent
+   *  otherwise. */
   expectedCloseAfterStopPct?: number;
 }
 
@@ -307,8 +308,9 @@ export function lineNotHeldOfCard(plan: CushionNotePlan): 'closeUnder' | 'aboveF
  * v1.200.0 — the outage line above the panel's 50% reserve, in one row: disclosed with nothing armed ("not held
  * tonight": advisory mode, the backup leg), or the force-charge's own row (line mode only, with the expected close —
  * the level the charge figure names) — (A5) followed, on an armed night, by what its walk cannot hold
- * (lineNotHeldOfCard). null otherwise, a cost-dominant night included. `maxPct` is the panel's reserve maximum
- * (status.reserveWriteMaxPct); 50 when unknown.
+ * (lineNotHeldOfCard). v1.202.0 — a night the cost force-charge carries whose walk past its stop closes under the line
+ * (lineNotHeldOfCard 'closeUnder'): that close, under the line. null otherwise, any other cost-dominant night included.
+ * `maxPct` is the panel's reserve maximum (status.reserveWriteMaxPct); 50 when unknown.
  */
 export function outageLineRow(plan: CushionNotePlan, maxPct: number | null = null): string | null {
   const r1 = (n: number): number => Math.round(n * 10) / 10;
@@ -338,10 +340,18 @@ export function outageLineRow(plan: CushionNotePlan, maxPct: number | null = nul
     : kind === 'aboveFull' ? ' — the line is above a full pool; residual risk remains'
       : kind === 'nearFull' ? ' — within 10 points of a full pool, not held with its usual margin; residual risk remains' : '';
   const row = outageLineArmedRow(plan, max, r1, lineText);
-  if (row == null && armed && plan.cushionShortfallCause != null) {
-    // Never silent on a disclosed night, whatever the walk's mode: v1.202.0, a night the cost force-charge carries whose walk
-    // past its stop closes under the line.
+  if (row == null && armed && (plan.cushionShortfallCause != null || kind === 'closeUnder')) {
+    // Never silent on a disclosed night, whatever the walk's mode. v1.202.0 — a night the cost force-charge carries whose walk
+    // past its stop closes under the line (kind 'closeUnder', whether or not its sizing fell short) names that close, and the
+    // stop it is armed with (its level, expectedWriteLevelPct: reached or not, the stop is what the charge figure names); any
+    // other armed, disclosed night says the line is not claimed.
     const l = plan.cushionLineSocPct;
+    const c = plan.expectedCloseAfterStopPct;
+    if (kind === 'closeUnder' && c != null && Number.isFinite(c)) {
+      const stop = plan.expectedWriteLevelPct;
+      const stopText = stop != null && Number.isFinite(stop) ? ` (the cost force-charge's stop is ~${r1(stop)}%)` : '';
+      return `outage line ${lineText(l)}is above the ${max}% the panel accepts as a reserve — ~${r1(c)}% expected at the close, under the line${stopText}; residual risk remains`;
+    }
     return `outage line ${lineText(l)}is above the ${max}% the panel accepts as a reserve — its force-charge runs, but the line is not claimed; residual risk remains`;
   }
   return row == null ? null : `${row}${notHeld}`;

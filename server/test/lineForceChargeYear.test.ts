@@ -241,7 +241,8 @@ const ALL_ZERO = { m1: 0, m2: 0, m3: 0, m4: 0, undisclosedUnder: 0, carrierRest:
 /** Measured on the landed A5 (emulated, the planner over the year), the live cost gate: what is pinned, not asserted.
  *  `armed` / `carried` — plans with forceChargeLine, and of them those with no envelope cause; `nearFull` / `closeUnder`
  *  — the reasons; `kinds` — lineNotHeldOf over every line-mode plan (closeUnder: the reason's, the near-full lines' under
- *  their walk, and carried nights whose sizing fell short); `eFalls` — h steps whose expected close falls (any amount),
+ *  their walk, and carried nights whose sizing fell short) and, v1.202.0, every cost-carried one (its close past the stop,
+ *  under the line, its sizing short or not); `eFalls` — h steps whose expected close falls (any amount),
  *  of them `eFallsNonBoundGt5` by more than 5 points after a walk that was not deliverable-bound, the largest such fall
  *  `eFallMaxNonBound` (2027-08-09 21:30, 13 → 14 h on nameplate, 71.8 → 52.9%; 12 → 13 h at 0.944, 77.2 → 57.3%, both
  *  now 'closeUnder'); `eFallMax` — the largest fall after any walk: after a window-bound one, whose stated level was a
@@ -252,19 +253,20 @@ const ALL_ZERO = { m1: 0, m2: 0, m3: 0, m4: 0, undisclosedUnder: 0, carrierRest:
  *  the next hour (its walk rose above the rising line); `meanBuyQual` — the mean expected buy per armed or disclosed plan,
  *  per hour (not monotone: the set grows with h).
  *  v1.202.0 — re-measured. On nameplate (no scale, no standby: v1.201.0's walks) only the cost-carried nights whose walk past
- *  the stop closes under their line move: 17 more 'closeUnder' (carried 4819 → 4802, kinds 777 → 794, a disclosure that
- *  vanishes at the next hour 6 → 11). At 0.944 the walks are on the measured pool too (v1.201.0: armed 5664, carried 5030,
- *  closeUnder 32, kinds 895 / 194 / 209, eFalls 395, eFallsNonBoundGt5 18, eFallMaxNonBound 19.9, buyFalls 138,
- *  closeUnderVanish 4, buyFallMax 9.24 at 2027-01-27 21:30 16 → 17 h). */
+ *  the stop closes under their line move: 17 more 'closeUnder' (carried 4819 → 4802, a disclosure that vanishes at the
+ *  next hour 6 → 11), and kinds 777 → 859: those 17, and 65 whose sizing fell short, which keep their caps note and now name
+ *  that close too (lineNotHeldOf 'closeUnder'; 58 at 0.944). At 0.944 the walks are on the measured pool too (v1.201.0: armed
+ *  5664, carried 5030, closeUnder 32, kinds 895 / 194 / 209, eFalls 395, eFallsNonBoundGt5 18, eFallMaxNonBound 19.9,
+ *  buyFalls 138, closeUnderVanish 4, buyFallMax 9.24 at 2027-01-27 21:30 16 → 17 h). */
 const PIN_A5: Record<Basis, ReturnType<typeof PINNED>> = {
   np: {
-    armed: 5262, carried: 4802, nearFull: 418, closeUnder: 42, kinds: { closeUnder: 794, aboveFull: 95, nearFull: 175 },
+    armed: 5262, carried: 4802, nearFull: 418, closeUnder: 42, kinds: { closeUnder: 859, aboveFull: 95, nearFull: 175 },
     eFalls: 384, eFallsNonBoundGt5: 29, eFallMaxNonBound: 18.9, buyFalls: 136, closeUnderVanish: 11,
     eFallMax: { d: 40, at: '2026-11-13 13:00 np 15 → 16 h' }, buyFallMax: { d: 9.25, at: '2026-10-13 13:00 np 10 → 11 h' },
     meanBuyQual: { 4: null, 5: 40.35, 6: 29.96, 7: 32.29, 8: 28.89, 9: 30.44, 10: 32.1, 11: 32.09, 12: 32.44, 13: 33.09, 14: 33.23, 15: 34.07, 16: 35.18, 17: 35.87, 18: 36.18, 19: 36.99, 20: 37.66 },
   },
   m: {
-    armed: 5687, carried: 5023, nearFull: 602, closeUnder: 62, kinds: { closeUnder: 873, aboveFull: 194, nearFull: 210 },
+    armed: 5687, carried: 5023, nearFull: 602, closeUnder: 62, kinds: { closeUnder: 931, aboveFull: 194, nearFull: 210 },
     eFalls: 484, eFallsNonBoundGt5: 29, eFallMaxNonBound: 19.6, buyFalls: 163, closeUnderVanish: 15,
     eFallMax: { d: 43.8, at: '2027-05-28 21:30 m 19 → 20 h' }, buyFallMax: { d: 8.26, at: '2027-01-27 21:30 m 16 → 17 h' },
     meanBuyQual: { 4: null, 5: 30.41, 6: 27.56, 7: 29.77, 8: 28.8, 9: 31.08, 10: 31.43, 11: 31.35, 12: 31.6, 13: 32.32, 14: 32.88, 15: 33.96, 16: 35.07, 17: 35.29, 18: 36.14, 19: 36.77, 20: 37.01 },

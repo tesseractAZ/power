@@ -400,7 +400,8 @@ export type LineNotHeld = 'closeUnder' | 'aboveFull' | 'nearFull';
 /**
  * v1.200.0 (A5) — PURE. What an armed night's line walk cannot hold, or null where it holds (or nothing is armed).
  * v1.202.0 — a night the COST force-charge carries (its stop ⌈L⌉ + 10 or more, so no line-mode walk) is 'closeUnder' where
- * its walk past the stop closes under the line (expectedCloseAfterStopPct, the close the texts then name); null otherwise.
+ * its walk past the stop closes under the line (expectedCloseAfterStopPct, the close the texts then name), whether or not its
+ * sizing fell short (its caps note stands); null otherwise.
  * On a line-mode walk:
  *  - 'aboveFull' — the line is above a full pool: no charge can hold it;
  *  - 'closeUnder' — the walk's expected close (capped at the window's reach) is under L − the tolerance, whatever the
@@ -686,8 +687,11 @@ export interface NightChargePlan {
   /** v1.202.0 — an armed line night the COST force-charge carries (its stop ⌈L⌉ + 10 or more, so no expectedForceChargeMode),
    *  whose walk past the stop closes under the line: the close, % (round1). expectedWriteLevelPct is the stop the pool reaches
    *  first; from there the cost force-charge is off for the night (no re-ON in cost mode) and the house, the EV included, draws
-   *  the pool on the median basis, held at the written reserve, to the window close (expectedBuyFromPlan). Present only beside
-   *  cushionEnvelopeReason 'closeUnder' (lineNotHeldOf), so a cost-carried night that holds its line keeps its JSON. */
+   *  the pool on the median basis, held at the written reserve, to the window close (expectedBuyFromPlan). Present wherever
+   *  that close is under the line less the tolerance, whatever the sizing (lineNotHeldOf 'closeUnder'): beside
+   *  cushionEnvelopeReason 'closeUnder' where the sizing held a line more than 10 points under full, beside the caps note
+   *  (cushionShortfall, no envelope cause) where the sizing fell short, beside 'nearFull' on a line within 10 points of full.
+   *  A cost-carried night whose walk holds its line keeps its JSON. */
   expectedCloseAfterStopPct?: number;
 
   /** v1.60.0 — EV-contention disclosure for tonight's window (see the type).
@@ -2804,7 +2808,11 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   // A5 — what an ARMED night's own walk cannot hold (lineNotHeldOf, the one predicate every surface words by), after
   // its line-mode sentence: under the line (whatever the reason or cause), above a full pool, or held without the margin.
   // v1.202.0 — the close a cost-carried night's walk past its stop reaches, only where it is under the line (the plan's field).
-  const closeAfterStopField = lineCloseUnder && lineCloseAfterStopPct != null ? { expectedCloseAfterStopPct: lineCloseAfterStopPct } : {};
+  // Whatever the sizing, as a line-mode night's close is named (lineNotHeldOf): beside the closeUnder disclosure
+  // (lineCloseUnder) where the sizing held a line more than 10 points under full, beside the caps note where it fell short.
+  // Text only: the rationale, the 21:30 notice, the ARMED line and the card read it; nothing written, armed or bought does.
+  const closeAfterStopField = lineArmed && lineCloseAfterStopPct != null && !lineWalkHolds(lineCloseAfterStopPct, cushionLineSocPct)
+    ? { expectedCloseAfterStopPct: lineCloseAfterStopPct } : {};
   const lineNotHeld = lineNotHeldOf({
     ...(forceChargeLine != null ? { forceChargeLine } : {}), expectedForceChargeMode: expected.mode, expectedWriteLevelPct: expected.levelPct,
     cushionLineSocPct, ...(cushionEnvelopeReason != null ? { cushionEnvelopeReason } : {}), ...closeAfterStopField,

@@ -11,7 +11,8 @@ import { walkYear, closeUnder, panelGridAt, WALK_HOURS_ALL, WALK_HOURS_SAMPLE, t
  * plant's own floor at the open. C: the own floor at the plan, 50 at the open. O: the plant's own floor throughout. W: 49 throughout, the written control of A.
  * The suite walks four hours; A5_IDENTITY_FULL=1 walks every hour, as the gates run it. STANDING_WALK_WRITE=1 writes lineStanding.walkIdentity.json (on a3588d96 only).
  * v1.202.0 — re-written on v1.202.0: its nameplate groups equal a3588d96's (regenerated on c692f30e) with the walk past a cost stop disabled, and move only
- * where it discloses a cost-carried night closing under its line (O at 14-20 h, W at 4-9 h); the 0.944 groups move with the walks on the measured pool.
+ * where the plan names a cost-carried night's close under its line, disclosed where its sizing held the line and beside the caps note where it fell short
+ * (O at 7-20 h, W at 4-9 h); the 0.944 groups move with the walks on the measured pool.
  */
 
 const HERE = dirname(fileURLToPath(import.meta.url));

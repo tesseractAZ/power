@@ -75,8 +75,10 @@ const PIN_T1 = { level: 80, startMs: Date.UTC(2027, 0, 5, 10, 25), buyKwh: 28.23
  *  switches it back on (A's re-ON), and it closes ~79.7% (69.6% with no re-ON; v1.200.0's walks on nameplate: 72.1%, no re-ON). */
 const PIN_T2_CLOSE = 79.7;
 /** Measured when the change was made (v1.200.0): the year's carried / disclosed split, nameplate and 0.944.
- *  v1.202.0 — re-measured with the walks on the measured pool: 24 line-mode plans at 0.944 (25), 35 expected rises (36). */
-const PIN_T4 = { carried: [22, 37], disclosedOn: [0, 0], lineMode: [14, 24], expectedRose: 35 };
+ *  v1.202.0 — re-measured with the walks on the measured pool: 24 line-mode plans at 0.944 (25), 35 expected rises (36);
+ *  `costCloseUnder`, the cost-dominant carried nights whose walk past the stop closes under the line, each sized short (its
+ *  caps note stands) and naming that close in one NOTE. */
+const PIN_T4 = { carried: [22, 37], disclosedOn: [0, 0], lineMode: [14, 24], costCloseUnder: [2, 2], expectedRose: 35 };
 /** Measured (v1.200.0 review) on the same year: carried plans whose setpoint is the force-charge's own ask; and of
  *  the line-mode plans with an expected figure, those whose expected buy exceeds the worst case (and the de-biased
  *  one), with and without a predicted window EV. */
@@ -389,9 +391,20 @@ test('★★★ T4 the year: no sizing figure moves, every over-envelope charge 
         }
         // R6d — the line sentence only in line mode: a cost-dominant night's cost force-charge already
         // clears ⌈L⌉ + 10, and its rationale says nothing of the line.
+        // v1.202.0 — unless its walk past the stop closes under the line (lineNotHeldOf 'closeUnder', whether or not its sizing
+        // fell short): then the one NOTE that names that close is added, and nothing else.
         if (on.forceChargeLine != null && on.expectedForceChargeMode !== 'line') {
-          assert.doesNotMatch(on.rationale, /outage line/, `${c.label} ${scaleName}: a cost-dominant night names the line`);
-          assert.equal(on.rationale, base.rationale, `${c.label}: a cost-dominant carried night reads as today`);
+          const closeNote = lineNotHeldOf(on) === 'closeUnder'
+            ? ` NOTE: on the median load the pool is expected to close at ~${(on as { expectedCloseAfterStopPct?: number }).expectedCloseAfterStopPct}%, under tonight's ${on.cushionLineSocPct}% outage line, so the cushion is not fully held — residual risk remains.`
+            : '';
+          if (closeNote !== '') {
+            add(`costCloseUnder.${scaleName}`);
+            assert.deepEqual([base.cushionShortfall, on.cushionShortfallCause ?? null], [true, null], `${c.label} ${scaleName}: sized short, its caps note stands`);
+            assert.equal(on.rationale.split(closeNote).length, 2, `${c.label} ${scaleName}: the close named once`);
+          }
+          const rest = closeNote !== '' ? on.rationale.replace(closeNote, '') : on.rationale;
+          assert.doesNotMatch(rest, /outage line/, `${c.label} ${scaleName}: a cost-dominant night names the line`);
+          assert.equal(rest, base.rationale, `${c.label}: a cost-dominant carried night reads as today`);
         }
       } else {
         assert.equal(planDigest(on), planDigest(base), `${c.label} ${scaleName}: a non-qualifying plan moved (eligible)`);
@@ -413,7 +426,7 @@ test('★★★ T4 the year: no sizing figure moves, every over-envelope charge 
   );
   assert.deepEqual(
     { carried: [counts['carried.np'] ?? 0, counts['carried.m'] ?? 0], disclosedOn: [counts['disclosedOn.np'] ?? 0, counts['disclosedOn.m'] ?? 0],
-      lineMode: [counts['lineMode.np'] ?? 0, counts['lineMode.m'] ?? 0], expectedRose },
+      lineMode: [counts['lineMode.np'] ?? 0, counts['lineMode.m'] ?? 0], costCloseUnder: [counts['costCloseUnder.np'] ?? 0, counts['costCloseUnder.m'] ?? 0], expectedRose },
     PIN_T4,
   );
   assert.deepEqual(
@@ -1839,6 +1852,18 @@ test('★★ T19 the card warns on what the walk cannot hold, the cause or not (
   const odd = { cushionShortfall: true, cushionShortfallCause: 'envelope', cushionEnvelopeReason: 'nearFull', cushionLineSocPct: 92.34, forceChargeLine: { askPct: 93, linePct: 92.34 } };
   assert.match(ct.outageLineRow(odd)!, /^outage line 92\.3% is above the 50% the panel accepts as a reserve — /);
   assert.doesNotMatch(ct.outageLineRow(odd)!, /not held tonight|no force-charge/);
+  // v1.202.0 — a night the cost force-charge carries whose walk past its stop closes under the line names that close and its
+  // stop, whether its sizing held the line (disclosed, 'closeUnder') or fell short (no envelope cause, the caps row beside it);
+  // a close at L − 0.05 holds, and its night has no row.
+  const cost = { cushionShortfall: true, cushionLineSocPct: 52.7, forceChargeLine: { askPct: 53, linePct: 52.7 }, expectedWriteLevelPct: 70,
+    expectedForceChargeStartMs: 1, expectedCloseAfterStopPct: 50 };
+  const costRow = "outage line 52.7% is above the 50% the panel accepts as a reserve — ~50% expected at the close, under the line (the cost force-charge's stop is ~70%); residual risk remains";
+  assert.equal(ct.outageLineRow({ ...cost, cushionShortfallCause: 'envelope', cushionEnvelopeReason: 'closeUnder' }), costRow, 'disclosed');
+  assert.equal(ct.outageLineRow(cost), costRow, 'sized short');
+  assert.equal(ct.lineNotHeldOfCard(cost), 'closeUnder');
+  assert.equal(ct.outageLineRow({ ...cost, expectedCloseAfterStopPct: 52.65 }), null, 'held at L − 0.05');
+  assert.equal(ct.outageLineRow({ ...cost, expectedCloseAfterStopPct: undefined, cushionShortfallCause: 'envelope', cushionEnvelopeReason: 'nearFull' }),
+    'outage line 52.7% is above the 50% the panel accepts as a reserve — its force-charge runs, but the line is not claimed; residual risk remains');
 });
 
 test('★★ T19 the mid-day push and its shadow record: a leg with a line ask is never told "no force-charge carries it" — worded by what its walk cannot hold, or (L4) armed and not claimed when that is lost', async () => {
@@ -2088,11 +2113,13 @@ test('★★★ T23 the mid-day re-entry hold never holds a leg the line force-c
  *  leg (`armedPushes`: armFromPlan's lineRides, = `armed`) is pushed with Charge Now; 5d7c7c75 left it out on 136 / 144 of them
  *  (stated at the 50% reserve). */
 const PIN_T23: Record<'np' | 'm', { plans: number; armed: number; carried: number; nearFull: number; lineMode: number; reentryNotes: number; kinds: Record<string, number>; eFalls: number; buyFalls: number; armedPushes: number }> = {
-  np: { plans: 3400, armed: 2808, carried: 1836, nearFull: 972, lineMode: 2412, reentryNotes: 830, kinds: { closeUnder: 1598, aboveFull: 468 }, eFalls: 131, buyFalls: 71, armedPushes: 2808 },
+  // v1.202.0 — `kinds` counts lineNotHeldOf, a cost-carried leg's close past its stop included wherever it is under the line,
+  // whether or not the sizing fell short (60 legs more here and 55 at ×0.944 than when only a disclosed leg named it).
+  np: { plans: 3400, armed: 2808, carried: 1836, nearFull: 972, lineMode: 2412, reentryNotes: 830, kinds: { closeUnder: 1658, aboveFull: 468 }, eFalls: 131, buyFalls: 71, armedPushes: 2808 },
   // v1.202.0 — re-measured with the walks on the measured pool (v1.201.0: reentryNotes 847, closeUnder 1495, no held
   // 'nearFull', eFalls 131, buyFalls 71): the same lift is more points of it, so fewer closes are under the line or the
   // re-entry line.
-  m: { plans: 3400, armed: 2916, carried: 1764, nearFull: 1152, lineMode: 2460, reentryNotes: 559, kinds: { closeUnder: 1420, aboveFull: 648, nearFull: 4 }, eFalls: 127, buyFalls: 68, armedPushes: 2916 },
+  m: { plans: 3400, armed: 2916, carried: 1764, nearFull: 1152, lineMode: 2460, reentryNotes: 559, kinds: { closeUnder: 1475, aboveFull: 648, nearFull: 4 }, eFalls: 127, buyFalls: 68, armedPushes: 2916 },
 };
 
 for (const basis of ['np', 'm'] as const) {
@@ -2670,7 +2697,10 @@ test('★★★ T24 (Fix9) a line night\'s force-charge "waits on" a reading of 
  *  stated at 50.00 whose raw value a hair above the reserve is asked at 51 reads "tonight's 50% outage line is above it" —
  *  the A5 identity holds those plans (a residual, counted: the identity's guard would have to move with it). The push and
  *  the card of the same armed plans (armFromPlan's record) state none false. */
-const PIN_T24_YEAR = { plans: 13271, armed: 5781, stated50: 6 }; // v1.202.0 — on the measured pool (v1.201.0: 13,217 and 5,742)
+// v1.202.0 — on the measured pool (v1.201.0: 13,217 and 5,742), and with every cost-carried night whose walk past its stop
+// closes under the line naming the line in its NOTE, whether or not its sizing fell short (79 plans more, each sized short:
+// its NOTE stands beside the caps note).
+const PIN_T24_YEAR = { plans: 13350, armed: 5860, stated50: 6 };
 
 test('★★★ T24 (Fix8) the year at the edges: the rationale, the push and the card of every line plan state each relation true — but the rationale of a line stated at 50.00, counted', () => {
   const got = { plans: 0, armed: 0, stated50: 0 };
