@@ -15,7 +15,7 @@
  *    the 09-28 plan (issued 21:30:29, a clean night), while the on-peak that plan
  *    actually governed (Tue 09-29) imported 0 kWh.
  *  - the cost columns were declared and never written (the manual's chapter 15 section 6,
- *    now docs/reference/15-1-night-charge-planning.md “6. The learning ledger”: "no valid savings
+ *    now docs/reference/15-3-night-charge-ledger-and-scoring.md “6. The learning ledger”: "no valid savings
  *    counterfactual pre-write, and rates default unconfirmed" — both reasons had
  *    expired: rates confirmed, 24 actuated nights).
  *  - a PV band built on a forecast fitted on one Core (the 2026-09-27 21:06 restart,

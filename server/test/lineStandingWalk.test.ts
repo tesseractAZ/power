@@ -10,6 +10,9 @@ import { walkYear, closeUnder, panelGridAt, WALK_HOURS_ALL, WALK_HOURS_SAMPLE, t
  * v1.200.1 — THE YEAR ON A STANDING 50, walked through the real decisions (fixtures/lineStandingWalk.ts). Case A: 50 at the plan and the open. B: 50 at the plan, the
  * plant's own floor at the open. C: the own floor at the plan, 50 at the open. O: the plant's own floor throughout. W: 49 throughout, the written control of A.
  * The suite walks four hours; A5_IDENTITY_FULL=1 walks every hour, as the gates run it. STANDING_WALK_WRITE=1 writes lineStanding.walkIdentity.json (on a3588d96 only).
+ * v1.202.0 — re-written on v1.202.0: its nameplate groups equal a3588d96's (regenerated on c692f30e) with the walk past a cost stop disabled, and move only
+ * where the plan names a cost-carried night's close under its line, disclosed where its sizing held the line and beside the caps note where it fell short
+ * (O at 7-20 h, W at 4-9 h); the 0.944 groups move with the walks on the measured pool.
  */
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -28,7 +31,7 @@ const group = (cs: 'O' | 'W', b: Basis, h: number) => digest(ROWS.filter((r) => 
 if (process.env.STANDING_WALK_WRITE === '1') {
   const groups: Record<string, { n: number; sha: string }> = {};
   for (const cs of ['O', 'W'] as const) for (const b of ['np', 'm'] as const) for (const h of WALK_HOURS_ALL) groups[`${cs}|${b}|${h}`] = group(cs, b, h);
-  writeFileSync(FIXTURE, `${JSON.stringify({ generatedOn: 'a3588d96', walks: Object.values(groups).reduce((n, g) => n + g.n, 0), groups }, null, 1)}\n`);
+  writeFileSync(FIXTURE, `${JSON.stringify({ generatedOn: process.env.STANDING_WALK_BASE ?? 'a3588d96', walks: Object.values(groups).reduce((n, g) => n + g.n, 0), groups }, null, 1)}\n`);
   test('wrote the walk identity fixture', () => { assert.ok(true); });
 } else {
   const FX = JSON.parse(readFileSync(FIXTURE, 'utf8')) as { generatedOn: string; walks: number; groups: Record<string, { n: number; sha: string }> };
@@ -53,8 +56,10 @@ if (process.env.STANDING_WALK_WRITE === '1') {
   const PIN_A: Record<string, ReturnType<typeof stat>> = {
     'np|4': { nights: 233, on: 233, cost: 79, under: 18, close: 73, onMin: 116 }, 'np|8': { nights: 247, on: 247, cost: 52, under: 48, close: 78.5, onMin: 134 },
     'np|12': { nights: 256, on: 256, cost: 23, under: 82, close: 84.5, onMin: 156 }, 'np|20': { nights: 257, on: 257, cost: 3, under: 161, close: 89.3, onMin: 175 },
-    'm|4': { nights: 234, on: 234, cost: 78, under: 21, close: 73.2, onMin: 117 }, 'm|8': { nights: 248, on: 248, cost: 44, under: 52, close: 79.3, onMin: 137 },
-    'm|12': { nights: 256, on: 256, cost: 20, under: 95, close: 85.3, onMin: 159 }, 'm|20': { nights: 257, on: 257, cost: 3, under: 170, close: 89.6, onMin: 176 },
+    // v1.202.0 — re-measured with the walks on the measured pool (v1.201.0: m|4 234 / 21, m|8 248 / 79.3, m|12 256 / 95,
+    // m|20 170 / 176 min).
+    'm|4': { nights: 235, on: 235, cost: 78, under: 22, close: 73.2, onMin: 117 }, 'm|8': { nights: 250, on: 250, cost: 44, under: 52, close: 79.4, onMin: 137 },
+    'm|12': { nights: 257, on: 257, cost: 20, under: 93, close: 85.3, onMin: 159 }, 'm|20': { nights: 257, on: 257, cost: 3, under: 169, close: 89.6, onMin: 177 },
   };
 
   test('★★★ W2 case A, a standing 50: every night rides, with no reserve write, no restore, and the ceiling back; the exposure is pinned', () => {
@@ -98,7 +103,9 @@ if (process.env.STANDING_WALK_WRITE === '1') {
       && (cs === 'W' ? ROWS.some((a) => a.cs === 'A' && a.stands === true && a.label === r.label && a.b === r.b && a.h === r.h) : r.stands === true));
     return { claimed: rs.length, under: rs.filter(closeUnder).length };
   };
-  const PIN_STANDING_CLAIMED = FULL ? { A: { claimed: 3854, under: 188 }, W: { claimed: 3978, under: 184 } } : { A: { claimed: 1005, under: 45 }, W: { claimed: 1026, under: 40 } };
+  // v1.202.0 — re-measured (v1.201.0: full A 3854 / 188, W 3978 / 184; sample A 1005 / 45, W 1026 / 40): the walks on the measured pool, and the
+  // cost-carried nights the walk past the stop discloses no longer claimed.
+  const PIN_STANDING_CLAIMED = FULL ? { A: { claimed: 3904, under: 189 }, W: { claimed: 4025, under: 183 } } : { A: { claimed: 1009, under: 40 }, W: { claimed: 1028, under: 37 } };
 
   test('★★★ W5 PIN_STANDING_CLAIMED: the nights a standing 50 claims and closes under, beside the written control: the same order, and each short by what its line is higher', () => {
     assert.deepEqual({ A: claimed('A'), W: claimed('W') }, PIN_STANDING_CLAIMED);

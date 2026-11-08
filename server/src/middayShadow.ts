@@ -188,6 +188,7 @@ export function heldSpan(window: { startMs: number; endMs: number }, nextOnPeakS
  * heldImportEstimate — two pools walked hour by hour over the hold on the median forecast, as the
  * planner's grid-present carry walks them (nightChargeAdvisor expectedCarryKwh: PV into the pack,
  * load out of it over the discharge efficiency, a surplus stored at legEff — v1.194.0, chargeLegStep —
+ * v1.202.0: and the Cores' standby out of it, on the pool the plan's walks counted —
  * clamped to [floor, full]): one held at the written
  * reserve (lifted to it at the open, the grid being present), one at the owner's reserve. In each hour
  * the part of the load a pool's floor turns away is drawn from the grid; the held pool's extra, beyond
@@ -204,9 +205,13 @@ export function heldImportEstimate(o: {
   holdPct: number | null;
   /** The owner's reserve (the restore target). */
   floorPct: number;
+  /** The pool the plan's walks counted on, kWh (index.ts: NightChargePlan.planPool, else the panel's figure). */
   fullKwh: number;
   dischargeEff: number;
   legEff: number;
+  /** v1.202.0 — the Cores' standby the plan's walks drained, W (NightChargePlan.planPool.standbyW): drained from both pools
+   *  beside the load, pack side, as the planner's carry does. Absent ⇒ 0. */
+  standbyW?: number;
   centsAt: (ms: number) => number | null;
   replaceCentsPerKwh: number | null;
 }): HeldImport | null {
@@ -214,6 +219,7 @@ export function heldImportEstimate(o: {
   if (!ok(o.startSocPct) || !ok(o.holdPct) || !ok(o.floorPct) || !(o.fullKwh > 0) || !(o.untilMs > o.fromMs)) return null;
   if (!(o.dischargeEff > 0 && o.dischargeEff <= 1) || !(o.legEff > 0 && o.legEff <= 1)) return null;
   const full = o.fullKwh;
+  const standbyW = o.standbyW != null && Number.isFinite(o.standbyW) && o.standbyW > 0 ? o.standbyW : 0;
   const kwhOf = (pct: number): number => (full * Math.max(0, Math.min(100, pct))) / 100;
   let free = kwhOf(o.startSocPct);
   let held = free;
@@ -239,7 +245,7 @@ export function heldImportEstimate(o: {
     if (w <= 0) continue;
     const h = byHour.get(slot / HOUR_MS);
     if (h == null || !ok(h.pvP50W) || !ok(h.loadP50W)) return null;
-    const net = chargeLegStep((w * (Math.max(0, h.pvP50W) - Math.max(0, h.loadP50W) / o.dischargeEff)) / 1000, o.legEff);
+    const net = chargeLegStep((w * (Math.max(0, h.pvP50W) - Math.max(0, h.loadP50W) / o.dischargeEff - standbyW)) / 1000, o.legEff);
     const f = step(free, freeFloor, net);
     const k = step(held, holdFloor, net);
     free = f.pack;

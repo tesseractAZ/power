@@ -350,16 +350,16 @@ configuration:
     description: 'Advanced. The power each connected Core takes into its batteries while force-charging, in kW. It times the start of the night charge and sizes the planner''s automatic charge cap. Leave empty or 0 for 5.5 kW. A Grid-Charge Power Cap above 0 still sets the planner''s cap.'
   RUNWAY_POOL_OVERHEAD_FLOOR_W:
     name: Runway Standby Overhead Floor (W)
-    description: 'Advanced. The Cores'' own standby consumption, in watts, that the runway adds to the house load while the panel reports a battery pool, and that the night-charge outage cushion counts for its hours. Leave empty for 270 W, fitted on a three-Core pool; about 90 W per connected Core is a starting point for another pool. 0 here and in Runway Standby Overhead per Core removes it from both. The cushion uses the night-charge planner''s discharge efficiency for its load, not the runway''s marginal drain efficiency (an environment setting, 0.94 by default): at that default the cushion counts the runway''s own drain for its hours; set lower, the runway drains faster than the cushion assumes. Range 0-1500.'
+    description: 'Advanced. The Cores'' own standby consumption, in watts, that the runway adds to the house load while the panel reports a battery pool, and that the night-charge planner counts in its walks and the outage cushion for its hours. Leave empty for 270 W, fitted on a three-Core pool; about 90 W per connected Core is a starting point for another pool. 0 here and in Runway Standby Overhead per Core removes it from all three. The cushion uses the night-charge planner''s discharge efficiency for its load, not the runway''s marginal drain efficiency (an environment setting, 0.94 by default): at that default the cushion counts the runway''s own drain for its hours; set lower, the runway drains faster than the cushion assumes. Range 0-1500.'
   RUNWAY_CORE_OVERHEAD_W:
     name: Runway Standby Overhead per Core (W)
-    description: 'Advanced. Standby consumption per connected Core, in watts. It raises the overhead above the floor when more Cores are connected than the floor accounts for, in the runway and in the night-charge outage cushion alike (the floor''s note on the drain efficiency applies). Leave empty for 90 W. Range 0-500.'
+    description: 'Advanced. Standby consumption per connected Core, in watts. It raises the overhead above the floor when more Cores are connected than the floor accounts for, in the runway, the night-charge walks and the outage cushion alike (the floor''s note on the drain efficiency applies). Leave empty for 90 W. Range 0-500.'
   BMS_RESEED_MIN_GAP_WH:
     name: Lifetime Energy Re-seed Gap (Wh)
     description: 'Advanced. How far apart, in watt-hours, the stored lifetime energy totals and the batteries'' own counters may drift before the totals are re-seeded from the counters. Leave empty for 50000 Wh, about one Core''s capacity.'
   CAPACITY_SCALE_MIN:
     name: Minimum Capacity Scale
-    description: 'Advanced. The lowest measured battery-capacity ratio (full-charge capacity over nameplate) applied to the panel''s energy figures for the runway, the forecast, the idle-pool check and the night charge''s outage-cushion line. Leave empty for 0.8. Range 0.5-1; 1 keeps the cushion line on nameplate.'
+    description: 'Advanced. The lowest measured battery-capacity ratio (full-charge capacity over nameplate) applied to the panel''s energy figures for the runway, the forecast, the idle-pool check and the night-charge plan (its pool and outage-cushion line). Leave empty for 0.8. Range 0.5-1; 1 keeps that plan on nameplate.'
   FORECAST_NIGHT_START_HOUR:
     name: Forecast Night Start Hour
     description: 'Advanced. First hour (0-23) of the overnight band in which the load forecast is trimmed toward the load measured in the last hours. Leave empty for 21.'

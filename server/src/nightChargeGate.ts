@@ -111,7 +111,13 @@ function maxYmd(a: string, b: string): string { return a >= b ? a : b; }
  *  _basis / _kwh record the standby inside them), and every verdict keeps its rule on the row's own line — buy_err_kwh
  *  (the cushion moves the planned buy and the planner's own need together), plan_traj_floor_breached,
  *  cushion_breached. A pool held at ⌈line⌉ reads at or above the line; a line the standby lifts above the 50%
- *  envelope is carried or disclosed, as above. (v1.194.0 — the rule stated
+ *  envelope is carried or disclosed, as above. v1.202.0 — and so does the plan's pool counted on the packs' measured
+ *  capacity with the walks draining the Cores' standby (nightChargeAdvisor.ts plannerPoolKwh): a physics change of the
+ *  walks, not of any verdict's rule. buy_err_kwh is −netMiss/legEff (plannerSizingNeedBuyKwh), independent of the planned
+ *  buy; the line behind cushion_breached is the same percent; a row's percents are of plan_pool_kwh, and rows straddling
+ *  the release read apart by issued_at_ms. A cost-carried line night disclosed by its walk past the stop
+ *  (cushion_envelope_shortfall 1) is exempt as any disclosed row is, unless its force-charge never switched on
+ *  (armedNeverRanUnder). (v1.194.0 — the rule stated
  *  as practised; it read "bumped on ANY planner physics/algorithm change", which no change since v1.105.0
  *  followed.)
  *

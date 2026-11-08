@@ -33,11 +33,12 @@ test('★★★ source pins: every walk steps the pool through chargeLegStep; th
     [an, 'export async function computeMultiDayForecast(', /socWh \+ chargeLegStep\(pv - runwayDrainW\(load, poolBasis\.overheadW\), RUNWAY_CHARGE_EFFICIENCY\)/],
     [an, 'export async function computeProbabilisticForecast(', /chargeLegStep\(dP50Kwh \+ z \* sigmaNetKwh, RUNWAY_CHARGE_EFFICIENCY\)/],
     [an, 'export async function computeProbabilisticForecast(', /const netKwh = \(pvW: number, loadW: number\): number => chargeLegStep\(rawNetKwh\(pvW, loadW\), RUNWAY_CHARGE_EFFICIENCY\);/],
-    [nca, 'function simulate(', /packWh \+ chargeLegStep\(h\.pvP10W - h\.loadP90W \/ dischargeEff, chargeEff\)/],
-    [nca, 'export function expectedCarryKwh(', /pack \+ chargeLegStep\(\(w \* \(pv - Math\.max\(0, h\.loadP50W!\) \/ o\.dischargeEff\)\) \/ 1000, o\.legEff\)/],
+    // v1.202.0 — each discharge leg less the Cores' standby (the walks' standby, pack side), still through the charge leg.
+    [nca, 'function simulate(', /packWh \+ chargeLegStep\(h\.pvP10W - h\.loadP90W \/ dischargeEff - standbyW, chargeEff\)/],
+    [nca, 'export function expectedCarryKwh(', /pack \+ chargeLegStep\(\(w \* \(pv - Math\.max\(0, h\.loadP50W!\) \/ o\.dischargeEff - standbyW\)\) \/ 1000, o\.legEff\)/],
     [nca, 'export function expectedPvChargeWalk(', /chargeLegStep\(\(pvW \/ 1000\) \* dtH, o\.legEff\)/],
-    [nca, 'export function expectedForceChargeStart(', /pack \+ chargeLegStep\(\(\(pv - loadW \/ o\.dischargeEff\) \/ 1000\) \* \(EXPECTED_JIT_STEP_MS \/ HOUR_MS\), o\.legEff\)/],
-    ['middayShadow.ts', 'export function heldImportEstimate(', /const net = chargeLegStep\(\(w \* \(Math\.max\(0, h\.pvP50W\) - Math\.max\(0, h\.loadP50W\) \/ o\.dischargeEff\)\) \/ 1000, o\.legEff\);/],
+    [nca, 'export function expectedForceChargeStart(', /pack \+ chargeLegStep\(\(\(pv - loadW \/ o\.dischargeEff - standbyW\) \/ 1000\) \* \(EXPECTED_JIT_STEP_MS \/ HOUR_MS\), o\.legEff\)/],
+    ['middayShadow.ts', 'export function heldImportEstimate(', /const net = chargeLegStep\(\(w \* \(Math\.max\(0, h\.pvP50W\) - Math\.max\(0, h\.loadP50W\) \/ o\.dischargeEff - standbyW\)\) \/ 1000, o\.legEff\);/],
   ];
   for (const [file, head, re] of pins) assert.match(body(file, head), re, `${file} ${head}`);
   // The with-buy window walk is a closure inside computeNightChargePlan.
@@ -49,7 +50,8 @@ test('★★★ source pins: every walk steps the pool through chargeLegStep; th
   // Every simulate() call passes the charge leg (legEff) after the discharge leg.
   const calls = [...s.matchAll(/(?<!function )\bsimulate\((?!\))([^;]*?)\)(?:\.\w+)?;/gs)].map((m) => m[1]);
   assert.ok(calls.length >= 5, `${calls.length} simulate calls`);
-  for (const c of calls) assert.match(c, /dischargeEff, legEff, /, `simulate(${c.trim()})`);
+  // v1.202.0 — and the walks' standby after it.
+  for (const c of calls) assert.match(c, /dischargeEff, legEff, walkStandbyW, /, `simulate(${c.trim()})`);
   // One charge leg on the alarm path: the constant, not a literal.
   assert.match(src(an), /^export const RUNWAY_CHARGE_EFFICIENCY = Math\.sqrt\(DISPATCH_ROUND_TRIP_EFFICIENCY\);$/m);
   // The planner takes the step from the neutral module, never the runway's basis.

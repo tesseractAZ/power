@@ -1634,29 +1634,29 @@ const MUTANTS = [
   {
     id: 'A5-ii. ★★★ no closeUnder: a sized night whose own walk closes under its line is carried',
     file: NCA, tests: [T_LINE, T_YEAR],
-    find: '  const lineCloseUnder = lineArmed && !lineNearFull && !cushionShortfall && !lineWalkHolds(expected.levelPct, cushionLineSocPct);',
+    find: '  const lineCloseUnder = lineArmed && !lineNearFull && !cushionShortfall\n    && !lineWalkHolds(lineCloseAfterStopPct ?? expected.levelPct, cushionLineSocPct);',
     to: '  const lineCloseUnder = false; /* MUTANT */',
     why: 'The plan claims a 68.85% line its own walk closes at ~57.3% (ITEM 6).',
   },
   {
     id: 'A5-iii. ★★★ closeUnder also where the sizing fell short (the caps note doubled into the envelope)',
     file: NCA, tests: [T_LINE, T_YEAR],
-    find: '  const lineCloseUnder = lineArmed && !lineNearFull && !cushionShortfall && !lineWalkHolds(expected.levelPct, cushionLineSocPct);',
-    to: '  const lineCloseUnder = lineArmed && !lineNearFull && !lineWalkHolds(expected.levelPct, cushionLineSocPct); /* MUTANT */',
+    find: '  const lineCloseUnder = lineArmed && !lineNearFull && !cushionShortfall\n    && !lineWalkHolds(lineCloseAfterStopPct ?? expected.levelPct, cushionLineSocPct);',
+    to: '  const lineCloseUnder = lineArmed && !lineNearFull\n    && !lineWalkHolds(lineCloseAfterStopPct ?? expected.levelPct, cushionLineSocPct); /* MUTANT */',
     why: 'Hundreds of carried nights already disclosed by their caps note change cause and ledger column (and move plans A5 must not).',
   },
   {
     id: 'A5-iv(a). ★★ closeUnder judged against ⌈L⌉, not the line',
     file: NCA, tests: [T_LINE, T_YEAR],
-    find: '  const lineCloseUnder = lineArmed && !lineNearFull && !cushionShortfall && !lineWalkHolds(expected.levelPct, cushionLineSocPct);',
-    to: '  const lineCloseUnder = lineArmed && !lineNearFull && !cushionShortfall && !lineWalkHolds(expected.levelPct, lineAsk); /* MUTANT */',
+    find: '  const lineCloseUnder = lineArmed && !lineNearFull && !cushionShortfall\n    && !lineWalkHolds(lineCloseAfterStopPct ?? expected.levelPct, cushionLineSocPct);',
+    to: '  const lineCloseUnder = lineArmed && !lineNearFull && !cushionShortfall\n    && !lineWalkHolds(lineCloseAfterStopPct ?? expected.levelPct, lineAsk); /* MUTANT */',
     why: 'A walk holding the line by less than a point is disclosed as under it.',
   },
   {
     id: 'A5-iv(b). ★★ closeUnder judged against the start target, not the line',
     file: NCA, tests: [T_LINE, T_YEAR],
-    find: '  const lineCloseUnder = lineArmed && !lineNearFull && !cushionShortfall && !lineWalkHolds(expected.levelPct, cushionLineSocPct);',
-    to: '  const lineCloseUnder = lineArmed && !lineNearFull && !cushionShortfall && !lineWalkHolds(expected.levelPct, expected.startTargetPct ?? cushionLineSocPct); /* MUTANT */',
+    find: '  const lineCloseUnder = lineArmed && !lineNearFull && !cushionShortfall\n    && !lineWalkHolds(lineCloseAfterStopPct ?? expected.levelPct, cushionLineSocPct);',
+    to: '  const lineCloseUnder = lineArmed && !lineNearFull && !cushionShortfall\n    && !lineWalkHolds(lineCloseAfterStopPct ?? expected.levelPct, expected.startTargetPct ?? cushionLineSocPct); /* MUTANT */',
     why: 'Every night drawn back under ⌈L⌉ + 5 after the panel\'s stop is disclosed as under its line.',
   },
   {
@@ -1788,8 +1788,8 @@ const MUTANTS = [
   {
     id: 'A5-xvi. ★★ the disclosure judged on the start target the write is timed to (armedWriteLevelPct), not the walk\'s close',
     file: NCA, tests: [T_LINE, T_YEAR],
-    find: '  const lineCloseUnder = lineArmed && !lineNearFull && !cushionShortfall && !lineWalkHolds(expected.levelPct, cushionLineSocPct);',
-    to: "  const lineCloseUnder = lineArmed && !lineNearFull && !cushionShortfall && !lineWalkHolds(armedWriteLevelPct({ setpointSocPct, costCeilingSocPct, forceChargeLine }, { cost: inputs.forceChargeEligible === true, line: true }), cushionLineSocPct); /* MUTANT */",
+    find: '  const lineCloseUnder = lineArmed && !lineNearFull && !cushionShortfall\n    && !lineWalkHolds(lineCloseAfterStopPct ?? expected.levelPct, cushionLineSocPct);',
+    to: "  const lineCloseUnder = lineArmed && !lineNearFull && !cushionShortfall\n    && !lineWalkHolds(armedWriteLevelPct({ setpointSocPct, costCeilingSocPct, forceChargeLine }, { cost: inputs.forceChargeEligible === true, line: true }), cushionLineSocPct); /* MUTANT */",
     why: 'The floor of the walk is always above the line: no night closing under is ever disclosed.',
   },
   {
@@ -4520,15 +4520,15 @@ const MUTANTS = [
   {
     id: 'F10r2-e(ii). ★★★ the plan walks a re-ON the record cannot make (the finding: ~80.1%)',
     file: NCA, tests: [T_UNHELD],
-    find: "lineForceChargeEligible: inputs.lineForceChargeEligible === true, noReOn: lineNoReOn != null, runOn: lineRunOn, tickPoolKwh: fullKwh,\n",
-    to: "lineForceChargeEligible: inputs.lineForceChargeEligible === true, runOn: lineRunOn, tickPoolKwh: fullKwh, /* MUTANT */\n",
+    find: "lineForceChargeEligible: inputs.lineForceChargeEligible === true, noReOn: lineNoReOn != null, runOn: lineRunOn, tickPoolKwh: panelFullKwh,\n",
+    to: "lineForceChargeEligible: inputs.lineForceChargeEligible === true, runOn: lineRunOn, tickPoolKwh: panelFullKwh, /* MUTANT */\n",
     why: 'The words say none comes, and the figure beside them counts one.',
   },
   {
     id: 'F10r2-e(iii). ★★★ the line walk is not told',
     file: NCA, tests: [T_UNHELD],
-    find: "    acceptKw: o.window.acceptKw ?? null, noReOn: o.noReOn, runOn: o.runOn,\n",
-    to: "    acceptKw: o.window.acceptKw ?? null, runOn: o.runOn, /* MUTANT */\n",
+    find: "    acceptKw: o.window.acceptKw ?? null, noReOn: o.noReOn, runOn: o.runOn, standbyW: o.window.standbyW,\n",
+    to: "    acceptKw: o.window.acceptKw ?? null, runOn: o.runOn, standbyW: o.window.standbyW, /* MUTANT */\n",
     why: 'The same, one call down.',
   },
   {
@@ -4650,15 +4650,15 @@ const MUTANTS = [
   {
     id: 'F11-b(iv). ★★★ the line walk is not told, one call up',
     file: NCA, tests: [T_UNHELD],
-    find: "    acceptKw: o.window.acceptKw ?? null, noReOn: o.noReOn, runOn: o.runOn,\n",
-    to: "    acceptKw: o.window.acceptKw ?? null, noReOn: o.noReOn, /* MUTANT */\n",
+    find: "    acceptKw: o.window.acceptKw ?? null, noReOn: o.noReOn, runOn: o.runOn, standbyW: o.window.standbyW,\n",
+    to: "    acceptKw: o.window.acceptKw ?? null, noReOn: o.noReOn, standbyW: o.window.standbyW, /* MUTANT */\n",
     why: 'The same, one call up.',
   },
   {
     id: 'F11-b(v). ★★★ the plan does not pass it',
     file: NCA, tests: [T_UNHELD],
-    find: "noReOn: lineNoReOn != null, runOn: lineRunOn, tickPoolKwh: fullKwh,\n",
-    to: "noReOn: lineNoReOn != null, tickPoolKwh: fullKwh, /* MUTANT */\n",
+    find: "noReOn: lineNoReOn != null, runOn: lineRunOn, tickPoolKwh: panelFullKwh,\n",
+    to: "noReOn: lineNoReOn != null, tickPoolKwh: panelFullKwh, /* MUTANT */\n",
     why: 'The texts say on, the walk does not start: "is on" beside a drain to the close.',
   },
   {

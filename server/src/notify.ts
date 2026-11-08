@@ -1438,7 +1438,7 @@ function sizingShortfall(plan: Pick<NightChargePlan, 'cushionShortfall' | 'cushi
  *  whatever the reason or cause; above a full pool; held without its usual margin), on a carried night whose sizing
  *  fell short too (cause null, beside the caps note). Never "no force-charge" on an armed night. '' otherwise. PURE. */
 function envelopeShortfallNote(plan: Pick<NightChargePlan, 'cushionShortfallCause' | 'cushionLineSocPct' | 'cushionEnvelopeReason'
-  | 'expectedWriteLevelPct' | 'forceChargeLine' | 'expectedForceChargeMode' | 'reserveFloorPct'>): string {
+  | 'expectedWriteLevelPct' | 'forceChargeLine' | 'expectedForceChargeMode' | 'reserveFloorPct' | 'expectedCloseAfterStopPct'>): string {
   // (Fix8) Beside the 50% reserve and a full pool as lineBesidePct names it (a 100.03% line is "100.03%" above a full pool, a 50.03%
   // one "50.03%" above the reserve); a line stated at the reserve unnumbered.
   const line = plan.cushionLineSocPct != null && Number.isFinite(plan.cushionLineSocPct)
@@ -1446,12 +1446,13 @@ function envelopeShortfallNote(plan: Pick<NightChargePlan, 'cushionShortfallCaus
   if (plan.forceChargeLine != null) {
     const kind = lineNotHeldOf(plan);
     if (kind === 'closeUnder') {
-      const e = plan.expectedWriteLevelPct;
+      // v1.202.0 — on a night the cost force-charge carries, the close past its stop (the level is the stop it reaches first).
+      const e = plan.expectedCloseAfterStopPct ?? plan.expectedWriteLevelPct;
       return ` NOTE: on the median load the pool is expected to close at ${e != null && Number.isFinite(e) ? `~${round1(e)}%` : 'a level'}, under ${line} — residual risk remains.`;
     }
     if (kind === 'aboveFull') return ` NOTE: ${line} is above a full pool, so no charge can hold it — residual risk remains.`;
     if (kind === 'nearFull') return ` NOTE: ${line} is within 10 points of a full pool, so the force-charge cannot hold it with its usual margin — residual risk remains.`;
-    // Armed and disclosed, but no line-mode walk to say why (a plan this build does not make): armed, not claimed.
+    // Armed and disclosed with no walk that says why (a plan this build does not make): armed, not claimed.
     if (plan.cushionShortfallCause != null) {
       return ` NOTE: ${line} is above the ${RESERVE_WRITE_MAX_PCT}% the panel accepts as a reserve; its force-charge runs, but the plan does not claim the line — residual risk remains.`;
     }

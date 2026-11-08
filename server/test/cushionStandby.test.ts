@@ -44,6 +44,12 @@ import { withEnv } from './golden/support/env.js';
  * legs; S8 the year at (0.944, 270) and (nameplate, 270) with A's carrier invariant and the figures file; S9 the
  * parity with the runway; S10 the ledger helper (the recorder round trip is cushionStandbyLedger.test.ts);
  * S11 the plumbing.
+ *
+ * v1.202.0 — the plan's WALKS count the pool on the measured capacity and drain the same standby figure
+ * (nightChargeAdvisor.ts plannerPoolKwh, walkStandbyW): the cushion, its line and every write pinned here are B's; the
+ * kWh figures (the requirement, the buys), the arrival and a hold's no-buy setpoint are the walks', re-measured. Where w
+ * rises the walks drain more: what is written, the line, the requirement, the worst-case buy and the cost ceiling still
+ * never fall; a hold's setpoint (its no-buy prediction) and the expected figures may (measuredPlannerWalks.test.ts T12).
  */
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -97,7 +103,8 @@ test('★★★ S1 THE REFERENCE PLANT: 2026-10-12 resilience at ×0.944 with 27
   const deps = caseOf('2026-10-12 resilience').deps;
   const before = yearPlan(deps, S944);
   assert.deepEqual([before.cushionKwh, before.cushionLineSocPct, written(before)], [13.94, 32.02, 33]);
-  assert.deepEqual([before.requiredExtraKwh, before.buyKwh, before.targetSocPct], [23.38, 25.22, 32]);
+  // v1.202.0 — on the measured pool (v1.201.0's walks on nameplate: 23.38 and 25.22 kWh).
+  assert.deepEqual([before.requiredExtraKwh, before.buyKwh, before.targetSocPct], [24.25, 26.16, 32]);
   assert.equal('cushionStandby' in before, false);
 
   const p = yearPlan(deps, S944, 270);
@@ -110,7 +117,8 @@ test('★★★ S1 THE REFERENCE PLANT: 2026-10-12 resilience at ×0.944 with 27
   assert.equal(written(p), 34);
   assert.equal(chargeReservePct(p), 34);
   assert.equal(floorCushionLinePct(p), 33.26, 'every surface states the one line');
-  assert.deepEqual([p.requiredExtraKwh, p.buyKwh, p.targetSocPct, p.expectedWriteLevelPct], [24.3, 26.22, 33.3, 34]);
+  // v1.202.0 — the walks drain the 270 W too, on the measured pool (v1.201.0: 24.3 and 26.22 kWh).
+  assert.deepEqual([p.requiredExtraKwh, p.buyKwh, p.targetSocPct, p.expectedWriteLevelPct], [26.42, 28.5, 33.3, 34]);
   assert.equal(p.cushionShortfall, false);
   // The write holds the whole cushion on the measured capacity: (34 − 16)% × 86.999 = 15.66 ≥ 15.02 kWh,
   // 4.17 h at k·L + 270 W = 2.62 × 1.25 ÷ 0.94 + 0.27 = 3.754 kW (3.94 h before: 17% × 86.999 = 14.79).
@@ -254,7 +262,7 @@ test('★★★ S4 FAIL-SAFE — 0 W moves no number and no word (the key says 0
 
 /** Measured when the change was made (v1.201.0): the expected buy is not monotone in w (a higher write starts the
  *  just-in-time force-charge earlier, from a level that draws less) — 2027-08-09 13:00 at 0.944. */
-const PIN_S5_FALL = { label: '2027-08-09 13:00', from: 570, to: 600, expected: [3.43, 3.27] };
+const PIN_S5_FALL = { label: '2027-08-09 13:00', from: 570, to: 600, expected: [0.19, 0.02] }; // v1.202.0 (v1.201.0: 3.43 → 3.27)
 const STEPS_30 = Array.from({ length: 51 }, (_, i) => i * 30);
 const S075: CushionPoolScale = Object.freeze({ scale: 0.75, basis: 'measured' }) as CushionPoolScale;
 const scaleTag = (s: CushionPoolScale | null): string => (s == null ? 'np' : s.scale === 0.944 ? 'm' : `s${s.scale}`);
@@ -267,17 +275,23 @@ const scaleTag = (s: CushionPoolScale | null): string => (s == null ? 'np' : s.s
  * w = 0 plan lacks appears (a hold that charges aside). RETURNED: the ≥-w0 set's falls below the w = 0 plan (expected
  * buy, its write level, target SoC and the rest of the set), as `label|scale|w|field`, and those re-carried nights,
  * as `label|scale|w`, for the caller to pin.
+ * v1.202.0 — the walks drain the same w (walkStandbyW), so a HOLD's setpoint (its no-buy prediction at the close) falls
+ * as w rises, and the arrival (target SoC), the expected buy and its write level are disclosures that may fall below the
+ * w = 0 plan: the setpoint is in the monotone set on charge nights only (I-C4, over what is written), and the ≥-w0 set's
+ * falls of those disclosures are counted by field (`softUnderW0`), the rest returned as before (`underW0`).
  */
 function sweepW(
   cases: ReadonlyArray<{ label: string; deps: NightChargeInputDeps }>,
   scales: ReadonlyArray<CushionPoolScale | null>,
   o: { line?: boolean; steps?: readonly number[]; deps?: (d: NightChargeInputDeps) => NightChargeInputDeps; only?: (zero: StandbyPlan, top: StandbyPlan) => boolean } = {},
-): { plans: number; underW0: string[]; expectedFalls: number; crossings: number; reCarried: string[] } {
+): { plans: number; underW0: string[]; softUnderW0: Record<string, number>; holdSetpointFalls: number; expectedFalls: number; crossings: number; reCarried: string[] } {
   const steps = o.steps ?? STEPS_30;
   const atLeast = ['cushionLineSocPct', 'setpointSocPct', 'buyKwh', 'buyKwhDebiased', 'requiredExtraKwh', 'expectedBuyKwh',
     'expectedWriteLevelPct', 'costCeilingSocPct', 'targetSocPct'] as const;
+  /** v1.202.0 — disclosures the walks' standby moves: counted below the w = 0 plan, not returned one by one. */
+  const soft = new Set<string>(['expectedBuyKwh', 'expectedWriteLevelPct', 'targetSocPct']);
   const monotone = ['cushionLineSocPct', 'setpointSocPct', 'requiredExtraKwh', 'buyKwh', 'costCeilingSocPct'] as const;
-  const out = { plans: 0, underW0: [] as string[], expectedFalls: 0, crossings: 0, reCarried: [] as string[] };
+  const out = { plans: 0, underW0: [] as string[], softUnderW0: {} as Record<string, number>, holdSetpointFalls: 0, expectedFalls: 0, crossings: 0, reCarried: [] as string[] };
   for (const c of cases) {
     const deps = o.deps ? o.deps(c.deps) : c.deps;
     for (const scale of scales) {
@@ -293,11 +307,21 @@ function sweepW(
         for (const f of atLeast) {
           const a = zero[f] as number | null | undefined, b = p[f] as number | null | undefined;
           if (a == null) { if (!holdToCharge) assert.equal(b ?? null, null, `${tag} w ${w}: ${f} appeared`); continue; }
-          if (!(b != null && b >= a - 1e-9)) out.underW0.push(`${tag}|${w}|${f}`);
+          if (b != null && b >= a - 1e-9) continue;
+          // v1.202.0 — a hold's setpoint is its no-buy prediction (counted with the hold falls below); the disclosures, by field.
+          if (f === 'setpointSocPct' && !(zero.chargeTonight && p.chargeTonight)) continue;
+          if (soft.has(f)) out.softUnderW0[f] = (out.softUnderW0[f] ?? 0) + 1;
+          else out.underW0.push(`${tag}|${w}|${f}`);
         }
         for (const f of monotone) {
           const a = prev[f] as number | null | undefined, b = p[f] as number | null | undefined;
-          if (a != null) assert.ok(b != null && b >= a - 1e-9, `${tag} w ${w}: ${f} fell ${a} → ${b} as w rose`);
+          if (a == null) continue;
+          // v1.202.0 — the setpoint over what is written: a hold's (its no-buy prediction) falls with the walks' drain.
+          if (f === 'setpointSocPct' && !(prev.chargeTonight && p.chargeTonight)) {
+            if (b != null && b < a - 1e-9) out.holdSetpointFalls += 1;
+            continue;
+          }
+          assert.ok(b != null && b >= a - 1e-9, `${tag} w ${w}: ${f} fell ${a} → ${b} as w rose`);
         }
         const wa = written(prev), wb = written(p);
         if (prev.chargeTonight && p.chargeTonight && wa != null) assert.ok(wb! >= wa, `${tag} w ${w}: write ${wa} → ${wb}`);
@@ -324,7 +348,10 @@ test('★★★ S5 MONOTONE — on the year, w = 0…1500 in 30 W steps on both 
   assert.deepEqual(out.underW0, [], 'nothing under the w = 0 plan (no line force-charge eligibility passed)');
   assert.deepEqual(out.reCarried, [], 'no disclosed shortfall vanishes');
   assert.ok(out.expectedFalls > 0, 'the expected buy is not monotone in w: the set it is held in is ≥ the w = 0 plan');
-  // The example (critique B R2): 3.43 → 3.27 kWh from 570 to 600 W, while the line, setpoint and buy rise.
+  // v1.202.0 — the walks drain w too: a hold's no-buy setpoint falls as w rises, and the arrival and the expected buy can
+  // fall below the w = 0 plan (disclosures). What is written and sized does not (the monotone set, asserted in the sweep).
+  assert.deepEqual([out.softUnderW0, out.holdSetpointFalls], [{ targetSocPct: 17_752, expectedBuyKwh: 366 }, 6416]);
+  // The example (critique B R2): 0.19 → 0.02 kWh from 570 to 600 W (v1.201.0: 3.43 → 3.27), while the line, setpoint and buy rise.
   const deps = caseOf(PIN_S5_FALL.label).deps;
   const a = yearPlan(deps, S944, PIN_S5_FALL.from), b = yearPlan(deps, S944, PIN_S5_FALL.to);
   assert.deepEqual([a.expectedBuyKwh, b.expectedBuyKwh], PIN_S5_FALL.expected);
@@ -332,7 +359,8 @@ test('★★★ S5 MONOTONE — on the year, w = 0…1500 in 30 W steps on both 
   assert.ok(b.expectedBuyKwh! >= yearPlan(deps, S944, 0).expectedBuyKwh!, 'never under the w = 0 plan');
 });
 
-/** Measured on v1.200.1 (v1.201.0), with lineForceChargeEligible true (a write mode; index.ts passes it on every live
+/** v1.202.0 — re-measured with the walks on the measured pool and draining w (the figures below are v1.202.0's; the
+ *  v1.201.0 account follows). Measured on v1.200.1 (v1.201.0), with lineForceChargeEligible true (a write mode; index.ts passes it on every live
  *  leg): the ≥-w0 set's falls on the S5 sweep — the expected write level of the carried 2027-01-04 line nights at
  *  0.944 from 1050 W (78.4% at 0 W; 78.3% at 1050 W, 77.5% at 1500 W), and of the disclosed 2027-01-12 +1 01:30 night
  *  (an EV, the caps note at every figure) from 570 W on nameplate and 390 W at 0.944, where its line comes within 10
@@ -341,11 +369,14 @@ test('★★★ S5 MONOTONE — on the year, w = 0…1500 in 30 W steps on both 
  *  And with the year's 4 h cases at 8, 12, 14 and 16 h at 270 W: the plans whose expected buy or write level falls
  *  below the 0 W plan, and the armed lines the standby disarms — none (v1.200.0 arms a line whatever its ask). */
 const PIN_S5_LINE = {
-  labels: ['2027-01-04 21:30', '2027-01-04 13:00'], fromW: 1050, levels: [78.4, 78.3, 77.5], swept: [2406, 17_150],
+  labels: ['2027-01-04 21:30', '2027-01-04 13:00'], fromW: 1050, levels: [80, 76.8, 74.9], swept: [2391, 17_900],
   handOff: { label: '2027-01-12 +1 01:30', fromW: { np: 570, m: 390 }, levels: [70, 50], expectedBuyKwh: 35.34 },
-  hours: { 8: { m: [11, 0], np: [8, 0] }, 12: { m: [29, 0], np: [20, 0] }, 14: { m: [34, 0], np: [34, 0] }, 16: { m: [26, 0], np: [35, 0] } } as Record<number, Record<'m' | 'np', [number, number]>>,
-  example8: { label: '2027-04-13 21:30', expectedBuyKwh: [40.8, 38.77], expectedWriteLevelPct: [74.4, 70.3] },
-  example16: { label: '2026-10-26 21:30', expectedBuyKwh: [56.29, 56.29], expectedWriteLevelPct: [96.5, 97.4] },
+  hours: { 8: { m: [30, 0], np: [23, 0] }, 12: { m: [57, 0], np: [52, 0] }, 14: { m: [81, 0], np: [66, 0] }, 16: { m: [106, 0], np: [88, 0] } } as Record<number, Record<'m' | 'np', [number, number]>>,
+  example8: { label: '2027-04-13 21:30', expectedBuyKwh: [38.5, 44.33], expectedWriteLevelPct: [72.3, 79.1] },
+  example16: { label: '2026-10-26 21:30', expectedBuyKwh: [56.29, 56.29], expectedWriteLevelPct: [96.5, 97] },
+  /** v1.202.0 — the ≥-w0 set's disclosure falls with the walks draining w, the holds' setpoint falls, and the one night A's
+   *  re-ON walk re-carries as w rises (the critique's claim flip in a write mode; measuredPlannerWalks.test.ts T12). */
+  soft: { targetSocPct: 3110, expectedWriteLevelPct: 434, expectedBuyKwh: 52 }, holdSetpointFalls: 336, reCarried: ['2026-10-13 13:00|m|420'],
 };
 
 test('★★★ S5 LINE NIGHTS — with line force-charge eligibility (a write mode) the monotone set holds as w rises; the expected buy and its write level are ≥ the w = 0 plan except on carried line nights, as measured', () => {
@@ -370,12 +401,11 @@ test('★★★ S5 LINE NIGHTS — with line force-charge eligibility (a write m
   const out = sweepW(CASES, [null, S944], { line: true, only: (zero, top) => onLine(zero) || onLine(top) });
   assert.deepEqual([offLine, out.plans], PIN_S5_LINE.swept, '[plans off the line, checked identical; line-night plans swept]');
   const ho = PIN_S5_LINE.handOff;
-  const pinned = [
-    ...PIN_S5_LINE.labels.flatMap((l) => STEPS_30.filter((w) => w >= PIN_S5_LINE.fromW).map((w) => `${l}|m|${w}|expectedWriteLevelPct`)),
-    ...(['np', 'm'] as const).flatMap((s) => STEPS_30.filter((w) => w >= ho.fromW[s]).map((w) => `${ho.label}|${s}|${w}|expectedWriteLevelPct`)),
-  ];
-  assert.deepEqual(out.underW0, pinned, 'the ≥-w0 set under the w = 0 plan: the carried 2027-01-04 nights at 0.944 and the 2027-01-12 hand-off');
-  assert.deepEqual(out.reCarried, [], 'no disclosed shortfall vanishes');
+  // v1.202.0 — the expected write level is a disclosure the walks' drain moves (counted in softUnderW0, with the carried
+  // 2027-01-04 nights and the 2027-01-12 hand-off among them); nothing else of the ≥-w0 set falls under the w = 0 plan.
+  assert.deepEqual(out.underW0, [], 'the ≥-w0 set under the w = 0 plan, the disclosures aside');
+  assert.deepEqual([out.softUnderW0, out.holdSetpointFalls], [PIN_S5_LINE.soft, PIN_S5_LINE.holdSetpointFalls]);
+  assert.deepEqual(out.reCarried, PIN_S5_LINE.reCarried, 'the one disclosed night a higher w re-carries (A\'s re-ON walk)');
   for (const [s, scale] of [['np', null], ['m', S944]] as const) {
     const [x, y] = [ho.fromW[s] - 30, ho.fromW[s]].map((w) => yearPlan(caseOf(ho.label).deps, scale, w, true) as StandbyPlan & { expectedForceChargeMode?: unknown });
     assert.deepEqual([x.expectedWriteLevelPct, y.expectedWriteLevelPct], ho.levels, `${s}: the level stated`);
@@ -400,13 +430,17 @@ test('★★★ S5 LINE NIGHTS — with line force-charge eligibility (a write m
         if (b0.cushionBasis !== 'islanded-outage') continue;
         const p = yearPlan(d, scale, 270, true) as StandbyPlan & { forceChargeLine?: unknown; cushionEnvelopeReason?: unknown };
         for (const f of ['cushionLineSocPct', 'setpointSocPct', 'requiredExtraKwh', 'buyKwh', 'costCeilingSocPct'] as const) {
+          // v1.202.0 — the setpoint over what is written: a hold's is its no-buy prediction, which the walks' drain lowers.
+          if (f === 'setpointSocPct' && !(b0.chargeTonight && p.chargeTonight)) continue;
           const x = b0[f] as number | null | undefined, y = p[f] as number | null | undefined;
           if (x != null) assert.ok(y != null && y >= x - 1e-9, `${c.label} ${H} h ${name}: ${f} fell ${x} → ${y}`);
         }
         if (b0.chargeTonight) assert.ok(p.chargeTonight && written(p)! >= written(b0)!, `${c.label} ${H} h ${name}: the write`);
         if ((['expectedBuyKwh', 'expectedWriteLevelPct'] as const).some((f) => b0[f] != null && !(p[f] != null && p[f]! >= b0[f]! - 1e-9))) fell += 1;
         if (b0.forceChargeLine != null && p.forceChargeLine == null) dropped += 1;
-        if ((p.forceChargeLine != null || p.cushionEnvelopeReason != null) && p.expectedWriteLevelPct! < p.cushionLineSocPct! - 0.05 - 1e-9) {
+        // v1.202.0 — a night the cost force-charge carries closes where its walk past the stop ends (expectedCloseAfterStopPct).
+        const closeOf = (p as StandbyPlan & { expectedCloseAfterStopPct?: number }).expectedCloseAfterStopPct ?? p.expectedWriteLevelPct!;
+        if ((p.forceChargeLine != null || p.cushionEnvelopeReason != null) && closeOf < p.cushionLineSocPct! - 0.05 - 1e-9) {
           assert.equal(p.cushionShortfall, true, `${c.label} ${H} h ${name}: a line night under its line, undisclosed`);
         }
       }
@@ -425,18 +459,23 @@ test('★★★ S5 LINE NIGHTS — with line force-charge eligibility (a write m
   assert.deepEqual([x16.forceChargeLine != null, y16.forceChargeLine != null, x16.cushionEnvelopeReason ?? null, y16.cushionEnvelopeReason], [true, true, null, 'nearFull'], 'still armed past an ask of 90, and disclosed');
 });
 
-/** Measured (v1.201.0 review): where the standby lifts the line past 100% of the pool. */
+/** Measured (v1.201.0 review): where the standby lifts the line past 100% of the pool. v1.202.0 — re-measured with the
+ *  walks on the pool and draining w (v1.201.0's figure in a comment where it moved). */
 const PIN_S5_CLIFF = {
-  // 2027-02-09 21:30 at 12 h on ×0.75: [line, requirement, worst-case buy, target, shortfall] at 560 and 570 W.
-  a: { label: '2027-02-09 21:30', hours: 12, at560: [99.98, 84.67, 91.3, 100, false], at570: [100.15, 99.04, 106.8, 100, true] },
-  // 2027-02-01 21:30 at 47.65 h on ×0.944, a 40 kWh minimum buy: [charge, buy, requirement, written] at 0 and 270 W.
-  b: { label: '2027-02-01 21:30', hours: 47.65, minBuyKwh: 40, at0: [true, 42.04, 38.98, 50], at270: [true, 84.88, 78.71, 50] },
-  // 2027-02-09 21:30 at 14 h on ×0.75, unmeetable at 0 W: v1.200.1's proxy [requirement, buy, target], then full effort.
-  c: { label: '2027-02-09 21:30', hours: 14, proxy: [61.27, 66.06, 94.6], full: [99.04, 106.8, 100] },
-  // (d) [crossings, plans] over 12/20/30 h × three scales, and with eligibility at 20 h; there, measured on v1.200.1, the
-  // nights its line walk re-carries ('closeUnder' at one figure, closing at or above the higher line at the next).
+  // 2027-02-09 21:30 at 12 h on ×0.75: [line, requirement, worst-case buy, target, shortfall] at 560 and 570 W (560 W:
+  // 84.67 and 91.3 kWh in v1.201.0).
+  a: { label: '2027-02-09 21:30', hours: 12, at560: [99.98, 85.09, 91.75, 100, false], at570: [100.15, 99.04, 106.8, 100, true] },
+  // 2027-02-01 21:30 at 47.65 h on ×0.944, a 40 kWh minimum buy: [charge, buy, requirement, written] at 0 and 270 W (0 W:
+  // 42.04 and 38.98 kWh in v1.201.0).
+  b: { label: '2027-02-01 21:30', hours: 47.65, minBuyKwh: 40, at0: [true, 42.47, 39.38, 50], at270: [true, 84.88, 78.71, 50] },
+  // 2027-02-09 21:30 at 14 h on ×0.75, unmeetable at 0 W: v1.200.1's proxy [requirement, buy, target] — on the measured
+  // pool (61.27, 66.06, 94.6 on v1.201.0's walks) — then full effort.
+  c: { label: '2027-02-09 21:30', hours: 14, proxy: [50.67, 54.64, 91.2], full: [99.04, 106.8, 100] },
+  // (d) [crossings, plans] over 12/20/30 h × three scales, and with eligibility at 20 h; there the nights its line walk
+  // re-carries ('closeUnder' at one figure, closing at or above the higher line at the next) — v1.202.0's five; v1.200.1's
+  // walks re-carried 2027-01-26 21:30 and 13:00 at 750 W and 2027-04-26 21:30 and 13:00 at 600 W, on ×0.75.
   sweep: [2159, 21_590], sweepLine: [1136, 11_360],
-  reCarried: ['2027-01-26 21:30|s0.75|750', '2027-01-26 13:00|s0.75|750', '2027-04-26 21:30|s0.75|600', '2027-04-26 13:00|s0.75|600'],
+  reCarried: ['2026-10-15 13:00|s0.75|450', '2026-11-11 21:30|s0.75|150', '2026-11-11 13:00|s0.75|150', '2027-02-24 21:30|s0.75|450', '2027-02-24 13:00|s0.75|450'],
 };
 
 test('★★★ S5 THE POOL CLIFF — where the standby lifts the line past 100% of the pool, the requirement and the buy do not fall and a charge night does not hold; with no figure or 0 W, v1.200.1\'s plan', () => {
@@ -490,23 +529,31 @@ test('★★★ S5 THE POOL CLIFF — where the standby lifts the line past 100%
 
 /* ══ S6 — the scope ═══════════════════════════════════════════════════════════ */
 
-test('★★★ S6 SCOPE — the legacy band and a disabled cushion do not move at any w, and carry no key', () => {
+test('★★★ S6 SCOPE — the legacy band and a disabled cushion count no standby in their cushion at any w, and carry no key; v1.202.0, their walks drain it', () => {
+  // v1.202.0 — the cushion (B's term) is the islanded-outage cushion's alone; the plan's WALKS drain the figure on every
+  // basis (walkStandbyW, NightChargePlan.planPool.standbyW). So the band and a disabled cushion keep their line and carry no
+  // cushionStandby; their walks' figures move with w, and at 0 W they are as with no figure.
   for (const o of [{ islandedLoadKw: null }, { outageCushionHours: 0 }] as const) {
     for (const scale of [undefined, S944]) {
       const base = plan({ ...o, ...(scale ? { cushionPoolScale: scale } : {}) });
-      for (const w of [0, 270, 1500]) {
+      assert.equal(planDigest(plan({ ...o, ...(scale ? { cushionPoolScale: scale } : {}), cushionStandbyW: 0 })), planDigest(base), `${JSON.stringify(o)} at 0 W`);
+      for (const w of [270, 1500]) {
         const p = plan({ ...o, ...(scale ? { cushionPoolScale: scale } : {}), cushionStandbyW: w });
-        assert.equal(planDigest(p), planDigest(base), `${JSON.stringify(o)} at ${w} W`);
         assert.equal('cushionStandby' in p, false);
+        assert.deepEqual([p.cushionKwh, p.cushionLineSocPct], [base.cushionKwh, base.cushionLineSocPct], `${JSON.stringify(o)} at ${w} W: the cushion and its line`);
+        assert.equal(p.planPool?.standbyW, w, 'the walks drain it');
+        assert.ok(written(p)! >= written(base)! && p.requiredExtraKwh! >= base.requiredExtraKwh! - 1e-9, `${JSON.stringify(o)} at ${w} W: the write and the requirement`);
       }
     }
   }
-  // On the year: every legacy-pct and null plan is byte-identical at 270 W.
+  // On the year: every legacy-pct and null plan keeps its cushion, line and no key at 270 W, and writes no lower.
   let legacy = 0;
   for (const c of CASES) {
     const base = yearPlan(c.deps, S944);
     if (base.cushionBasis === 'islanded-outage') continue;
-    assert.equal(planDigest(yearPlan(c.deps, S944, 270)), planDigest(base), c.label);
+    const p = yearPlan(c.deps, S944, 270);
+    assert.deepEqual([p.cushionKwh, p.cushionLineSocPct, 'cushionStandby' in p], [base.cushionKwh, base.cushionLineSocPct, false], c.label);
+    if (base.chargeTonight) assert.ok(p.chargeTonight && written(p)! >= written(base)!, `${c.label}: the write`);
     if (base.cushionBasis === 'legacy-pct') legacy += 1;
   }
   assert.equal(legacy, 148);
@@ -516,8 +563,10 @@ test('★★★ S6 SCOPE — the cost formula is untouched: a cost target above 
   const base = plan({ ...COST55, cushionPoolScale: S944 });
   const p = plan({ ...COST55, cushionPoolScale: S944, cushionStandbyW: 270 });
   assert.deepEqual([p.costCeilingSocPct, p.setpointSocPct, chargeReservePct(p)], [40.3, 40.3, 40]);
-  assert.equal(p.buyKwh, base.buyKwh, 'the cost target, not the line, sizes the buy');
-  assert.equal(p.expectedBuyKwh, base.expectedBuyKwh);
+  // v1.202.0 — the cost target, not the line, sizes the buy; the walks drain the 270 W on the way to it, so the buy rises
+  // with it (33.86 → 34.78 kWh) and the expected draw to 40% with the drain to the window open (20.33 → 20.91 kWh).
+  assert.deepEqual([base.buyKwh, p.buyKwh], [33.86, 34.78], 'the cost target, not the line, sizes the buy');
+  assert.deepEqual([base.expectedBuyKwh, p.expectedBuyKwh], [20.33, 20.91]);
   // The line it is bounded below by moved: 10 + 100 × (18.85 + 8 × 0.27) ÷ 86.999 = 34.15%.
   assert.equal(p.cushionKwh, 21.01);
   assert.equal(p.cushionLineSocPct, 34.15);
@@ -528,12 +577,16 @@ test('★★★ S6 SCOPE — the cost formula is untouched: a cost target above 
  *  cost ceiling is at or above the new line's whole-percent ask, ⌈line⌉ (nothing moves), and those whose ceiling sits
  *  between the new line and ⌈line⌉ (the write rises to ⌈line⌉: the setpoint is max(target, ⌈line⌉)). */
 const PIN_S6_COST = {
-  m: { atOrAboveAsk: 414, between: ['2027-03-21 21:30', '2027-03-21 +1 01:30'] },
-  np: { atOrAboveAsk: 417, between: ['2027-08-09 13:00'] },
-  example: { label: '2027-08-09 13:00', costCeilingSocPct: 49.2, line: [46.71, 49.05], written: [49, 50], buyKwh: [20.28, 20.28] },
+  // v1.202.0 — `rose`: a write the walks' drain lifts (2027-06-04 13:00: the window, an EV sharing it, no longer reaches the
+  // line, so the shortfall keeps the raw surplus and the ceiling rises 42.7 → 51.5%, written 43 → 50).
+  m: { atOrAboveAsk: 414, between: ['2027-03-21 21:30', '2027-03-21 +1 01:30'], rose: ['2027-06-04 13:00'] },
+  np: { atOrAboveAsk: 417, between: ['2027-08-09 13:00'], rose: ['2027-06-04 13:00'] },
+  // v1.202.0 — the buy rises with the walks' drain (20.28 → 21.28 kWh; v1.201.0: 20.28 both).
+  example: { label: '2027-08-09 13:00', costCeilingSocPct: 49.2, line: [46.71, 49.05], written: [49, 50], buyKwh: [20.28, 21.28] },
 };
 
-test('★★★ S6 SCOPE — on the year, a cost night whose cost ceiling is at or above ⌈the new line⌉ writes and buys what it did; one between the line and ⌈line⌉ writes ⌈line⌉', () => {
+test('★★★ S6 SCOPE — on the year, a cost night whose cost ceiling is at or above ⌈the new line⌉ writes what it did (v1.202.0: or more, where its de-bias falls away) and buys no less; one between the line and ⌈line⌉ writes ⌈line⌉', () => {
+  const rose: Record<'m' | 'np', string[]> = { m: [], np: [] };
   for (const [name, scale] of [['m', S944], ['np', null]] as const) {
     let atOrAbove = 0;
     const between: string[] = [];
@@ -546,7 +599,11 @@ test('★★★ S6 SCOPE — on the year, a cost night whose cost ceiling is at 
       const ask = askOf((p.cushionLineSocPct! / 100) * c.deps.fullKwh, c.deps.fullKwh);
       if (p.costCeilingSocPct >= ask) {
         atOrAbove += 1;
-        assert.deepEqual([written(p), p.buyKwh], [written(b), b.buyKwh], `${c.label} ${name}: the cost target writes and buys what it did`);
+        // v1.202.0 — no lower write, no lower buy (the walks drain w on the way to the target). A write rises where the
+        // drain leaves the window short of the line, so the de-bias keeps the raw surplus and the ceiling rises with it.
+        assert.ok(written(p)! >= written(b)!, `${c.label} ${name}: the cost target writes ${written(b)} → ${written(p)}`);
+        if (written(p)! > written(b)!) rose[name].push(c.label);
+        assert.ok(p.buyKwh! >= b.buyKwh! - 1e-9, `${c.label} ${name}: the buy ${b.buyKwh} → ${p.buyKwh}`);
       } else if (p.costCeilingSocPct > p.cushionLineSocPct!) {
         between.push(c.label);
         assert.equal(written(p), Math.min(RESERVE_WRITE_MAX_PCT, ask), `${c.label} ${name}: ⌈line⌉`);
@@ -554,6 +611,7 @@ test('★★★ S6 SCOPE — on the year, a cost night whose cost ceiling is at 
       }
     }
     assert.equal(atOrAbove, PIN_S6_COST[name].atOrAboveAsk, `${name}: cost ceilings at or above ⌈line⌉`);
+    assert.deepEqual(rose[name], PIN_S6_COST[name].rose, `${name}: the cost writes that rise`);
     assert.deepEqual(between, PIN_S6_COST[name].between, `${name}: cost ceilings between the line and ⌈line⌉`);
   }
   const E = PIN_S6_COST.example;
@@ -596,7 +654,10 @@ test('★★★ S6 (I-B3, the tripwire) — the standby is divided by the scale 
 /* ══ S7 — agreement and the legs ══════════════════════════════════════════════ */
 
 /** Measured when the change was made (v1.201.0) at (0.944, 270): the hold that becomes a charge. */
-const PIN_S7_HOLD = { label: '2027-05-20 21:30', buyKwh: 1.76 };
+// v1.202.0 — on the measured pool 2027-05-20 21:30 already charges with no standby (v1.201.0's case: a 1.76 kWh charge);
+// 2026-10-25 21:30 is the year's first night between the lines: its pack at the close, 42.1%, holds the 41.74% line and not
+// the 42.98% one.
+const PIN_S7_HOLD = { label: '2026-10-25 21:30', buyKwh: 2.02 };
 
 test('★★ S7 AGREEMENT — a hold whose pack at the close sits between the two lines charges; a charge-bound night that held the old line discloses a shortfall and still writes the line', () => {
   const deps = caseOf(PIN_S7_HOLD.label).deps;
@@ -639,7 +700,8 @@ test('★★ S7 LEGS — the backup leg asks more against the higher line; the m
   assert.deepEqual([b0.cushionLineSocPct, b0.setpointSocPct, b0.requiredExtraKwh, b0.cushionTroughSocPct], [30.45, 53.8, 31.6, 30.45]);
   // The walk to the horizon end drains the same energy from any start, so the pack it asks for rises by the
   // line's own 2.34 points (2.16 kWh on 92.16).
-  assert.deepEqual([b1.cushionLineSocPct, b1.setpointSocPct, b1.requiredExtraKwh, b1.cushionTroughSocPct], [32.8, 56.1, 33.58, 32.8]);
+  // v1.202.0 — and the walk itself drains the 270 W for every hour to the horizon end (56.1% and 33.58 kWh with v1.201.0's walks).
+  assert.deepEqual([b1.cushionLineSocPct, b1.setpointSocPct, b1.requiredExtraKwh, b1.cushionTroughSocPct], [32.8, 62.6, 40.13, 32.8]);
   assert.equal(b1.cushionShortfall, false);
   // The mid-day leg: no load after the window, so R is the line itself and T_mid's line term sets it.
   const mid = (o: Partial<NightChargeInputs> & { cushionStandbyW?: unknown } = {}) => plan({
@@ -652,7 +714,10 @@ test('★★ S7 LEGS — the backup leg asks more against the higher line; the m
   const m0 = mid();
   const m1 = mid({ cushionStandbyW: 270 });
   assert.deepEqual([m0.reserveTargetBasis, m0.setpointSocPct], ['line', 31]);
-  assert.deepEqual([m1.reserveTargetBasis, m1.setpointSocPct], ['line', 33]);
+  // v1.202.0 — with the walks draining the 270 W, the hours after the window are no longer free: the resilience walk to the
+  // next open (R) asks 40%, above ⌈the new line⌉ = 33, and sets T_mid (v1.201.0's walks: the line term, 33).
+  assert.deepEqual([m1.reserveTargetBasis, m1.setpointSocPct, m1.cushionLineSocPct], ['resilience', 40, 32.8]);
+  assert.ok(m1.setpointSocPct! >= Math.ceil(m1.cushionLineSocPct!), 'T_mid at or above ⌈the new line⌉');
   assert.equal(middayReentryLinePct(30, 10), 35, 'floor + 25: unchanged, and not on the cushion');
 });
 
@@ -660,10 +725,12 @@ test('★★ S7 LEGS — the backup leg asks more against the higher line; the m
 
 /** Measured when the change was made (v1.201.0), against the v1.200.1 plan at the same scale (no standby), at
  *  0.944 and on nameplate: writes raised, shortfalls disclosed, holds that charge, charges that hold, and the charge
- *  plans whose line is over the 50% envelope with no shortfall (no line force-charge eligibility passed). */
+ *  plans whose line is over the 50% envelope with no shortfall (no line force-charge eligibility passed).
+ *  v1.202.0 — re-measured with the walks on the pool and draining the figure (v1.201.0: writtenUp 156 / 162, shortfallOn 5,
+ *  holdToCharge 3, overEnvelope [24, 36] / [13, 23]); `soft`: the walks' disclosures and the holds' setpoints that fall. */
 const PIN_S8 = {
-  m: { islanded: 702, lineUp: 702, writtenUp: 156, shortfallOn: 5, holdToCharge: 3, chargeToHold: 0, overEnvelope: [24, 36] },
-  np: { islanded: 702, lineUp: 702, writtenUp: 162, shortfallOn: 5, holdToCharge: 3, chargeToHold: 0, overEnvelope: [13, 23] },
+  m: { islanded: 702, lineUp: 702, writtenUp: 163, shortfallOn: 12, holdToCharge: 15, chargeToHold: 0, overEnvelope: [22, 36], soft: { targetSocPct: 169, expectedBuyKwh: 4, setpointSocPct: 85 }, reCarried: 0 },
+  np: { islanded: 702, lineUp: 702, writtenUp: 163, shortfallOn: 10, holdToCharge: 9, chargeToHold: 0, overEnvelope: [13, 21], soft: { targetSocPct: 190, expectedBuyKwh: 5, setpointSocPct: 94 }, reCarried: 0 },
 };
 /** Measured (v1.201.0): A's carrier on the B year — qualifying plans, carried (eligible), and the rest (neither
  *  carried nor disclosed), at 0.944 and on nameplate. */
@@ -671,37 +738,50 @@ const PIN_S8_CARRIER = { m: { qualifying: 53, carried: 53, rest: 0 }, np: { qual
 /** Measured (v1.201.0 review): the same year in the states the add-on runs — lineForceChargeEligible true (a write
  *  mode) and false (advisory) — against v1.200.1 in the same state: writes raised, shortfalls disclosed (the
  *  envelope's included), holds that charge, charges that hold, and the plans the line force-charge carries. */
+/** v1.202.0 — re-measured as PIN_S8 (v1.201.0: writtenUp 156 / 162, shortfallOn 5 on, 15 / 18 off, holdToCharge 3). */
 const PIN_S8_LIVE = {
   on: {
-    m: { writtenUp: 156, shortfallOn: 5, holdToCharge: 3, chargeToHold: 0, carried: [37, 53], carryDropped: 0 },
-    np: { writtenUp: 162, shortfallOn: 5, holdToCharge: 3, chargeToHold: 0, carried: [22, 40], carryDropped: 0 },
+    m: { writtenUp: 163, shortfallOn: 13, holdToCharge: 15, chargeToHold: 0, carried: [37, 53], carryDropped: 0, soft: { targetSocPct: 169, expectedBuyKwh: 6, setpointSocPct: 85, expectedWriteLevelPct: 6 }, reCarried: 0 },
+    np: { writtenUp: 163, shortfallOn: 10, holdToCharge: 9, chargeToHold: 0, carried: [22, 40], carryDropped: 0, soft: { targetSocPct: 190, expectedBuyKwh: 5, setpointSocPct: 94, expectedWriteLevelPct: 4 }, reCarried: 0 },
   },
   off: {
-    m: { writtenUp: 156, shortfallOn: 15, holdToCharge: 3, chargeToHold: 0, carried: [0, 0], carryDropped: 0 },
-    np: { writtenUp: 162, shortfallOn: 18, holdToCharge: 3, chargeToHold: 0, carried: [0, 0], carryDropped: 0 },
+    m: { writtenUp: 163, shortfallOn: 24, holdToCharge: 15, chargeToHold: 0, carried: [0, 0], carryDropped: 0, soft: { targetSocPct: 169, expectedBuyKwh: 4, setpointSocPct: 85 }, reCarried: 0 },
+    np: { writtenUp: 163, shortfallOn: 21, holdToCharge: 9, chargeToHold: 0, carried: [0, 0], carryDropped: 0, soft: { targetSocPct: 190, expectedBuyKwh: 5, setpointSocPct: 94 }, reCarried: 0 },
   },
 };
 
-test('★★★ S8 THE YEAR at (0.944, 270) and (nameplate, 270) against v1.200.1: nothing falls, the counts as measured; A\'s carrier holds (rest = 0)', () => {
+test('★★★ S8 THE YEAR at (0.944, 270) and (nameplate, 270) against v1.200.1: nothing written or sized falls, the counts as measured; A\'s carrier holds (rest = 0)', () => {
+  // v1.202.0 — against the same plan with no figure (the walks then drain none): the line, a charge night's setpoint and
+  // write, the requirement, the worst-case buy and the cost ceiling never fall; the walks' disclosures (the expected buy,
+  // its level, the arrival) and a hold's no-buy setpoint may, counted (`soft`); a shortfall can vanish only where A's
+  // re-ON walk re-carries its night (counted). The legacy band keeps its cushion and line and carries no key.
   for (const [name, scale] of [['m', S944], ['np', null]] as const) {
-    const k = { islanded: 0, lineUp: 0, writtenUp: 0, shortfallOn: 0, holdToCharge: 0, chargeToHold: 0, overEnvelope: [0, 0] };
+    const k = { islanded: 0, lineUp: 0, writtenUp: 0, shortfallOn: 0, holdToCharge: 0, chargeToHold: 0, overEnvelope: [0, 0], soft: {} as Record<string, number>, reCarried: 0 };
     const carrier = { qualifying: 0, carried: 0, rest: 0 };
     let eightHourMoved = 0;
     const overEnvelope = (p: NightChargePlan) => p.chargeTonight && p.cushionBasis === 'islanded-outage' && p.cushionLineSocPct! > RESERVE_WRITE_MAX_PCT + 0.05 && !p.cushionShortfall;
     for (const c of CASES) {
       const b = yearPlan(c.deps, scale);
       const p = yearPlan(c.deps, scale, 270);
-      if (b.cushionBasis !== 'islanded-outage') { assert.equal(planDigest(p), planDigest(b), c.label); continue; }
+      if (b.cushionBasis !== 'islanded-outage') {
+        assert.deepEqual([p.cushionKwh, p.cushionLineSocPct, 'cushionStandby' in p], [b.cushionKwh, b.cushionLineSocPct, false], c.label);
+        if (b.chargeTonight) assert.ok(p.chargeTonight && written(p)! >= written(b)!, `${c.label}: the write`);
+        continue;
+      }
       k.islanded += 1;
       if (p.cushionLineSocPct! > b.cushionLineSocPct! + 1e-9) k.lineUp += 1;
-      for (const f of ['cushionLineSocPct', 'setpointSocPct', 'requiredExtraKwh', 'buyKwh', 'buyKwhDebiased', 'costCeilingSocPct', 'expectedBuyKwh', 'expectedWriteLevelPct'] as const) {
+      for (const f of ['cushionLineSocPct', 'setpointSocPct', 'requiredExtraKwh', 'buyKwh', 'buyKwhDebiased', 'costCeilingSocPct', 'expectedBuyKwh', 'expectedWriteLevelPct', 'targetSocPct'] as const) {
         const x = b[f] as number | null | undefined, y = p[f] as number | null | undefined;
         if (x == null) continue;
-        assert.ok(y != null && y >= x - 1e-9, `${c.label} ${name}: ${f} fell ${x} → ${y}`);
+        if (y != null && y >= x - 1e-9) continue;
+        const softF = f === 'expectedBuyKwh' || f === 'expectedWriteLevelPct' || f === 'targetSocPct' || (f === 'setpointSocPct' && !(b.chargeTonight && p.chargeTonight));
+        assert.ok(softF, `${c.label} ${name}: ${f} fell ${x} → ${y}`);
+        k.soft[f] = (k.soft[f] ?? 0) + 1;
       }
+      if (b.chargeTonight && p.chargeTonight) assert.ok(written(p)! >= written(b)!, `${c.label} ${name}: the write`);
       if (b.chargeTonight && p.chargeTonight && written(p)! > written(b)!) k.writtenUp += 1;
       if (!b.cushionShortfall && p.cushionShortfall) k.shortfallOn += 1;
-      assert.ok(!(b.cushionShortfall && !p.cushionShortfall), `${c.label}: a shortfall vanished`);
+      if (b.cushionShortfall && !p.cushionShortfall) k.reCarried += 1;
       if (!b.chargeTonight && p.chargeTonight) k.holdToCharge += 1;
       if (b.chargeTonight && !p.chargeTonight) k.chargeToHold += 1;
       if (overEnvelope(b)) k.overEnvelope[0] += 1;
@@ -727,10 +807,10 @@ test('★★★ S8 THE YEAR at (0.944, 270) and (nameplate, 270) against v1.200.
   }
 });
 
-test('★★★ S8 THE YEAR in a write mode and in advisory mode (eligibility true / false): nothing falls either, the counts as measured', () => {
+test('★★★ S8 THE YEAR in a write mode and in advisory mode (eligibility true / false): nothing written or sized falls either, the counts as measured', () => {
   for (const [state, line] of [['on', true], ['off', false]] as const) {
     for (const [name, scale] of [['m', S944], ['np', null]] as const) {
-      const k = { writtenUp: 0, shortfallOn: 0, holdToCharge: 0, chargeToHold: 0, carried: [0, 0], carryDropped: 0 };
+      const k = { writtenUp: 0, shortfallOn: 0, holdToCharge: 0, chargeToHold: 0, carried: [0, 0], carryDropped: 0, soft: {} as Record<string, number>, reCarried: 0 };
       for (const c of CASES) {
         const b = yearPlan(c.deps, scale, undefined, line) as StandbyPlan & { forceChargeLine?: unknown };
         const p = yearPlan(c.deps, scale, 270, line) as StandbyPlan & { forceChargeLine?: unknown };
@@ -738,11 +818,16 @@ test('★★★ S8 THE YEAR in a write mode and in advisory mode (eligibility tr
         for (const f of ['cushionLineSocPct', 'setpointSocPct', 'requiredExtraKwh', 'buyKwh', 'buyKwhDebiased', 'costCeilingSocPct', 'expectedBuyKwh', 'expectedWriteLevelPct', 'targetSocPct'] as const) {
           const x = b[f] as number | null | undefined, y = p[f] as number | null | undefined;
           if (x == null) continue;
-          assert.ok(y != null && y >= x - 1e-9, `${c.label} ${state} ${name}: ${f} fell ${x} → ${y}`);
+          if (y != null && y >= x - 1e-9) continue;
+          // v1.202.0 — as above: the walks' disclosures and a hold's setpoint are counted; what is written and sized is held.
+          const softF = f === 'expectedBuyKwh' || f === 'expectedWriteLevelPct' || f === 'targetSocPct' || (f === 'setpointSocPct' && !(b.chargeTonight && p.chargeTonight));
+          assert.ok(softF, `${c.label} ${state} ${name}: ${f} fell ${x} → ${y}`);
+          k.soft[f] = (k.soft[f] ?? 0) + 1;
         }
+        if (b.chargeTonight && p.chargeTonight) assert.ok(written(p)! >= written(b)!, `${c.label} ${state} ${name}: the write`);
         if (b.chargeTonight && p.chargeTonight && written(p)! > written(b)!) k.writtenUp += 1;
         if (!b.cushionShortfall && p.cushionShortfall) k.shortfallOn += 1;
-        assert.ok(!(b.cushionShortfall && !p.cushionShortfall), `${c.label} ${state} ${name}: a shortfall vanished`);
+        if (b.cushionShortfall && !p.cushionShortfall) k.reCarried += 1;
         if (!b.chargeTonight && p.chargeTonight) k.holdToCharge += 1;
         if (b.chargeTonight && !p.chargeTonight) k.chargeToHold += 1;
         if (b.forceChargeLine != null) k.carried[0] += 1;
@@ -762,22 +847,27 @@ test('★★★ S8 THE YEAR in a write mode and in advisory mode (eligibility tr
  *  'closeUnder' where its line walk closes under the line; 'advisory' disclosed with nothing armed. `under` counts the
  *  line nights whose expected close is under the line less 0.05, `undisclosed` those of them with no shortfall
  *  disclosed; `closeFell` / `buyFell` the line nights (at both figures) whose expected close / expected buy falls. */
+/** v1.202.0 — re-measured with the walks on the pool and draining the figure, and with a cost-carried night judged on its
+ *  close past the stop ('cost closeUnder', disclosed: v1.202.0's walk of the drawback). In a write mode the walks' drain
+ *  lowers 3 closes on nameplate and 5 at 0.944 (2 expected buys), every one a disclosure; no line night is under its line
+ *  undisclosed in any state. `under` reads a cost-carried night's close past the stop wherever the plan names it (whether
+ *  or not its sizing fell short: a '+caps' night is under by that close too, beside its caps note). */
 const PIN_S8_MODES = {
   write: {
-    np: { nights: [22, 40], crossed: 18, before: { cost: 3, 'cost+caps': 7, line: 10, 'line+caps': 2 }, after: { cost: 8, 'cost+caps': 9, line: 18, 'line+caps': 5 }, under: [0, 2], undisclosed: [0, 0], newUnder: ['2026-10-29 +1 01:30', '2027-05-16 +1 01:30'], closeFell: 0, buyFell: 0 },
-    m: { nights: [37, 53], crossed: 16, before: { cost: 6, 'cost+caps': 8, line: 18, 'line+caps': 5 }, after: { cost: 12, 'cost+caps': 11, line: 22, 'line+caps': 8 }, under: [2, 2], undisclosed: [0, 0], newUnder: [], closeFell: 0, buyFell: 0 },
+    np: { nights: [22, 40], crossed: 18, before: { cost: 3, 'cost+caps': 7, line: 10, 'line+caps': 2 }, after: { cost: 8, 'cost+caps': 9, line: 16, 'line+caps': 7 }, under: [2, 6], undisclosed: [0, 0], newUnder: ['2026-10-29 +1 01:30', '2026-11-13 21:30', '2026-11-13 13:00', '2027-05-16 +1 01:30'], closeFell: 3, buyFell: 0 },
+    m: { nights: [37, 53], crossed: 16, before: { cost: 6, 'cost+caps': 9, line: 16, 'line+caps': 6 }, after: { cost: 11, 'cost closeUnder': 1, 'cost+caps': 11, line: 22, 'line+caps': 8 }, under: [3, 7], undisclosed: [0, 0], newUnder: ['2026-10-13 13:00', '2026-10-29 +1 01:30', '2026-11-13 21:30', '2026-11-13 13:00'], closeFell: 5, buyFell: 2 },
   },
   advisory: {
     np: { nights: [22, 40], crossed: 18, before: { advisory: 22 }, after: { advisory: 40 }, under: [22, 37], undisclosed: [0, 0], newUnder: 15, closeFell: 0, buyFell: 0 },
     m: { nights: [37, 53], crossed: 16, before: { advisory: 37 }, after: { advisory: 53 }, under: [37, 53], undisclosed: [0, 0], newUnder: 16, closeFell: 0, buyFell: 0 },
   },
   stand: {
-    np: { nights: [659, 666], crossed: 7, before: { 'stand cost': 153, 'stand cost+caps': 52, 'stand line': 302, 'stand line closeUnder': 1, 'stand line+caps': 151 }, after: { 'stand cost': 137, 'stand cost+caps': 51, 'stand line': 315, 'stand line closeUnder': 3, 'stand line+caps': 160 }, under: [63, 71], undisclosed: [0, 0], newUnder: 9, closeFell: 90, buyFell: 44 },
-    m: { nights: [663, 668], crossed: 5, before: { 'stand cost': 147, 'stand cost+caps': 51, 'stand line': 309, 'stand line closeUnder': 3, 'stand line+caps': 153 }, after: { 'stand cost': 128, 'stand cost+caps': 47, 'stand line': 315, 'stand line closeUnder': 4, 'stand line+caps': 174 }, under: [67, 80], undisclosed: [0, 0], newUnder: 13, closeFell: 110, buyFell: 49 },
+    np: { nights: [659, 669], crossed: 10, before: { 'stand cost': 149, 'stand cost closeUnder': 4, 'stand cost+caps': 52, 'stand line': 302, 'stand line closeUnder': 1, 'stand line+caps': 151 }, after: { 'stand cost': 132, 'stand cost closeUnder': 3, 'stand cost+caps': 54, 'stand line': 316, 'stand line closeUnder': 4, 'stand line+caps': 160 }, under: [74, 83], undisclosed: [0, 0], newUnder: 12, closeFell: 146, buyFell: 26 },
+    m: { nights: [665, 674], crossed: 9, before: { 'stand cost': 144, 'stand cost closeUnder': 4, 'stand cost+caps': 50, 'stand line': 314, 'stand line closeUnder': 2, 'stand line+caps': 151 }, after: { 'stand cost': 126, 'stand cost closeUnder': 6, 'stand cost+caps': 46, 'stand line': 332, 'stand line closeUnder': 2, 'stand line+caps': 162 }, under: [73, 86], undisclosed: [0, 0], newUnder: 16, closeFell: 181, buyFell: 31 },
   },
 };
 
-test('★★★ S8 THE LINE NIGHTS by mode: more nights carry a line above 50 at 270 W; none is left undisclosed under its line, and in a write mode no close or expected buy falls', () => {
+test('★★★ S8 THE LINE NIGHTS by mode: more nights carry a line above 50 at 270 W; none is left undisclosed under its line; the closes and expected buys that fall, counted', () => {
   const gate = (d: NightChargeInputDeps) => d.objectiveMode === 'cost' && (d.costMaxSocPct ?? 90) > 50;
   const STATES: Record<keyof typeof PIN_S8_MODES, (d: NightChargeInputDeps) => NightChargeInputDeps> = {
     write: (d) => ({ ...d, lineForceChargeEligible: true, forceChargeEligible: gate(d) }) as NightChargeInputDeps,
@@ -790,7 +880,9 @@ test('★★★ S8 THE LINE NIGHTS by mode: more nights carry a line above 50 at
     const how = p.expectedForceChargeMode === 'line' ? 'line' : 'cost';
     return `${p.lineReserveStands === true ? 'stand ' : ''}${how}${p.cushionEnvelopeReason != null ? ` ${p.cushionEnvelopeReason}` : p.cushionShortfall ? '+caps' : ''}`;
   };
-  const under = (p: LP) => lineMode(p) != null && p.expectedWriteLevelPct != null && p.expectedWriteLevelPct < p.cushionLineSocPct! - 0.05 - 1e-9;
+  // v1.202.0 — a night the cost force-charge carries closes where its walk past the stop ends (expectedCloseAfterStopPct).
+  const closeOf = (p: LP): number | null | undefined => (p as LP & { expectedCloseAfterStopPct?: number }).expectedCloseAfterStopPct ?? p.expectedWriteLevelPct;
+  const under = (p: LP) => lineMode(p) != null && closeOf(p) != null && closeOf(p)! < p.cushionLineSocPct! - 0.05 - 1e-9;
   const sorted = (o: Record<string, number>) => Object.fromEntries(Object.entries(o).sort(([a], [b]) => (a < b ? -1 : 1)));
   for (const [state, of] of Object.entries(STATES) as Array<[keyof typeof PIN_S8_MODES, (d: NightChargeInputDeps) => NightChargeInputDeps]>) {
     for (const [name, scale] of [['np', null], ['m', S944]] as const) {

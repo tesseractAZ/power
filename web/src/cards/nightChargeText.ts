@@ -236,6 +236,9 @@ export interface ChargeFigurePlan {
   setpointSocPct: number | null;
   /** v1.198.0 — the plan was sized on the provisional solar band; absent on the full basis. */
   pvBandWiden?: PvBandWidenText | null;
+  /** v1.202.0 — the pool and the Cores' standby the plan's walks counted (NightChargePlan.planPool); absent where neither
+   *  differs from the panel's figure with no standby, and on older plans. */
+  planPool?: { kwh: number; standbyW: number } | null;
 }
 
 /** v1.200.0 — the plan fields the card's outage-cushion notes read (/api/night-charge/status → plan). */
@@ -262,6 +265,10 @@ export interface CushionNotePlan {
   expectedLineCeilingStop?: { ceilingPct: number; startTargetPct: number; noReOnWords?: string };
   expectedWriteLevelPct?: number | null;
   expectedForceChargeStartMs?: number | null;
+  /** v1.202.0 — a line night the cost force-charge carries whose walk past its stop closes under the line, whether or not
+   *  its sizing fell short: that close (NightChargePlan.expectedCloseAfterStopPct; the outage-line row names it). Absent
+   *  otherwise. */
+  expectedCloseAfterStopPct?: number;
 }
 
 /** v1.200.0 (review 2) — the server's FORCE_CHARGE_LINE_REON_MAX in words (nightForceCharge.lineReOnTimesWords): the
@@ -280,11 +287,17 @@ export function capsShortfallShown(plan: CushionNotePlan): boolean {
  *  scorer's 0.05, whatever the reason or cause), 'nearFull' (held, within 10 points of full) — or null. The server's
  *  lineForceChargeYear.test.ts holds the two equal on every plan of the year, and lineForceCharge.test.ts T20 at the
  *  edge: a close exactly at L − 0.05 holds (1e-9 of float slack, the server's LINE_CLOSE_EDGE_EPS: in binary 50.35 −
- *  0.05 is 50.300000000000004). */
+ *  0.05 is 50.300000000000004). v1.202.0 — and, on a night the cost force-charge carries, 'closeUnder' where its walk past
+ *  the stop closes under the line (expectedCloseAfterStopPct). */
 export function lineNotHeldOfCard(plan: CushionNotePlan): 'closeUnder' | 'aboveFull' | 'nearFull' | null {
-  if (plan.forceChargeLine == null || plan.expectedForceChargeMode !== 'line') return null;
+  if (plan.forceChargeLine == null) return null;
   const l = plan.cushionLineSocPct;
   if (l == null || !Number.isFinite(l)) return null;
+  // v1.202.0 — a night the cost force-charge carries: its close past the stop, where under the line.
+  if (plan.expectedForceChargeMode !== 'line') {
+    const c = plan.expectedCloseAfterStopPct;
+    return c != null && Number.isFinite(c) && c < l - 0.05 - 1e-9 ? 'closeUnder' : null;
+  }
   if (l > 100) return 'aboveFull';
   const e = plan.expectedWriteLevelPct;
   if (e != null && e < l - 0.05 - 1e-9) return 'closeUnder';
@@ -295,8 +308,9 @@ export function lineNotHeldOfCard(plan: CushionNotePlan): 'closeUnder' | 'aboveF
  * v1.200.0 — the outage line above the panel's 50% reserve, in one row: disclosed with nothing armed ("not held
  * tonight": advisory mode, the backup leg), or the force-charge's own row (line mode only, with the expected close —
  * the level the charge figure names) — (A5) followed, on an armed night, by what its walk cannot hold
- * (lineNotHeldOfCard). null otherwise, a cost-dominant night included. `maxPct` is the panel's reserve maximum
- * (status.reserveWriteMaxPct); 50 when unknown.
+ * (lineNotHeldOfCard). v1.202.0 — a night the cost force-charge carries whose walk past its stop closes under the line
+ * (lineNotHeldOfCard 'closeUnder'): that close, under the line. null otherwise, any other cost-dominant night included.
+ * `maxPct` is the panel's reserve maximum (status.reserveWriteMaxPct); 50 when unknown.
  */
 export function outageLineRow(plan: CushionNotePlan, maxPct: number | null = null): string | null {
   const r1 = (n: number): number => Math.round(n * 10) / 10;
@@ -326,9 +340,18 @@ export function outageLineRow(plan: CushionNotePlan, maxPct: number | null = nul
     : kind === 'aboveFull' ? ' — the line is above a full pool; residual risk remains'
       : kind === 'nearFull' ? ' — within 10 points of a full pool, not held with its usual margin; residual risk remains' : '';
   const row = outageLineArmedRow(plan, max, r1, lineText);
-  if (row == null && armed && plan.cushionShortfallCause != null) {
-    // Never silent on a disclosed night, whatever the walk's mode (a plan this build does not make).
+  if (row == null && armed && (plan.cushionShortfallCause != null || kind === 'closeUnder')) {
+    // Never silent on a disclosed night, whatever the walk's mode. v1.202.0 — a night the cost force-charge carries whose walk
+    // past its stop closes under the line (kind 'closeUnder', whether or not its sizing fell short) names that close, and the
+    // stop it is armed with (its level, expectedWriteLevelPct: reached or not, the stop is what the charge figure names); any
+    // other armed, disclosed night says the line is not claimed.
     const l = plan.cushionLineSocPct;
+    const c = plan.expectedCloseAfterStopPct;
+    if (kind === 'closeUnder' && c != null && Number.isFinite(c)) {
+      const stop = plan.expectedWriteLevelPct;
+      const stopText = stop != null && Number.isFinite(stop) ? ` (the cost force-charge's stop is ~${r1(stop)}%)` : '';
+      return `outage line ${lineText(l)}is above the ${max}% the panel accepts as a reserve — ~${r1(c)}% expected at the close, under the line${stopText}; residual risk remains`;
+    }
     return `outage line ${lineText(l)}is above the ${max}% the panel accepts as a reserve — its force-charge runs, but the line is not claimed; residual risk remains`;
   }
   return row == null ? null : `${row}${notHeld}`;
@@ -454,8 +477,11 @@ export function sizingLine(plan: ChargeFigurePlan): string | null {
   const r1 = (n: number): number => Math.round(n * 10) / 10;
   const cal = factor > 1.005 && plan.buyKwh != null && Number.isFinite(plan.buyKwh)
     ? ` (raw estimate ${r1(plan.buyKwh)} kWh × ${factor.toFixed(2)} realized-buy calibration)` : '';
-  // v1.198.0 — and, on a provisional plan, the widened P10 it was sized on.
-  return `Sized on an islanded worst case (P10 PV, P90 load including any committed EV session, no grid) of ~${r1(worst)} kWh${cal}.`
+  // v1.198.0 — and, on a provisional plan, the widened P10 it was sized on. v1.202.0 — and the Cores' standby where the walks
+  // drained it (the server's sizingBasisText).
+  const sb = plan.planPool?.standbyW;
+  const standby = sb != null && Number.isFinite(sb) && sb > 0 ? ` and the Cores' ~${Math.round(sb)} W standby` : '';
+  return `Sized on an islanded worst case (P10 PV, P90 load including any committed EV session${standby}, no grid) of ~${r1(worst)} kWh${cal}.`
     + provisionalBandText(plan.pvBandWiden);
 }
 
