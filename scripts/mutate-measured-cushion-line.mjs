@@ -7,12 +7,35 @@
  * energy on the packs' measured capacity: targetFloorKwh = reserveKwh + cushionKwh ÷ scale
  * (nightChargeAdvisor.ts cushionLineKwh), so ⌈line⌉ − floor points of the measured capacity hold the
  * whole cushion. The floor is not divided; a legacy-pct band and a disabled cushion do not move; an
- * absent or implausible scale is the nameplate line exactly. Mutants L-i..x.
+ * absent or implausible scale is the nameplate line exactly. Mutants L-i..x. v1.202.0 — the sizing counts
+ * its pool on the measured capacity (plannerPoolKwh) and hands cushionLineKwh a scale only where the pool
+ * is the panel's figure (none, no reading, or 1), so the line is plain reserve + cushion on the pool on
+ * every path; L-i..ix pin cushionLineKwh's own rules as a unit, L-x the seam.
  *
- * (A) AGREEMENT. Every reader of the line reads the one targetFloorKwh: the hold test, the requirement
- * and its bisection, cushionShortfall, the line reported on both plan shapes, the setpoint's line ask,
- * T_mid's line term and the backup leg's walk; the plan field and the rationale's clause appear only
- * where a scale applied, and the inputs carry it only when given. Mutants A-i..xii.
+ * (A) AGREEMENT. Until v1.202.0 every reader of the line was pinned to the one targetFloorKwh against
+ * the nameplate line, reserveKwh + cushionKwh (mutants A-i..ix). Under v1.202.0 targetFloorKwh IS
+ * reserveKwh + cushionKwh, bit for bit, on every basis (measured, held, min-known, nameplate), with the
+ * scale absent, implausible or 1, and on every cushion basis (islanded-outage, legacy-pct, disabled):
+ * plannerPoolKwh passes cushionLineKwh no scale where it moved the pool, and cushionLineKwh's ÷ scale is
+ * ÷ 1 where it gets one. Those nine mutants were equivalent (the re-sweep on 38254e85: 33/42), and the
+ * defect they pinned, the ÷ scale missing at one reader, has no form left. The defect v1.202.0 could
+ * bring back at a reader is a line counted on the panel's nameplate figure (panelFullKwh) instead of the
+ * pool (fullKwh), and only a reader that converts the line between kWh and a percent can make it:
+ *   A-v, A-vi, A-vii, A-viii — RE-POINTED at that conversion: the charge plan's and the hold plan's line,
+ *   the setpoint's line ask and T_mid's line term, each read on the panel's figure.
+ * The readers in kWh only compare the line with a walk on the pool; there the line in kWh is the line,
+ * with no nameplate form, so they are RETIRED, and what guards each is the walk it compares, in
+ * mutate-measured-planner-walks.mjs (the line itself: MPW-P-i the seam, MPW-L-i ÷ s twice, MPW-L-ii the
+ * reserve on the panel's figure):
+ *   A-i   the hold test (the no-buy pack at the close)   MPW-W-i its walk, MPW-W-iii the pack now,
+ *                                                        MPW-W-ix the whole-house trough (legacy band, backup leg)
+ *   A-ii  meetability (the window walk at full effort)    MPW-W-vi its clamp, MPW-W-viii its start,
+ *                                                        MPW-W-vii the full-pack proxy an unmeetable line gets
+ *   A-iii the requirement's bisection                     MPW-W-iii, MPW-W-viii, MPW-SB-i and MPW-SB-v (its legs)
+ *   A-iv  cushionShortfall (the walk at the lift bought)  MPW-W-vi, MPW-W-viii, MPW-W-iii
+ *   A-ix  the backup leg's setpoint walk                  MPW-W-v (that walk on the panel's figure)
+ * The plan field and the rationale's clause appear only where a scale applied, and the inputs carry it
+ * only when given. Mutants A-x..xiii.
  *
  * (D) THE DOOR (runwayBasisContracts.test.ts, SCOPE): the scale reaches the planner only from index.ts
  * measuredCushionScale, on the main thread's own tracker and file, from the planner's own snapshot
@@ -118,69 +141,35 @@ const MUTANTS = [
   },
 
   /* ── A: every reader agrees with the one line ── */
+  // v1.202.0 — A-i..iv and A-ix retired, A-v..viii re-pointed at the panel's figure (the header).
   {
-    id: 'A-i. ★★★ the hold test reads the nameplate line',
-    file: NCA, tests: [T_LINE],
-    find: '  const baselineHolds = baselineTrough.minKwh >= targetFloorKwh - 1e-9;',
-    to: '  const baselineHolds = baselineTrough.minKwh >= reserveKwh + cushionKwh - 1e-9; /* MUTANT */',
-    why: 'A pack at the close between the two lines holds: nothing written, the measured cushion not held.',
-  },
-  {
-    id: 'A-ii. ★★★ meetability reads the nameplate line',
-    file: NCA, tests: [T_LINE],
-    find: '  const meetable = baselineHolds || troughAtLift(hiLift).minKwh >= targetFloorKwh - 1e-9;',
-    to: '  const meetable = baselineHolds || troughAtLift(hiLift).minKwh >= reserveKwh + cushionKwh - 1e-9; /* MUTANT */',
-    why: 'An unmeetable measured line bisects to a requirement the window cannot deliver, not the full-pack proxy.',
-  },
-  {
-    id: 'A-iii. ★★★ the requirement is bisected on the nameplate line',
-    file: NCA, tests: [T_LINE],
-    find: '      if (troughAtLift(mid).minKwh >= targetFloorKwh) hi = mid;',
-    to: '      if (troughAtLift(mid).minKwh >= reserveKwh + cushionKwh) hi = mid; /* MUTANT */',
-    why: 'The buy lifts the pack to the nameplate line while the write asks the measured one: an under-buy.',
-  },
-  {
-    id: 'A-iv. ★★★ cushionShortfall reads the nameplate line',
-    file: NCA, tests: [T_LINE],
-    find: '  const cushionShortfall = minProjKwh < targetFloorKwh - 1e-6;',
-    to: '  const cushionShortfall = minProjKwh < reserveKwh + cushionKwh - 1e-6; /* MUTANT */',
-    why: 'A charge-bound night that misses the written line says nothing: the shortfall is not disclosed.',
-  },
-  {
-    id: 'A-v. ★★★ the charge plan reports the nameplate line',
+    id: 'A-v. ★★★ the charge plan reports its line on the panel\'s figure, not the pool',
     file: NCA, tests: [T_LINE],
     find: '  const cushionLineSocPct = round2((targetFloorKwh / fullKwh) * 100);',
-    to: '  const cushionLineSocPct = round2(((reserveKwh + cushionKwh) / fullKwh) * 100); /* MUTANT */',
-    why: 'The push, the card, the ledger and the realized verdict grade the night on a line it did not write.',
+    to: '  const cushionLineSocPct = round2((targetFloorKwh / panelFullKwh) * 100); /* MUTANT */',
+    why: 'The 31.67% line reads 29.89% (27.55 kWh of the pool over 92.16): the push, the card, the ledger and the realized verdict grade a night written at 32 on a line 1.8 points under it.',
   },
   {
-    id: 'A-vi. ★★ the hold plan reports the nameplate line',
+    id: 'A-vi. ★★ the hold plan reports its line on the panel\'s figure, not the pool',
     file: NCA, tests: [T_LINE],
     find: '      cushionLineSocPct: round2((targetFloorKwh / fullKwh) * 100),',
-    to: '      cushionLineSocPct: round2(((reserveKwh + cushionKwh) / fullKwh) * 100), /* MUTANT */',
-    why: 'A hold states (and the ledger records) a line other than the one its test held.',
+    to: '      cushionLineSocPct: round2((targetFloorKwh / panelFullKwh) * 100), /* MUTANT */',
+    why: 'A hold states (and the ledger records) its 31.67% line as 29.89%: not the line its test held (the 68% night\'s trough, 32.02%).',
   },
   {
-    id: 'A-vii. ★★★ the setpoint asks the nameplate line',
+    id: 'A-vii. ★★★ the setpoint asks its line on the panel\'s figure, not the pool',
     file: NCA, tests: [T_LINE],
     // v1.200.0 (review) — anchor moved: the reserve path's ask reads askOf (the one expression).
     find: '  const lineAskPct = !setpointOnWalk && !baselineHolds ? askOf(targetFloorKwh, fullKwh) : 0;',
-    to: '  const lineAskPct = !setpointOnWalk && !baselineHolds ? askOf(reserveKwh + cushionKwh, fullKwh) : 0; /* MUTANT */',
-    why: 'The ask is ⌈30.45⌉ = 31 under a 31.67% line: the arrival (31.7) carries the write, to one decimal.',
+    to: '  const lineAskPct = !setpointOnWalk && !baselineHolds ? askOf(targetFloorKwh, panelFullKwh) : 0; /* MUTANT */',
+    why: 'The ask is ⌈29.89⌉ = 30 under a 31.67% line, so the setpoint is the arrival (31.7, not 32); on the year a 32.02% line writes 32, under it (2026-10-12 resilience).',
   },
   {
-    id: 'A-viii. ★★ T_mid\'s line term is the nameplate line',
+    id: 'A-viii. ★★ T_mid\'s line term on the panel\'s figure, not the pool',
     file: NCA, tests: [T_LINE],
     find: '      linePct: (targetFloorKwh / fullKwh) * 100,',
-    to: '      linePct: ((reserveKwh + cushionKwh) / fullKwh) * 100, /* MUTANT */',
-    why: 'A mid-day reserve set by its line term writes 31 under a 31.67% line.',
-  },
-  {
-    id: 'A-ix. ★★ the backup leg\'s walk is held to the nameplate line',
-    file: NCA, tests: [T_LINE],
-    find: '      if (troughFromPack(mid) >= targetFloorKwh) hi = mid;',
-    to: '      if (troughFromPack(mid) >= reserveKwh + cushionKwh) hi = mid; /* MUTANT */',
-    why: 'The backup asks for the pack whose walk holds the old line: 1.2 points short of the one it reports.',
+    to: '      linePct: (targetFloorKwh / panelFullKwh) * 100, /* MUTANT */',
+    why: 'The line term is ⌈29.89⌉ = 30 under a 31.67% line, a term that alone writes under the line: the mid-day write the line sets (32) is credited to the resilience term.',
   },
   {
     id: 'A-x. ★★★ the plan carries an undefined scale key where none applied',
