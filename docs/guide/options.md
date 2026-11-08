@@ -122,8 +122,9 @@ preset, the overnight period, 23:00–05:00 Monday to Friday; on a custom plan, 
 before that window opens: with another plan than the preset, its catch-up window, its notify-hour
 clamp, its deferral of a stale panel and the force-charge run cap follow the plan's cheap window
 (below); the preset keeps 23:00, 22, 22:30 and 7 hours. The full semantics are in
-[night-charge planning](../reference/15-1-night-charge-planning.md) and
-[the night-charge writes](../reference/15-2-night-charge-writes.md).
+[night-charge planning](../reference/15-1-night-charge-planning.md),
+[the night-charge writes](../reference/15-2-night-charge-writes.md) and
+[the night-charge ledger and its scoring](../reference/15-3-night-charge-ledger-and-scoring.md).
 
 | Option / Env | Default | Schema | Purpose |
 |--------------|---------|--------|---------|

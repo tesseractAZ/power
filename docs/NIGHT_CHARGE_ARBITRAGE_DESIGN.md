@@ -5,8 +5,9 @@
 > deployment, a grid-tied home in Arizona on the APS R-EV tariff, and its rates, windows, loads
 > and measured dates are that plant's. The night-charge engine as it ships, for any tariff and
 > time zone, is described in the engineering reference:
-> [night-charge planning](reference/15-1-night-charge-planning.md) and
-> [the night-charge writes](reference/15-2-night-charge-writes.md).
+> [night-charge planning](reference/15-1-night-charge-planning.md),
+> [the night-charge writes](reference/15-2-night-charge-writes.md) and
+> [the night-charge ledger and its scoring](reference/15-3-night-charge-ledger-and-scoring.md).
 
 _Originated 2026-07-17 as a design plan (12-agent design dive + 4-agent APS-EV/EcoFlow verification), implemented v1.36.0–v1.51.0, amended 2026-07-31. **Rewritten 2026-09-06 against the shipped system at v1.133.1; amended 2026-09-11 for v1.148.0–v1.149.0** (see §I6 and the note below); **amended 2026-10-11 for v1.164.0–v1.187.15** (force-charge, billing-cycle seasons, off-peak holidays, apply/revert timing, the readiness-gate fix); **amended 2026-10-26 for v1.187.22–v1.191.2** (what is announced, the on-peak bound and the revert-deadline pages, the foreign-reserve rule, the mid-day cycle in shadow, the site clock and the tariff from the options). Dated status lines below are the reference plant's at their dates; the reference chapters describe the code as it ships._
 
