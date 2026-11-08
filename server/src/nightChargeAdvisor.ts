@@ -75,7 +75,11 @@
  * mirror (tickPoolKwh — the force-charge times its start on backupFullCapWh), the cost room (the morning
  * surplus counted at v1.201.0's percent: the walks drain the standby and the surplus does not, so the sun's
  * share of the measured pool is not established) and the plan's record of its pool (planPool). With no
- * scale and no standby the plan is v1.201.0's byte for byte.
+ * scale (or one that is no reading, or 1) the pool is the panel's figure and the line is v1.201.0's. With no standby
+ * figure (or 0 W) as well the plan is v1.201.0's, but on a line night the cost force-charge carries whose walk past its
+ * stop closes under the line: that night names the close (beside the closeUnder disclosure where its sizing held the
+ * line, beside its caps note where it fell short), and no write, mode or stop moves. index.ts always passes a standby
+ * figure (the runway's pool overhead for the connected Cores), so live walks drain it with no scale too.
  * v1.194.0 — a POSITIVE change is a surplus the Cores charge the cells with, and it is
  * stored at legEff (chargeLegStep, physics/chargeLeg.ts): every walk here (simulate, the
  * with-buy window walk, expectedCarryKwh, expectedPvChargeWalk, expectedForceChargeStart)
@@ -230,7 +234,8 @@ export interface NightChargeInputs {
   /** v1.199.0 — the house pool's measured capacity scale (index.ts measuredCushionScale): the ONE
    *  measured input the planner takes. v1.202.0 — read ONCE, at the top of the sizing (plannerPoolKwh): the
    *  planning pool every walk counts on, on every basis whose scale is plausible, the line plain reserve +
-   *  cushion on it. Absent / null / no reading / 1 ⇒ the panel's figure and v1.201.0's plan, exactly as before. */
+   *  cushion on it. Absent / null / no reading / 1 ⇒ the panel's figure and v1.201.0's line; with no standby figure too,
+   *  v1.201.0's plan but for a cost-carried line night's close past its stop (the header). */
   cushionPoolScale?: CushionPoolScale | null;
   /** v1.201.0 — the Cores' standby draw, W (index.ts cushionStandbyOverheadW: the runway's pool overhead figure
    *  for the connected Cores, the planner's second runway-basis input): read ONCE, by plausibleStandbyW, and
@@ -1767,7 +1772,7 @@ function sizeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   // carries, the troughs, the with-buy window walk, the setpoint, the cost target and ceiling, the line's ask, the expected
   // walks — and the line is plain reserve + cushion on it (cushionLineKwh's ÷ scale is in the pool). The only reads of the
   // panel's figure are the capacity gate above, the tick's own mirror (tickPoolKwh), the cost room's percent and the plan's
-  // record of the pool. With no scale, or one that is no reading, or 1: the panel's figure, and v1.201.0's plan.
+  // record of the pool. With no scale, or one that is no reading, or 1: the panel's figure, and v1.201.0's line.
   const pool = plannerPoolKwh(panelFullKwh, inputs.cushionPoolScale);
   const fullKwh = pool.kwh;
 
@@ -4772,8 +4777,9 @@ export interface PlannerPool {
  * pool than the last measurement. Nameplate (1) is the tracker's most optimistic answer for the drains.
  *
  * Fail-safe: no scale (null, undefined), a scale that is no reading (not a finite number in [0.5, 1], float noise above
- * 1 included as 1) or a unit scale ⇒ the panel's figure, and the scale goes to cushionLineKwh as passed, so the plan is
- * v1.201.0's exactly (its line, its key). A lower scale is a smaller pool: every drain in percent is deeper and the
+ * 1 included as 1) or a unit scale ⇒ the panel's figure, and the scale goes to cushionLineKwh as passed, so the line is
+ * v1.201.0's exactly (its line, its key); the plan is too where no standby figure is drained, but for a cost-carried line
+ * night's close past its stop (the header). A lower scale is a smaller pool: every drain in percent is deeper and the
  * line (the same percent as v1.201.0's) is held on fewer kWh.
  */
 export function plannerPoolKwh(panelKwh: number, poolScale: CushionPoolScale | null | undefined): PlannerPool {

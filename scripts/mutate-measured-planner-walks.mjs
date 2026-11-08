@@ -5,7 +5,9 @@
  * percent; the cost-carried drawback disclosure).
  *
  * (P) THE SEAM: one planning pool, read once after the refusals, on every plausible basis; absent, no reading or unit ⇒
- * the panel's figure and v1.201.0's plan. (L) THE LINE: plain reserve + cushion on the pool, the same percent.
+ * the panel's figure and v1.201.0's line, and with no standby figure v1.201.0's plan, but for a line night the cost
+ * force-charge carries whose walk past its stop closes under the line (it names that close; nothing written moves).
+ * (L) THE LINE: plain reserve + cushion on the pool, the same percent.
  * (W) THE WALKS: none left on the panel's figure. (C) THE COST ROOM: the morning surplus × pool ÷ panel, the over-buy
  * flag's too, the de-bias bound on the panel's figure. (J) THE MIRROR: the tick's pool is the panel's figure.
  * (SB) THE WALK STANDBY: B's one figure, 0 W with none, on every discharge leg and nowhere else; (H) B's hiLift rule
