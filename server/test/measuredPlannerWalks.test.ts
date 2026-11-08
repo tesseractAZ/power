@@ -10,7 +10,7 @@ import {
   type NightChargeInputs, type NightChargeInputDeps, type NightChargePlan, type CushionPoolScale,
 } from '../src/nightChargeAdvisor.js';
 import { clampReserveTarget, RESERVE_WRITE_MAX_PCT } from '../src/nightChargeActuator.js';
-import { forceChargeStopPct, forceChargeStartAtMs, FORCE_CHARGE_MIN_RUN_MS } from '../src/nightForceCharge.js';
+import { forceChargeModeOf, forceChargeStopPct, forceChargeStartAtMs, FORCE_CHARGE_MIN_RUN_MS, FORCE_CHARGE_LINE_HEADROOM_PCT } from '../src/nightForceCharge.js';
 import { heldImportEstimate } from '../src/middayShadow.js';
 import { buildNightChargeMessage } from '../src/notify.js';
 import * as cardText from '../../web/src/cards/nightChargeText.js';
@@ -337,14 +337,19 @@ test('★★★ T6 THE COST ROOM\'S CONVERSION IS v1.201.0\'s: COST55\'s 40.3% a
 /** Measured against c692f30e (v1.201.0) in a write mode over 4-20 h at 0, 90 and 336 W (270 W is T6's), on every plausible
  *  basis: every cost stop and cost write that falls, v1.201.0's value (`was`) and v1.202.0's (`is`), and (`line`) every cost
  *  stop the lowered ceiling hands to the line force-charge (the ceiling's stop now within 10 points of the line's ask: the
- *  night is carried in line mode to the window close; `is` is that ceiling's stop). Each is the de-bias's gate — a night
- *  v1.201.0's walks sized short of its line, so its de-bias kept the raw surplus, that the walks on the pool and the standby
- *  hold — none of a resilience night, none on nameplate, no charge night held. */
-type GateFall = { label: string; h: number; basis: CushionPoolScale['basis']; scale: number; w: number; kind: 'stop' | 'write' | 'line'; was: number; is: number };
+ *  night is carried in line mode to the window close; `is` is that ceiling's stop); (`start`) on a night the line
+ *  force-charge already carried, the start target its lower ceiling lowers (the larger of the ceiling and ⌈L⌉ + 5 on a
+ *  line more than 10 points under full: `was` and `is` are the start targets); and (`ceiling`) every other cost ceiling
+ *  that falls, where nothing the night does moves (the force-charge, or none, as at v1.201.0's ceiling; `was` and `is` are
+ *  the ceilings). Each is the de-bias's gate — a night v1.201.0's walks sized short of its line, so its de-bias kept the
+ *  raw surplus, whose sizing on the pool and the standby holds it — none of a resilience night, none on nameplate, no
+ *  charge night held. */
+type GateFall = { label: string; h: number; basis: CushionPoolScale['basis']; scale: number; w: number; kind: 'stop' | 'write' | 'line' | 'start' | 'ceiling'; was: number; is: number };
 const PIN_T6B_FALLS: ReadonlyArray<GateFall> = [
   { label: '2027-05-28 21:30', h: 9, basis: 'measured', scale: 0.944, w: 0, kind: 'stop', was: 93.8, is: 93.5 },
   { label: '2027-07-12 13:00', h: 10, basis: 'measured', scale: 0.944, w: 0, kind: 'stop', was: 60, is: 58.5 },
   { label: '2027-05-07 21:30', h: 12, basis: 'measured', scale: 0.944, w: 90, kind: 'line', was: 73.8, is: 68.2 },
+  { label: '2027-07-23 21:30', h: 18, basis: 'measured', scale: 0.944, w: 90, kind: 'start', was: 73.8, is: 73 },
   { label: '2026-11-30 +1 01:30', h: 14, basis: 'measured', scale: 0.944, w: 0, kind: 'stop', was: 75.9, is: 75.5 },
   { label: '2027-07-12 +1 01:30', h: 8, basis: 'measured', scale: 0.944, w: 90, kind: 'write', was: 45, is: 44 },
   { label: '2026-10-13 +1 01:30', h: 6, basis: 'measured', scale: 0.944, w: 336, kind: 'write', was: 50, is: 43 },
@@ -352,6 +357,7 @@ const PIN_T6B_FALLS: ReadonlyArray<GateFall> = [
   { label: '2026-11-30 +1 01:30', h: 12, basis: 'measured', scale: 0.944, w: 336, kind: 'stop', was: 75.9, is: 75.5 },
   { label: '2027-03-19 21:30', h: 7, basis: 'held', scale: 0.92, w: 0, kind: 'stop', was: 61.5, is: 53.1 },
   { label: '2026-10-13 13:00', h: 10, basis: 'held', scale: 0.92, w: 0, kind: 'line', was: 70.7, is: 62.4 },
+  { label: '2027-03-21 13:00', h: 9, basis: 'held', scale: 0.92, w: 0, kind: 'start', was: 68.6, is: 66 },
   { label: '2027-07-12 +1 01:30', h: 8, basis: 'held', scale: 0.92, w: 0, kind: 'write', was: 45, is: 44 },
   { label: '2026-11-30 +1 01:30', h: 14, basis: 'held', scale: 0.92, w: 0, kind: 'stop', was: 75.9, is: 75.5 },
   { label: '2027-07-12 +1 01:30', h: 8, basis: 'held', scale: 0.92, w: 90, kind: 'write', was: 45, is: 44 },
@@ -363,6 +369,9 @@ const PIN_T6B_FALLS: ReadonlyArray<GateFall> = [
   { label: '2027-02-05 21:30', h: 17, basis: 'held', scale: 0.92, w: 336, kind: 'stop', was: 89, is: 87 },
   { label: '2027-07-12 +1 01:30', h: 8, basis: 'min-known', scale: 0.9, w: 0, kind: 'write', was: 45, is: 44 },
   { label: '2027-05-07 21:30', h: 12, basis: 'min-known', scale: 0.9, w: 0, kind: 'line', was: 73.8, is: 68.2 },
+  { label: '2027-03-21 13:00', h: 9, basis: 'min-known', scale: 0.9, w: 0, kind: 'start', was: 68.6, is: 67 },
+  { label: '2027-07-23 21:30', h: 18, basis: 'min-known', scale: 0.9, w: 0, kind: 'ceiling', was: 73.8, is: 68 },
+  { label: '2027-07-12 +1 01:30', h: 8, basis: 'min-known', scale: 0.9, w: 90, kind: 'ceiling', was: 45, is: 44.5 },
   { label: '2026-11-30 +1 01:30', h: 13, basis: 'min-known', scale: 0.9, w: 0, kind: 'stop', was: 75.9, is: 75.5 },
   { label: '2026-11-30 +1 01:30', h: 14, basis: 'min-known', scale: 0.9, w: 0, kind: 'stop', was: 75.9, is: 75.5 },
   { label: '2027-02-10 +1 01:30', h: 8, basis: 'min-known', scale: 0.9, w: 90, kind: 'stop', was: 80, is: 76.6 },
@@ -373,8 +382,11 @@ const PIN_T6B_FALLS: ReadonlyArray<GateFall> = [
   { label: '2026-11-30 +1 01:30', h: 12, basis: 'min-known', scale: 0.9, w: 336, kind: 'stop', was: 75.9, is: 75.5 },
 ];
 const costStopOf = (p: NightChargePlan, deps: NightChargeInputDeps): number | null => parseToken(figToken(p, deps)).stop;
+/** The sizing held the line: no shortfall, or only the envelope's (the line walk's disclosure, OR-ed in after the cost block;
+ *  the de-bias reads the sized flag alone). */
+const sizingHeld = (p: NightChargePlan): boolean => !p.cushionShortfall || p.cushionShortfallCause === 'envelope';
 
-test('★★★ T6b THE DE-BIAS\'S GATE AT 0, 90 AND 336 W: against v1.201.0 at ×0.944 in its figures (the frozen `mainStandby`) no resilience write falls and no charge night holds, and every cost write or stop that falls, or that a lowered ceiling hands to the line force-charge, is pinned; over 4-20 h on every plausible basis each pinned fall is the gate, a write to ⌈line⌉ and a stop at or above it; every cost write at or above min(50, ⌈line⌉) and every de-biased ceiling of a night that holds its line at or above it', () => {
+test('★★★ T6b THE DE-BIAS\'S GATE AT 0, 90 AND 336 W: against v1.201.0 at ×0.944 in its figures (the frozen `mainStandby`) no resilience write falls and no charge night holds, and every cost write or stop that falls, or that a lowered ceiling hands to the line force-charge, is pinned, as are the ceilings that fall beside them (a line night\'s start target, or nothing the night does); over 4-20 h on every plausible basis each pinned fall is the gate, a write to ⌈line⌉ and a stop at or above it; every cost write at or above min(50, ⌈line⌉) and every de-biased ceiling of a night whose sizing holds its line at or above it', () => {
   assert.equal(FIG.mainStandby.generatedAt.startsWith('c692f30e'), true);
   // The frozen figures' hours at ×0.944: the falls there are exactly the pinned ones.
   const atHours: string[] = [];
@@ -414,10 +426,26 @@ test('★★★ T6b THE DE-BIAS\'S GATE AT 0, 90 AND 336 W: against v1.201.0 at 
     const at = `${f.label} ${f.h} h ${f.basis} ${f.w} W`;
     const ceilL = Math.ceil(p.cushionLineSocPct! - 1e-9);
     assert.equal(p.objective, 'cost_arbitrage', at);
-    assert.ok(!p.cushionShortfall && p.costCeilingSurplusKwh! > p.costCeilingSurplusRawKwh! + 0.005, `${at}: the de-bias applied on a night that holds its line`);
+    assert.ok(sizingHeld(p) && p.costCeilingSurplusKwh! > p.costCeilingSurplusRawKwh! + 0.005, `${at}: the de-bias applied on a night whose sizing holds its line`);
     if (f.kind === 'write') {
       assert.equal(written(p), f.is, at);
       assert.equal(written(p), ceilL, `${at}: the write is ⌈line⌉`);
+    } else if (f.kind === 'ceiling' || f.kind === 'start') {
+      const ask = p.forceChargeLine?.askPct ?? null;
+      const modeAt = (c: number) => {
+        const m = forceChargeModeOf({ forceChargeCeilingPct: c, forceChargeLineAskPct: ask } as never, { cost: true, line: true });
+        return m == null ? null : m.kind === 'line' ? ['line', m.startTargetPct, m.panelCeilingPct] : ['cost', forceChargeStopPct(m.targetPct)];
+      };
+      const now = modeAt(p.costCeilingSocPct!);
+      assert.notEqual(now?.[0], 'cost', `${at}: a cost stop moved`);
+      assert.ok(p.costCeilingSocPct! >= p.cushionLineSocPct! - LINE_CARRY_CLOSE_TOLERANCE_PCT - 1e-9, `${at}: the ceiling ${p.costCeilingSocPct} under the ${p.cushionLineSocPct}% line`);
+      if (f.kind === 'ceiling') {
+        assert.equal(p.costCeilingSocPct, f.is, at);
+        assert.deepEqual(now, modeAt(f.was), `${at}: the force-charge as at v1.201.0's ${f.was}% ceiling`);
+      } else {
+        assert.deepEqual([p.expectedForceChargeMode, now?.[0], now?.[1]], ['line', 'line', f.is], `${at}: the line walk's start target`);
+        assert.ok(f.is >= ceilL + FORCE_CHARGE_LINE_HEADROOM_PCT, `${at}: the start target ${f.is} under ⌈${p.cushionLineSocPct}⌉ + ${FORCE_CHARGE_LINE_HEADROOM_PCT}`);
+      }
     } else if (f.kind === 'line') {
       assert.equal(p.expectedForceChargeMode, 'line', `${at}: carried in line mode`);
       assert.equal(costStopOf(p, stateDeps(caseOf(f.label).deps, 'write')), null, at);
@@ -442,7 +470,7 @@ test('★★★ T6b THE DE-BIAS\'S GATE AT 0, 90 AND 336 W: against v1.201.0 at 
         assert.ok(written(p)! >= Math.min(RESERVE_WRITE_MAX_PCT, Math.ceil(p.cushionLineSocPct - 1e-9)), `${at}: line ${p.cushionLineSocPct}, written ${written(p)}`);
       }
       // The bound is on the morning-solar headroom: an owner's SoC ceiling under the line ('max-soc') is the owner's.
-      if (p.costCeilingSocPct != null && p.costCeilingBasis === 'pv-headroom' && !p.cushionShortfall && p.costCeilingSurplusKwh != null
+      if (p.costCeilingSocPct != null && p.costCeilingBasis === 'pv-headroom' && sizingHeld(p) && p.costCeilingSurplusKwh != null
         && p.costCeilingSurplusRawKwh != null && p.costCeilingSurplusKwh > p.costCeilingSurplusRawKwh + 0.005 && p.requiredExtraKwh! > 0) {
         debiased += 1;
         // (round1 of a ceiling at least the arrival, at or above the line.)
