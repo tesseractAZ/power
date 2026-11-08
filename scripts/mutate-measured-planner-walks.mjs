@@ -8,7 +8,11 @@
  * the panel's figure and v1.201.0's line, and with no standby figure v1.201.0's plan, but for a line night the cost
  * force-charge carries whose walk past its stop closes under the line (it names that close; nothing written moves).
  * (L) THE LINE: plain reserve + cushion on the pool, the same percent.
- * (W) THE WALKS: none left on the panel's figure. (C) THE COST ROOM: the morning surplus × pool ÷ panel, the over-buy
+ * (W) THE WALKS: none left on the panel's figure. W-i, W-iii, W-v and W-vi..ix (the window walk's clamp, the full-pack
+ * proxy, the window walk's start, the whole-house trough) are the walks the line's readers in kWh compare with it: the
+ * hold test, meetability, the requirement's bisection, cushionShortfall and the backup leg's setpoint walk, whose own
+ * mutants (mutate-measured-cushion-line.mjs A-i..iv, A-ix) are equivalent under v1.202.0 and retired; that harness's
+ * header names each reader's guards. (C) THE COST ROOM: the morning surplus × pool ÷ panel, the over-buy
  * flag's too, the de-bias bound on the panel's figure. (J) THE MIRROR: the tick's pool is the panel's figure.
  * (SB) THE WALK STANDBY: B's one figure, 0 W with none, on every discharge leg and nowhere else; (H) B's hiLift rule
  * extended to it. (S) THE SHADOW on the plan's pool and standby. (D) THE CONTRACT. (R) THE LEDGER. (F2) the minimum-buy
@@ -36,6 +40,7 @@ const T_MPW = 'test/measuredPlannerWalks.test.ts';
 const T_SCOPE = 'test/runwayBasisContracts.test.ts';
 const T_YEAR = 'test/lineForceChargeYear.test.ts';
 const T_LFC = 'test/lineForceCharge.test.ts';
+const T_LINE = 'test/measuredCushionLine.test.ts';
 
 const SEAM = '  const pool = plannerPoolKwh(panelFullKwh, inputs.cushionPoolScale);';
 const POOL_RET = '  return { kwh: panelKwh * scale, lineScale: null, applied: { scale, basis: poolScale.basis } };';
@@ -153,6 +158,34 @@ const MUTANTS = [
     find: '    simulate(p, fullKwh, postHours, dischargeEff, legEff, walkStandbyW, windowEnd, windowEnd).minPackKwh;',
     to: '    simulate(p, panelFullKwh, postHours, dischargeEff, legEff, walkStandbyW, windowEnd, windowEnd).minPackKwh; /* MUTANT */',
     why: 'The legacy band and the backup leg ask for a pack the measured pool cannot hold.',
+  },
+  {
+    id: 'MPW-W-vi. ★★★ the window walk clamped on the panel figure (meetability\'s, the requirement\'s and cushionShortfall\'s pack)',
+    file: NCA, tests: [T_MPW, T_LINE],
+    find: '      pack = Math.max(0, Math.min(fullKwh, pack + gainKwh + chargeLegStep(pvKwh - drainKwh, legEff)));',
+    to: '      pack = Math.max(0, Math.min(panelFullKwh, pack + gainKwh + chargeLegStep(pvKwh - drainKwh, legEff))); /* MUTANT */',
+    why: 'A lift the measured pool cannot take reads as pack: 105.9% arrives (2026-10-28 21:30, 4 h; the backup leg\'s full-effort night 102.6%), and the readers compare it with the line.',
+  },
+  {
+    id: 'MPW-W-vii. ★★★ the full-pack proxy on the panel figure (the requirement meetability hands an unmeetable line)',
+    file: NCA, tests: [T_MPW, T_LINE],
+    find: '  const poolHeadroomLiftKwh = Math.max(0, fullKwh - packAtWindowEnd_noBuy);',
+    to: '  const poolHeadroomLiftKwh = Math.max(0, panelFullKwh - packAtWindowEnd_noBuy); /* MUTANT */',
+    why: 'The charge-bound night that cannot meet its line asks 92.16 kWh of an 87 kWh pool: the proxy is 5.6% more than the packs hold.',
+  },
+  {
+    id: 'MPW-W-viii. ★★ the window walk starts from a carry on the panel figure',
+    file: NCA, tests: [T_MPW],
+    find: '  const packAtWindowStartKwh = simulate(socNowKwh, fullKwh, preHorizon, dischargeEff, legEff, walkStandbyW, windowStart, windowStart, holdLift).packAtMarkKwh;',
+    to: '  const packAtWindowStartKwh = simulate(socNowKwh, panelFullKwh, preHorizon, dischargeEff, legEff, walkStandbyW, windowStart, windowStart, holdLift).packAtMarkKwh; /* MUTANT */',
+    why: 'The pack the lift is added to keeps sun the packs cannot take: a 13:00 plan\'s requirement falls (2027-03-12: 10.96 for 11.2 kWh) and an 86th minimum-buy hold appears.',
+  },
+  {
+    id: 'MPW-W-ix. ★★ the whole-house trough on the panel figure (the legacy band\'s and the backup leg\'s cushion trough)',
+    file: NCA, tests: [T_MPW, T_LINE],
+    find: '    const r = simulate(packAtWindowEndWith(lift), fullKwh, postHours, dischargeEff, legEff, walkStandbyW, windowEnd, windowEnd);',
+    to: '    const r = simulate(packAtWindowEndWith(lift), panelFullKwh, postHours, dischargeEff, legEff, walkStandbyW, windowEnd, windowEnd); /* MUTANT */',
+    why: 'The trough the hold test and the requirement compare with the line reads high: 29.8% for 29.29% (2027-05-10 21:30, 4 h).',
   },
 
   /* ── C: the cost room at v1.201.0's percent ── */
