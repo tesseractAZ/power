@@ -459,13 +459,92 @@ export function pricedImport(
  * Unknown `modelSns` (a row planned before v1.187.0, or no probabilistic forecast) ⇒
  * null: the verdict stands, as it always has.
  */
-export function pvVerdictSetAside(modelSns: string | null | undefined, actualSns: readonly string[]): string | null {
+export function pvVerdictSetAside(
+  modelSns: string | null | undefined,
+  actualSns: readonly string[],
+  /** ★★★ v1.204.0 — the row's pv_basis: a band built on the panel's own per-slot readings is set aside FIRST (panelPvVerdictSetAside),
+   *  whatever its keys against the actuals' Cores. Absent ⇒ the rule as before. */
+  pvBasis?: string | null,
+): string | null {
+  const panel = panelPvVerdictSetAside(pvBasis);
+  if (panel != null) return panel;
   if (modelSns == null || modelSns === '') return null;
   const actual = [...actualSns].sort().join(',');
   if (modelSns === actual) return null;
   const nModel = modelSns.split(',').filter((s) => s.length > 0).length;
   return `PV verdict set aside — the band was built on a solar model fitted on a different set of Cores `
     + `(${nModel}) than the actual PV sums (${actualSns.length}); it says nothing about forecast skill`;
+}
+
+/** ★★★ v1.204.0 — a row planned on the panel-measured band (pv_basis 'panel' or 'mixed'). PURE. */
+export function isPanelBasisRow(r: Pick<NightLedgerRow, 'pv_basis'> & Partial<Pick<NightLedgerRow, 'actual_pv_basis'>>): boolean {
+  return r.pv_basis === 'panel' || r.pv_basis === 'mixed' || (typeof r.actual_pv_basis === 'string' && /:P\b/.test(r.actual_pv_basis));
+}
+
+/**
+ * ★★★ v1.204.0 — the PV verdict of a row planned on the panel's own per-slot readings is set aside, FIRST: the band was built on a
+ * reading no independent meter vouches for while the Cores are dark (the energy balance bounds it from above only), and a high
+ * reading raises the actual, lowers the realized need and hides an under-buy — every PV criterion moves toward graduating. Counted in
+ * pvVerdictsSetAside like every set-aside. Null on every other row. PURE.
+ */
+export function panelPvVerdictSetAside(pvBasis: string | null | undefined): string | null {
+  return pvBasis === 'panel' || pvBasis === 'mixed'
+    ? `PV verdict set aside — the band was built on the panel's own per-slot solar readings (pv_basis ${pvBasis}), which no independent `
+      + 'meter vouches for while the Cores are dark; kept apart from the readiness gate'
+    : null;
+}
+
+/**
+ * ★★★ v1.204.0 — a 'panel' / 'mixed' row's PV actual: per slot of its pv_basis_slots ('1:P,2:P,3:C'), the panel's own reading
+ * (src{n}_pv_w) for a P slot and the slot's Core's pv_total for a C slot, each integrated over the span with at least `minCoverage`
+ * of it covered; null (withheld) when any slot falls short, a slot is unresolved (N), a C slot has no Core, or the slots are
+ * unreadable. `basis`: the sources it was (or would have been) integrated from, the row's actual_pv_basis. PURE (query seam).
+ */
+export function panelRowPvActual(i: {
+  slots: string | null | undefined;
+  span: TimeSpan;
+  panelSn: string;
+  coreOfSlot: (slot: number) => string | null;
+  query: (sn: string, metric: string, fromMs: number, toMs: number) => ReadonlyArray<Sample>;
+  minCoverage: number;
+}): { kwh: number | null; basis: string | null; worstCoverage: number | null; why: string | null } {
+  const parts = String(i.slots ?? '').split(',').filter((x) => x !== '').map((x) => {
+    const m = /^(\d+):([CPN])$/.exec(x);
+    return m ? { slot: Number(m[1]), src: m[2] as 'C' | 'P' | 'N' } : null;
+  });
+  if (parts.length === 0 || parts.some((p) => p == null)) return { kwh: null, basis: null, worstCoverage: null, why: 'no per-slot sources recorded' };
+  const basis = (parts as Array<{ slot: number; src: 'C' | 'P' | 'N' }>).map((p) => `${p.slot}:${p.src}`).join(',');
+  let wh = 0;
+  let worst = 1;
+  for (const p of parts as Array<{ slot: number; src: 'C' | 'P' | 'N' }>) {
+    if (p.src === 'N') return { kwh: null, basis, worstCoverage: null, why: `slot ${p.slot} had no source` };
+    const sn = p.src === 'P' ? i.panelSn : i.coreOfSlot(p.slot);
+    if (sn == null) return { kwh: null, basis, worstCoverage: null, why: `slot ${p.slot}'s Core is not connected` };
+    const pts = i.query(sn, p.src === 'P' ? `src${p.slot}_pv_w` : 'pv_total', i.span.startMs, i.span.endMs);
+    wh += integrateWh(pts, true);
+    worst = Math.min(worst, coverageFrac(pts, i.span.startMs, i.span.endMs));
+  }
+  const ok = worst >= i.minCoverage;
+  return {
+    kwh: ok ? Math.round(wh / 10) / 100 : null, basis, worstCoverage: Math.round(worst * 100) / 100,
+    why: ok ? null : `worst per-slot PV coverage ${worst.toFixed(2)} < ${i.minCoverage}`,
+  };
+}
+
+/** ★★★ v1.204.0 (L5) — the score note of a 'panel' / 'mixed' row's PV actual: its sources, the evening its 7-day energy balance passed
+ *  as of and the window ratio stored with the row (not re-judged at capture), and that the row is kept apart. PURE. */
+export function panelPvActualNote(r: Pick<NightLedgerRow, 'plan_date' | 'pv_upper_ratio'>, basis: string | null, withheldWhy: string | null): string {
+  const slots = String(basis ?? '').split(',').filter((x) => x !== '');
+  const p = slots.filter((x) => x.endsWith(':P')).map((x) => x.split(':')[0]);
+  const c = slots.filter((x) => x.endsWith(':C')).map((x) => x.split(':')[0]);
+  const src = `${p.length > 0 ? `the panel's own per-slot reading for slot${p.length === 1 ? '' : 's'} ${p.join(', ')}` : ''}`
+    + `${p.length > 0 && c.length > 0 ? '; ' : ''}${c.length > 0 ? `the Core's own meter for slot${c.length === 1 ? '' : 's'} ${c.join(', ')}` : ''}`;
+  const ratio = typeof r.pv_upper_ratio === 'number' && Number.isFinite(r.pv_upper_ratio) ? ` (window ratio ${r.pv_upper_ratio.toFixed(4)})` : '';
+  const head = withheldWhy != null
+    ? ` PV actual withheld (${withheldWhy}).`
+    : ` PV actual is ${src || 'the per-slot resolver'}.`;
+  return `${head} The plan's 7-day energy balance passed as of ${r.plan_date}${ratio}, the evening it was made; it is not re-judged at capture. `
+    + "The row is kept apart from the readiness gate's sizing figures.";
 }
 
 /**
@@ -1423,7 +1502,7 @@ export function deliveredLedgerFields(
 
 export interface NightLedgerColumnsInput {
   row: Pick<NightLedgerRow,
-    'plan_date' | 'issued_at_ms' | 'actuation_applied_at_ms' | 'actuation_reverted_at_ms' | 'pv_model_sns'>;
+    'plan_date' | 'issued_at_ms' | 'actuation_applied_at_ms' | 'actuation_reverted_at_ms' | 'pv_model_sns'> & Partial<Pick<NightLedgerRow, 'pv_basis'>>;
   /** The actuator stamped this night `actuated=1`. */
   actuated: boolean;
   windowStartMs: number;
@@ -1511,7 +1590,8 @@ export function assembleNightLedgerColumns(i: NightLedgerColumnsInput): NightLed
 
   // Is the PV verdict forecast-skill evidence at all? Only when the band was built for
   // the Cores whose actual PV it is graded against (pv_model_sns, recorded at plan time).
-  const pvSetAside = pvVerdictSetAside(i.row.pv_model_sns, i.homeSns) ?? knownFleetMismatchReason(i.row);
+  // v1.204.0 — a band on the panel's own readings first (panelPvVerdictSetAside).
+  const pvSetAside = pvVerdictSetAside(i.row.pv_model_sns, i.homeSns, i.row.pv_basis) ?? knownFleetMismatchReason(i.row);
 
   return {
     onpeak, cost, costSpan, hold,

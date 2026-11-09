@@ -371,6 +371,8 @@ import {
   forecastSpanRecaptureHorizonMs, forecastSpanResetColumns,
   // v1.188.1 — held telemetry: a row on held readings is not scored; one captured on them is repaired.
   heldLedgerVerdict, heldLedgerNote, heldLedgerRepair, heldRepairColumns, heldRepairClause, heldSides, basisIncompleteNote, cushionOnlyNote,
+  // v1.204.0 — a row planned on the panel's own readings: its PV actual from the per-slot sources, and its note.
+  isPanelBasisRow, panelRowPvActual, panelPvActualNote,
   // v1.196.0 — the saturation that censors a row's PV for the cost ceiling's PV factor.
   pvSaturationColumns,
 } from './nightLedgerScoring.js';
@@ -4612,6 +4614,12 @@ function recordNightPlanRow(planDate: string, plan: NightChargePlan, extras: Nig
     // ★★★ v1.203.0 — a cushion-only plan's solar refusal (its basis), the scorer's key to leave the row unscored. Written
     // unconditionally (null on every other plan, a refusal included), so a re-issued plan never leaves an earlier one's beside it.
     cushion_only_refused_by: plan.cushionOnly?.refusedBy ?? null,
+    // ★★★ v1.204.0 — the solar basis the plan was selected on, written unconditionally (null with no selection: a snapshot from before
+    // v1.204.0), so a re-issued plan never leaves an earlier plan's basis beside its own.
+    pv_basis: extras.pvSelection?.pvBasis ?? null,
+    pv_basis_slots: extras.pvSelection?.pvBasisSlots ?? null,
+    pv_basis_refused_by: extras.pvSelection?.pvBasisRefusedBy ?? null,
+    pv_upper_ratio: extras.pvSelection?.pvUpperRatio ?? null,
     // v1.189.0 — the cost leg's window (the charge cycle's ledger columns): every plan of record is
     // the overnight leg until the mid-day switch.
     window_kind: 'overnight',
@@ -4909,6 +4917,25 @@ function scoreNightRow(
       app.log.warn(`night-charge ledger: actual_pv_kwh WITHHELD — worst per-core PV coverage ${worstCov.toFixed(2)} < ${PV_LEDGER_MIN_CORE_COVERAGE} over the scored span; a fleet sum across a dark core under-counts and this column is durable`);
     }
   }
+  // ★★★ v1.204.0 — a row planned on the panel's own per-slot readings ('panel' / 'mixed'): its PV actual is the per-slot resolver over
+  // the same span — the panel's reading (src{n}_pv_w) for a slot that took it, the slot's Core's pv_total for one that did not
+  // (panelRowPvActual) — each slot at the Cores' coverage minimum, and withheld when the panel or a Core read held telemetry. The
+  // sources go to actual_pv_basis; the note (panelPvActualNote) says what it is and that the row is kept apart.
+  const panelRow = isPanelBasisRow(y);
+  let panelPv: ReturnType<typeof panelRowPvActual> | null = null;
+  if (panelRow) {
+    const houseSrc = (findShp2(store.get().devices)?.projection?.sources ?? []) as Array<{ slot?: number; sn?: string; isConnected?: boolean }>;
+    panelPv = panelRowPvActual({
+      slots: y.pv_basis_slots, span: { startMs: fcSpanStart, endMs: fcSpanEnd }, panelSn: shp2Sn,
+      coreOfSlot: (slot) => houseSrc.find((x) => x.slot === slot && x.isConnected === true && typeof x.sn === 'string')?.sn ?? null,
+      query: (sn, metric, a, b) => recorder.query(sn, metric, a, b),
+      minCoverage: PV_LEDGER_MIN_CORE_COVERAGE,
+    });
+    const held = heldSide.pv || heldSide.load;
+    actualPvKwh = held ? null : panelPv.kwh;
+    actualPvCoverage = panelPv.worstCoverage;
+    if (held) panelPv = { ...panelPv, kwh: null, why: 'held telemetry over the span' };
+  }
   const actualLoadKwh = loadPts.length && !heldSide.load ? round2(integrateWh(loadPts, false) / 1000) : null;
   // v1.196.0 — did the pool reach the charge taper over the same span (pvSaturationColumns)? A day
   // it did shed PV, and the cost ceiling's PV factor leaves its pv_err_frac out.
@@ -5039,6 +5066,8 @@ function scoreNightRow(
 
   // v1.187.22 — the plan's expected buy against what was delivered, and its expected window-open
   // SoC against the measured one (expectedBuyScoreNote; '' on a row without them). Notes only.
+  // v1.204.0 (L5) — a panel row's PV actual, said: its sources, the evening its balance passed as of, the stored ratio, kept apart.
+  if (panelRow && panelPv != null) scoreNotes += panelPvActualNote(y, panelPv.basis, panelPv.kwh == null ? (panelPv.why ?? 'withheld') : null);
   scoreNotes += expectedBuyScoreNote({
     expectedBuyKwh: y.expected_buy_kwh ?? null,
     expectedStartSocPct: y.expected_start_soc_pct ?? null,
@@ -5120,6 +5149,8 @@ function scoreNightRow(
   recorder.recordNightOutcome(yDate, {
     outcome_captured_at_ms: nowMs,
     actual_pv_kwh: actualPvKwh,
+    // v1.204.0 — the per-slot sources of a panel row's PV actual (null on every other row: the Cores' sum).
+    actual_pv_basis: panelRow ? (panelPv?.basis ?? null) : null,
     actual_load_kwh: actualLoadKwh,
     actual_window_import_kwh: windowImportKwh,
     actual_onpeak_import_kwh: onpeak.importKwh,
