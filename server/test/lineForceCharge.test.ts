@@ -1361,7 +1361,26 @@ test('★★★ T9 (Fix13) the body: a line above the reserve with no time has n
   assert.equal(b(55.55, null), `Night-charge: the force-charge for tonight's 55.6% outage line cannot start yet — grid presence is unknown. ${NO_CLOCK}`);
   assert.doesNotMatch(b(55.55, null), /window close|null|undefined/);
   assert.ok(b(55.55, '4:11 AM').endsWith('If it has not started by ~4:11 AM, the pool may close under the line; if it never starts, the add-on adds nothing above the 50% reserve.'));
-  for (const t of [null, '4:11 AM']) assert.ok(b(50, t).endsWith('grid presence is unknown. If it never starts, the add-on adds nothing above the 50% reserve.'), String(t));
+  // v1.203.0 — a line the reserve holds is one at or under 49 (a 50% reserve holds the pool at 49): it keeps its own sentence; a line
+  // stated at 50.00 is not held, and is told the pool may close under it.
+  for (const t of [null, '4:11 AM']) assert.ok(b(49, t).endsWith('grid presence is unknown. If it never starts, the add-on adds nothing above the 50% reserve.'), String(t));
+  assert.equal(b(50, null), `Night-charge: the force-charge for tonight's 50% outage line cannot start yet — grid presence is unknown. ${NO_CLOCK}`);
+  assert.ok(b(49.5, '4:11 AM').endsWith('If it has not started by ~4:11 AM, the pool may close under the line; if it never starts, the add-on adds nothing above the 50% reserve.'));
+});
+
+test('★★★ v1.203.0 THE PANEL\'S HOLD in the ON failure and the declined start: a line in (49, 50] — the line force-charge\'s, since a 50% reserve holds the pool at 49 — is told the pool may close under it; a line at or under 49 is not', () => {
+  const build = (notify as unknown as { buildLineForceChargeDeclinedStart: (o: unknown) => { body: string } }).buildLineForceChargeDeclinedStart;
+  const on = (lineLinePct: number, slots: number[]) => buildNightForceChargeOnFailure({ day: '2026-09-16', slots, ourSlots: [1, 2, 3], retries: 1, noRetry: false, ceilingPct: null, lineLinePct } as never).body;
+  for (const l of [49.5, 49.97, 50]) {
+    assert.ok(on(l, [1, 2, 3]).includes(', and the pool may close the window under the line. '), `${l}: ${on(l, [1, 2, 3])}`);
+    assert.ok(on(l, [2]).includes(', so the pool may close the window short of the line. '), `${l}: ${on(l, [2])}`);
+    assert.ok(build({ day: '2026-09-16', linePct: l, why: 'grid presence is unknown', latestStartText: null }).body.endsWith(NO_CLOCK), `${l}`);
+  }
+  for (const l of [40, 48.5, 49]) {
+    assert.doesNotMatch(on(l, [1, 2, 3]), /under the line|short of the line/, `${l}`);
+    assert.doesNotMatch(on(l, [2]), /under the line|short of the line/, `${l}`);
+    assert.doesNotMatch(build({ day: '2026-09-16', linePct: l, why: 'grid presence is unknown', latestStartText: '4:11 AM' }).body, /under the line/, `${l}`);
+  }
 });
 
 test('★★ T9 the morning summary (review): "ran to the window close" only when the OFF was the window\'s; any other OFF says when and why', () => {
@@ -2400,6 +2419,8 @@ test('★★★ T24 (Fix8) the line texts at their edges: every text on the line
       const t = nfc.forceChargeLineArmNote({ linePct: line, startTargetPct: S, panelCeilingPct: C, expectedStartText: '03:25', timedByText: '04:40', ceilingStop, notHeld });
       add(t, { line, named: besideReserve(line), noNumber: atReserve, where: where(`21:30 ${ceilingStop ? 'stop' : 'plain'} ${notHeld?.kind ?? 'held'}`) });
       if (!/^Force-charge: LINE — tonight's (?:[\d.]+% )?outage line is above (?:the 50% reserve|the 49% the panel holds the pool at under a 50% reserve): /.test(t)) errs.push(`${where('21:30')}: ${t}`);
+      // v1.203.0 — a line stated at the reserve (50.00) is unnumbered beside the 49% hold and the 50% reserve it would read as.
+      if (atReserve && /^Force-charge: LINE — tonight's [\d.]+% outage line/.test(t)) errs.push(`${where('21:30')}: numbered at the reserve: ${t}`);
     }
     // 3. The line's number on the add-on's own log lines (index.ts: the ON, the re-ON, the ceiling lowering, the at-risk and the
     // declined-start lines): lineLogPct, round1 of the record's line, its ask where the line is unknown (read at the source below).
@@ -2422,6 +2443,8 @@ test('★★★ T24 (Fix8) the line texts at their edges: every text on the line
       if (row == null) errs.push(`${where('card')}: no row`);
       else {
         add(row, { line, named: besideReserve(line), noNumber: atReserve, where: where(`card ${shape}`) });
+        // v1.203.0 — …and on the card.
+        if (atReserve && /^outage line [\d.]+% /.test(row)) errs.push(`${where('card')}: numbered at the reserve: ${row}`);
         if (row.includes('the line is above a full pool') && !(line > 100 && /^outage line ([\d.]+)%/.test(row) && Number(/^outage line ([\d.]+)%/.exec(row)![1]) > 100)) errs.push(`${where('card')}: ${row}`);
       }
     }
@@ -2436,11 +2459,14 @@ test('★★★ T24 (Fix8) the line texts at their edges: every text on the line
       const b = f.body;
       add(`${f.title}\n${b}`, { line, named: beside(line, 50), where: where(`ON failure ${slots.length}`) });
       if (held && /under the line|short of the line/.test(b)) errs.push(`${where('ON failure')}: a line the reserve holds said to close under it`);
+      // v1.203.0 — a line the reserve does not hold (the 50% reserve holds the pool at 49: every line here) is told it may.
+      if (!held && !/may close the window (?:under|short of) the line/.test(b)) errs.push(`${where('ON failure')}: a line the reserve cannot hold not told the pool may close under it`);
     }
     const decM = notify.buildLineForceChargeDeclinedStart({ day: '2026-09-16', linePct: line, why: 'grid presence is unknown', latestStartText: '04:24' });
     const dec = decM.body;
     add(`${decM.title}\n${dec}`, { line, named: beside(line, 50), where: where('declined start') });
     if (held && /under the line/.test(dec)) errs.push(`${where('declined start')}: a line the reserve holds said to close under it`);
+    if (!held && !/the pool may close under the line|perhaps under the line/.test(dec)) errs.push(`${where('declined start')}: a line the reserve cannot hold not told the pool may close under it`);
     // 8. The line at risk: whole-percent pool readings (the panel's) under the threshold, falling and flat; and 9. the morning
     // account's close; 10. the reserve-apply failure.
     const costDominant = !near; // a cost-dominant night needs its cost stop at ⌈L⌉ + 10 ≤ 100

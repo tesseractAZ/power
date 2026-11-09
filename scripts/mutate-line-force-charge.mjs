@@ -2141,9 +2141,11 @@ const MUTANTS = [
   {
     id: 'F8-ii(b). ★★★ a line stated at the reserve numbered beside it',
     file: NFC, tests: [T_LINE],
-    // v1.203.0 — re-anchored: the unnumbered words are named once (a line at or under the reserve is beside the 49% too).
-    find: '  return n > RESERVE_WRITE_MAX_PCT ? `${lead}${n}%${tail}` : unnumbered;',
-    to: '  return `${lead}${n}%${tail}`; /* MUTANT */',
+    // v1.203.0 — re-pointed: a line stated at 50.00 is now named in the branch for a line at or under the reserve (beside the 49% the
+    // panel holds too), so the unnumbered words of the branch above it are unreachable for a stated line (equivalent: the full sweep
+    // on 5ba94b01 left it alive). The property lives here.
+    find: '    return b > held && b < RESERVE_WRITE_MAX_PCT ? `${lead}${b}%${tail}` : unnumbered;',
+    to: '    return `${lead}${b}%${tail}`; /* MUTANT */',
     why: 'A line stated at 50.00 (asked at 51) is pushed and logged "the 50% outage line is above the 50% reserve" (2026-11-25, nameplate, 11 h).',
   },
   {
@@ -2241,9 +2243,17 @@ const MUTANTS = [
   {
     id: 'F8-ii(p). ★★ the ON failure says a line the reserve holds may close under it',
     file: NTF, tests: [T_LINE],
-    find: '  const underReach = line != null && line > RESERVE_WRITE_MAX_PCT;',
+    // v1.203.0 — re-anchored: the reserve holds the pool at 49 (the panel's point), so the line it holds is one at or under 49.
+    find: '  const underReach = line != null && line > RESERVE_WRITE_MAX_PCT - PANEL_RESERVE_HOLD_UNDERSHOOT_PCT;',
     to: '  const underReach = line != null; /* MUTANT */',
-    why: 'A line stated at 50.00 (the reserve holds it) is told the pool may close under it, or short of it.',
+    why: 'A line the reserve holds (at or under 49) is told the pool may close under it, or short of it.',
+  },
+  {
+    id: 'F8-ii(p2). ★★★ (v1.203.0) the ON failure keeps v1.202.0\'s threshold: a line in (49, 50] not told it may close under it',
+    file: NTF, tests: [T_LINE],
+    find: '  const underReach = line != null && line > RESERVE_WRITE_MAX_PCT - PANEL_RESERVE_HOLD_UNDERSHOOT_PCT;',
+    to: '  const underReach = line != null && line > RESERVE_WRITE_MAX_PCT; /* MUTANT */',
+    why: 'A line stated at 50.00 whose force-charge did not take is held at 49 by the 50% reserve, and the push says nothing of the close under it.',
   },
   {
     id: 'F8-ii(q). ★★★ the declined start says the pool is expected to close under the line, near the reserve (the defect)',
@@ -2255,9 +2265,17 @@ const MUTANTS = [
   {
     id: 'F8-ii(r). ★★ the declined start says a line the reserve holds may close under it',
     file: NTF, tests: [T_LINE],
-    find: '      + (line > RESERVE_WRITE_MAX_PCT',
-    to: '      + (line > 0 /* MUTANT */',
-    why: 'A line stated at 50.00 is told the pool may close under it.',
+    // v1.203.0 — re-anchored: the line the 50% reserve holds is one at or under 49 (the panel's point).
+    find: '      + (line > RESERVE_WRITE_MAX_PCT - PANEL_RESERVE_HOLD_UNDERSHOOT_PCT\n',
+    to: '      + (line > 0 /* MUTANT */\n',
+    why: 'A line the reserve holds (at or under 49) is told the pool may close under it.',
+  },
+  {
+    id: 'F8-ii(r2). ★★★ (v1.203.0) the declined start keeps v1.202.0\'s threshold: a line in (49, 50] not told it may close under it',
+    file: NTF, tests: [T_LINE],
+    find: '      + (line > RESERVE_WRITE_MAX_PCT - PANEL_RESERVE_HOLD_UNDERSHOOT_PCT\n',
+    to: '      + (line > RESERVE_WRITE_MAX_PCT /* MUTANT */\n',
+    why: 'A line stated at 50.00 whose force-charge cannot start is held at 49 by the 50% reserve, and the push says only that nothing is added above it.',
   },
   {
     id: 'F8-ii(s). ★★ the declined start names the line to one decimal beside the reserve',
@@ -2290,8 +2308,9 @@ const MUTANTS = [
   {
     id: 'F8-ii(w). ★★ the card numbers a line stated at the reserve',
     file: CARD, tests: [T_LINE],
-    find: "    return n > max ? `${n}% ` : '';",
-    to: "    return `${n}% `; /* MUTANT */",
+    // v1.203.0 — re-pointed, as F8-ii(b): a line stated at 50.00 is named in the card's branch for a line at or under the reserve.
+    find: "      return b > max - 1 && b < max ? `${b}% ` : '';",
+    to: "      return `${b}% `; /* MUTANT */",
     why: 'A line stated at 50.00 reads "outage line 50% is above the 50% reserve".',
   },
   /* (Fix8) ITEM 2 — the push judged after the line ceiling lowering while ON, and on its refusal. */

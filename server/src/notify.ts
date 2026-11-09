@@ -1287,8 +1287,9 @@ export function buildNightForceChargeOnFailure(o: {
   const head = `The night-charge for ${o.day ?? '—'} switched force-charge ("Charge Now") ON, but the Smart Home Panel 2 `
     + `still reads slot(s) ${named.text} OFF after ${o.retries} re-issue(s)${o.noRetry ? ' (too close to the window end to re-issue)' : ''}. `;
   const line = o.lineLinePct != null && Number.isFinite(o.lineLinePct) ? lineBesidePct(o.lineLinePct, RESERVE_WRITE_MAX_PCT) : null;
-  // (Fix8) Only where the line, as named, is above the reserve can the pool close under it: a line stated at 50.00 the reserve holds.
-  const underReach = line != null && line > RESERVE_WRITE_MAX_PCT;
+  // (Fix8) Only where the line, as named, is above what the reserve holds can the pool close under it. v1.203.0 — a 50% reserve holds
+  // the pool one point under it (PANEL_RESERVE_HOLD_UNDERSHOOT_PCT), so a line stated at 50.00, or anywhere in (49, 50], is not held.
+  const underReach = line != null && line > RESERVE_WRITE_MAX_PCT - PANEL_RESERVE_HOLD_UNDERSHOOT_PCT;
   // v1.200.0 (review) — a LINE night is the outage cushion, not a buy: say what the failure does to the line, and
   // what can still lift the pool — never "no action needed". The add-on's close OFF goes to these slots too. (Fix10 review 1) Never
   // "to hold the line": a start held late and an ON that does not take can leave too little of the window for that.
@@ -1336,11 +1337,12 @@ export function buildLineForceChargeDeclinedStart(o: {
     // (Fix8 review 2) "yet", as the body and the log say it: decideForceCharge decides every tick, so a held start may still come.
     title: 'Night-charge: the force-charge for the outage line cannot start yet',
     // (Fix8) In words true in every outcome: the pool may already read above the line, or a person's Charge Now may be lifting it
-    // (a declined cause) — never "is expected to close under the line", never "near the 50% reserve"; a line stated at 50.00 (the
-    // reserve holds it) is not said to close under it. (Fix8 review 1) Nor "only the 50% reserve holds it": with the grid absent (a
+    // (a declined cause) — never "is expected to close under the line", never "near the 50% reserve"; a line the reserve holds
+    // is not said to close under it (v1.203.0: one at or under 49, since a 50% reserve holds the pool at 49; a line stated at 50.00, or
+    // anywhere in (49, 50], is not held). (Fix8 review 1) Nor "only the 50% reserve holds it": with the grid absent (a
     // declined cause) the pool drains through the reserve, and a person's Charge Now lifts it — the add-on adds nothing above it.
     body: `Night-charge: the force-charge for tonight's ${line}% outage line cannot start yet — ${o.why}. `
-      + (line > RESERVE_WRITE_MAX_PCT
+      + (line > RESERVE_WRITE_MAX_PCT - PANEL_RESERVE_HOLD_UNDERSHOOT_PCT
         ? o.latestStartText != null
           ? `If it has not started by ~${o.latestStartText}, the pool may close under the line; if it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.`
           : `The later it starts, the lower the pool may close, perhaps under the line; if it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.`
