@@ -3249,6 +3249,8 @@ export function nightChargeStateFields(
   night_charge_window_start: string | null;
   night_charge_window_end: string | null;
   charge_tonight: boolean;
+  night_charge_pv_basis: 'cores' | 'panel' | 'mixed' | 'none' | null;
+  night_charge_pv_basis_refused_by: string | null;
 } {
   const fresh = !!plan && plan.basisComplete && nowMs - plan.generatedAt < PLAN_STALENESS_MS;
   const win = plan?.window ?? null;
@@ -3281,6 +3283,13 @@ export function nightChargeStateFields(
     night_charge_window_start: win ? fmtSiteDayHm(win.startMs, nowMs) : null,
     night_charge_window_end: win ? fmtSiteDayHm(win.endMs, nowMs) : null,
     charge_tonight: fresh ? plan!.chargeTonight === true : false,
+    // ★★★ v1.204.0 (L6) — ecoflow_night_charge_target_soc's attributes (NIGHT_CHARGE_ATTRIBUTES_TEMPLATE), under the same freshness:
+    // the basis the plan was sized on — the panel's readings ('panel' | 'mixed'), none (a cushion-only plan), or the Cores' band (a
+    // plan the selection put nothing on) — and why the panel's readings are not used (a reason code; null where they are, where none
+    // was judged, and on the transient class).
+    night_charge_pv_basis: !fresh ? null
+      : plan!.pvBasis != null ? plan!.pvBasis : plan!.cushionOnly != null ? 'none' : plan!.pvBasisAsOfDay != null ? 'none' : 'cores',
+    night_charge_pv_basis_refused_by: fresh && plan!.pvBasis == null ? (plan!.pvBasisRefusedBy?.code ?? null) : null,
   };
 }
 

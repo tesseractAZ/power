@@ -238,6 +238,10 @@ export interface ChargeFigurePlan {
   pvBandWiden?: PvBandWidenText | null;
   /** v1.203.0 — a cushion-only plan (the server's NightChargePlan.cushionOnly); absent on every other plan. */
   cushionOnly?: CushionOnlyText | null;
+  /** ★★★ v1.204.0 — the sentence the server's rationale closes with on the selected solar basis (NightChargePlan.pvBasisText): the
+   *  panel-measured basis on a plan sized on it, or why the panel's readings are not used on a cushion-only plan. Shown word for
+   *  word; '' or absent on every other plan. */
+  pvBasisText?: string | null;
   costCeilingSocPct?: number | null;
   longGapAhead?: boolean | null;
   /** v1.202.0 — the pool and the Cores' standby the plan's walks counted (NightChargePlan.planPool); absent where neither
@@ -564,7 +568,7 @@ export function sizingLine(plan: ChargeFigurePlan): string | null {
   // v1.203.0 — a cushion-only plan credits no solar: "no PV" (the server's NO_PV_WORST_CASE_BASIS), and its disclosure.
   const pv = plan.cushionOnly != null ? 'no PV' : 'P10 PV';
   return `Sized on an islanded worst case (${pv}, P90 load including any committed EV session${standby}, no grid) of ~${r1(worst)} kWh${cal}.`
-    + provisionalBandText(plan.pvBandWiden) + cushionOnlyCardText(plan.cushionOnly, plan);
+    + provisionalBandText(plan.pvBandWiden) + cushionOnlyCardText(plan.cushionOnly, plan) + (plan.pvBasisText ?? '');
 }
 
 /** The plan fields the card's HOLD summary reads (a subset of /api/night-charge/status → plan). */
@@ -584,6 +588,8 @@ export interface HoldSummaryPlan {
   pvBandWiden?: PvBandWidenText | null;
   /** v1.203.0 — a cushion-only hold (the server's NightChargePlan.cushionOnly); absent on every other plan. */
   cushionOnly?: CushionOnlyText | null;
+  /** ★★★ v1.204.0 — the server's closing sentence on the selected solar basis (NightChargePlan.pvBasisText), word for word. */
+  pvBasisText?: string | null;
   costCeilingSocPct?: number | null;
   longGapAhead?: boolean | null;
 }
@@ -633,7 +639,7 @@ function holdVerdict(plan: HoldSummaryPlan, none: string): { headline: string; d
   }
   // v1.198.0 — a hold SIZED on the provisional solar band closes its detail with the sentence the
   // push closes it with ('' on the full basis); a hold with no window, above, was sized on nothing.
-  const provisionalDetail = provisionalBandText(plan.pvBandWiden) + cushionOnlyCardText(plan.cushionOnly, plan);
+  const provisionalDetail = provisionalBandText(plan.pvBandWiden) + cushionOnlyCardText(plan.cushionOnly, plan) + (plan.pvBasisText ?? '');
   if (plan.cushionShortfall) {
     return {
       headline: 'No overnight charge tonight — the window cannot cover the cushion.',
@@ -803,4 +809,27 @@ export function middayShadowView(
   }
   if (preview?.push?.title) lines.push(`Its evening notice would read (not sent): “${preview.push.title}”`);
   return { title: 'Mid-day charge (shadow)', lines, note: MIDDAY_SHADOW_NOTE };
+}
+
+/**
+ * ★★★ v1.204.0 — the card's Basis stat on the selected solar basis: on a plan sized on the panel-measured band 'panel solar' (every
+ * connected slot on the panel's readings) or 'Cores + panel solar' (mixed), its sub the 7-day energy balance against its threshold;
+ * on a cushion-only plan whose panel basis was refused, the cushion-only value with "panel solar refused" in the sub. Null where the
+ * plan carries neither (the card shows what it showed in v1.203.0). PURE.
+ */
+export function panelBasisStat(plan: {
+  pvBasis?: 'panel' | 'mixed' | null;
+  pvBasisChecks?: { ratio: number | null; threshold: number } | null;
+  pvBasisRefusedBy?: { code: string } | null;
+  cushionOnly?: unknown;
+}): { value: string | null; sub: string } | null {
+  if (plan.pvBasis === 'panel' || plan.pvBasis === 'mixed') {
+    const c = plan.pvBasisChecks;
+    return {
+      value: plan.pvBasis === 'panel' ? 'panel solar' : 'Cores + panel solar',
+      sub: c?.ratio != null ? `balance ${c.ratio.toFixed(4)} ≤ ${c.threshold.toFixed(2)}` : 'panel solar',
+    };
+  }
+  if (plan.cushionOnly != null && plan.pvBasisRefusedBy != null) return { value: null, sub: 'no solar basis · panel solar refused' };
+  return null;
 }

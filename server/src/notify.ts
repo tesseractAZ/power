@@ -3,6 +3,8 @@ import { request } from 'undici';
 import { callHaService } from './haService.js';
 import { packSnTail, type Severity } from './alerts.js';
 import { lineNotHeldOf, type NightChargePlan } from './nightChargeAdvisor.js';
+// v1.204.0 — the night plan's solar basis, said in the push (panelPvSelection.pvBasisPushText).
+import { pvBasisPushText } from './panelPvSelection.js';
 // v1.187.22 — a night-charge push states what the write will do: the level it drives the pool to
 // and the energy it is expected to draw. The worst case the plan is sized on is never pushed.
 import {
@@ -496,7 +498,9 @@ export function buildNightChargeMessage(
     // v1.198.0 — a hold SIZED on the provisional solar band says so, as the charge shape does: the
     // sentence closes each sized hold's body. '' on the full basis (the body as before); a hold with
     // no window, above, was sized on nothing and carries no pvBandWiden.
-    const provisionalHold = provisionalBandText(plan.pvBandWiden) + cushionOnlyPushText(plan, 'short');
+    // v1.204.0 — and a hold sized on the panel-measured band says so (panelBasisPushText; a cushion-only hold's refusal is in
+    // cushionOnlyPushText).
+    const provisionalHold = provisionalBandText(plan.pvBandWiden) + cushionOnlyPushText(plan, 'short') + panelBasisPushText(plan);
     if (plan.cushionShortfall) {
       return {
         ...base,
@@ -686,7 +690,8 @@ export function buildNightChargeMessage(
     ? `${cushionOnlyPushText(plan, 'charge')}${shortfallNote}${overBuyNote}${economicNote}${held ? '' : evNote} `
     : `Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~${pct(plan.baselineMinSocPct)} `
       + `${lowSoc}; the floor+cushion line is ${pct(line)}. `
-      + `Confidence: ${plan.confidenceTier}.${shortfallNote}${overBuyNote}${economicNote}${held ? '' : evNote} `;
+      // v1.204.0 — a plan sized on the panel-measured band says so after its confidence tier ('' on every other plan).
+      + `Confidence: ${plan.confidenceTier}.${panelBasisPushText(plan)}${shortfallNote}${overBuyNote}${economicNote}${held ? '' : evNote} `;
   // v1.203.0 — and the title says it; on the long-gap fill (cushionOnlyFills) the plan is not the cushion only.
   const cushionOnlyTitle = plan.cushionOnly == null ? '' : cushionOnlyFills(plan.cushionOnly, plan) ? ' — no solar basis, long-gap fill' : ' — outage cushion only';
   // v1.198.0 — a plan sized on the provisional solar band says so, after its confidence tier.
@@ -1455,12 +1460,26 @@ function cushionOnlyPushText(plan: NightChargePlan | null, form: 'charge' | 'sho
     : costFill
       ? ` Before the gap (${gapAfterWindowText(co.gapAfterMs)}) the cost target is the long-gap fill: the ${round1(plan.costCeilingSocPct!)}% state-of-charge ceiling, with the solar headroom set aside.`
       : ` ${gapAfterWindowText(co.gapAfterMs).replace(/^./, (c) => c.toUpperCase())}; the cushion is sized for this window's close only.`;
-  if (form === 'short') return ` ${basis} (${co.refusedBy}).${gap}`;
+  // v1.204.0 — and why the panel's own solar readings are not used tonight ('' where none was judged, or the class is transient).
+  const panel = panelRefusedPushText(plan);
+  if (form === 'short') return ` ${basis} (${co.refusedBy}).${gap}${panel}`;
   const line = floorCushionLinePct(plan);
   const lineText = line == null ? 'the line' : `the ${round1(line)}% line`;
   return `${basis} (${co.refusedBy}): ${lineText} is the ${round1(plan.reserveFloorPct)}% reserve floor plus `
     + `${round1(plan.cushionOutageHours ?? 4)} h of islanded backup load at the window close, with no solar credited and `
-    + `${costFill ? 'no cost target but the long-gap fill' : 'no cost target'}.${gap}`;
+    + `${costFill ? 'no cost target but the long-gap fill' : 'no cost target'}.${gap}${panel}`;
+}
+
+/** ★★★ v1.204.0 — a plan sized on the PANEL-MEASURED band, in the push: " Solar from the panel's readings (7-day energy balance
+ *  1.0044, refused above 1.04)." '' on every other plan. PURE. */
+function panelBasisPushText(plan: NightChargePlan): string {
+  return plan.pvBasis != null ? pvBasisPushText({ pvBasis: plan.pvBasis, pvBasisChecks: plan.pvBasisChecks ?? null, pvBasisRefusedBy: null }) : '';
+}
+/** ★★★ v1.204.0 — a cushion-only plan's refusal of the panel's readings, in the push: " Panel solar not used: <reason>." '' where none
+ *  was judged (the plan of the Cores' band, a shadow leg) and on the transient class. PURE. */
+function panelRefusedPushText(plan: NightChargePlan): string {
+  return plan.pvBasis == null && plan.pvBasisRefusedBy != null
+    ? pvBasisPushText({ pvBasis: null, pvBasisChecks: null, pvBasisRefusedBy: plan.pvBasisRefusedBy }) : '';
 }
 
 /** v1.200.0 — the plan's SIZING fell short (the caps note): a shortfall the envelope alone did not make. PURE. */

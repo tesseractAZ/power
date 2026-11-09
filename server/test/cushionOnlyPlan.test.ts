@@ -436,7 +436,10 @@ test('★★★ T9 THE TEXTS: rationale, push and card on every cushion-only sha
 
 test('★★ T9 the card\'s stats name the basis, not a confidence tier, and the island low credits no PV (source pins)', () => {
   const card = readFileSync(resolve(HERE, '../../web/src/cards/NightChargeCard.tsx'), 'utf8');
-  assert.ok(card.includes("        {plan.cushionOnly != null\n          ? <Stat label=\"Basis\" value={cushionOnlyBasisValue(plan.cushionOnly, plan)} sub={ws && we ? `no solar basis · ${ws}–${we}` : 'no solar basis'} />\n          : <Stat label=\"Confidence\""));
+  // v1.204.0 — the sub is the panel basis's words where its readings were refused ("no solar basis · panel solar refused",
+  // panelBasisStat), else "no solar basis" as before; the window after it (withWindow).
+  assert.ok(card.includes("        {plan.cushionOnly != null\n          ? <Stat label=\"Basis\" value={cushionOnlyBasisValue(plan.cushionOnly, plan)} sub={withWindow(pvStat?.sub ?? 'no solar basis')} />\n          : pvStat != null"));
+  assert.ok(card.includes("const withWindow = (sub: string): string => (ws && we ? `${sub} · ${ws}–${we}` : sub);"));
   // The value: the cushion only, or on the long-gap fill the cushion and the fill (never "cushion only" of a night that fills).
   const co = { longGapAfter: true };
   assert.equal(web.cushionOnlyBasisValue({ longGapAfter: false }, { longGapAhead: false, costCeilingSocPct: null }), 'cushion only');

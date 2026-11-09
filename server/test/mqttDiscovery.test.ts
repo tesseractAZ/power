@@ -730,8 +730,10 @@ test('★★★ mqtt-discovery: every mid-day figure carries a basis attribute; 
   // v1.197.0 — and the maintenance sensor, whose one attribute (`cores`) lists the shelved Cores; it is
   // pinned in its own test below. Every OTHER sensor is still unchanged.
   const MAINT = 'ecoflow_maintenance_devices';
-  const withAttrs = SENSORS.filter((x) => x.json_attributes_template != null && x.unique_id !== MAINT).map((x) => x.unique_id).sort();
-  assert.deepEqual(withAttrs, [...ids].sort(), 'exactly the mid-day figures (the maintenance sensor aside)');
+  // v1.204.0 — and the night-charge target, whose two attributes (pv_basis, pv_basis_refused_by) are pinned in panelPvSelection.test.ts.
+  const NIGHT = 'ecoflow_night_charge_target_soc';
+  const withAttrs = SENSORS.filter((x) => x.json_attributes_template != null && x.unique_id !== MAINT && x.unique_id !== NIGHT).map((x) => x.unique_id).sort();
+  assert.deepEqual(withAttrs, [...ids].sort(), 'exactly the mid-day figures (the maintenance sensor and the night-charge target aside)');
   for (const id of ids) {
     const cfg = sensorDiscoveryConfig(SENSORS.find((x) => x.unique_id === id)!);
     assert.equal(cfg.json_attributes_topic, 'ecoflow_panel/state', `${id}: attributes from the state topic`);
@@ -741,7 +743,7 @@ test('★★★ mqtt-discovery: every mid-day figure carries a basis attribute; 
   }
   assert.equal(MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE, '{{ {"basis": value_json.midday_charge_basis | default(none)} | tojson }}');
   // Every other sensor's config is what it was: no attribute keys at all.
-  for (const x of SENSORS.filter((y) => !ids.includes(y.unique_id) && y.unique_id !== MAINT)) {
+  for (const x of SENSORS.filter((y) => !ids.includes(y.unique_id) && y.unique_id !== MAINT && y.unique_id !== NIGHT)) {
     const cfg = sensorDiscoveryConfig(x);
     assert.equal('json_attributes_topic' in cfg, false, x.unique_id);
     assert.equal('json_attributes_template' in cfg, false, x.unique_id);

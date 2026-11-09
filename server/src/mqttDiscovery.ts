@@ -278,6 +278,11 @@ export interface SensorConfig {
 export const MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE = '{{ {"basis": value_json.midday_charge_basis | default(none)} | tojson }}';
 /** v1.197.0 — the maintenance sensor's one attribute: which Cores, until when. */
 export const MAINTENANCE_ATTRIBUTES_TEMPLATE = '{{ {"cores": value_json.maintenance_summary | default([])} | tojson }}';
+/** ★★★ v1.204.0 (L6) — ecoflow_night_charge_target_soc's two attributes, EXACTLY these (json_attributes is an allowlist): the solar
+ *  basis tonight's plan was sized on ('cores' — the Cores' own band; 'panel' / 'mixed' — the panel's own per-slot readings; 'none' —
+ *  no solar basis, the cushion-only plan) and why the panel's readings are not used (a reason code, null when they are, when none
+ *  was judged, and on the transient class). Null under the night-charge entities' freshness rule (nightChargeStateFields). */
+export const NIGHT_CHARGE_ATTRIBUTES_TEMPLATE = '{{ {"pv_basis": value_json.night_charge_pv_basis | default(none), "pv_basis_refused_by": value_json.night_charge_pv_basis_refused_by | default(none)} | tojson }}';
 
 export const SENSORS: SensorConfig[] = [
   // Power flow
@@ -466,7 +471,8 @@ export const SENSORS: SensorConfig[] = [
   // ("Arrival SoC (Worst Case)", was "Expected SoC") beside "Expected Buy", which is the expected
   // charge. As with the buy entity below only the NAME changes — unique_id, config topic, value
   // and value key are unchanged and no object_id is published, so HA keeps the entity_id.
-  { unique_id: 'ecoflow_night_charge_target_soc', name: 'Night-Charge Target SoC', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-charging-90', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_target_soc_percent }}' },
+  // v1.204.0 (L6) — with the plan's solar basis as two attributes (NIGHT_CHARGE_ATTRIBUTES_TEMPLATE).
+  { unique_id: 'ecoflow_night_charge_target_soc', name: 'Night-Charge Target SoC', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-charging-90', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_target_soc_percent }}', json_attributes_template: NIGHT_CHARGE_ATTRIBUTES_TEMPLATE },
   { unique_id: 'ecoflow_night_charge_expected_soc', name: 'Night-Charge Arrival SoC (Worst Case)', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-clock', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_expected_soc_percent }}' },
   // v1.42.0 — alarm-host SoC temperature (heat tripwire; HA recorder provides
   // the trend history). Null when the host exposes no readable thermal zone.
