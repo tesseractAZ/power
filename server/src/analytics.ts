@@ -2900,10 +2900,13 @@ export async function getPlanningForecast(
   const fc = await getDayForecast(devices, recorder, log);
   const hit = planningForecastCache.get(asOfDay);
   if (hit && hit.forecastTs === fc.generatedAt && Date.now() - hit.ts < PLANNING_FORECAST_TTL_MS) return hit.value;
+  // The planning hours are the forecast's own, walked on its own weather and SoC basis: a forecast this
+  // worker did not build (none kept beside it) has no planning layer.
+  const built = forecastBuildInputs.get(fc);
+  if (!built) return null;
   const inputs = panelBasisInputs(devices, recorder, asOfDay);
   if (inputs == null) return null;
   const now = Date.now();
-  const built = forecastBuildInputs.get(fc);
   const coresOfSlots = [...inputs.coreOfSlot.values()].filter((sn): sn is string => sn != null).sort();
   const identity = inputs.fieldHoursUnadmitted === 0
     && coresOfSlots.length === inputs.slots.length
@@ -2927,15 +2930,8 @@ export async function getPlanningForecast(
     };
   } else {
     const startE = siteDayStartMs(asOfDay);
-    // GHI: the build's own realized-first map (the alarm model's), else the recorder's.
-    let ghiByEpoch = built?.ghiByEpoch;
-    if (!ghiByEpoch) {
-      ghiByEpoch = new Map<number, number>();
-      const since = siteShiftDaysMs(startE, -PLANNING_WINDOW_DAYS);
-      for (const r of preferRealizedGhiRows(recorder.query('weather', 'ghi_wm2', since, now, 3600), queryRealizedGhi(recorder, since, now))) {
-        ghiByEpoch.set(Math.floor(r.ts / 3_600_000), r.value);
-      }
-    }
+    // GHI: the build's own realized-first map, the one the alarm model is fitted on.
+    const ghiByEpoch = built.ghiByEpoch;
     const maps = [...inputs.slotMaps.values()];
     const fit = fullCoverageFleetPv(maps);
     const model = buildSolarResponse(fit.map, ghiByEpoch);
@@ -2946,15 +2942,15 @@ export async function getPlanningForecast(
     for (const [k, m] of inputs.slotMaps) pvBySlot.set(k, slotMapPoints(m, biasFrom, startE));
     // No log: the exclusion line names the series key, and a slot key carries the panel's serial.
     const bias = computePvBiasCorrection(model, ghiByEpoch, pvBySlot, startE, 7);
-    const clearnessHist = built?.clearnessHist ?? 1;
+    const clearnessHist = built.clearnessHist;
     const hours: ForecastHour[] = [];
     let ceiling = 0;
-    let socWh = built?.socWhStart ?? null;
-    const fullWh = built?.fullWh ?? null;
+    let socWh = built.socWhStart;
+    const fullWh = built.fullWh;
     let minSoc: number | null = null;
     fc.hours.forEach((fh, k) => {
       const clock = siteHour(fh.ts);
-      const wx = built?.wxByHour.get(Math.floor(fh.ts / 3_600_000)) ?? null;
+      const wx = built.wxByHour.get(Math.floor(fh.ts / 3_600_000)) ?? null;
       const ghi = wx ? wx.radiationWm2 : fh.ghiWm2;
       const cloud = wx ? wx.cloudCoverPct : fh.cloudCoverPct;
       const resp = model.hourly[clock];
@@ -2962,9 +2958,9 @@ export async function getPlanningForecast(
       const hourCeil = modelled ? resp.observedMaxPvW * 1.05 : null;
       const pvW = hourCeil != null ? Math.min(pv * bias, hourCeil) : pv * bias;
       if (hourCeil != null && hourCeil > ceiling) ceiling = hourCeil;
-      const load = built?.loadWs[k] ?? fh.forecastLoadW;
+      const load = built.loadWs[k] ?? fh.forecastLoadW;
       let socPct: number | null = null;
-      if (built && fullWh != null && fullWh > 0 && socWh != null) {
+      if (fullWh != null && fullWh > 0 && socWh != null) {
         socWh = Math.max(0, Math.min(fullWh, socWh + chargeLegStep(pvW - runwayDrainW(load, built.overheadW), RUNWAY_CHARGE_EFFICIENCY)));
         socPct = (socWh / fullWh) * 100;
         if (minSoc == null || socPct < minSoc) minSoc = socPct;

@@ -58,8 +58,9 @@ function flows(slot: number, hs: number) {
   const s = sun(hs) || sun(hs + H);
   const pv = s ? (2.6 + 0.2 * slot) * ghiAt(he) : 0;
   const hod = hourOfDay(hs);
-  const out = 500 + 200 * slot + 150 * Math.cos(hod) ;
   const inn = !s && (hod === 1 || hod === 2) ? 1800 : 0;
+  // The slot meter reads one direction in an hour: AC into the Core while it charges, out otherwise.
+  const out = inn > 0 ? 0 : 500 + 200 * slot + 150 * Math.cos(hod);
   return { s, pv, out, inn };
 }
 
@@ -292,4 +293,45 @@ test('★★★ identity: with every Core reporting its own meter and no field h
   const { generatedAt: _a, ...bandP } = await computeProbabilisticForecast(fc, sp, p);
   const { generatedAt: _b, ...band } = await computeProbabilisticForecast(fc, skill);
   assert.deepEqual(bandP, band, 'and the band');
+});
+
+test('★★ L10: the fitted constants are kept with their day set, so rows ageing out of the retention do not take them away', async () => {
+  const { mkdtempSync, readFileSync: rd, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = mkdtempSync(join(tmpdir(), 'panel-pv-constants-'));
+  const path = join(dir, 'panel-pv-constants.json');
+  try {
+    const devices = devicesWith();
+    setPanelBasisConstantsPathForTesting(path);
+    const first = (await getPlanningForecast(devices, dark.recorder, () => {}, E))!;
+    assert.equal(first.planningVerdict.state, 'pass');
+    const kept = JSON.parse(rd(path, 'utf8'));
+    const keys = Object.keys(kept.fits).sort();
+    assert.equal(keys.length, 3, 'one per (slot, Core)');
+    for (const k of keys) {
+      const fit = kept.fits[k].fit;
+      assert.equal(fit.days, 25);
+      assert.equal(fit.dayList.length, 25, 'with the days it was fitted on');
+      assert.ok(fit.constants != null && fit.chargeHours === 50, 'the constants, with their charge hours');
+    }
+    // The retention prunes everything older than E−30: the Cores keep 10 of their 25 whole days (and
+    // their last pv_total row, so the kept fit is for the same Core history).
+    const cutoff = siteDayStartMs(addDaysYmd(E, -30));
+    const pruned = { ...dark.recorder } as Any;
+    const keep = (pts: Array<{ ts: number }>) => pts.filter((p) => p.ts >= cutoff);
+    pruned.query = (...a: Any[]) => keep((dark.recorder.query as Any)(...a));
+    pruned.queryMulti = (...a: Any[]) => new Map([...(dark.recorder.queryMulti as Any)(...a)].map(([m, pts]: Any) => [m, keep(pts)]));
+    setUp({ recorder: pruned, vendor: dark.vendor });
+    setPanelBasisConstantsPathForTesting(path);
+    const again = (await getPlanningForecast(devices, pruned, () => {}, E))!;
+    assert.equal(again.planningVerdict.state, 'pass', JSON.stringify(again.planningVerdict.reason));
+    assert.deepEqual(again.planningVerdict.checks.constants, first.planningVerdict.checks.constants);
+    // Without the kept record the pruned rows cannot fit them, and the check refuses by name.
+    setUp({ recorder: pruned, vendor: dark.vendor });
+    const none = (await getPlanningForecast(devices, pruned, () => {}, E))!;
+    assert.equal(none.planningVerdict.reason?.code, 'no-constants');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
