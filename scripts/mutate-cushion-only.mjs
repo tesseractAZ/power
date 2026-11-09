@@ -28,6 +28,7 @@ const NCA = resolve(REPO, 'server/src/nightChargeAdvisor.ts');
 const IDX = resolve(REPO, 'server/src/index.ts');
 const PEB = resolve(REPO, 'server/src/poolEnergyBasis.ts');
 const NLS = resolve(REPO, 'server/src/nightLedgerScoring.ts');
+const REC = resolve(REPO, 'server/src/recorder.ts');
 const NTF = resolve(REPO, 'server/src/notify.ts');
 const NFC = resolve(REPO, 'server/src/nightForceCharge.ts');
 const HW = resolve(REPO, 'server/src/hwSpec.ts');
@@ -53,6 +54,13 @@ const MUTANTS = [
     find: QUAL,
     to: "  const cushionOnly: CushionOnlyBasis | null = !basisComplete && forecastPresent && window != null /* MUTANT */\n    && (windowSpec == null || (windowSpec.kind === 'overnight' && windowSpec.role !== 'backup'))",
     why: 'Advisory mode, a stale panel and every shadow leg get a cushion-only plan: the golden\'s refused nights move.',
+  },
+  {
+    id: 'CO-Q-viii. ★★ (design) the solar refusal left on a sized cushion-only plan\'s inputs',
+    file: NCA, tests: [T_CO],
+    find: "    basisBlockedBy: cushionOnly != null ? null : basisBlockedBy,\n",
+    to: "    basisBlockedBy, /* MUTANT */\n",
+    why: 'A sized plan carries a refusal: the gate, the push and the ledger read a refusal beside a plan.',
   },
   {
     id: 'CO-Q-ii. ★★★ no forecast or load hours still falls back',
@@ -472,6 +480,20 @@ const MUTANTS = [
     find: '  } else if (y.cushion_only_refused_by != null) {',
     to: '  } else if ((false as boolean) && y.cushion_only_refused_by != null) { /* MUTANT */',
     why: 'planBuy + (0 − actualPv)/0.927 reads as a large over-buy and lowers the under-buy rate.',
+  },
+  {
+    id: 'CO-C-iii. ★★ (design) the scorer branch after the held branch (a held cushion-only row gets the held note, no cushion-only word)',
+    file: IDX, tests: [T_CO],
+    find: "  } else if (y.cushion_only_refused_by != null) {\n    // ★★★ v1.203.0 — a CUSHION-ONLY row is never scored, in any outcome (the Cores' actuals covered included): its buy was sized on\n    // the outage cushion with no solar credited, so the planner-sizing metric has no solar forecast to grade, and a buy_err against\n    // a forecast the buy never used would read as an over-buy. Before the held branch, with the held verdict (and its marker) when\n    // there is one, as basisIncompleteNote does. The realized cushion verdict below still grades the one claim the plan made.\n    scoreNotes = cushionOnlyNote(heldVerdict, deviceNameOf, y.cushion_only_refused_by);\n  } else if (heldVerdict != null) {\n    scoreNotes = heldLedgerNote(heldVerdict, deviceNameOf);\n",
+    to: "  } else if (heldVerdict != null) {\n    scoreNotes = heldLedgerNote(heldVerdict, deviceNameOf);\n  } else if (y.cushion_only_refused_by != null) { /* MUTANT */\n    scoreNotes = cushionOnlyNote(heldVerdict, deviceNameOf, y.cushion_only_refused_by);\n",
+    why: 'A held cushion-only row reads as an ordinary held row: the ledger no longer says it was sized with no solar credited.',
+  },
+  {
+    id: 'CO-L-ii. ★★★ the column dropped from the ledger allowlist (the scorer\'s key never stored)',
+    file: REC, tests: [T_CO],
+    find: "  // v1.203.0 — a cushion-only plan's solar refusal.\n  'cushion_only_refused_by',\n",
+    to: "  // v1.203.0 — a cushion-only plan's solar refusal. /* MUTANT */\n",
+    why: 'The upsert drops the column: every cushion-only row is scored against a solar forecast it never used.',
   },
   {
     id: 'CO-C-ii. ★★ the note loses the held marker',
