@@ -255,6 +255,8 @@ const BUILDERS: Record<string, Builder> = {
       planningPvBasis: p.planningPvBasis,
       planningVerdict: p.planningVerdict,
       planningModelKeys: p.planningModelKeys,
+      // v1.204.0 — the window mix the plan's basis sentence discloses (days of the 30 with an admitted panel reading).
+      planningAdmittedDays: p.planningAdmittedDays,
     };
   },
   bayesianSolar: (ctx) => computeBayesianSolarModel(devicesOf(ctx), ctx.recorder),
