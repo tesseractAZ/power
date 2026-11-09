@@ -236,6 +236,10 @@ export interface ChargeFigurePlan {
   setpointSocPct: number | null;
   /** v1.198.0 — the plan was sized on the provisional solar band; absent on the full basis. */
   pvBandWiden?: PvBandWidenText | null;
+  /** v1.203.0 — a cushion-only plan (the server's NightChargePlan.cushionOnly); absent on every other plan. */
+  cushionOnly?: CushionOnlyText | null;
+  costCeilingSocPct?: number | null;
+  longGapAhead?: boolean | null;
   /** v1.202.0 — the pool and the Cores' standby the plan's walks counted (NightChargePlan.planPool); absent where neither
    *  differs from the panel's figure with no standby, and on older plans. */
   planPool?: { kwh: number; standbyW: number } | null;
@@ -430,6 +434,43 @@ export function provisionalBandText(w: PvBandWidenText | null | undefined): stri
     + ` and the multi-day carry by ±${Math.round(w.rollupHalfFrac * 100)}% per √day; the full band returns at ${w.fullCalScoredDays} scored days.`;
 }
 
+/** ★★★ v1.203.0 — the server's CushionOnlyBasis (nightChargeAdvisor.ts): a plan sized with the solar basis refused, on the outage
+ *  cushion at the window close alone. */
+export interface CushionOnlyText {
+  refusedBy: string;
+  transient?: boolean;
+  gapAfterMs: number | null;
+  longGapAfter: boolean;
+  poolFloorScale?: number;
+}
+
+/** v1.203.0 — the server's gapAfterWindowText, mirrored word for word. */
+export function gapAfterWindowCardText(gapAfterMs: number | null): string {
+  return gapAfterMs == null
+    ? 'no further charge window is found within the tariff scan after this one'
+    : `the next charge window opens ~${Math.round(gapAfterMs / 3_600_000)} h after this one closes`;
+}
+
+/** ★★★ v1.203.0 — the server's cushionOnlyText (nightChargeAdvisor.ts), mirrored word for word: a cushion-only plan's disclosure. ''
+ *  on every other plan. */
+export function cushionOnlyCardText(
+  co: CushionOnlyText | null | undefined,
+  plan: { costCeilingSocPct?: number | null; longGapAhead?: boolean | null },
+): string {
+  if (co == null) return '';
+  const r1 = (n: number): number => Math.round(n * 10) / 10;
+  const costFill = co.longGapAfter && plan.longGapAhead === true && plan.costCeilingSocPct != null;
+  const head = ` OUTAGE CUSHION ONLY; NO SOLAR BASIS: the solar basis is refused (${co.refusedBy}), so this plan is sized only to hold the outage cushion at the window close — no solar is credited, no solar calibration is used, `
+    + (costFill ? 'and no mid-day charge is planned.' : 'and no cost target or mid-day charge is planned.');
+  const g = gapAfterWindowCardText(co.gapAfterMs);
+  const gap = !co.longGapAfter ? ''
+    : costFill
+      ? ` Before the gap (${g}) tonight's cost target is the long-gap fill: the ${r1(plan.costCeilingSocPct!)}% state-of-charge ceiling, with the solar headroom set aside.`
+      : ` ${g.charAt(0).toUpperCase()}${g.slice(1)}; the cushion is sized for this window's close only, and no long-gap fill runs in resilience mode.`;
+  const floor = co.poolFloorScale != null ? ` The pool is counted on the capacity floor, ×${co.poolFloorScale.toFixed(2)} of nameplate: no pack capacity ratio is known.` : '';
+  return `${head}${gap}${floor}`;
+}
+
 /** v1.187.22 — below this an expected draw is NO charge (the server's NO_CHARGE_EXPECTED_KWH,
  *  nightChargeActuator.ts): what the card would show as "0.0 kWh". */
 export const NO_CHARGE_EXPECTED_KWH = 0.05;
@@ -501,8 +542,10 @@ export function sizingLine(plan: ChargeFigurePlan): string | null {
   // drained it (the server's sizingBasisText).
   const sb = plan.planPool?.standbyW;
   const standby = sb != null && Number.isFinite(sb) && sb > 0 ? ` and the Cores' ~${Math.round(sb)} W standby` : '';
-  return `Sized on an islanded worst case (P10 PV, P90 load including any committed EV session${standby}, no grid) of ~${r1(worst)} kWh${cal}.`
-    + provisionalBandText(plan.pvBandWiden);
+  // v1.203.0 — a cushion-only plan credits no solar: "no PV" (the server's NO_PV_WORST_CASE_BASIS), and its disclosure.
+  const pv = plan.cushionOnly != null ? 'no PV' : 'P10 PV';
+  return `Sized on an islanded worst case (${pv}, P90 load including any committed EV session${standby}, no grid) of ~${r1(worst)} kWh${cal}.`
+    + provisionalBandText(plan.pvBandWiden) + cushionOnlyCardText(plan.cushionOnly, plan);
 }
 
 /** The plan fields the card's HOLD summary reads (a subset of /api/night-charge/status → plan). */
@@ -520,6 +563,10 @@ export interface HoldSummaryPlan {
   cushionPct: number;
   /** v1.198.0 — the hold was sized on the provisional solar band; absent on the full basis. */
   pvBandWiden?: PvBandWidenText | null;
+  /** v1.203.0 — a cushion-only hold (the server's NightChargePlan.cushionOnly); absent on every other plan. */
+  cushionOnly?: CushionOnlyText | null;
+  costCeilingSocPct?: number | null;
+  longGapAhead?: boolean | null;
 }
 
 /**
@@ -567,7 +614,7 @@ function holdVerdict(plan: HoldSummaryPlan, none: string): { headline: string; d
   }
   // v1.198.0 — a hold SIZED on the provisional solar band closes its detail with the sentence the
   // push closes it with ('' on the full basis); a hold with no window, above, was sized on nothing.
-  const provisionalDetail = provisionalBandText(plan.pvBandWiden);
+  const provisionalDetail = provisionalBandText(plan.pvBandWiden) + cushionOnlyCardText(plan.cushionOnly, plan);
   if (plan.cushionShortfall) {
     return {
       headline: 'No overnight charge tonight — the window cannot cover the cushion.',

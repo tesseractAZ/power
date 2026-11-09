@@ -11,6 +11,8 @@ import {
   // v1.198.0 — a plan sized on the provisional solar band says so: beside a charge's confidence
   // tier, and at the end of a sized hold.
   provisionalBandText,
+  // v1.203.0 — a cushion-only plan's gap after its window, in the rationale's words.
+  gapAfterWindowText,
 } from './nightChargeAdvisor.js';
 import {
   forceChargeStopPct, partialForceChargeOnFailureSlots, forceChargeFailedSlotsText, FORCE_CHARGE_LINE_REON_MAX, lineReOnTimesWords,
@@ -494,7 +496,7 @@ export function buildNightChargeMessage(
     // v1.198.0 — a hold SIZED on the provisional solar band says so, as the charge shape does: the
     // sentence closes each sized hold's body. '' on the full basis (the body as before); a hold with
     // no window, above, was sized on nothing and carries no pvBandWiden.
-    const provisionalHold = provisionalBandText(plan.pvBandWiden);
+    const provisionalHold = provisionalBandText(plan.pvBandWiden) + cushionOnlyPushText(plan, 'short');
     if (plan.cushionShortfall) {
       return {
         ...base,
@@ -547,14 +549,14 @@ export function buildNightChargeMessage(
         title: 'Night-charge: planned reserve hold NOT armed tonight',
         body:
           `Tonight's plan holds the backup reserve at ${reserveText} overnight as a floor, with no charge expected, but ${write} `
-          + `was not armed — ${armRefused}. The add-on will not raise the reserve tonight.${shortfallNote}`,
+          + `was not armed — ${armRefused}. The add-on will not raise the reserve tonight.${shortfallNote}${cushionOnlyPushText(plan, 'short')}`,
       }
       : {
         ...base,
         title: 'Night-charge: planned charge NOT armed tonight',
         body:
           `Tonight's plan calls for a charge, but ${write} was not armed — ${armRefused}. `
-          + `The add-on will not charge tonight.${shortfallNote}`,
+          + `The add-on will not charge tonight.${shortfallNote}${cushionOnlyPushText(plan, 'short')}`,
       };
   }
   const overBuyNote = plan.bindingCap === 'overBuy'
@@ -679,9 +681,13 @@ export function buildNightChargeMessage(
   const lowSoc = plan.cushionEnvelopeReason === 'reserveAtTarget'
     ? `with no charge, ~${pct(plan.minProjSocPct)} with the plan's full buy`
     : `without ${held && !stands ? "tonight's write" : 'this charge'}, ~${pct(plan.minProjSocPct)} with it`;
-  const projection = `Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~${pct(plan.baselineMinSocPct)} `
-    + `${lowSoc}; the floor+cushion line is ${pct(line)}. `
-    + `Confidence: ${plan.confidenceTier}.${shortfallNote}${overBuyNote}${economicNote}${held ? '' : evNote} `;
+  // v1.203.0 — a cushion-only plan states its basis in place of the projection and the confidence tier (cushionOnlyPushText).
+  const projection = plan.cushionOnly != null
+    ? `${cushionOnlyPushText(plan, 'charge')}${shortfallNote}${overBuyNote}${economicNote}${held ? '' : evNote} `
+    : `Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~${pct(plan.baselineMinSocPct)} `
+      + `${lowSoc}; the floor+cushion line is ${pct(line)}. `
+      + `Confidence: ${plan.confidenceTier}.${shortfallNote}${overBuyNote}${economicNote}${held ? '' : evNote} `;
+  const cushionOnlyTitle = plan.cushionOnly != null ? ' — outage cushion only' : '';
   // v1.198.0 — a plan sized on the provisional solar band says so, after its confidence tier.
   const provisionalNote = plan.pvBandWiden != null ? `${provisionalBandText(plan.pvBandWiden).trim()} ` : '';
   if (held) {
@@ -692,7 +698,7 @@ export function buildNightChargeMessage(
       ? ` — the pool should open the window near ~${pct(start)} and stay at or above ${reserveText}` : '';
     return {
       ...base,
-      title: `Night-charge: ${supervised ? `reserve held at ${reserveText}` : `reserve hold at ${reserveText} recommended`} tonight — no charge expected`,
+      title: `Night-charge: ${supervised ? `reserve held at ${reserveText}` : `reserve hold at ${reserveText} recommended`} tonight — no charge expected${cushionOnlyTitle}`,
       body:
         `${supervised ? 'Holding' : 'Recommended: hold'} the backup reserve at ${reserveText} overnight as a floor; `
         + `no charge is expected${stays}. ${projection}${provisionalNote}${tail}`,
@@ -701,11 +707,11 @@ export function buildNightChargeMessage(
   return {
     ...base,
     title: `Night-charge: ${supervised ? `charging ${to} ${levelText}` : `charge ${to} ${levelText} recommended`} tonight`
-      + (expected == null ? '' : ` (~${kwh(expected)})`),
+      + (expected == null ? '' : ` (~${kwh(expected)})`) + cushionOnlyTitle,
     body:
       `${supervised ? 'Charging' : 'Recommended: charge'} the backup pool ${to} ${levelText} overnight`
       + (bound ? ', as far as the window can deliver' : '')
-      + (expected == null ? '. ' : `, ~${kwh(expected)} of grid energy expected. `)
+      + (expected == null ? '. ' : `, ~${kwh(expected)} of grid energy expected${plan.cushionOnly != null ? ', with no solar credited' : ''}. `)
       + projection
       + provisionalNote
       + tail,
@@ -1427,6 +1433,29 @@ function forceChargeOffWords(reason: string): string {
     case 'foreign': return 'the reserve was set outside the add-on';
     default: return reason;
   }
+}
+
+/**
+ * ★★★ v1.203.0 — a CUSHION-ONLY plan's basis sentence in the evening push (plan.cushionOnly): the solar refusal it was made on, and
+ * — on a charge, in place of the whole-house projection and its confidence tier, which no solar figure here supports — what the line
+ * is: the reserve floor plus the cushion's hours of islanded backup load at the window close, no solar credited, and no cost target
+ * but the long-gap fill's. Before a gap of more than a day after this window, the gap as fact (gapAfterWindowText) and what runs.
+ * '' on every other plan. PURE.
+ */
+function cushionOnlyPushText(plan: NightChargePlan, form: 'charge' | 'short'): string {
+  const co = plan.cushionOnly;
+  if (co == null) return '';
+  const costFill = co.longGapAfter && plan.longGapAhead === true && plan.costCeilingSocPct != null;
+  const gap = !co.longGapAfter ? ''
+    : costFill
+      ? ` Before the gap (${gapAfterWindowText(co.gapAfterMs)}) the cost target is the long-gap fill: the ${round1(plan.costCeilingSocPct!)}% state-of-charge ceiling, with the solar headroom set aside.`
+      : ` ${gapAfterWindowText(co.gapAfterMs).replace(/^./, (c) => c.toUpperCase())}; the cushion is sized for this window's close only.`;
+  if (form === 'short') return ` Outage cushion only; no solar basis (${co.refusedBy}).${gap}`;
+  const line = floorCushionLinePct(plan);
+  const lineText = line == null ? 'the line' : `the ${round1(line)}% line`;
+  return `Outage cushion only; no solar basis (${co.refusedBy}): ${lineText} is the ${round1(plan.reserveFloorPct)}% reserve floor plus `
+    + `${round1(plan.cushionOutageHours ?? 4)} h of islanded backup load at the window close, with no solar credited and `
+    + `${costFill ? 'no cost target but the long-gap fill' : 'no cost target'}.${gap}`;
 }
 
 /** v1.200.0 — the plan's SIZING fell short (the caps note): a shortfall the envelope alone did not make. PURE. */

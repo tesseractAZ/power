@@ -3,7 +3,7 @@ import {
   actuationBannerState, actuationBannerVisible, actuationKey, cancelOutcome, cancelRequestInit, chargeFigureParts, floorCushionLinePct, fmtLinePct,
   holdSummary, noChargeExpected, noPlanText, refusedArmLead, reserveWriteLabel, sizingLine, startClosedLead, withConfirmedCancel, writeStands,
   capsShortfallShown, outageLineRow, lineNotHeldOfCard,
-  writtenReservePct, middayShadowView, type MiddayShadowStatus, type MiddayShadowPreviewStatus,
+  writtenReservePct, middayShadowView, type MiddayShadowStatus, type MiddayShadowPreviewStatus, type CushionOnlyText,
 } from './nightChargeText';
 import { apiUrl } from '../api';
 import { fmtHHMMIn } from '../siteTime';
@@ -95,6 +95,9 @@ interface NightChargePlan {
    *  (expectedCloseAfterStopPct: the outage-line row names it). */
   planPool?: { kwh: number; standbyW: number } | null;
   expectedCloseAfterStopPct?: number;
+  /** v1.203.0 — a cushion-only plan (the server's NightChargePlan.cushionOnly): its basis instead of a confidence tier. */
+  cushionOnly?: CushionOnlyText | null;
+  longGapAhead?: boolean | null;
   confidenceTier: 'forecast' | 'mixed' | 'climatology';
   window: { startMs: number; endMs: number } | null;
   reserveFloorPct: number;
@@ -407,7 +410,8 @@ export const NightChargeCard = memo(function NightChargeCard() {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
         {/* v1.187.22 — the whole-house island troughs, labelled as such: with the grid present
             the SHP2 holds the reserve, so neither is where the pool is expected to go. */}
-        <Stat label="Island low, no charge" value={fmtSoc(plan.baselineMinSocPct)} sub="if the grid were lost · P10 PV / P90 load" />
+        {/* v1.203.0 — a cushion-only plan credits no solar: its island low is a no-PV walk. */}
+        <Stat label="Island low, no charge" value={fmtSoc(plan.baselineMinSocPct)} sub={plan.cushionOnly != null ? 'if the grid were lost · no PV / P90 load' : 'if the grid were lost · P10 PV / P90 load'} />
         <Stat label="Island low, with charge" value={fmtSoc(plan.minProjSocPct)} sub={`if the grid were lost · floor+cushion ${floorCushionLine}`} />
         <Stat
           // v1.187.22 — the arrival on the islanded worst case the plan is sized on, labelled as
@@ -429,7 +433,10 @@ export const NightChargeCard = memo(function NightChargeCard() {
               .join(' · ') || undefined
           }
         />
-        <Stat label="Confidence" value={plan.confidenceTier} sub={ws && we ? `${ws}–${we}` : undefined} />
+        {/* v1.203.0 — a cushion-only plan reads no forecast PV, so it states its basis, not a confidence tier. */}
+        {plan.cushionOnly != null
+          ? <Stat label="Basis" value="cushion only" sub={ws && we ? `no solar basis · ${ws}–${we}` : 'no solar basis'} />
+          : <Stat label="Confidence" value={plan.confidenceTier} sub={ws && we ? `${ws}–${we}` : undefined} />}
       </div>
 
       <AdvisoryNote mode={status.mode} />

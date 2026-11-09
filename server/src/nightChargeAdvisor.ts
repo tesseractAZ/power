@@ -368,9 +368,37 @@ export interface NightChargeInputs {
    *  P10 PV and the beyond-24 h carry are widened (PROVISIONAL_BAND_WIDEN), and this says by how
    *  much. Absent on the full basis and on a refused one. */
   pvBandWiden?: PvBandWiden;
+  /** ★★★ v1.203.0 — the CUSHION-ONLY plan (buildNightChargeInputs): the solar basis was refused, and this plan is sized on the
+   *  outage cushion alone, every PV figure zeroed. Absent on every other plan. `poolFloorMissing`: no pack capacity ratio is
+   *  known and no capacity floor was passed — the sizer refuses by name. */
+  cushionOnly?: CushionOnlyBasis & { poolFloorMissing?: true };
 
   /** Below this buy, treat the night as "hold" (no meaningful charge). kWh. */
   minBuyKwh: number;
+}
+
+/**
+ * ★★★ v1.203.0 — the CUSHION-ONLY plan's basis (NightChargeInputs.cushionOnly, NightChargePlan.cushionOnly): what a plan sized
+ * with the solar basis refused carries. The fallback is made only on the live overnight leg, in a write mode, on a fresh panel
+ * (index.ts cushionOnlyEligible), with forecast and load hours and a resolved window; it zeroes every PV figure and sizes the
+ * outage cushion at the window close on the islanded-outage basis, nothing more (computeNightChargePlan's disclosure).
+ */
+export interface CushionOnlyBasis {
+  /** The solar basis gate's words, as it refused (basisBlockedBy). */
+  refusedBy: string;
+  /** That refusal's transience (basisTransient): the evening job still waits a transient one out to its deferral end
+   *  (eveningBasisDefers), so a start-up's "0 scored days" never latches the fallback. */
+  transient: boolean;
+  /** v1.203.0 (owner) — ms from this window's close to the next charge window's open (nextRechargeMs − window.endMs); null where
+   *  none opens within the scan. */
+  gapAfterMs: number | null;
+  /** That gap is more than LONG_GAP_MS, or none opens (Friday's 1 h window before Monday): in cost mode the night takes the
+   *  long-gap fill (v1.168.0's solar-free rule: the cost ceiling at ARB_COST_MAX_SOC_PCT, the solar headroom set aside); in
+   *  resilience mode the gap is disclosed and nothing more is charged. */
+  longGapAfter: boolean;
+  /** No pack capacity ratio is known (no scale, one that is no reading, or the tracker's nameplate answer): the pool is counted
+   *  on this floor, CAPACITY_SCALE_MIN, and the plan says so. Absent where a ratio is known. */
+  poolFloorScale?: number;
 }
 
 /** v1.200.0 — the outage line above the 50% reserve envelope a charge plan arms (NightChargePlan.
@@ -835,6 +863,10 @@ export interface NightChargePlan {
   /** A mid-day cost leg the re-entry hold held (plan §3.3): the level its write would take the pool
    *  to, and the line it had to reach (floor + MIDDAY_REENTRY_MARGIN_PCT). Absent otherwise. */
   middayReentryHold?: { arrivalPct: number; linePct: number };
+  /** ★★★ v1.203.0 — a CUSHION-ONLY plan (NightChargeInputs.cushionOnly): sized with the solar basis refused, on the outage cushion
+   *  at the window close alone, no solar credited. The rationale, the push, the card and the ledger (cushion_only_refused_by) state
+   *  it. Absent on every other plan, so no other plan's JSON moves. */
+  cushionOnly?: CushionOnlyBasis;
   rationale: string;
 }
 
@@ -1718,6 +1750,8 @@ export function armedExpectedPhrase(expectedKwh: number | null | undefined): str
 
 /** v1.187.22 — what the sizing basis is, in the words the rationale and the card label it with. */
 export const WORST_CASE_BASIS = 'P10 PV, P90 load including any committed EV session, no grid';
+/** v1.203.0 — the same, on a cushion-only plan (every PV figure zeroed): no PV at all. The card mirrors it. */
+export const NO_PV_WORST_CASE_BASIS = 'no PV, P90 load including any committed EV session, no grid';
 
 /** v1.187.22 — the ONE sentence that names the worst case, labelled as the basis the plan is sized
  *  on: "Sized on an islanded worst case (P10 PV, …, no grid) of ~64.2 kWh" + `calNote` (the de-bias
@@ -1725,9 +1759,11 @@ export const WORST_CASE_BASIS = 'P10 PV, P90 load including any committed EV ses
  *  v1.202.0 — where the walks drained the Cores' standby (`standbyW` above 0, NightChargePlan.planPool.standbyW) the basis
  *  names it: "(P10 PV, P90 load including any committed EV session and the Cores' ~270 W standby, no grid)". 0 W or none:
  *  the sentence as before. null with no figure. PURE. */
-export function sizingBasisText(worstKwh: number | null | undefined, calNote = '', standbyW = 0): string | null {
+export function sizingBasisText(worstKwh: number | null | undefined, calNote = '', standbyW = 0, noPv = false): string | null {
   if (worstKwh == null || !Number.isFinite(worstKwh)) return null;
-  const basis = standbyW > 0 ? WORST_CASE_BASIS.replace(', no grid', ` and the Cores' ~${Math.round(standbyW)} W standby, no grid`) : WORST_CASE_BASIS;
+  // v1.203.0 — a cushion-only plan credits no solar: "no PV", never "P10 PV" (NO_PV_WORST_CASE_BASIS).
+  const head = noPv ? NO_PV_WORST_CASE_BASIS : WORST_CASE_BASIS;
+  const basis = standbyW > 0 ? head.replace(', no grid', ` and the Cores' ~${Math.round(standbyW)} W standby, no grid`) : head;
   return `Sized on an islanded worst case (${basis}) of ~${round1(worstKwh)} kWh${calNote}`;
 }
 
@@ -1745,6 +1781,13 @@ export function computeNightChargePlan(
   holdUndershootPct: number = PANEL_RESERVE_HOLD_UNDERSHOOT_PCT,
 ): NightChargePlan {
   const plan = sizeNightChargePlan(inputs, holdUndershootPct);
+  // ★★★ v1.203.0 — a CUSHION-ONLY plan says so, as a provisional one does: the field (absent on every other plan, so no other
+  // plan's JSON moves) and the rationale's closing disclosure (cushionOnlyText). Only a plan that was sized.
+  const co = inputs.cushionOnly;
+  if (co != null && plan.basisComplete && plan.requiredExtraKwh != null) {
+    const { poolFloorMissing: _m, ...field } = co;
+    return { ...plan, rationale: `${plan.rationale}${cushionOnlyText(field, plan)}`, cushionOnly: field };
+  }
   // v1.198.0 — a plan sized on the PROVISIONAL band says so: the field (absent on the full basis, so
   // that plan's JSON is unchanged) and the rationale's closing sentence. Only a plan that was sized
   // — a charge or a hold (requiredExtraKwh set): a refused plan, or a night with no window, was
@@ -1754,6 +1797,45 @@ export function computeNightChargePlan(
     ? { ...plan, rationale: `${plan.rationale}${provisionalBandText(w)}`, pvBandWiden: { ...w } }
     : plan;
 }
+
+/**
+ * ★★★ v1.203.0 — PURE. The words a gap after this window has (the push, the card and the rationale): "the next charge window opens
+ * ~48 h after this one closes", or, with none found within the scan, that no charge window is found. A fact of the tariff calendar.
+ */
+export function gapAfterWindowText(gapAfterMs: number | null): string {
+  return gapAfterMs == null
+    ? 'no further charge window is found within the tariff scan after this one'
+    : `the next charge window opens ~${Math.round(gapAfterMs / HOUR_MS)} h after this one closes`;
+}
+
+/**
+ * ★★★ v1.203.0 — PURE. A cushion-only plan's closing disclosure (computeNightChargePlan), true in every outcome a sized plan has:
+ *  - what it is: the solar basis is refused (its words), so the plan is sized only to hold the outage cushion at the window close
+ *    — sized, not held: a night the charge rate or an EV cannot carry keeps its "toward" headline and its caps note beside this;
+ *  - what it is not: no solar credited, no solar calibration used, no mid-day charge planned, and no cost target but the long-gap
+ *    fill's;
+ *  - before a gap of more than a day after this window (Friday's 1 h window before Monday), the gap as fact; in cost mode the
+ *    long-gap fill (the cost ceiling at ARB_COST_MAX_SOC_PCT, the solar headroom set aside); in resilience mode nothing more;
+ *  - the pool on the capacity floor where no pack capacity ratio is known.
+ * The card mirrors it (web/src/cards/nightChargeText.ts cushionOnlyCardText).
+ */
+export function cushionOnlyText(
+  co: CushionOnlyBasis,
+  plan: Pick<NightChargePlan, 'objective' | 'costCeilingSocPct'> & { longGapAhead?: boolean },
+): string {
+  const costFill = co.longGapAfter && plan.longGapAhead === true && plan.costCeilingSocPct != null;
+  const head = ` OUTAGE CUSHION ONLY; NO SOLAR BASIS: the solar basis is refused (${co.refusedBy}), so this plan is sized only to hold the outage cushion at the window close — no solar is credited, no solar calibration is used, `
+    + (costFill ? 'and no mid-day charge is planned.' : 'and no cost target or mid-day charge is planned.');
+  const gap = !co.longGapAfter ? ''
+    : costFill
+      ? ` Before the gap (${gapAfterWindowText(co.gapAfterMs)}) tonight's cost target is the long-gap fill: the ${round1(plan.costCeilingSocPct!)}% state-of-charge ceiling, with the solar headroom set aside.`
+      : ` ${capitalize(gapAfterWindowText(co.gapAfterMs))}; the cushion is sized for this window's close only, and no long-gap fill runs in resilience mode.`;
+  const floor = co.poolFloorScale != null
+    ? ` The pool is counted on the capacity floor, ×${co.poolFloorScale.toFixed(2)} of nameplate: no pack capacity ratio is known.`
+    : '';
+  return `${head}${gap}${floor}`;
+}
+function capitalize(t: string): string { return t.charAt(0).toUpperCase() + t.slice(1); }
 
 /** The sizing itself (computeNightChargePlan's body before v1.198.0, unchanged). */
 function sizeNightChargePlan(inputs: NightChargeInputs, holdUndershootPct: number): NightChargePlan {
@@ -1776,7 +1858,8 @@ function sizeNightChargePlan(inputs: NightChargeInputs, holdUndershootPct: numbe
     return nullPlan(inputs, false, `No plan — forecast/telemetry basis incomplete${why}; nothing will be charged.`, inputs.basisTransient === true, inputs.basisBlockedBy ?? null);
   }
   if (!socCoherent) return refuse('SoC telemetry incoherent (% vs remaining/full mismatch)', true);
-  if (inputs.confidenceTier === 'climatology') return refuse('horizon is climatology-only (no real forecast)', false, '; will not size a buy on a guessed sky');
+  // v1.203.0 — not on a cushion-only plan: the tier is a verdict on the weather, and a plan that credits no solar reads none.
+  if (inputs.confidenceTier === 'climatology' && inputs.cushionOnly == null) return refuse('horizon is climatology-only (no real forecast)', false, '; will not size a buy on a guessed sky');
   // v1.132.0 — basisComplete TRUE here: the forecast/telemetry basis is fine,
   // there is simply no cheap window tonight (Saturday has none on this tariff).
   // Reporting basisComplete:false made HA say "basis incomplete" about a healthy
@@ -1835,6 +1918,21 @@ function sizeNightChargePlan(inputs: NightChargeInputs, holdUndershootPct: numbe
     dischargeEff,
     legacyCushionKwh,
   });
+  // ★★★ v1.203.0 — A CUSHION-ONLY PLAN HOLDS AN OUTAGE CUSHION OR NOTHING. Its one test is the pack at the window close against
+  // reserve + an islanded-outage cushion; the legacy band's test is the whole-house trough over the next day, which needs the solar
+  // forecast this plan has not got, and a disabled cushion holds nothing. Either is refused by name, as is a pool with no pack
+  // capacity ratio known and no floor to count it on; each keeps the solar refusal's transience (the evening deferral as before).
+  const co = inputs.cushionOnly;
+  if (co != null) {
+    const coWhy = cushion.basis === 'legacy-pct' ? 'no islanded-load measurement'
+      : cushion.basis === 'disabled' ? 'the outage cushion is disabled'
+        : co.poolFloorMissing === true ? 'no pack capacity ratio is known and no capacity floor is set (the pool would be counted on nameplate)'
+          : null;
+    if (coWhy != null) {
+      const why = `${co.refusedBy}; no cushion-only plan: ${coWhy}`;
+      return nullPlan(inputs, false, `No plan — forecast/telemetry basis incomplete (${why}); nothing will be charged.`, co.transient, why);
+    }
+  }
   // v1.201.0 — THE CORES' STANDBY DRAW for the cushion's hours (cushionStandbyKwh): on an island the Cores'
   // electronics draw whether or not the backup circuits load, and that draw is not in the panel load the
   // cushion is sized from. The figure (the runway's pool overhead for the connected Cores, index.ts) is read
@@ -2157,8 +2255,11 @@ function sizeNightChargePlan(inputs: NightChargeInputs, holdUndershootPct: numbe
   // which is true of a standard that was lowered rather than met.
   // v1.199.0 — where the measured capacity moved the line, the cushion's share of it: the line's own
   // percent above the floor (no second division by the scale). Nowhere else: that text is unchanged.
+  // v1.203.0 — on a cushion-only plan with no ratio known the pool is the capacity floor, which is no measurement: said so.
   const measuredCushionNote = planScale != null && planScale.scale < 1
-    ? `, ${round1(((targetFloorKwh - reserveKwh) / fullKwh) * 100)}% of the packs' measured capacity at ×${planScale.scale.toFixed(3)} of nameplate`
+    ? planScale.basis === 'floor'
+      ? `, ${round1(((targetFloorKwh - reserveKwh) / fullKwh) * 100)}% of the pool counted on the capacity floor, ×${planScale.scale.toFixed(3)} of nameplate`
+      : `, ${round1(((targetFloorKwh - reserveKwh) / fullKwh) * 100)}% of the packs' measured capacity at ×${planScale.scale.toFixed(3)} of nameplate`
     : '';
   // v1.201.0 — where the Cores' standby is in the cushion, its share, named as the runway's figure: part of
   // what the line is sized to carry, not a measurement and not an outcome. Nowhere else (no figure, 0 W, or a
@@ -2239,7 +2340,7 @@ function sizeNightChargePlan(inputs: NightChargeInputs, holdUndershootPct: numbe
   if (baselineHolds && !costMode) {
     return holdPlan(cushionBasis === 'legacy-pct' || backupLeg
       ? `Hold — projected overnight trough (${baselineMinSocPct}%) stays at/above ${cushionDesc}; no charge needed.${preWindowNote}`
-      : `Hold — the pack at window close (${noBuyPct}%) already covers ${cushionDesc}; no charge needed. For reference, a whole-house island would trough at ~${baselineMinSocPct}%, which is not what the cushion is sized against.${preWindowNote}`);
+      : `Hold — the pack at window close (${noBuyPct}%) already covers ${cushionDesc}; no charge needed. For reference, a whole-house island${co != null ? ' with no solar credited' : ''} would trough at ~${baselineMinSocPct}%, which is not what the cushion is sized against.${preWindowNote}`);
   }
 
   // Feasibility bounds on the lift.
@@ -2762,7 +2863,7 @@ function sizeNightChargePlan(inputs: NightChargeInputs, holdUndershootPct: numbe
     ? `Hold the reserve at ${writtenPct}% in the ${windowText}: no charge expected.`
     : `Charge ${expected.deliverableBound ? 'toward' : 'to'} ~${headlineLevelPct}% in the ${windowText}`
       + `${expected.buyKwh == null ? '' : `: ~${round1(expected.buyKwh)} kWh expected`}.`;
-  const sizingNote = ` ${sizingBasisText(buyKwhDebiased, calNote, walkStandbyW)}${projSocAtWindowStartPct != null
+  const sizingNote = ` ${sizingBasisText(buyKwhDebiased, calNote, walkStandbyW, co != null)}${projSocAtWindowStartPct != null
     ? `, from ~${projSocAtWindowStartPct}% at the window open` : ''}, projecting ~${targetSocPct}% by ${fmtLocalHint(windowEnd)}.`;
   // What the write does from the expected start (expectedBuyFromPlan): the reserve leg, then — when
   // force-charge rides the night — the house's drain to the just-in-time start and the fill to the stop.
@@ -2805,7 +2906,9 @@ function sizeNightChargePlan(inputs: NightChargeInputs, holdUndershootPct: numbe
   const expectedNote = expected.buyKwh != null && expected.levelPct != null && expectedStartSocPct != null
     ? ` Expected: ${midWindow
       ? `the pool is at ~${expectedStartSocPct}% now`
-      : `the pool should open the window near ~${expectedStartSocPct}% with the grid present (${walkStandbyW > 0 ? "median load, PV and the Cores' standby" : 'median load and PV'}, never below the ${round1(reserveFloorPct)}% reserve)`}${expectedWriteNote(expectedStartSocPct, expected.levelPct)}.`
+      : `the pool should open the window near ~${expectedStartSocPct}% with the grid present (${co != null
+        ? `${walkStandbyW > 0 ? "median load and the Cores' standby" : 'median load'}, no solar credited`
+        : walkStandbyW > 0 ? "median load, PV and the Cores' standby" : 'median load and PV'}, never below the ${round1(reserveFloorPct)}% reserve)`}${expectedWriteNote(expectedStartSocPct, expected.levelPct)}.`
     : '';
   // v1.132.0 — SAY WHICH HOLD THIS IS.
   //
@@ -2914,7 +3017,7 @@ function sizeNightChargePlan(inputs: NightChargeInputs, holdUndershootPct: numbe
     ? `this window can deliver only ~${round1(buyKwh)} kWh, under the ${round1(minBuyKwh)} kWh minimum-buy threshold${holdCapName} — against a requirement of ${meetable ? `~${round1(requiredExtraKwh)} kWh` : 'more than the pool can hold'}. The window cannot serve the need; this is not a night with little worth buying.`
     : `the buy this window would make (~${round1(buyKwh)} kWh) is under the ${round1(minBuyKwh)} kWh minimum-buy threshold — the projected need is genuinely small.`;
   const rationale = chargeTonight
-    ? `${chargeHeadline}${expectedNote}${sizingNote}${reserveNote}${reentryNote} ${costMode ? `Objective: COST — buying cheap ${midday ? 'super off-peak' : 'overnight'} energy to displace dearer grid energy later, up to the ${costCeilingBasis === 'pv-headroom' ? `morning-solar headroom${headroomNote}` : costCeilingBasis === 'pv-curtail' ? `solar headroom under the ${round1(spec?.curtailFromPct ?? 0)}% charge taper${headroomNote}` : `${inputs.costMaxSocPct ?? DEFAULT_COST_MAX_SOC_PCT}% state-of-charge ceiling`}${longGap ? longGapNote : ''}. ` : ''}The cushion is ${cushionDesc}; without the buy a whole-house island would trough at ~${baselineMinSocPct}%.${baselineHolds ? ` Resilience needs no buy tonight — the pack at window close (${noBuyPct}%) already covers the cushion; this buy is economic only.` : ''}${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${bindingCap === 'overBuy' ? ' NOTE: buy exceeds morning-PV headroom; a small clip is accepted to hold resilience.' : ''}${evNote}${preWindowNote}`
+    ? `${chargeHeadline}${expectedNote}${sizingNote}${reserveNote}${reentryNote} ${costMode ? `Objective: COST — buying cheap ${midday ? 'super off-peak' : 'overnight'} energy to displace dearer grid energy later, up to the ${costCeilingBasis === 'pv-headroom' ? `morning-solar headroom${headroomNote}` : costCeilingBasis === 'pv-curtail' ? `solar headroom under the ${round1(spec?.curtailFromPct ?? 0)}% charge taper${headroomNote}` : `${inputs.costMaxSocPct ?? DEFAULT_COST_MAX_SOC_PCT}% state-of-charge ceiling`}${longGap ? longGapNote : ''}. ` : ''}The cushion is ${cushionDesc}; without the buy a whole-house island${co != null ? ' with no solar credited' : ''} would trough at ~${baselineMinSocPct}%.${baselineHolds ? ` Resilience needs no buy tonight — the pack at window close (${noBuyPct}%) already covers the cushion; this buy is economic only.` : ''}${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${bindingCap === 'overBuy' ? ' NOTE: buy exceeds morning-PV headroom; a small clip is accepted to hold resilience.' : ''}${evNote}${preWindowNote}`
     : `Hold — ${holdReason}${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${evNote}${preWindowNote}`;
 
   return {
@@ -3304,6 +3407,12 @@ export interface NightChargeInputDeps {
   lineForceChargeEligible?: boolean;
   /** v1.200.0 (Fix9 review 2) — forwarded verbatim (see NightChargeInputs). */
   armedNoLineStartMs?: number | null;
+  /** ★★★ v1.203.0 — the cushion-only fallback may be made (index.ts: the live overnight plan, a write mode, a fresh panel —
+   *  `shadowLeg == null && lineForceChargeOn(legRole) && panel.fresh`). Absent or false ⇒ today's refusal, byte for byte. */
+  cushionOnlyEligible?: boolean;
+  /** v1.203.0 — the capacity floor a cushion-only plan counts its pool on where no pack capacity ratio is known
+   *  (the capacity scale's own floor, CAPACITY_SCALE_MIN: index.ts). Read only on a cushion-only plan; absent or no reading there ⇒ refused by name. */
+  cushionOnlyFloorScale?: number;
 }
 
 /** v1.169.0 — PURE. The fraction of the window hour starting at `hourTs` that is still
@@ -3541,6 +3650,8 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     // undefined and every line above the envelope stays uncarried and undisclosed).
     lineForceChargeEligible,
     armedNoLineStartMs,
+    // v1.203.0 — the cushion-only fallback's gate and the capacity floor it counts the pool on with no ratio known.
+    cushionOnlyEligible, cushionOnlyFloorScale,
     // v1.125.0 — the islanded-outage cushion inputs. Destructuring here is not
     // decoration: NightChargeInputs is built field-by-field below, so a field
     // added to the deps interface and to the inputs interface but NOT copied
@@ -3627,6 +3738,39 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
             ? `PV band coverage ${Math.round(bandCoverageFrac * 100)}% < ${Math.round(BASIS_MIN_BAND_COVERAGE * 100)}%`
               + ` (forecast present, tier=${confidenceTier}, calDays ${calDaysPassedText})`
             : `no provisional band widening is defined for ${calScoredDays} scored calibration day(s)`;
+  // v1.186.5 — no forecast, or not ONE scored calibration day: what a start-up leaves
+  // (a skill scored on a partial device map is now empty rather than wrong). 1 to the
+  // provisional minimum − 1 (1-3) scored days is a young history and a coverage miss is a real
+  // miss: both persistent.
+  const solarBasisTransient = !basisComplete && (!forecastPresent || calScoredDays === 0);
+
+  // ★★★ v1.203.0 — THE CUSHION-ONLY PLAN. With the Cores dark on the vendor cloud the solar basis is refused every night
+  // (0 scored calibration days, a PV band of 0), and from 2026-10-16 nothing charged overnight at all. Where the solar basis is
+  // refused, the live overnight leg in a write mode on a fresh panel (cushionOnlyEligible) is sized on the outage cushion alone:
+  // the sizer as it is, on every PV figure zeroed (the band's and the rollups' P10 and P50, the surpluses null), resilience
+  // (but for the long-gap fill below), no band widening — so no solar is credited and no solar calibration is read. It needs
+  // load hours (forecastPresent: the published band's, the panel's own load curve) and a window. The climatology tier is no
+  // bar: the tier is a verdict on the weather, which a plan with no PV does not read. The no-forecast refusal, no window, a
+  // backup or mid-day leg, a stale panel and advisory mode refuse as before; the sizer refuses the legacy band and a disabled
+  // cushion by name. A refused basis is never "passed": a night that plans today (basisComplete) never takes this branch.
+  const gapAfterMs = window != null && nextRechargeMs != null ? nextRechargeMs - window.endMs : null;
+  const cushionOnly: CushionOnlyBasis | null = !basisComplete && cushionOnlyEligible === true && forecastPresent && window != null
+    && (windowSpec == null || (windowSpec.kind === 'overnight' && windowSpec.role !== 'backup'))
+    ? { refusedBy: basisBlockedBy!, transient: solarBasisTransient, gapAfterMs, longGapAfter: gapAfterMs == null || gapAfterMs > LONG_GAP_MS }
+    : null;
+  /** v1.203.0 — the pool a cushion-only plan counts on: the scale as passed where it is a ratio; where none is known (no scale,
+   *  one that is no reading, or the tracker's nameplate answer: it has never seen a ratio) the capacity floor, CAPACITY_SCALE_MIN,
+   *  never nameplate — a smaller pool is a higher line and a deeper drain, so the floor holds at least the cushion on any pack the
+   *  tracker can answer for. No floor passed (or none that is a reading) ⇒ the sizer refuses by name. */
+  const ratioKnown = (sc: CushionPoolScale | null | undefined): boolean => sc != null && sc.basis !== 'nameplate'
+    && typeof sc.scale === 'number' && Number.isFinite(sc.scale) && sc.scale >= CUSHION_SCALE_PLAUSIBLE_MIN && sc.scale <= 1 + 1e-9;
+  const floorOk = typeof cushionOnlyFloorScale === 'number' && Number.isFinite(cushionOnlyFloorScale)
+    && cushionOnlyFloorScale >= CUSHION_SCALE_PLAUSIBLE_MIN && cushionOnlyFloorScale <= 1;
+  const coPoolFloor = cushionOnly != null && !ratioKnown(cushionPoolScale) && floorOk ? cushionOnlyFloorScale! : null;
+  const coPoolMissing = cushionOnly != null && !ratioKnown(cushionPoolScale) && !floorOk;
+  const coInputs: (CushionOnlyBasis & { poolFloorMissing?: true }) | null = cushionOnly == null ? null
+    : { ...cushionOnly, ...(coPoolFloor != null ? { poolFloorScale: coPoolFloor } : {}), ...(coPoolMissing ? { poolFloorMissing: true as const } : {}) };
+  const planPoolScale: CushionPoolScale | null | undefined = coPoolFloor != null ? { scale: coPoolFloor, basis: 'floor' } : cushionPoolScale;
 
   // ★ EV de-dup MUST be atomic with the re-add (§2.3): only STRIP the embedded
   // expected-value EV from the base load when we will actually place the
@@ -3668,7 +3812,8 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     embByTs.set(h.ts, embW);
     byTs.set(h.ts, {
       ts: h.ts,
-      pvP10W: Math.max(0, h.pvP10W),
+      // v1.203.0 — a cushion-only plan credits no solar: P10 0, and P50 0 where the hour has one (no P50 stays none).
+      pvP10W: cushionOnly != null ? 0 : Math.max(0, h.pvP10W),
       loadP90W: Math.max(0, h.loadP90W),
       // Within the band the EV component of the load IS known when a prediction
       // exists: it is the day-ahead expected-value EV embedded in loadP90W,
@@ -3677,7 +3822,7 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
       // v1.187.22 — copied, not derived: an hour without them has no P50 basis (and the plan
       // then states no expected buy). The block placement below never touches them.
       loadP50W: finiteOrNull(h.loadP50W),
-      pvP50W: finiteOrNull(h.pvP50W),
+      pvP50W: cushionOnly != null && finiteOrNull(h.pvP50W) != null ? 0 : finiteOrNull(h.pvP50W),
     });
   }
   // v1.198.0 — THE PROVISIONAL BAND: every band hour is sized on its widened P10 (provisionalP10W),
@@ -3717,12 +3862,12 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
       if (!Number.isFinite(hh.ts) || byTs.has(hh.ts)) continue;
       byTs.set(hh.ts, {
         ts: hh.ts,
-        pvP10W: Math.max(0, hh.pvW * p10Frac),
+        pvP10W: cushionOnly != null ? 0 : Math.max(0, hh.pvW * p10Frac),
         loadP90W: Math.max(0, hh.loadW * p90Frac),
         // v1.187.22 — the rollup's own (central) figures, unwidened: its loadW already embeds
         // typical EV, and the committed P90 block is never placed out here.
         loadP50W: finiteOrNull(hh.loadW),
-        pvP50W: finiteOrNull(hh.pvW),
+        pvP50W: cushionOnly != null && finiteOrNull(hh.pvW) != null ? 0 : finiteOrNull(hh.pvW),
       });
     }
   }
@@ -3781,19 +3926,25 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
       }).kwh
       : null;
 
-  // v1.186.5 — no forecast, or not ONE scored calibration day: what a start-up leaves
-  // (a skill scored on a partial device map is now empty rather than wrong). 1 to the
-  // provisional minimum − 1 (1-3) scored days is a young history and a coverage miss is a real
-  // miss: both persistent.
-  const basisTransient = !basisComplete && (!forecastPresent || calScoredDays === 0);
+  // v1.203.0 — a cushion-only plan is sized (basisComplete), so it is not refused, and its refusal's transience is on its own
+  // field (cushionOnly.transient); every other plan as before.
+  const basisTransient = cushionOnly == null && solarBasisTransient;
+  /** v1.203.0 — a cushion-only plan's objective: resilience, but for the long-gap fill (owner, 2026-11-08): before a gap of more
+   *  than a day after this window (Friday's 1 h window before Monday) the configured objective stands, so in cost mode the cost
+   *  ceiling is ARB_COST_MAX_SOC_PCT with the solar headroom set aside (longGapAhead, no surplus: v1.168.0's solar-free rule) and
+   *  the cost force-charge rides it to its stop; in resilience mode nothing more than the cushion. */
+  const legObj = legObjective(legRole, objectiveMode);
+  const objective = cushionOnly == null ? legObj : cushionOnly.longGapAfter ? legObj : 'resilience';
   return {
     nowMs,
     // R2 — forwarded only when given, so a plan with no spec carries exactly the inputs it did.
     ...(windowSpec !== undefined ? { windowSpec } : {}),
-    basisBlockedBy,
+    basisBlockedBy: cushionOnly != null ? null : basisBlockedBy,
     basisTransient,
     // v1.198.0 — only on a provisional basis: the full basis's inputs carry exactly what they did.
     ...(pvBandWiden != null ? { pvBandWiden } : {}),
+    // v1.203.0 — only on a cushion-only plan: every other plan's inputs carry exactly what they did.
+    ...(coInputs != null ? { cushionOnly: coInputs } : {}),
     fullKwh,
     socNowPct,
     reserveFloorPct,
@@ -3802,11 +3953,12 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     islandedLoadKw,
     outageCushionHours,
     islandedLoadSafety,
-    // v1.199.0 — only when given, so inputs built without it carry exactly what they did.
-    ...(cushionPoolScale !== undefined ? { cushionPoolScale } : {}),
+    // v1.199.0 — only when given, so inputs built without it carry exactly what they did. v1.203.0 — a cushion-only plan with
+    // no ratio known: the capacity floor (planPoolScale).
+    ...(planPoolScale !== undefined ? { cushionPoolScale: planPoolScale } : {}),
     // v1.201.0 — the same: only when given.
     ...(cushionStandbyW !== undefined ? { cushionStandbyW } : {}),
-    objectiveMode: legObjective(legRole, objectiveMode),
+    objectiveMode: objective,
     costMaxSocPct,
     socCoherent,
     legEff,
@@ -3815,10 +3967,12 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     gridInputCapKw,
     window,
     horizon: trimmed,
-    morningPvSurplusP90Kwh,
-    morningPvSurplusP50Kwh,
-    longGapAhead,
-    prePeakPvSurplusP10Kwh,
+    // v1.203.0 — a cushion-only plan counts no solar surplus: every one null (no over-buy flag, no solar headroom), and its long
+    // gap is the one after its own window (cushionOnly.longGapAfter: Friday's, not Thursday's).
+    morningPvSurplusP90Kwh: cushionOnly != null ? null : morningPvSurplusP90Kwh,
+    morningPvSurplusP50Kwh: cushionOnly != null ? null : morningPvSurplusP50Kwh,
+    longGapAhead: cushionOnly != null ? cushionOnly.longGapAfter : longGapAhead,
+    prePeakPvSurplusP10Kwh: cushionOnly != null ? null : prePeakPvSurplusP10Kwh,
     buyDebiasFactor,
     // v1.187.3 — forwarded verbatim; see the destructure note above.
     buyDebiasBasis,
@@ -3830,10 +3984,10 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     // v1.200.0 (Fix9 review 2) — forwarded verbatim; absent on every caller with no armed record to read.
     ...(armedNoLineStartMs !== undefined ? { armedNoLineStartMs } : {}),
     confidenceTier,
-    basisComplete,
+    basisComplete: basisComplete || cushionOnly != null,
     minBuyKwh,
-    // v1.187.1 — forwarded verbatim; see the destructure note above.
-    costSurplusLoad,
+    // v1.187.1 — forwarded verbatim; see the destructure note above. v1.203.0 — none on a cushion-only plan.
+    costSurplusLoad: cushionOnly != null ? null : costSurplusLoad,
   };
 }
 
@@ -4237,7 +4391,7 @@ export const NIGHT_PLAN_STALE_DEFER_UNTIL_MIN = 22 * 60 + 30;
  * TRANSIENT-shaped failure defers (`basisTransient`); a persistent one is decided at once.
  */
 export function eveningBasisDefers(
-  plan: { basisComplete: boolean; basisTransient?: boolean } | null,
+  plan: { basisComplete: boolean; basisTransient?: boolean; cushionOnly?: { transient: boolean } | null } | null,
   nowMin: number,
   /** v1.191.0 (W3) — the schedule's deferral end (nightSchedule.ts staleDeferUntilMin):
    *  NIGHT_PLAN_STALE_DEFER_UNTIL_MIN on the APS preset. */
@@ -4245,7 +4399,9 @@ export function eveningBasisDefers(
 ): boolean {
   // Only a transient-shaped failure waits; a persistent one is announced at 21:30 so the
   // owner keeps the full evening to act on it.
-  return (plan == null || (!plan.basisComplete && plan.basisTransient === true))
+  // v1.203.0 — and a cushion-only plan made on a transient refusal (a start-up's 0 scored days): the full plan may be minutes away,
+  // so the fallback is the deferral end's last resort, never a latch at 21:30.
+  return (plan == null || (!plan.basisComplete && plan.basisTransient === true) || plan.cushionOnly?.transient === true)
     && nowMin < deferUntilMin;
 }
 
@@ -4739,7 +4895,7 @@ export function outageCushionKwh(o: {
  * ('nameplate', scale 1). The runway's capacity tracker's own vocabulary, restated here so the
  * planner imports nothing of the runway's basis (runwayBasisContracts.test.ts).
  */
-export type CushionScaleBasis = 'measured' | 'held' | 'min-known' | 'nameplate';
+export type CushionScaleBasis = 'measured' | 'held' | 'min-known' | 'nameplate' | 'floor';
 /** v1.199.0 — the house pool's measured capacity scale (Σ full-charge ÷ Σ design capacity over the
  *  panel's connected Cores, after the runway tracker's 24 h increase hold) and its basis. */
 export interface CushionPoolScale { scale: number; basis: CushionScaleBasis }

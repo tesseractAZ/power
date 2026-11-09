@@ -898,6 +898,19 @@ export function basisIncompleteNote(v: HeldLedgerVerdict | null, name: (sn: stri
     + `${v.pv.length > 0 && v.load.length > 0 ? 'PV and load actuals are' : v.pv.length > 0 ? 'PV actual is' : 'load actual is'} left empty rather than integrated from held readings.`;
 }
 
+/**
+ * ★★★ v1.203.0 — the note of a CUSHION-ONLY row (cushion_only_refused_by set), never scored in any outcome: its buy was sized on the
+ * outage cushion at the window close with no solar credited, so the planner-sizing metric (algo v3: the buy against the solar and
+ * load forecast) has no solar forecast to grade. With the held verdict when there is one, its marker included, so the held repair
+ * does not reset the row every sweep (as basisIncompleteNote). PURE.
+ */
+export function cushionOnlyNote(v: HeldLedgerVerdict | null, name: (sn: string) => string, refusedBy: string): string {
+  const head = `not scored — a cushion-only plan (no solar basis: ${refusedBy}): its buy was sized on the outage cushion at the window close with no solar credited, so the planner-sizing metric has no solar forecast to grade.`;
+  if (v == null) return head;
+  return `${head} Also ${HELD_TELEMETRY_MARKER}: ${heldParts(v, name)} of the 24 h span had no fresh readings; the `
+    + `${v.pv.length > 0 && v.load.length > 0 ? 'PV and load actuals are' : v.pv.length > 0 ? 'PV actual is' : 'load actual is'} left empty rather than integrated from held readings.`;
+}
+
 /** v1.188.1 — the clause appended to a row past the re-capture horizon. Carries the marker. PURE.
  *  v1.188.1 (dry run) — it does not say the actuals were integrated from held readings: a hold
  *  can cover hours with no rows at all (a device silent for days, then held), which the actuals

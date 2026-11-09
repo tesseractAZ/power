@@ -1170,7 +1170,8 @@ test('★★ the card labels the worst-case arrival and the island troughs as wh
   assert.doesNotMatch(card, /label="Expected SoC"|label="Trough with(out)? buy"/);
   assert.match(card, /label="Worst-case arrival"\n\s+value=\{fmtSoc\(plan\.targetSocPct\)\}/);
   assert.match(card, /\[\n\s+'sizing basis',\n/);
-  assert.match(card, /<Stat label="Island low, no charge" value=\{fmtSoc\(plan\.baselineMinSocPct\)\} sub="if the grid were lost · P10 PV \/ P90 load" \/>/);
+  // v1.203.0 — a cushion-only plan's island low is a no-PV walk, and says so.
+  assert.match(card, /<Stat label="Island low, no charge" value=\{fmtSoc\(plan\.baselineMinSocPct\)\} sub=\{plan\.cushionOnly != null \? 'if the grid were lost · no PV \/ P90 load' : 'if the grid were lost · P10 PV \/ P90 load'\} \/>/);
   assert.match(card, /<Stat label="Island low, with charge" value=\{fmtSoc\(plan\.minProjSocPct\)\} sub=\{`if the grid were lost · floor\+cushion/);
 });
 
