@@ -1824,7 +1824,8 @@ export function cushionOnlyText(
   plan: Pick<NightChargePlan, 'objective' | 'costCeilingSocPct'> & { longGapAhead?: boolean },
 ): string {
   const costFill = co.longGapAfter && plan.longGapAhead === true && plan.costCeilingSocPct != null;
-  const head = ` OUTAGE CUSHION ONLY; NO SOLAR BASIS: the solar basis is refused (${co.refusedBy}), so this plan is sized only to hold the outage cushion at the window close — no solar is credited, no solar calibration is used, `
+  const head = ` OUTAGE CUSHION ONLY; NO SOLAR BASIS: the solar basis is refused (${co.refusedBy}), `
+    + 'so this plan is sized only to hold the outage cushion at the window close — no solar is credited, no solar calibration is used, '
     + (costFill ? 'and no mid-day charge is planned.' : 'and no cost target or mid-day charge is planned.');
   const gap = !co.longGapAfter ? ''
     : costFill

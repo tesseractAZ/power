@@ -157,8 +157,10 @@ second panel gets its own charge-level ladder and runway, and nothing else.
   the house drawing little, or take about 0.93 × its AC input power: the AC input is the grid
   side, before the charge losses.
 - `ARB_OUTAGE_CUSHION_HOURS`: how long the panel's circuits must run on the batteries in an outage
-  that starts as the charge window closes, before you can act. When the reserve plus that cushion
-  comes to more than 50 % of the pool, the panel cannot hold it as a reserve. In `supervised` or
+  that starts as the charge window closes, before you can act. The panel holds the pool one point
+  under a reserve it charges up to, so the reserve is written one point above the line. When the
+  reserve plus that cushion comes to more than 49 % of the pool, the panel cannot hold it as a
+  reserve. In `supervised` or
   `auto` mode the night's force-charge (the EcoFlow app's Charge Now) then carries the pool toward the
   line and the add-on leaves it on until the window closes, on a resilience setup as well as a cost
   one. In an emulation over the year's test nights (not a measurement) a battery slot reads Charge
@@ -172,10 +174,10 @@ second panel gets its own charge-level ladder and runway, and nothing else.
   minutes before the close. A load that only slows the charge is not pushed, and on a night whose
   cost force-charge already stops above the line, nothing is pushed after that stop. How a
   battery slot with Charge Now on behaves when the grid fails has not been tested on any plant.
-  Before a home with a line above 50 % runs in a write mode, test it once while someone is present:
+  Before a home with a line above 49 % runs in a write mode, test it once while someone is present:
   switch Charge Now on for one slot in the EcoFlow app, open the main breaker, and check that the
   backed-up circuits stay powered and the pool discharges. `NIGHT_CHARGE_MODE` `advisory`, the
-  per-night cancel, or a cushion whose line is at or under 50 % keeps Charge Now off on those
+  per-night cancel, or a cushion whose line is at or under 49 % keeps Charge Now off on those
   nights. A reserve already at 50 % gets no write and no restore: Charge Now rides it, reading ON
   about two to three hours a night in the same emulation. That ride ends for the night if the
   reserve reads another 10–50 % setting for five minutes, or if the add-on reads the grid as not

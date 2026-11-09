@@ -102,6 +102,8 @@ test('★★★ T2 QUALIFIES: every solar-basis refusal — no scored day, too f
     assert.deepEqual(p.cushionOnly, { refusedBy: why, transient, gapAfterMs: 18 * H, longGapAfter: false }, why);
     assert.equal(p.objective, p.chargeTonight ? 'resilience_cushion' : 'none', why);
     assert.equal('basisBlockedBy' in p, false, `${why}: a sized plan names no refusal`);
+    const i = buildNightChargeInputs(refDark(o));
+    assert.deepEqual([i.basisComplete, i.basisBlockedBy, i.basisTransient], [true, null, false], `${why}: the inputs carry no refusal`);
   }
 });
 
@@ -433,7 +435,7 @@ test('★★★ T9 THE TEXTS: rationale, push and card on every cushion-only sha
 
 test('★★ T9 the card\'s stats name the basis, not a confidence tier, and the island low credits no PV (source pins)', () => {
   const card = readFileSync(resolve(HERE, '../../web/src/cards/NightChargeCard.tsx'), 'utf8');
-  assert.ok(card.includes("? <Stat label=\"Basis\" value=\"cushion only\" sub={ws && we ? `no solar basis · ${ws}–${we}` : 'no solar basis'} />"));
+  assert.ok(card.includes("        {plan.cushionOnly != null\n          ? <Stat label=\"Basis\" value=\"cushion only\" sub={ws && we ? `no solar basis · ${ws}–${we}` : 'no solar basis'} />\n          : <Stat label=\"Confidence\""));
   assert.ok(card.includes("sub={plan.cushionOnly != null ? 'if the grid were lost · no PV / P90 load' : 'if the grid were lost · P10 PV / P90 load'}"));
 });
 
@@ -509,6 +511,10 @@ test('★★★ T15 FRIDAY: before a gap of more than a day after its window, a 
       assert.equal(p.costCeilingSocPct, deps.costMaxSocPct ?? 90, `${c.label}: the owner's ceiling, no solar headroom`);
       assert.equal(p.costCeilingSurplusBasis, 'none');
       assert.ok(p.rationale.includes(`Before the gap (${gapAfterWindowText(p.cushionOnly.gapAfterMs)}) tonight's cost target is the long-gap fill: the ${p.costCeilingSocPct}% state-of-charge ceiling, with the solar headroom set aside.`), p.rationale);
+      if (p.chargeTonight) {
+        const body = buildNightChargeMessage(p, 'charge', null).body;
+        assert.ok(body.includes('with no solar credited and no cost target but the long-gap fill.') && body.includes(`Before the gap (${gapAfterWindowText(p.cushionOnly.gapAfterMs)}) the cost target is the long-gap fill: the ${p.costCeilingSocPct}% state-of-charge ceiling, with the solar headroom set aside.`), body);
+      }
       if (p.chargeTonight && p.window != null) {
         const a = armFromPlan(emptyActuationState(), c.label, p, deps.nowMs, deps.reserveFloorPct, costGate(c.deps), nextOnPeakStartMs(MODEL, p.window.startMs), true);
         if (a != null && costGate(c.deps)) { costFill += 1; assert.equal(a.forceChargeCeilingPct, p.costCeilingSocPct, `${c.label}: the cost force-charge rides it`); }
@@ -521,6 +527,10 @@ test('★★★ T15 FRIDAY: before a gap of more than a day after its window, a 
     }
   }
   assert.deepEqual({ costFill, resilience, thursday }, PIN_T15);
+  // No next charge window within the scan is a long gap too (its length unknown, at least the scan's), said as such.
+  const none = plan(refDark({ nextRechargeMs: null }));
+  assert.deepEqual([none.cushionOnly?.gapAfterMs, none.cushionOnly?.longGapAfter], [null, true]);
+  assert.ok(none.rationale.includes(' No further charge window is found within the tariff scan after this one; the cushion is sized for this window\'s close only, and no long-gap fill runs in resilience mode.'), none.rationale);
 });
 /** Measured on the dark year at ×0.944 held: 53 cost-mode long-gap nights armed with the cost force-charge (Fridays, and the
  *  holiday eves the tariff calendar makes), 20 resilience-mode long-gap nights that hold the cushion only, and 128 plans of a
