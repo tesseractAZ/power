@@ -170,7 +170,7 @@ The machine Power runs on, read from the kernel; each reads unknown where it can
 
 ## Night charge
 
-Refreshed from the latest plan, recomputed every 30 minutes. These carry a 25-hour expiry: a stopped planner turns them unavailable instead of leaving a stale "charge tonight". A plan older than 12 hours, or one built on an incomplete basis, publishes no figures and "charge tonight" off. In `supervised` or `auto` mode a plan made while the solar basis is refused holds the outage cushion only and publishes its figures like any other; they credit no solar.
+Refreshed from the latest plan, recomputed every 30 minutes. These carry a 25-hour expiry: a stopped planner turns them unavailable instead of leaving a stale "charge tonight". A plan older than 12 hours, or one built on an incomplete basis, publishes no figures and "charge tonight" off. In `supervised` or `auto` mode a plan made while the solar basis is refused is sized on the outage cushion at the window close (and, with `ARB_OBJECTIVE` `cost` before a gap of more than a day after its window, the long-gap fill) and publishes its figures like any other; they credit no solar.
 
 | entity_id (fresh install) | unique_id | Meaning | Unit |
 |---|---|---|---|

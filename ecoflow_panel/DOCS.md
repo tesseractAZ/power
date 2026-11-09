@@ -200,12 +200,12 @@ cut off from the grid, so the pack still holds the reserve plus an outage cushio
 `NIGHT_CHARGE_CHEAP_PERIOD` `off_peak`, has no cheap window, so the planner holds every night.
 
 While the solar basis is refused (for example while the Cores are dark on the vendor cloud and no
-solar calibration day scores), a `supervised` or `auto` plan holds the outage cushion only: it
-credits no solar, sizes the reserve plus the cushion at the window close, and says "outage cushion
-only" in the notice and on the card. Before a gap of more than a day after its window (Friday
-before Monday) it fills toward `ARB_COST_MAX_SOC_PCT` with `ARB_OBJECTIVE` `cost`; in resilience
-mode it holds the cushion only. A reserve held at the outage line is written one point above it:
-the panel holds the pool one point under a reserve it charges up to.
+solar calibration day scores), a `supervised` or `auto` plan is a cushion-only plan: it credits no
+solar, sizes the reserve plus the cushion at the window close, and says so in the notice and on the
+card. Before a gap of more than a day after its window (Friday before Monday) it also fills toward
+`ARB_COST_MAX_SOC_PCT` with `ARB_OBJECTIVE` `cost`, and says that too; in resilience mode it holds
+the cushion only. A reserve held at the outage line is written one point above it: the panel holds
+the pool one point under a reserve it charges up to.
 
 The notice states the charge, not the worst case: the level the charge drives the pool to and
 the grid energy it is expected to draw, for example "charging to ~80% tonight (~34.9 kWh)", or

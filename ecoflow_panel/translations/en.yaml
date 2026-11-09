@@ -359,7 +359,7 @@ configuration:
     description: 'Advanced. How far apart, in watt-hours, the stored lifetime energy totals and the batteries'' own counters may drift before the totals are re-seeded from the counters. Leave empty for 50000 Wh, about one Core''s capacity.'
   CAPACITY_SCALE_MIN:
     name: Minimum Capacity Scale
-    description: 'Advanced. The lowest measured battery-capacity ratio (full-charge capacity over nameplate) applied to the panel''s energy figures for the runway, the forecast, the idle-pool check and the night-charge plan (its pool and outage-cushion line). Leave empty for 0.8. Range 0.5-1; 1 keeps that plan on nameplate. A night plan made with the solar basis refused (the outage cushion only) counts its pool on this figure while no pack capacity ratio is known.'
+    description: 'Advanced. The lowest measured battery-capacity ratio (full-charge capacity over nameplate) applied to the panel''s energy figures for the runway, the forecast, the idle-pool check and the night-charge plan (its pool and outage-cushion line). Leave empty for 0.8. Range 0.5-1; 1 keeps that plan on nameplate. A night plan made with the solar basis refused (a cushion-only plan) counts its pool on this figure while no pack capacity ratio is known.'
   FORECAST_NIGHT_START_HOUR:
     name: Forecast Night Start Hour
     description: 'Advanced. First hour (0-23) of the overnight band in which the load forecast is trimmed toward the load measured in the last hours. Leave empty for 21.'
