@@ -37,6 +37,9 @@ import {
 } from './curtailmentFreeze.js';
 // v1.196.0 — the forecast-skill hindcast measures each past day on that day's recorded Cores.
 import { membershipsDuring, membershipConfirmedDuring, latestSlotOf, standInCores, type MembershipHistory } from './membershipHistory.js';
+// v1.204.0 — the panel-measured solar basis (the planning layer, getPlanningForecast).
+import { PLANNING_WINDOW_DAYS, type HourSource, type UcVerdict } from './panelPvBasis.js';
+import { panelBasisInputs, slotMapPoints, resetPanelBasisMemos, type PanelBasisInputs } from './analytics/panelBasisInputs.js';
 
 /**
  * Learned alerting — phase 1: peer-comparison anomaly detection.
@@ -1925,6 +1928,19 @@ function dayForecastCacheFresh(now: number): boolean {
 // one; this inner flight was unkeyed, so a 'runway' or 'forecast' request on the hydrated map
 // could still be handed the forecast a boot-time flight was computing on the partial map.
 const dayForecastFlights = new Map<string, Promise<DayForecast>>();
+/** v1.204.0 — each built DayForecast's own walk inputs, for the planning layer (getPlanningForecast):
+ *  it walks the SAME hours, loads and SoC basis on the panel-measured solar model. A WeakMap beside
+ *  the value (never on it, so nothing published changes); a hand-built forecast has none. */
+interface ForecastBuildInputs {
+  ghiByEpoch: Map<number, number>;
+  wxByHour: Map<number, WeatherHour>;
+  clearnessHist: number;
+  loadWs: number[];
+  socWhStart: number | null;
+  fullWh: number | null;
+  overheadW: number;
+}
+const forecastBuildInputs = new WeakMap<DayForecast, ForecastBuildInputs>();
 // v0.60.0 — throttle the "structurally incomplete" rebuild log. A cold post-boot
 // worker can hit this on every read for several minutes (the 4-min warm cycle +
 // per-request rebuilds), flooding the log with ~70 identical lines; the gate is
@@ -2784,6 +2800,9 @@ async function computeDayForecastUncached(
   // re-adds each connected-but-unprojected Core's own recorded PV — real figures even when
   // no home Core is projected (all wedged cloud-offline at a restart).
   value.pvForecastUnavailable = restoredPvSpan === 0;
+  // v1.204.0 — what the planning layer (getPlanningForecast) walks the same hours with: the weather
+  // maps, the loads and the SoC basis of this build. Kept beside the value in the worker, never on it.
+  forecastBuildInputs.set(value, { ghiByEpoch, wxByHour, clearnessHist, loadWs, socWhStart, fullWh, overheadW: poolBasis.overheadW });
   // Cache whenever ≥1 DPU is present (so a totally-empty fleet still doesn't latch),
   // tagging the entry incomplete so the TTL fast-path uses the short negative-cache
   // window. A complete forecast overwrites it with incomplete:false + full TTL.
@@ -2799,6 +2818,193 @@ async function computeDayForecastUncached(
   // not latch. One line: workerCacheInventory.test.ts reads each cache write with its gate.
   if ((dpus.length > 0 || shp2 != null) && cacheWritable()) dayForecastCache = { ts: now, value, incomplete: structurallyIncomplete, restoredSns: homeRestoredSns(devices), basisPending };
   return value;
+}
+
+/* ===================================================================
+ * v1.204.0 — THE PLANNING LAYER: the day forecast's hours walked on the PANEL-MEASURED solar basis
+ * (panelPvBasis.ts), as of the evening E that owns the night window.
+ *
+ * The alarm objects above are untouched: computeRunway, the alarms and the published reports read
+ * hours[].forecastPvW and solarModel alone. This layer is read by the night-charge planner only, through
+ * its own reports ('planningForecast', 'planningProbabilisticForecast', multiDayForecast {basis:
+ * 'planning'}), each echoing the E it was built for.
+ *
+ *  - Keys: the house panel's slots connected now ('<panelSn>#<n>', never printed).
+ *  - Per slot, the resolver's hours over E−30..E−1: the slot's Core with its own pv_total (G1), else the
+ *    field on a slot-day ADMITTED as of E (the upper check judged a window holding it, with that slot
+ *    summed, and none failed), else a partial Core hour, else a gap. Day E and later never enter.
+ *  - planningSolarModel: buildSolarResponse on fullCoverageFleetPv of those maps; planningPvBiasFactor:
+ *    computePvBiasCorrection over the 7 site days before E on the same maps; both windows end at the
+ *    start of day E (so 21:30, 22:30 and 00:30 of one night fit on one set of days).
+ *  - planningHours: the day forecast's own 24 hours (load, weather, SoC basis) with that PV.
+ *  - IDENTITY: when no slot-hour of the window takes the field and the alarm model was fitted on the
+ *    Cores of every connected slot, every planning field IS the alarm object.
+ * =================================================================== */
+
+export interface PlanningForecast {
+  generatedAt: number;
+  /** The DayForecast (generatedAt) the planning hours were walked on. */
+  forecastTs: number;
+  /** E, as passed (the report echoes it). */
+  asOfDay: string;
+  planningAsOfDay: string;
+  /** Every planning field below is the alarm object (see the identity rule above). */
+  identity: boolean;
+  planningFit: { usedFullCoverageOnly: boolean; fullHours: number; unionHours: number } | null;
+  planningSolarModel: SolarResponseModel;
+  planningPvBiasFactor: number;
+  planningPvCurve: number[];
+  planningHours: ForecastHour[];
+  planningPvCeilingW?: number;
+  planningMinProjectedSoc: number | null;
+  /** The slot keys the planning model is fitted on (the house panel's connected slots now). */
+  planningModelKeys: string[];
+  planningPvBasis: 'cores' | 'mixed' | 'panel';
+  planningVerdict: UcVerdict;
+  /** The resolver's hours over the window, by source (admission applied). */
+  planningSlotHours: Record<HourSource, number>;
+  /** Distinct site days with at least one admitted field slot-day. */
+  planningAdmittedDays: number;
+  /** Slots proved under charge (G11) inside the window. */
+  planningProvedUnderCharge: number[];
+}
+
+/** v1.204.0 — the per-slot maps each planning value was built on (worker only; the skill reads them). */
+const planningInputsOf = new WeakMap<PlanningForecast, PanelBasisInputs>();
+// v1.204.0 — the planning layer by E, for the day forecast it was walked on (forecastTs).
+const planningForecastCache = new Map<string, { ts: number; forecastTs: number; value: PlanningForecast }>();
+const PLANNING_FORECAST_TTL_MS = FORECAST_DAY_TTL_MS;
+
+const ASOF_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** The hour-of-day mean of a per-hour map (siteHour), 24 values (NaN-free: an hour with no rows is 0). */
+function hourOfDayMean(map: ReadonlyMap<number, number>): number[] {
+  const sum = new Array<number>(24).fill(0);
+  const n = new Array<number>(24).fill(0);
+  for (const [he, w] of map) { const h = siteHour(he * 3_600_000); sum[h] += w; n[h]++; }
+  return sum.map((s, h) => (n[h] > 0 ? s / n[h] : 0));
+}
+
+/**
+ * v1.204.0 — the planning layer as of the evening `asOfDay` (E: the site day of the evening decision
+ * that owns the window, passed in by the caller). Null for a malformed E or one after today (its
+ * evening has not come), and with no house panel.
+ */
+export async function getPlanningForecast(
+  devices: Record<string, DeviceSnapshot>,
+  recorder: Recorder,
+  log: (m: string) => void,
+  asOfDay: string,
+): Promise<PlanningForecast | null> {
+  if (!ASOF_RE.test(asOfDay) || asOfDay > siteYmd(Date.now())) return null;
+  const fc = await getDayForecast(devices, recorder, log);
+  const hit = planningForecastCache.get(asOfDay);
+  if (hit && hit.forecastTs === fc.generatedAt && Date.now() - hit.ts < PLANNING_FORECAST_TTL_MS) return hit.value;
+  const inputs = panelBasisInputs(devices, recorder, asOfDay);
+  if (inputs == null) return null;
+  const now = Date.now();
+  const built = forecastBuildInputs.get(fc);
+  const coresOfSlots = [...inputs.coreOfSlot.values()].filter((sn): sn is string => sn != null).sort();
+  const identity = inputs.fieldHoursUnadmitted === 0
+    && coresOfSlots.length === inputs.slots.length
+    && coresOfSlots.join(',') === (fc.solarModelSns ?? []).join(',');
+  const verdict = inputs.verdict;
+  const admittedDays = new Set<string>();
+  for (const days of inputs.admitted.values()) for (const d of days) admittedDays.add(d);
+  const proved = inputs.slots.filter((s) => inputs.provedUnderCharge.get(s) === true);
+  const common = {
+    generatedAt: now, forecastTs: fc.generatedAt, asOfDay, planningAsOfDay: asOfDay,
+    planningModelKeys: inputs.keys, planningPvBasis: verdict.basis, planningVerdict: verdict,
+    planningSlotHours: inputs.hourSources, planningAdmittedDays: admittedDays.size, planningProvedUnderCharge: proved,
+  };
+  let value: PlanningForecast;
+  if (identity) {
+    value = {
+      ...common, identity: true, planningFit: null,
+      planningSolarModel: fc.solarModel, planningPvBiasFactor: fc.pvBiasFactor ?? 1,
+      planningPvCurve: fc.typicalPvCurveWhPerHour ?? new Array(24).fill(0), planningHours: fc.hours,
+      planningPvCeilingW: fc.pvCeilingW, planningMinProjectedSoc: fc.minProjectedSoc,
+    };
+  } else {
+    const startE = siteDayStartMs(asOfDay);
+    // GHI: the build's own realized-first map (the alarm model's), else the recorder's.
+    let ghiByEpoch = built?.ghiByEpoch;
+    if (!ghiByEpoch) {
+      ghiByEpoch = new Map<number, number>();
+      const since = siteShiftDaysMs(startE, -PLANNING_WINDOW_DAYS);
+      for (const r of preferRealizedGhiRows(recorder.query('weather', 'ghi_wm2', since, now, 3600), queryRealizedGhi(recorder, since, now))) {
+        ghiByEpoch.set(Math.floor(r.ts / 3_600_000), r.value);
+      }
+    }
+    const maps = [...inputs.slotMaps.values()];
+    const fit = fullCoverageFleetPv(maps);
+    const model = buildSolarResponse(fit.map, ghiByEpoch);
+    const curve = new Array<number>(24).fill(0);
+    for (const m of maps) hourOfDayMean(m).forEach((w, h) => { curve[h] += w; });
+    const biasFrom = siteShiftDaysMs(startE, -7);
+    const pvBySlot = new Map<string, Array<{ ts: number; value: number }>>();
+    for (const [k, m] of inputs.slotMaps) pvBySlot.set(k, slotMapPoints(m, biasFrom, startE));
+    // No log: the exclusion line names the series key, and a slot key carries the panel's serial.
+    const bias = computePvBiasCorrection(model, ghiByEpoch, pvBySlot, startE, 7);
+    const clearnessHist = built?.clearnessHist ?? 1;
+    const hours: ForecastHour[] = [];
+    let ceiling = 0;
+    let socWh = built?.socWhStart ?? null;
+    const fullWh = built?.fullWh ?? null;
+    let minSoc: number | null = null;
+    fc.hours.forEach((fh, k) => {
+      const clock = siteHour(fh.ts);
+      const wx = built?.wxByHour.get(Math.floor(fh.ts / 3_600_000)) ?? null;
+      const ghi = wx ? wx.radiationWm2 : fh.ghiWm2;
+      const cloud = wx ? wx.cloudCoverPct : fh.cloudCoverPct;
+      const resp = model.hourly[clock];
+      const { pv, modelled } = forecastHourPvW(resp, ghi, cloud, curve[clock], clearnessHist);
+      const hourCeil = modelled ? resp.observedMaxPvW * 1.05 : null;
+      const pvW = hourCeil != null ? Math.min(pv * bias, hourCeil) : pv * bias;
+      if (hourCeil != null && hourCeil > ceiling) ceiling = hourCeil;
+      const load = built?.loadWs[k] ?? fh.forecastLoadW;
+      let socPct: number | null = null;
+      if (built && fullWh != null && fullWh > 0 && socWh != null) {
+        socWh = Math.max(0, Math.min(fullWh, socWh + chargeLegStep(pvW - runwayDrainW(load, built.overheadW), RUNWAY_CHARGE_EFFICIENCY)));
+        socPct = (socWh / fullWh) * 100;
+        if (minSoc == null || socPct < minSoc) minSoc = socPct;
+      }
+      hours.push({
+        ts: fh.ts, forecastPvW: Math.round(pvW), forecastLoadW: fh.forecastLoadW, cloudCoverPct: fh.cloudCoverPct, ghiWm2: fh.ghiWm2,
+        projectedSocPct: socPct == null ? null : Math.round(socPct * 10) / 10, modelled,
+        ...(fh.predictedEvLoadW != null ? { predictedEvLoadW: fh.predictedEvLoadW } : {}),
+      });
+    });
+    value = {
+      ...common, identity: false,
+      planningFit: { usedFullCoverageOnly: fit.usedFullCoverageOnly, fullHours: fit.fullHours, unionHours: fit.unionHours },
+      planningSolarModel: model, planningPvBiasFactor: bias, planningPvCurve: curve.map((w) => Math.round(w)), planningHours: hours,
+      planningPvCeilingW: ceiling > 0 ? Math.round(ceiling) : undefined,
+      planningMinProjectedSoc: minSoc == null ? null : Math.round(minSoc * 10) / 10,
+    };
+  }
+  planningInputsOf.set(value, inputs);
+  if (!fc.structurallyIncomplete && cacheWritable()) planningForecastCache.set(asOfDay, { ts: now, forecastTs: fc.generatedAt, value });
+  return value;
+}
+
+/** v1.204.0 — the day forecast seen through the planning layer: its hours, solar model, bias, ceiling and
+ *  typical curve are the planning ones; everything else (load, SoC basis, reserve) is the forecast's own.
+ *  The identity layer returns the forecast itself. */
+export function planningDayForecast(fc: DayForecast, p: PlanningForecast): DayForecast {
+  if (p.identity) return fc;
+  return {
+    ...fc,
+    hours: p.planningHours,
+    forecastPvWhNext24: Math.round(p.planningHours.reduce((s, h) => s + h.forecastPvW, 0)),
+    typicalPvCurveWhPerHour: p.planningPvCurve,
+    typicalPvWhPerDay: Math.round(p.planningPvCurve.reduce((a, b) => a + b, 0)),
+    pvBiasFactor: p.planningPvBiasFactor,
+    pvCeilingW: p.planningPvCeilingW,
+    minProjectedSoc: p.planningMinProjectedSoc,
+    solarModel: p.planningSolarModel,
+    solarModelSns: p.planningModelKeys,
+  };
 }
 
 /** Forecast-driven alerts derived from a DayForecast. */
@@ -6718,7 +6924,15 @@ export async function computeForecastSkill(
    * every day is `unrecorded`.
    */
   membership?: MembershipHistory | null,
+  /**
+   * v1.204.0 — the basis scored. 'alarm' (omitted): the alarm model against the home Cores' own
+   * pv_total, exactly as before. 'planning': the planning layer's model against the resolver's
+   * per-slot hours, field hours on admitted days only, the window ending at the start of the planning
+   * layer's day E (computePlanningForecastSkill); its cache key carries the basis and E.
+   */
+  basis?: { kind: 'planning'; planning: PlanningForecast },
 ): Promise<ForecastSkillReport> {
+  if (basis?.kind === 'planning') return computePlanningForecastSkill(devices, recorder, forecast, basis.planning, windowDays, ghiBasis, membership);
   const cacheKey = `${windowDays}:${ghiBasis}`;
   // v1.186.5 — a hit is valid only for the forecast it was scored against. The hindcast
   // pairs THIS forecast's solar model with the actual PV of the current home Cores, so a
@@ -6900,6 +7114,104 @@ export async function computeForecastSkill(
     unrecordedRosterDays,
   };
   if (dpus.length > 0 && cacheWritable()) forecastSkillCache.set(cacheKey, { ts: now, forecastTs: forecast.generatedAt, value });
+  return value;
+}
+
+/**
+ * v1.204.0 — the forecast skill on the PLANNING basis (computeForecastSkill with basis 'planning').
+ * The identity layer is scored as the alarm model is (the same report). Otherwise:
+ *  - the model is the planning layer's (planningSolarModel), and its keys must be the house panel's
+ *    connected slot keys now, else nothing is scored (empty, uncached), as the alarm path does with Cores;
+ *  - the actuals are the resolver's per-slot hours (the planning layer's maps: each slot's Core with its
+ *    own pv_total, the field on admitted days only), per slot key, with the same ≥ 80 % daylight coverage
+ *    per slot per day;
+ *  - the window is the `windowDays` site days before the start of E (L3), so a recompute after midnight
+ *    scores the days the evening scored;
+ *  - the cache key carries the basis and E.
+ */
+async function computePlanningForecastSkill(
+  devices: Record<string, DeviceSnapshot>,
+  recorder: Recorder,
+  forecast: DayForecast | null,
+  planning: PlanningForecast,
+  windowDays: number,
+  ghiBasis: ForecastSkillGhiBasis,
+  membership?: MembershipHistory | null,
+): Promise<ForecastSkillReport> {
+  if (planning.identity) return computeForecastSkill(devices, recorder, forecast, windowDays, ghiBasis, membership);
+  const cacheKey = `${windowDays}:${ghiBasis}:planning:${planning.asOfDay}`;
+  const hit = forecastSkillCache.get(cacheKey);
+  if (hit && Date.now() - hit.ts < FORECAST_SKILL_TTL_MS && hit.forecastTs === planning.generatedAt) return hit.value;
+  const now = Date.now();
+  const emptyVal = (): ForecastSkillReport => ({
+    generatedAt: now, days: [], meanAbsErrorKwh: null, meanAbsErrorPct: null, biasFactor: null, windowDays, ghiBasis,
+  });
+  if (!forecast || forecast.structurallyIncomplete) return emptyVal();
+  const inputs = planningInputsOf.get(planning);
+  if (!inputs) return emptyVal();
+  // The model and the actuals cover the SAME slots: the planning keys against the house panel's
+  // connected slots now.
+  const shp2 = findShp2(devices) as (DeviceSnapshot & { projection: Shp2Projection }) | undefined;
+  const keysNow = (shp2?.projection.sources ?? [])
+    .filter((s) => s.isConnected && !!s.sn && Number.isInteger(s.slot))
+    .map((s) => s.slot).sort((a, b) => a - b).map((s) => `${shp2!.sn}#${s}`);
+  if (keysNow.length === 0 || keysNow.join(',') !== planning.planningModelKeys.join(',')) return emptyVal();
+  const weather = await getWeather();
+  if (!weather) return emptyVal();
+  const todayStart = siteDayStartMs(planning.asOfDay);
+  const windowStart = siteShiftDaysMs(todayStart, -windowDays);
+  const ghiRows = recorder.query('weather', 'ghi_wm2', windowStart, todayStart, 3600);
+  const ghiByEpoch = ghiBasis === 'realized'
+    ? buildRealizedGhiByEpoch(ghiRows, queryRealizedGhi(recorder, windowStart, todayStart), weather.hours)
+    : buildGhiByEpoch(ghiRows, weather.hours);
+  const pvBySlot = new Map<string, Array<{ ts: number; value: number }>>();
+  for (const k of planning.planningModelKeys) pvBySlot.set(k, slotMapPoints(inputs.slotMaps.get(k) ?? new Map(), windowStart, todayStart));
+  const dayCoverage = coreCoverageByDay(ghiByEpoch, pvBySlot, todayStart, windowDays);
+  const model = planning.planningSolarModel;
+  const days: ForecastSkillDay[] = [];
+  let totalPred = 0, totalAct = 0, errSum = 0, errCount = 0;
+  for (let i = windowDays; i >= 1; i--) {
+    const dayStart = siteShiftDaysMs(todayStart, -i);
+    const dayEnd = siteShiftDaysMs(dayStart, 1);
+    const weatherCovered = dayHasGhiCoverage(ghiByEpoch, dayStart);
+    const coverageGap = weatherCovered && dayCoverage.get(dayStart)?.covered === false;
+    let predWh = 0, actWh = 0;
+    for (let hourStart = dayStart; hourStart < dayEnd; hourStart += 3_600_000) {
+      const he = Math.floor(hourStart / 3_600_000);
+      const ghi = ghiByEpoch.get(he);
+      const resp = model.hourly[siteHour(hourStart)];
+      if (ghi != null && resp.coeff != null) predWh += resp.coeff * ghi;
+      for (const pts of pvBySlot.values()) {
+        const slice = sliceByTsInclusive(pts, hourStart, hourStart + 3_600_000);
+        if (slice.length === 0) continue;
+        actWh += slice.reduce((s, p) => s + p.value, 0) / slice.length;
+      }
+    }
+    const predKwh = predWh / 1000;
+    const actKwh = actWh / 1000;
+    const errKwh = predKwh - actKwh;
+    const errPct = weatherCovered && !coverageGap && actKwh > 0.5 ? Math.round((errKwh / actKwh) * 1000) / 10 : null;
+    days.push({
+      date: siteYmd(dayStart), predictedKwh: round2(predKwh), actualKwh: round2(actKwh), errorKwh: round2(errKwh), errorPct: errPct,
+      weatherCovered, ...(coverageGap ? { coverageGap: true } : {}),
+    });
+    if (!weatherCovered || coverageGap) continue;
+    if (predKwh > 0.5 && actKwh > 0.5 && predKwh >= 0.25 * actKwh) {
+      totalPred += predKwh; totalAct += actKwh;
+      errSum += Math.abs(errKwh); errCount++;
+    }
+  }
+  const mae = errCount > 0 ? errSum / errCount : null;
+  const meanActual = errCount > 0 ? totalAct / errCount : 0;
+  const value: ForecastSkillReport = {
+    generatedAt: now, days,
+    meanAbsErrorKwh: mae != null ? round2(mae) : null,
+    meanAbsErrorPct: mae != null && meanActual > 0.5 ? Math.round((mae / meanActual) * 1000) / 10 : null,
+    biasFactor: totalPred > 0.5 ? round2(totalAct / totalPred) : null,
+    windowDays,
+    ghiBasis,
+  };
+  if (cacheWritable()) forecastSkillCache.set(cacheKey, { ts: now, forecastTs: planning.generatedAt, value });
   return value;
 }
 
@@ -9587,6 +9899,8 @@ export interface ProbabilisticForecast {
 
 // v1.186.5 — `forecastTs`: the generatedAt of the DayForecast the band was built on.
 let probabilisticCache: { ts: number; forecastTs: number; value: ProbabilisticForecast } | null = null;
+// v1.204.0 — the band on the planning basis, by E (computeProbabilisticForecast with `planning`).
+const planningProbabilisticCache = new Map<string, { ts: number; forecastTs: number; planningTs: number; value: ProbabilisticForecast }>();
 const PROB_TTL_MS = 15 * 60 * 1000;
 
 /** Normal-distribution shortcut: P10 ≈ μ−1.282σ, P90 ≈ μ+1.282σ. */
@@ -9740,13 +10054,23 @@ export function parseProbLoadSigmaFrac(raw: string | undefined): number {
 const PROB_LOAD_SIGMA_FRAC = parseProbLoadSigmaFrac(process.env.PROB_LOAD_SIGMA_FRAC);
 
 export async function computeProbabilisticForecast(
-  forecast: DayForecast | null,
+  forecastIn: DayForecast | null,
   skill: ForecastSkillReport | null,
+  /** v1.204.0 — the band on the PLANNING basis: the same math on the forecast seen through the planning
+   *  layer (planningDayForecast), in its own cache slot keyed by E. Omitted: the published band, exactly
+   *  as before. */
+  planning?: PlanningForecast | null,
 ): Promise<ProbabilisticForecast> {
+  if (planning != null) {
+    const hit = planningProbabilisticCache.get(planning.asOfDay);
+    if (hit && Date.now() - hit.ts < PROB_TTL_MS && hit.planningTs === planning.generatedAt
+        && (forecastIn == null || hit.forecastTs === forecastIn.generatedAt)) return hit.value;
+  } else
   // v1.186.5 — like the skill it is calibrated on, the band is reused only for the
   // forecast it was built on (a null forecast still reads a fresh entry, as before).
   if (probabilisticCache && Date.now() - probabilisticCache.ts < PROB_TTL_MS
-      && (forecast == null || probabilisticCache.forecastTs === forecast.generatedAt)) return probabilisticCache.value;
+      && (forecastIn == null || probabilisticCache.forecastTs === forecastIn.generatedAt)) return probabilisticCache.value;
+  const forecast = forecastIn != null && planning != null ? planningDayForecast(forecastIn, planning) : forecastIn;
   const now = Date.now();
   const empty = (): ProbabilisticForecast => ({
     generatedAt: now, hours: [], pAboveReservePct: null, pFullCharge: null, uncertaintyKwhStdev: 0,
@@ -10076,7 +10400,9 @@ export async function computeProbabilisticForecast(
   // v1.186.5 — a band built on a structurally incomplete forecast is served but never
   // cached: its skill was empty (calScoredDays 0), and caching it for PROB_TTL_MS would
   // fail the night-charge basis gate for 15 minutes after the forecast became complete.
-  if (!forecast.structurallyIncomplete && cacheWritable()) probabilisticCache = { ts: now, forecastTs: forecast.generatedAt, value };
+  if (planning != null) {
+    if (!forecast.structurallyIncomplete && cacheWritable()) planningProbabilisticCache.set(planning.asOfDay, { ts: now, forecastTs: forecast.generatedAt, planningTs: planning.generatedAt, value });
+  } else if (!forecast.structurallyIncomplete && cacheWritable()) probabilisticCache = { ts: now, forecastTs: forecast.generatedAt, value };
   return value;
 }
 
@@ -10162,14 +10488,25 @@ export interface MultiDayForecast {
 }
 
 let multiDayCache: { ts: number; horizonDays: number; forecastTs: number; value: MultiDayForecast } | null = null;
+// v1.204.0 — the rollup on the planning basis, by `${E}:${horizonDays}`.
+const planningMultiDayCache = new Map<string, { ts: number; forecastTs: number; planningTs: number; value: MultiDayForecast }>();
 const MULTI_DAY_TTL_MS = 30 * 60 * 1000;
 
 export async function computeMultiDayForecast(
   devices: Record<string, DeviceSnapshot>,
   recorder: Recorder,
-  forecast: DayForecast | null,
+  forecastIn: DayForecast | null,
   horizonDays = 3,
+  /** v1.204.0 — the rollup on the PLANNING basis: the planning hours within the 24-h forecast, the
+   *  planning solar model × its bias beyond (planningDayForecast), in its own cache slot keyed by E and
+   *  the horizon. Omitted: the published rollup, exactly as before. */
+  planning?: PlanningForecast | null,
 ): Promise<MultiDayForecast> {
+  if (planning != null) {
+    const hit = planningMultiDayCache.get(`${planning.asOfDay}:${horizonDays}`);
+    if (hit && Date.now() - hit.ts < MULTI_DAY_TTL_MS && hit.planningTs === planning.generatedAt
+        && (forecastIn == null || hit.forecastTs === forecastIn.generatedAt)) return hit.value;
+  } else
   // v1.33.0 — cache MUST be keyed by horizonDays: a days=3 call (the UI default)
   // otherwise satisfied a subsequent days=4 request from the 30-min-TTL cache,
   // silently truncating the weekend (Fri->Mon) lookahead the night-charge planner needs.
@@ -10179,9 +10516,10 @@ export async function computeMultiDayForecast(
     multiDayCache &&
     multiDayCache.horizonDays === horizonDays &&
     Date.now() - multiDayCache.ts < MULTI_DAY_TTL_MS &&
-    (forecast == null || multiDayCache.forecastTs === forecast.generatedAt)
+    (forecastIn == null || multiDayCache.forecastTs === forecastIn.generatedAt)
   )
     return multiDayCache.value;
+  const forecast = forecastIn != null && planning != null ? planningDayForecast(forecastIn, planning) : forecastIn;
   const now = Date.now();
   const empty = (): MultiDayForecast => ({ generatedAt: now, days: [] });
   if (!forecast) return empty();
@@ -10359,7 +10697,9 @@ export async function computeMultiDayForecast(
   }
   const value: MultiDayForecast = { generatedAt: now, days };
   // v1.187.18 — a rollup built on a structurally incomplete forecast is served but never cached.
-  if (!forecast.structurallyIncomplete && cacheWritable()) multiDayCache = { ts: now, horizonDays, forecastTs: forecast.generatedAt, value };
+  if (planning != null) {
+    if (!forecast.structurallyIncomplete && cacheWritable()) planningMultiDayCache.set(`${planning.asOfDay}:${horizonDays}`, { ts: now, forecastTs: forecast.generatedAt, planningTs: planning.generatedAt, value });
+  } else if (!forecast.structurallyIncomplete && cacheWritable()) multiDayCache = { ts: now, horizonDays, forecastTs: forecast.generatedAt, value };
   return value;
 }
 
@@ -11215,6 +11555,10 @@ export function resetForecastCachesForTesting(): void {
   soilingDecompCache = null; // v1.23.0 (F29) — force a cold soiling recompute
   multiDayCache = null;
   forecastSkillCache.clear();
+  planningForecastCache.clear();
+  planningProbabilisticCache.clear();
+  planningMultiDayCache.clear();
+  resetPanelBasisMemos();
   bayesCache = null;
   ambientThermalCache = null;
   dispatchCache = null;
@@ -11275,6 +11619,9 @@ export function resetWorkerReportCaches(): void {
   probabilisticCache = null;
   multiDayCache = null;
   bayesCache = null;
+  planningForecastCache.clear();
+  planningProbabilisticCache.clear();
+  planningMultiDayCache.clear();
 }
 
 /**
@@ -11293,4 +11640,6 @@ export function resetWorkerSampleCaches(): void {
   resetWorkerReportCaches();
   dailyEnergyWhCache.clear();
   eqSeriesCache.clear();
+  // v1.204.0 — the panel basis's closed-day slot-hours and its fits (analytics/panelBasisInputs.ts).
+  resetPanelBasisMemos();
 }

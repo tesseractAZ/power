@@ -27,6 +27,7 @@ import {
   computeAmbientThermalForecast,
   computeProbabilisticForecast,
   computeMultiDayForecast,
+  getPlanningForecast,
   computeBayesianSolarModel,
   diurnalBaselinePredictor,
   forecastHourPvW,
@@ -137,6 +138,12 @@ export interface ReportArgs {
    *  old (getDayForecast's `maxWeatherAgeMs`; the morning refresh, plan §3.4). Absent: the worker's
    *  own caches, as before. */
   maxWeatherAgeMs?: number;
+  /** v1.204.0 — planningForecast, planningProbabilisticForecast, multiDayForecast {basis: 'planning'}:
+   *  E, the site day (YYYY-MM-DD) of the evening decision that owns the night window (the plan date). Every
+   *  planning window ends at the start of that day, and the report echoes it. */
+  asOfDay?: string;
+  /** v1.204.0 — multiDayForecast: 'planning' rolls up the planning layer as of `asOfDay`. */
+  basis?: 'planning';
 }
 
 /** R5 — the day forecast's weather-age option from a report's args (absent ⇒ none: the call is
@@ -217,7 +224,38 @@ const BUILDERS: Record<string, Builder> = {
   },
   multiDayForecast: async (ctx, a) => {
     const fc = await getDayForecast(devicesOf(ctx), ctx.recorder, ctx.log);
+    if (a.basis === 'planning') {
+      // v1.204.0 — the rollup on the planning layer as of E (null: no planning layer for that E).
+      const p = await getPlanningForecast(devicesOf(ctx), ctx.recorder, ctx.log, a.asOfDay ?? '');
+      if (p == null) return null;
+      const md = await computeMultiDayForecast(devicesOf(ctx), ctx.recorder, fc, a.days ?? 3, p);
+      return { ...md, basis: 'planning', asOfDay: p.asOfDay };
+    }
     return computeMultiDayForecast(devicesOf(ctx), ctx.recorder, fc, a.days ?? 3);
+  },
+  // v1.204.0 — the planning layer as of E (getPlanningForecast): the panel-measured solar basis, its
+  // verdict (the 7-day energy balance) and figures. Null for a malformed E, an E after today, or no
+  // house panel. The night-charge planner's alone: no alarm and no published report reads it.
+  planningForecast: (ctx, a) => getPlanningForecast(devicesOf(ctx), ctx.recorder, ctx.log, a.asOfDay ?? ''),
+  // v1.204.0 — the band on the planning layer as of E: the same 30-day realized-GHI skill window and
+  // band math as 'probabilisticForecast', on the planning model, the resolver's per-slot actuals and
+  // windows ending at the start of E. It echoes E with the verdict, the basis and the model's keys.
+  planningProbabilisticForecast: async (ctx, a) => {
+    const fc = await getDayForecast(devicesOf(ctx), ctx.recorder, ctx.log);
+    const p = await getPlanningForecast(devicesOf(ctx), ctx.recorder, ctx.log, a.asOfDay ?? '');
+    if (p == null) return null;
+    const skill = await computeForecastSkill(
+      devicesOf(ctx), ctx.recorder, fc, PV_BAND_CAL_WINDOW_DAYS, 'realized', undefined, { kind: 'planning', planning: p },
+    );
+    const band = await computeProbabilisticForecast(fc, skill, p);
+    return {
+      ...band,
+      asOfDay: p.asOfDay,
+      planningIdentity: p.identity,
+      planningPvBasis: p.planningPvBasis,
+      planningVerdict: p.planningVerdict,
+      planningModelKeys: p.planningModelKeys,
+    };
   },
   bayesianSolar: (ctx) => computeBayesianSolarModel(devicesOf(ctx), ctx.recorder),
   totals: (ctx, a) => computeTotals(shimStore(ctx), ctx.recorder, a.sinceMs ?? 0, a.untilMs ?? Date.now(), { bridged: a.bridged === true }),

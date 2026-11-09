@@ -65,10 +65,12 @@ test('the reset names only caches that exist (a typo there resets nothing)', () 
   }
 });
 
-test('the inventory as of v1.187.18: 24 reset, 5 exempt', () => {
+// v1.204.0 — 27: the planning layer's three (planningForecastCache, planningProbabilisticCache,
+// planningMultiDayCache), keyed by the evening E and reset with the rest.
+test('the inventory as of v1.204.0: 27 reset, 5 exempt', () => {
   const body = resetBody();
   const caches = moduleCaches();
-  assert.equal(caches.filter((c) => resetsIt(body, c)).length, 24);
+  assert.equal(caches.filter((c) => resetsIt(body, c)).length, 27);
   assert.equal(caches.filter((c) => c in NOT_RESET).length, 5);
 });
 
