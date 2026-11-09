@@ -2899,7 +2899,12 @@ export async function getPlanningForecast(
   if (!ASOF_RE.test(asOfDay) || asOfDay > siteYmd(Date.now())) return null;
   const fc = await getDayForecast(devices, recorder, log);
   const hit = planningForecastCache.get(asOfDay);
-  if (hit && hit.forecastTs === fc.generatedAt && Date.now() - hit.ts < PLANNING_FORECAST_TTL_MS) return hit.value;
+  // Served only for the slots connected now (the planning keys): a slot added or pulled since rebuilds it.
+  const shp2Now = findShp2(devices) as (DeviceSnapshot & { projection: Shp2Projection }) | undefined;
+  const keysNow = (shp2Now?.projection.sources ?? []).filter((s) => s.isConnected && !!s.sn && Number.isInteger(s.slot))
+    .map((s) => s.slot).sort((a, b) => a - b).map((s) => `${shp2Now!.sn}#${s}`).join(',');
+  if (hit && hit.forecastTs === fc.generatedAt && Date.now() - hit.ts < PLANNING_FORECAST_TTL_MS
+      && hit.value.planningModelKeys.join(',') === keysNow) return hit.value;
   // The planning hours are the forecast's own, walked on its own weather and SoC basis: a forecast this
   // worker did not build (none kept beside it) has no planning layer.
   const built = forecastBuildInputs.get(fc);

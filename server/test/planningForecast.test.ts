@@ -276,9 +276,16 @@ test('★★ the reports echo E: planningForecast, planningProbabilisticForecast
 test('★★★ identity: with every Core reporting its own meter and no field hour, every planning field IS the alarm object', async () => {
   const live = buildWorld({ coresReport: true });
   setUp(live);
+  const { mkdtempSync, existsSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = mkdtempSync(join(tmpdir(), 'panel-pv-identity-'));
+  setPanelBasisConstantsPathForTesting(join(dir, 'panel-pv-constants.json'));
   const devices = devicesWith({ coresProjected: true });
   const fc: DayForecast = await getDayForecast(devices, live.recorder, () => {});
   const p = (await getPlanningForecast(devices, live.recorder, () => {}, E))!;
+  assert.equal(existsSync(join(dir, 'panel-pv-constants.json')), false, 'no slot takes the field: nothing is fitted or kept');
+  rmSync(dir, { recursive: true, force: true });
   assert.equal(p.identity, true);
   assert.equal(p.planningSolarModel, fc.solarModel);
   assert.equal(p.planningHours, fc.hours);

@@ -26,8 +26,8 @@ import { curtailmentMembershipHistory } from '../curtailmentFreeze.js';
 import type { MembershipHistory } from '../membershipHistory.js';
 import { addDaysYmd, siteDayStartMs, siteYmd } from '../siteTime.js';
 import {
-  PLANNING_WINDOW_DAYS, INTEGRATE_MAX_GAP_MS,
-  assembleUcTable, buildSlotHours, chargeProofAt, fitPlantConstants, resolveSlotHour,
+  PLANNING_WINDOW_DAYS, INTEGRATE_MAX_GAP_MS, HOUR_COVER_MIN_S, CORE_DAYLIGHT_MIN_FRAC,
+  assembleUcTable, bridgeVerified, buildSlotHours, chargeProofAt, fitPlantConstants, resolveSlotHour,
   siteHourStarts, slotMapOfDay, slotMapOfRecord, ucTableDays, upperCheck, admittedSlotDays,
   type BridgeWindowRow, type ConstantsFit, type HourSource, type Pt, type SlotHour, type UcTable, type UcVerdict,
 } from '../panelPvBasis.js';
@@ -279,9 +279,10 @@ export function panelBasisInputs(
 
   // The constants of every (slot, Core) the map of record names now (the only Cores a field day can have).
   const fits = new Map<string, ConstantsFit>();
+  const needsFit = new Set<number>();
   const fitOf = (slot: number, core: string): ConstantsFit | null => {
     const cap = capacityOf(slot);
-    if (cap == null) return null;
+    if (cap == null || !needsFit.has(slot)) return null;
     const k = `${slot}|${core}`;
     let f = fits.get(k);
     if (!f) fits.set(k, (f = constantsFor(recorder, panelSn, slot, core, cap, startE, history, sun)));
@@ -305,6 +306,23 @@ export function panelBasisInputs(
       if (slotDayHours(recorder, panelSn, s, day, mapByDay.get(day)?.[s] ?? null, sun).proofAt != null) { p = true; break; }
     }
     proved.set(s, p);
+  }
+  // The constants are fitted only for a slot that can need them: one whose Core did not cover E−1's
+  // daylight (it takes the field tonight), or whose field stood for an hour in the table's days (its past
+  // field days are judged). A plant whose Cores all report never fits (it would refit once a day).
+  const prevDay = addDaysYmd(asOfDay, -1);
+  for (const s of allSlots) {
+    const prevHours = slotDayHours(recorder, panelSn, s, prevDay, mapByDay.get(prevDay)?.[s] ?? null, sun).hours;
+    const daylight = prevHours.filter((h) => h.sun);
+    const covered = daylight.filter((h) => h.coreCovS >= HOUR_COVER_MIN_S).length;
+    if (daylight.length === 0 || covered < CORE_DAYLIGHT_MIN_FRAC * daylight.length) { needsFit.add(s); continue; }
+    for (const day of days) {
+      const core = mapByDay.get(day)?.[s] ?? null;
+      const g3 = bridgeVerified(bridgeRowsOf(recorder, day), panelSn, s, core, trusted(s)).g3;
+      if (!g3) continue;
+      const hs = slotDayHours(recorder, panelSn, s, day, core, sun).hours;
+      if (hs.some((h) => resolveSlotHour(h, { g3, provedUnderCharge: proved.get(s) ?? false, admitted: true }).source === 'field')) { needsFit.add(s); break; }
+    }
   }
   const { table, g3: g3Of } = assembleUcTable({
     panelSn,
