@@ -157,17 +157,20 @@ const T_UNHELD = 'test/lineNightUnheld.test.ts';
 const MUTANTS = [
   /* ── P: the plan ── */
   {
-    id: 'P-i. ★★★ qualify on >= the reserve maximum (a line asked at 50 is "carried")',
+    // v1.203.0 — re-anchored: a line asked at 50 IS the line force-charge's now (the 50% reserve holds 49, the panel's point), so the
+    // edge the reserve holds is an ask of 49, written 50 (lineNeedsForceCharge).
+    id: 'P-i. ★★★ qualify on >= the reserve maximum with the panel\'s point (a line asked at 49 is "carried")',
     file: NCA, tests: [T_LINE],
-    find: "  const lineQualifies = cushionBasis === 'islanded-outage' && chargeTonight && !baselineHolds && lineAsk > RESERVE_WRITE_MAX_PCT;",
-    to: "  const lineQualifies = cushionBasis === 'islanded-outage' && chargeTonight && !baselineHolds && lineAsk >= RESERVE_WRITE_MAX_PCT; /* MUTANT */",
-    why: 'A 49.97% line asks 50, which the reserve holds: a force-charge (and Charge Now in an outage) for nothing.',
+    find: '  return lineAskPct + undershootPct > RESERVE_WRITE_MAX_PCT;',
+    to: '  return lineAskPct + undershootPct >= RESERVE_WRITE_MAX_PCT; /* MUTANT */',
+    why: 'A 48.93% line asks 49, written 50 and held at 49, which the reserve holds: a force-charge (and Charge Now in an outage) for nothing.',
   },
   {
     id: 'P-ii. ★★★ an economic-only night qualifies (drop !baselineHolds)',
     file: NCA, tests: [T_LINE],
-    find: "  const lineQualifies = cushionBasis === 'islanded-outage' && chargeTonight && !baselineHolds && lineAsk > RESERVE_WRITE_MAX_PCT;",
-    to: "  const lineQualifies = cushionBasis === 'islanded-outage' && chargeTonight && lineAsk > RESERVE_WRITE_MAX_PCT; /* MUTANT */",
+    // v1.203.0 — re-anchored on the qualification's first line (its test is now two: the walk legs' and lineNeedsForceCharge).
+    find: "  const lineQualifies = cushionBasis === 'islanded-outage' && chargeTonight && !baselineHolds\n",
+    to: "  const lineQualifies = cushionBasis === 'islanded-outage' && chargeTonight /* MUTANT */\n",
     why: 'The pack already holds the line with no buy: the line force-charge has no resilience job there.',
   },
   {
@@ -209,7 +212,8 @@ const MUTANTS = [
     id: 'P-viii. ★★★ a line within 10 points of full is carried (not disclosed)',
     file: NCA, tests: [T_LINE, T_YEAR],
     // (A5) re-anchored: the near-full test now decides only whether the plan claims the line.
-    find: '  const lineNearFull = lineAsk + 2 * FORCE_CHARGE_LINE_HEADROOM_PCT > 100;',
+    // v1.203.0 — re-anchored: on the force-charge's own ask (at least 51).
+    find: '  const lineNearFull = lineForceAsk + 2 * FORCE_CHARGE_LINE_HEADROOM_PCT > 100;',
     to: '  const lineNearFull = false; /* MUTANT */',
     why: 'No headroom for the panel ceiling over the line: the claim cannot be met, and is not disclosed.',
   },
@@ -224,22 +228,24 @@ const MUTANTS = [
   {
     id: 'P-x. ★★★ a minimum-buy hold qualifies (drop chargeTonight)',
     file: NCA, tests: [T_LINE],
-    find: "  const lineQualifies = cushionBasis === 'islanded-outage' && chargeTonight && !baselineHolds && lineAsk > RESERVE_WRITE_MAX_PCT;",
-    to: "  const lineQualifies = cushionBasis === 'islanded-outage' && !baselineHolds && lineAsk > RESERVE_WRITE_MAX_PCT; /* MUTANT */",
+    // v1.203.0 — re-anchored on the qualification's first line.
+    find: "  const lineQualifies = cushionBasis === 'islanded-outage' && chargeTonight && !baselineHolds\n",
+    to: "  const lineQualifies = cushionBasis === 'islanded-outage' && !baselineHolds /* MUTANT */\n",
     why: 'A hold arms nothing, yet carries a line (forceChargeLine) or discloses one it was never going to write.',
   },
   {
     id: 'P-xi. ★★★ the headroom edge off by one (an ask of 90 disclosed)',
     file: NCA, tests: [T_LINE],
-    find: '  const lineNearFull = lineAsk + 2 * FORCE_CHARGE_LINE_HEADROOM_PCT > 100;',
-    to: '  const lineNearFull = lineAsk + 2 * FORCE_CHARGE_LINE_HEADROOM_PCT >= 100; /* MUTANT */',
+    find: '  const lineNearFull = lineForceAsk + 2 * FORCE_CHARGE_LINE_HEADROOM_PCT > 100;',
+    to: '  const lineNearFull = lineForceAsk + 2 * FORCE_CHARGE_LINE_HEADROOM_PCT >= 100; /* MUTANT */',
     why: 'A 89.9% line whose 100% panel ceiling fits is disclosed as unheld instead of carried.',
   },
   {
     id: 'P-v(b). ★★★ the reserve path\'s ask a second expression (round, not askOf)',
     file: NCA, tests: [T_LINE, T_GOLDEN],
-    find: '  const lineAskPct = !setpointOnWalk && !baselineHolds ? askOf(targetFloorKwh, fullKwh) : 0;',
-    to: '  const lineAskPct = !setpointOnWalk && !baselineHolds ? Math.min(100, Math.round((targetFloorKwh / fullKwh) * 100)) : 0; /* MUTANT */',
+    // v1.203.0 — re-anchored: the reserve path's ask is lineReserveAskPct's, the line's whole percent (askOf) and the panel's point.
+    find: '  const ask = askOf(targetFloorKwh, fullKwh);\n  return ask + undershootPct <= RESERVE_WRITE_MAX_PCT ? ask + undershootPct : ask;',
+    to: '  const ask = Math.min(100, Math.round((targetFloorKwh / fullKwh) * 100)); /* MUTANT */\n  return ask + undershootPct <= RESERVE_WRITE_MAX_PCT ? ask + undershootPct : ask;',
     why: 'The setpoint and the force-charge ask drift apart: a 54.12% line writes toward 54 while the force-charge carries 55.',
   },
   {
@@ -2135,8 +2141,9 @@ const MUTANTS = [
   {
     id: 'F8-ii(b). ★★★ a line stated at the reserve numbered beside it',
     file: NFC, tests: [T_LINE],
-    find: "  return n > RESERVE_WRITE_MAX_PCT ? `${lead}${n}%${tail}` : [lead.trim(), tail.trim()].filter((w) => w !== '').join(' ');",
-    to: "  return `${lead}${n}%${tail}`; /* MUTANT */",
+    // v1.203.0 — re-anchored: the unnumbered words are named once (a line at or under the reserve is beside the 49% too).
+    find: '  return n > RESERVE_WRITE_MAX_PCT ? `${lead}${n}%${tail}` : unnumbered;',
+    to: '  return `${lead}${n}%${tail}`; /* MUTANT */',
     why: 'A line stated at 50.00 (asked at 51) is pushed and logged "the 50% outage line is above the 50% reserve" (2026-11-25, nameplate, 11 h).',
   },
   {
@@ -2205,8 +2212,9 @@ const MUTANTS = [
   {
     id: 'F8-ii(l). ★★★ the evening push\'s clause names the line to one decimal beside the reserve',
     file: NTF, tests: [T_LINE],
-    find: "    const why = `${lineAboveReserveWords(l.linePct, \"for tonight's \", ' outage line')} (above the ${RESERVE_WRITE_MAX_PCT}% the panel holds as a reserve)`;",
-    to: "    const why = `for tonight's ${round1(l.linePct)}% outage line (above the ${RESERVE_WRITE_MAX_PCT}% the panel holds as a reserve)`; /* MUTANT */",
+    // v1.203.0 — re-anchored: what the line is above is lineOverReserveText's (a line in (49, 50] is above the 49% the panel holds).
+    find: "    const why = `${lineAboveReserveWords(l.linePct, \"for tonight's \", ' outage line')} (above ${lineOverReserveText(l.linePct, 'holds')})`;",
+    to: "    const why = `for tonight's ${round1(l.linePct)}% outage line (above ${lineOverReserveText(l.linePct, 'holds')})`; /* MUTANT */",
     why: 'The 89d8dece words: "for tonight\'s 50% outage line (above the 50% the panel holds as a reserve)" on the year\'s 50.00-50.03% lines.',
   },
   {
@@ -3097,9 +3105,10 @@ const MUTANTS = [
   {
     id: 'F9r1-f(iii). ★★ a line the reserve holds said to close under',
     file: NTF, tests: [T_UNHELD],
-    find: "${named! > RESERVE_WRITE_MAX_PCT ? ' The pool may close under the line.' : ''}",
+    // v1.203.0 — re-anchored: the reserve holds a line at or under 49 (the 50% reserve holds the pool at 49).
+    find: "${l.linePct > RESERVE_WRITE_MAX_PCT - PANEL_RESERVE_HOLD_UNDERSHOOT_PCT ? ' The pool may close under the line.' : ''}",
     to: "${' The pool may close under the line.'}",
-    why: 'A line stated at 50.00.',
+    why: 'A line at 49, which the 50% reserve holds.',
   },
   {
     id: 'F9r1-f(iv). ★★ an info push on a line night',

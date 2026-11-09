@@ -218,8 +218,9 @@ const MUTANTS = [
   {
     id: 'W-xxv. ★★★ buildNightChargeInputs keeps the configured objective on a backup leg',
     file: NCA,
-    find: '    objectiveMode: legObjective(legRole, objectiveMode),',
-    to: '    objectiveMode, /* MUTANT */',
+    // v1.203.0 — re-anchored: the leg's objective is computed once (legObj) before the cushion-only plan's own.
+    find: '  const legObj = legObjective(legRole, objectiveMode);',
+    to: '  const legObj = objectiveMode; /* MUTANT */',
     why: 'The engine sizes the backup as a cost buy.',
   },
   {

@@ -87,15 +87,17 @@ const MUTANTS = [
   {
     id: 'ix. ★★ a persistent basis failure defers too',
     file: NCA,
-    find: '  return (plan == null || (!plan.basisComplete && plan.basisTransient === true))',
-    to: '  return (plan == null || !plan.basisComplete) /* MUTANT */',
+    // v1.203.0 — anchor moved: the cushion-only plan's transient refusal defers beside it.
+    find: '  return (plan == null || (!plan.basisComplete && plan.basisTransient === true) || plan.cushionOnly?.transient === true)',
+    to: '  return (plan == null || !plan.basisComplete || plan.cushionOnly?.transient === true) /* MUTANT */',
     why: 'A genuine coverage miss is announced at 22:30 instead of 21:30 — an hour less for the owner to act.',
   },
   {
     id: 'x. ★★ zero scored calibration days is not treated as transient',
     file: NCA,
-    find: '  const basisTransient = !basisComplete && (!forecastPresent || calScoredDays === 0);',
-    to: '  const basisTransient = !basisComplete && !forecastPresent; /* MUTANT */',
+    // v1.203.0 — anchor moved: the solar refusal's transience is computed once, before the cushion-only plan reads it.
+    find: '  const solarBasisTransient = !basisComplete && (!forecastPresent || calScoredDays === 0);',
+    to: '  const solarBasisTransient = !basisComplete && !forecastPresent; /* MUTANT */',
     why: 'An empty skill after a restart (the partial-map case) is decided at 21:30 as "no plan" and cancels a prior arm.',
   },
   {

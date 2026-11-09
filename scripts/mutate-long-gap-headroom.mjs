@@ -87,8 +87,9 @@ const MUTANTS = [
   {
     id: 'ix. ★★★ the planner inputs drop the P10',
     file: NCA,
-    find: '    longGapAhead,\n    prePeakPvSurplusP10Kwh,\n    buyDebiasFactor,',
-    to: '    longGapAhead,\n    buyDebiasFactor, /* MUTANT */',
+    // v1.203.0 — re-anchored: forwarded beside the cushion-only plan's null.
+    find: '    longGapAhead: cushionOnly != null ? cushionOnly.longGapAfter : longGapAhead,\n    prePeakPvSurplusP10Kwh: cushionOnly != null ? null : prePeakPvSurplusP10Kwh,\n    buyDebiasFactor,',
+    to: '    longGapAhead: cushionOnly != null ? cushionOnly.longGapAfter : longGapAhead,\n    buyDebiasFactor, /* MUTANT */',
     why: 'Computed and never reaching the sizing — the v1.125.0 field-copy trap.',
   },
   {
