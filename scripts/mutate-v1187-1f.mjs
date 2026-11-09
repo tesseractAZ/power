@@ -248,7 +248,8 @@ const MUTANTS = [
   {
     id: 'xxix. ★★ buildNightChargeInputs drops it',
     file: NCA,
-    find: '    // v1.187.1 — forwarded verbatim; see the destructure note above.\n    costSurplusLoad,\n',
+    // v1.203.0 — anchor moved: forwarded beside the cushion-only plan's null.
+    find: '    // v1.187.1 — forwarded verbatim; see the destructure note above. v1.203.0 — none on a cushion-only plan.\n    costSurplusLoad: cushionOnly != null ? null : costSurplusLoad,\n',
     to: '    /* MUTANT */\n',
     why: 'The v1.125.0 trap: computed in index.ts, never reaches the planner.',
   },

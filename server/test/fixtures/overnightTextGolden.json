@@ -1,6 +1,6 @@
 {
   "capturedAt": "d42b556",
-  "_amended": "v1.196.0 — the evening entries regenerated, deliberately: a resilience night writes its cushion line asked to the whole percent above it (32% on this fixture's 31.1% line) where it wrote 50%, so the reserve-only charges, the reserve hold and its refusal read 32% (setpointOneTest.test.ts); the case 'charge, reserve only, window-bound (toward)' was added to keep a reserve-only 'toward' shape; the 'no plan tonight' push names what refused the plan, and a null plan says the panel's pool readings are unavailable (noPlanReason.test.ts). Every other evening entry, and the summary, revertDeadline and missedApply sections, are the words captured at d42b556.",
+  "_amended": "v1.196.0 — the evening entries regenerated, deliberately: a resilience night writes its cushion line asked to the whole percent above it (32% on this fixture's 31.1% line) where it wrote 50%, so the reserve-only charges, the reserve hold and its refusal read 32% (setpointOneTest.test.ts); the case 'charge, reserve only, window-bound (toward)' was added to keep a reserve-only 'toward' shape; the 'no plan tonight' push names what refused the plan, and a null plan says the panel's pool readings are unavailable (noPlanReason.test.ts). Every other evening entry, and the summary, revertDeadline and missedApply sections, are the words captured at d42b556. v1.203.0 — the evening entries whose resilience night writes its line regenerated, deliberately: the panel holds the pool one point under a reserve it charged up to, so the 31.1% line is written at its whole percent and one point more, 33% (was 32%), and the expected draw to it rises (~10 → ~11 kWh); 6 entries move by those figures alone. Every other entry is as before.",
   "evening": [
     {
       "name": "charge, force-charge riding (10-12)",
@@ -20,12 +20,12 @@
       "push": {
         "severity": "info",
         "dedupId": "night_charge_plan",
-        "title": "Night-charge: charging to ~32% tonight (~10 kWh)",
-        "body": "Charging the backup pool to ~32% overnight, ~10 kWh of grid energy expected. Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~0% without this charge, ~0% with it; the floor+cushion line is 31.1%. Confidence: forecast. SUPERVISED: at 12:00 AM the add-on raises the backup reserve to 32% (bounded write; auto-restores after the charge window closes). Cancel from the night-charge card on the panel before then."
+        "title": "Night-charge: charging to ~33% tonight (~11 kWh)",
+        "body": "Charging the backup pool to ~33% overnight, ~11 kWh of grid energy expected. Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~0% without this charge, ~0% with it; the floor+cushion line is 31.1%. Confidence: forecast. SUPERVISED: at 12:00 AM the add-on raises the backup reserve to 33% (bounded write; auto-restores after the charge window closes). Cancel from the night-charge card on the panel before then."
       },
       "spoken": {
-        "en": "Night charge notice. Charging the backup pool to about 32 percent, about 10 kilowatt hours, in the charge window that opens at 12:00 AM. Cancel on the Power panel before then.",
-        "es": "Aviso de carga nocturna. Se cargarán las baterías de respaldo hasta cerca del 32 por ciento, unos 10 kilovatios hora, en la ventana de carga que comienza a las 12:00 AM. Cancele en el panel Power antes de esa hora."
+        "en": "Night charge notice. Charging the backup pool to about 33 percent, about 11 kilowatt hours, in the charge window that opens at 12:00 AM. Cancel on the Power panel before then.",
+        "es": "Aviso de carga nocturna. Se cargarán las baterías de respaldo hasta cerca del 33 por ciento, unos 11 kilovatios hora, en la ventana de carga que comienza a las 12:00 AM. Cancele en el panel Power antes de esa hora."
       }
     },
     {
@@ -33,12 +33,12 @@
       "push": {
         "severity": "info",
         "dedupId": "night_charge_plan",
-        "title": "Night-charge: charging to ~32% tonight (~15.9 kWh)",
-        "body": "Charging the backup pool to ~32% overnight, ~15.9 kWh of grid energy expected. Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~0% without this charge, ~0% with it; the floor+cushion line is 31.1%. Confidence: forecast. SUPERVISED: at 12:00 AM the add-on raises the backup reserve to 32% (bounded write; auto-restores after the charge window closes). Cancel from the night-charge card on the panel before then."
+        "title": "Night-charge: charging to ~33% tonight (~16.9 kWh)",
+        "body": "Charging the backup pool to ~33% overnight, ~16.9 kWh of grid energy expected. Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~0% without this charge, ~0% with it; the floor+cushion line is 31.1%. Confidence: forecast. SUPERVISED: at 12:00 AM the add-on raises the backup reserve to 33% (bounded write; auto-restores after the charge window closes). Cancel from the night-charge card on the panel before then."
       },
       "spoken": {
-        "en": "Night charge notice. Charging the backup pool to about 32 percent, about 16 kilowatt hours, in the charge window that opens at 12:00 AM. Cancel on the Power panel before then.",
-        "es": "Aviso de carga nocturna. Se cargarán las baterías de respaldo hasta cerca del 32 por ciento, unos 16 kilovatios hora, en la ventana de carga que comienza a las 12:00 AM. Cancele en el panel Power antes de esa hora."
+        "en": "Night charge notice. Charging the backup pool to about 33 percent, about 17 kilowatt hours, in the charge window that opens at 12:00 AM. Cancel on the Power panel before then.",
+        "es": "Aviso de carga nocturna. Se cargarán las baterías de respaldo hasta cerca del 33 por ciento, unos 17 kilovatios hora, en la ventana de carga que comienza a las 12:00 AM. Cancele en el panel Power antes de esa hora."
       }
     },
     {
@@ -72,12 +72,12 @@
       "push": {
         "severity": "info",
         "dedupId": "night_charge_plan",
-        "title": "Night-charge: charging to ~32% tonight (~21.9 kWh)",
-        "body": "Charging the backup pool to ~32% overnight, ~21.9 kWh of grid energy expected. Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~0% without this charge, ~0% with it; the floor+cushion line is 31.1%. Confidence: forecast. NOTE: charge/pool limits prevent fully meeting the cushion — residual risk remains. SUPERVISED: at 12:00 AM the add-on raises the backup reserve to 32% (bounded write; auto-restores after the charge window closes). Cancel from the night-charge card on the panel before then."
+        "title": "Night-charge: charging to ~33% tonight (~22.9 kWh)",
+        "body": "Charging the backup pool to ~33% overnight, ~22.9 kWh of grid energy expected. Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~0% without this charge, ~0% with it; the floor+cushion line is 31.1%. Confidence: forecast. NOTE: charge/pool limits prevent fully meeting the cushion — residual risk remains. SUPERVISED: at 12:00 AM the add-on raises the backup reserve to 33% (bounded write; auto-restores after the charge window closes). Cancel from the night-charge card on the panel before then."
       },
       "spoken": {
-        "en": "Night charge notice. Charging the backup pool to about 32 percent, about 22 kilowatt hours, in the charge window that opens at 12:00 AM. Outage cushion not fully met. Cancel on the Power panel before then.",
-        "es": "Aviso de carga nocturna. Se cargarán las baterías de respaldo hasta cerca del 32 por ciento, unos 22 kilovatios hora, en la ventana de carga que comienza a las 12:00 AM. Margen de respaldo no cubierto por completo. Cancele en el panel Power antes de esa hora."
+        "en": "Night charge notice. Charging the backup pool to about 33 percent, about 23 kilowatt hours, in the charge window that opens at 12:00 AM. Outage cushion not fully met. Cancel on the Power panel before then.",
+        "es": "Aviso de carga nocturna. Se cargarán las baterías de respaldo hasta cerca del 33 por ciento, unos 23 kilovatios hora, en la ventana de carga que comienza a las 12:00 AM. Margen de respaldo no cubierto por completo. Cancele en el panel Power antes de esa hora."
       }
     },
     {
@@ -85,12 +85,12 @@
       "push": {
         "severity": "info",
         "dedupId": "night_charge_plan",
-        "title": "Night-charge: charging toward ~32% tonight (~9 kWh)",
-        "body": "Charging the backup pool toward ~32% overnight, as far as the window can deliver, ~9 kWh of grid energy expected. Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~0% without this charge, ~0% with it; the floor+cushion line is 31.1%. Confidence: forecast. NOTE: charge/pool limits prevent fully meeting the cushion — residual risk remains. SUPERVISED: at 12:00 AM the add-on raises the backup reserve to 32% (bounded write; auto-restores after the charge window closes). Cancel from the night-charge card on the panel before then."
+        "title": "Night-charge: charging toward ~33% tonight (~9 kWh)",
+        "body": "Charging the backup pool toward ~33% overnight, as far as the window can deliver, ~9 kWh of grid energy expected. Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~0% without this charge, ~0% with it; the floor+cushion line is 31.1%. Confidence: forecast. NOTE: charge/pool limits prevent fully meeting the cushion — residual risk remains. SUPERVISED: at 12:00 AM the add-on raises the backup reserve to 33% (bounded write; auto-restores after the charge window closes). Cancel from the night-charge card on the panel before then."
       },
       "spoken": {
-        "en": "Night charge notice. Charging the backup pool toward 32 percent, about 9 kilowatt hours, in the charge window that opens at 12:00 AM, which ends before it gets there. Outage cushion not fully met. Cancel on the Power panel before then.",
-        "es": "Aviso de carga nocturna. Se cargarán las baterías de respaldo rumbo al 32 por ciento, unos 9 kilovatios hora, en la ventana de carga que comienza a las 12:00 AM y termina antes de alcanzar ese nivel. Margen de respaldo no cubierto por completo. Cancele en el panel Power antes de esa hora."
+        "en": "Night charge notice. Charging the backup pool toward 33 percent, about 9 kilowatt hours, in the charge window that opens at 12:00 AM, which ends before it gets there. Outage cushion not fully met. Cancel on the Power panel before then.",
+        "es": "Aviso de carga nocturna. Se cargarán las baterías de respaldo rumbo al 33 por ciento, unos 9 kilovatios hora, en la ventana de carga que comienza a las 12:00 AM y termina antes de alcanzar ese nivel. Margen de respaldo no cubierto por completo. Cancele en el panel Power antes de esa hora."
       }
     },
     {
@@ -98,12 +98,12 @@
       "push": {
         "severity": "info",
         "dedupId": "night_charge_plan",
-        "title": "Night-charge: reserve held at 32% tonight — no charge expected",
-        "body": "Holding the backup reserve at 32% overnight as a floor; no charge is expected — the pool should open the window near ~61.9% and stay at or above 32%. Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~0% without tonight's write, ~0% with it; the floor+cushion line is 31.1%. Confidence: forecast. SUPERVISED: at 12:00 AM the add-on raises the backup reserve to 32% (bounded write; auto-restores after the charge window closes). Cancel from the night-charge card on the panel before then."
+        "title": "Night-charge: reserve held at 33% tonight — no charge expected",
+        "body": "Holding the backup reserve at 33% overnight as a floor; no charge is expected — the pool should open the window near ~61.9% and stay at or above 33%. Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~0% without tonight's write, ~0% with it; the floor+cushion line is 31.1%. Confidence: forecast. SUPERVISED: at 12:00 AM the add-on raises the backup reserve to 33% (bounded write; auto-restores after the charge window closes). Cancel from the night-charge card on the panel before then."
       },
       "spoken": {
-        "en": "Night charge notice. The backup reserve will be held at 32 percent in the charge window that opens at 12:00 AM; no charge is expected. Cancel on the Power panel before then.",
-        "es": "Aviso de carga nocturna. La reserva de respaldo se mantendrá en el 32 por ciento en la ventana de carga que comienza a las 12:00 AM; no se espera ninguna carga. Cancele en el panel Power antes de esa hora."
+        "en": "Night charge notice. The backup reserve will be held at 33 percent in the charge window that opens at 12:00 AM; no charge is expected. Cancel on the Power panel before then.",
+        "es": "Aviso de carga nocturna. La reserva de respaldo se mantendrá en el 33 por ciento en la ventana de carga que comienza a las 12:00 AM; no se espera ninguna carga. Cancele en el panel Power antes de esa hora."
       }
     },
     {
@@ -185,7 +185,7 @@
         "severity": "info",
         "dedupId": "night_charge_plan",
         "title": "Night-charge: planned reserve hold NOT armed tonight",
-        "body": "Tonight's plan holds the backup reserve at 32% overnight as a floor, with no charge expected, but the supervised write was not armed — the reserve reads 0%. The add-on will not raise the reserve tonight."
+        "body": "Tonight's plan holds the backup reserve at 33% overnight as a floor, with no charge expected, but the supervised write was not armed — the reserve reads 0%. The add-on will not raise the reserve tonight."
       },
       "spoken": null
     },

@@ -530,8 +530,10 @@ test('★★ SOURCE PIN: the scorer withholds a held actual and states the reaso
   assert.ok(score.includes('const heldSide = heldSides(heldVerdict);'));
   assert.ok(score.includes('const pvHeld = heldSide.pv;'), '★★ PV is withheld on the PV side');
   assert.ok(score.includes('const actualLoadKwh = loadPts.length && !heldSide.load ? round2(integrateWh(loadPts, false) / 1000) : null;'), 'load on the load side');
-  const basis = score.indexOf('    scoreNotes = basisIncompleteNote(heldVerdict, deviceNameOf);\n  } else if (heldVerdict != null) {');
+  // v1.203.0 — the cushion-only branch between them: a cushion-only row is never scored, with the held verdict where there is one.
+  const basis = score.indexOf('    scoreNotes = basisIncompleteNote(heldVerdict, deviceNameOf);\n  } else if (y.cushion_only_refused_by != null) {');
+  const co = score.indexOf('    scoreNotes = cushionOnlyNote(heldVerdict, deviceNameOf, y.cushion_only_refused_by);\n  } else if (heldVerdict != null) {');
   const held = score.indexOf('} else if (heldVerdict != null) {\n    scoreNotes = heldLedgerNote(heldVerdict, deviceNameOf);');
   const cov = score.indexOf('} else if (!covOk) {');
-  assert.ok(basis > 0 && held > basis && cov > held, `${basis} < ${held} < ${cov}`);
+  assert.ok(basis > 0 && co > basis && held > co && cov > held, `${basis} < ${co} < ${held} < ${cov}`);
 });

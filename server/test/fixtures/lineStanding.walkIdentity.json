@@ -1,142 +1,142 @@
 {
- "generatedOn": "v1.202.0 (np: a3588d96 but for the cost-carried drawback disclosures; m: the walks on the measured pool)",
+ "generatedOn": "v1.203.0 (v1.202.0 + the reserve hold's point)",
  "walks": 20059,
  "groups": {
   "O|np|4": {
    "n": 260,
-   "sha": "1d621054a4024a91528f4c6d"
+   "sha": "248ca0722e6859ded24244f4"
   },
   "O|np|5": {
    "n": 264,
-   "sha": "3844271babd63747ab192fbd"
+   "sha": "29032474a467274bd1185ac5"
   },
   "O|np|6": {
    "n": 267,
-   "sha": "b105754d7aebb7090eafc8e0"
+   "sha": "45fef25c75a0b2d2c3b7a9e0"
   },
   "O|np|7": {
    "n": 269,
-   "sha": "0db52687aaaebf207c95eb7b"
+   "sha": "337c4eaa302a8d9388fa2e1d"
   },
   "O|np|8": {
    "n": 271,
-   "sha": "76de54cedef5fdc627b85225"
+   "sha": "a7133a7e7ca60193d59eb626"
   },
   "O|np|9": {
    "n": 274,
-   "sha": "9f66655efd0d29a10db684d0"
+   "sha": "a1cd3ac9976ccf796bc4cb48"
   },
   "O|np|10": {
    "n": 275,
-   "sha": "86ec22a74bff72bf6a62c51e"
+   "sha": "2b4098bb2a7b9116db8825c7"
   },
   "O|np|11": {
    "n": 278,
-   "sha": "38e3f2bf7fc8331124c6c556"
+   "sha": "88f547bdb4c9e2dbd707151d"
   },
   "O|np|12": {
    "n": 283,
-   "sha": "a0595475967664e5f17a4159"
+   "sha": "97f7296295cd44c21d35b24e"
   },
   "O|np|13": {
    "n": 286,
-   "sha": "1aed2ea6e9d74b47b45abfba"
+   "sha": "94c6c5c90937be1091ecc1ab"
   },
   "O|np|14": {
    "n": 292,
-   "sha": "4de471f886604f32aaf82649"
+   "sha": "c44e4504b47397995dbf15f0"
   },
   "O|np|15": {
    "n": 294,
-   "sha": "c1566d8608d0504ae9206e94"
+   "sha": "2a1054ffe864833e7778366e"
   },
   "O|np|16": {
    "n": 294,
-   "sha": "499dd967131009a3b28f285f"
+   "sha": "15ad71a01b9479fe6b556444"
   },
   "O|np|17": {
    "n": 298,
-   "sha": "a1839f68465f305e46721cf5"
+   "sha": "62b5f6f4930be68cac9de6bb"
   },
   "O|np|18": {
    "n": 300,
-   "sha": "6f22894fd6cb63cd73e40eac"
+   "sha": "ae9d5109bdd7e703239550af"
   },
   "O|np|19": {
    "n": 300,
-   "sha": "aad27c77ada2ed8bd818a3d8"
+   "sha": "2a2bcfbf191d1e5b92f83f2b"
   },
   "O|np|20": {
    "n": 301,
-   "sha": "136ae0303116091d7870a23b"
+   "sha": "e44eabcd70d2a8b1393a4992"
   },
   "O|m|4": {
    "n": 264,
-   "sha": "ce0ffdf683cdf118c69c07b3"
+   "sha": "2f1cdb32ae3098c90f0c658d"
   },
   "O|m|5": {
    "n": 268,
-   "sha": "374dd35b86b3c23e54adba72"
+   "sha": "d273f1d1a2759b1aa3426e51"
   },
   "O|m|6": {
    "n": 269,
-   "sha": "f0f71997c0c1a1548a6bc878"
+   "sha": "ecc431614394301641b5785e"
   },
   "O|m|7": {
    "n": 270,
-   "sha": "0075d2b7f814c93fec99e3ae"
+   "sha": "b71ffc9833bf96d542bc0325"
   },
   "O|m|8": {
    "n": 273,
-   "sha": "c43d3ddc7b18fb7e6f4b1861"
+   "sha": "9fe18a857886b917b4a5b564"
   },
   "O|m|9": {
    "n": 276,
-   "sha": "494716df800892bb07f69194"
+   "sha": "25ceea3c45a1e917ffeb65d3"
   },
   "O|m|10": {
    "n": 279,
-   "sha": "f874d833ba8afe0f72bb9330"
+   "sha": "3a0bdb55c2fb9d0da6e7d47e"
   },
   "O|m|11": {
    "n": 284,
-   "sha": "aa08d71bb4a666e1184b8175"
+   "sha": "55e9e16c3fde45f70da2e6a4"
   },
   "O|m|12": {
    "n": 286,
-   "sha": "c6feecffe236acf72db91a80"
+   "sha": "b58ccd27a373652c550922ba"
   },
   "O|m|13": {
    "n": 293,
-   "sha": "8e548961b5447da224b07d1f"
+   "sha": "39a120044c9d33efb8825309"
   },
   "O|m|14": {
    "n": 294,
-   "sha": "d55194f75a28f815f8c0b784"
+   "sha": "7cc815f45e402fb9b75c9f20"
   },
   "O|m|15": {
    "n": 294,
-   "sha": "be906e3dfaa6d846f420bf86"
+   "sha": "dd8d598ed8fd4f513a19b779"
   },
   "O|m|16": {
    "n": 298,
-   "sha": "35bd2991ef6947d2dc74942b"
+   "sha": "e1d10f3635b8c47a2de0458b"
   },
   "O|m|17": {
    "n": 300,
-   "sha": "689029f8673532ef76fc0a34"
+   "sha": "ba54af62b540978f07530455"
   },
   "O|m|18": {
    "n": 301,
-   "sha": "0500082742f804b6c63638f3"
+   "sha": "1a887c195e68af456b009555"
   },
   "O|m|19": {
    "n": 301,
-   "sha": "9e6c70961c42c7c97ee5ca2d"
+   "sha": "d99962cb16aafd8542b196a6"
   },
   "O|m|20": {
    "n": 304,
-   "sha": "c9e999e97ba9e4808127719d"
+   "sha": "56562c7453bd90b34e449744"
   },
   "W|np|4": {
    "n": 292,

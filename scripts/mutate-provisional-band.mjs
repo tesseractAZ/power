@@ -241,8 +241,9 @@ const MUTANTS = [
   {
     id: 'xxx. ★★ the card drops the sentence',
     file: CARD,
-    find: '    + provisionalBandText(plan.pvBandWiden);',
-    to: "    + ''; /* MUTANT */",
+    // v1.203.0 — anchor moved: the cushion-only disclosure follows it.
+    find: '    + provisionalBandText(plan.pvBandWiden) + cushionOnlyCardText(plan.cushionOnly, plan);',
+    to: "    + '' + cushionOnlyCardText(plan.cushionOnly, plan); /* MUTANT */",
     why: 'The card states a provisional plan as a full-basis one.',
   },
   {
@@ -299,15 +300,17 @@ const MUTANTS = [
   {
     id: 'xxxviii. ★★ the hold push drops the sentence',
     file: NOTIFY,
-    find: '    const provisionalHold = provisionalBandText(plan.pvBandWiden);',
-    to: "    const provisionalHold = ''; /* MUTANT */",
+    // v1.203.0 — anchor moved: the cushion-only sentence follows it.
+    find: "    const provisionalHold = provisionalBandText(plan.pvBandWiden) + cushionOnlyPushText(plan, 'short');",
+    to: "    const provisionalHold = '' + cushionOnlyPushText(plan, 'short'); /* MUTANT */",
     why: 'The 21:30 hold push reads exactly as a full-basis hold for a hold decided on the widened band.',
   },
   {
     id: 'xxxix. ★★ the card\'s hold drops the sentence',
     file: CARD,
-    find: '  const provisionalDetail = provisionalBandText(plan.pvBandWiden);',
-    to: "  const provisionalDetail = ''; /* MUTANT */",
+    // v1.203.0 — anchor moved: the cushion-only disclosure follows it.
+    find: '  const provisionalDetail = provisionalBandText(plan.pvBandWiden) + cushionOnlyCardText(plan.cushionOnly, plan);',
+    to: "  const provisionalDetail = '' + cushionOnlyCardText(plan.cushionOnly, plan); /* MUTANT */",
     why: 'The card\'s hold summary reads exactly as a full-basis hold for a hold decided on the widened band.',
   },
   {

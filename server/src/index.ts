@@ -174,7 +174,7 @@ import { startSocLadders } from './socLadders.js';
 import { createRunwayAlarm, shouldGateRunwayAudible, runwayAlarmStatePathFor } from './runwayAlarm.js';
 import type { Shp2Projection } from './ecoflow/project.js';
 import { panelPoolNetWatts, noteDrainSample, panelDrainRunway, type DrainSample, type PanelRunway } from './panelRunway.js';
-import { PoolEnergyBasisTracker, defaultPoolEnergyBasisPath } from './poolEnergyBasis.js';
+import { PoolEnergyBasisTracker, defaultPoolEnergyBasisPath, CAPACITY_SCALE_MIN } from './poolEnergyBasis.js';
 import { liveGridBackstop, livePoolGridBackstop, gridPresenceEntityId, setPersistedGridAbsentSource, type GridBackstop } from './gridState.js';
 import { getBroadcastHealth } from './broadcastHealth.js';
 import { publishReadiness, withholdUnready } from './publishReadiness.js';
@@ -331,7 +331,7 @@ import {
   nextForceChargeOpenMs, withLiveTrailing, MISSED_APPLY_FALLBACK_REASON,
   type ChargeCycleState, type ChargeLegState,
 } from './chargeCycle.js';
-import { parsePersistedIslandedLoad, eveningBasisDefers } from './nightChargeAdvisor.js';
+import { parsePersistedIslandedLoad, eveningBasisDefers, cushionOnlyFills } from './nightChargeAdvisor.js';
 // v1.191.0 (S6) — the night-charge schedule of the tariff in effect (the APS constants on the preset).
 import { nightScheduleOf, nightScheduleLogLine, nightScheduleRepairIssues, fmtMinuteOfDay, type NightSchedule } from './nightSchedule.js';
 import { tariffModelFromEnv, legacyTariffFromEnv, resolveTariffFromEnv, rateOptionsHint, tariffRepairIssues, rateAt, localParts, seasonAt, cheapPeriodIdOf, APS_PERIOD } from './tariff.js';
@@ -351,7 +351,7 @@ import {
   ledgerRowsDueForCapture, forecastActualsSpan, forecastSpanRepair, forecastSpanTagNote,
   forecastSpanRecaptureHorizonMs, forecastSpanResetColumns,
   // v1.188.1 — held telemetry: a row on held readings is not scored; one captured on them is repaired.
-  heldLedgerVerdict, heldLedgerNote, heldLedgerRepair, heldRepairColumns, heldRepairClause, heldSides, basisIncompleteNote,
+  heldLedgerVerdict, heldLedgerNote, heldLedgerRepair, heldRepairColumns, heldRepairClause, heldSides, basisIncompleteNote, cushionOnlyNote,
   // v1.196.0 — the saturation that censors a row's PV for the cost ceiling's PV factor.
   pvSaturationColumns,
 } from './nightLedgerScoring.js';
@@ -2731,7 +2731,10 @@ const panelPoolBasisTracker = new PoolEnergyBasisTracker({ path: defaultPoolEner
  *  night-charge cushion line (measuredCushionScale). Its own file: the worker's runway tracker and
  *  the secondary panels' tracker keep theirs (one writer per file, its state read in the thread that
  *  writes it), and a secondary panel's Core can never be the house's lowest known ratio. */
-const cushionPoolBasisTracker = new PoolEnergyBasisTracker({ path: defaultPoolEnergyBasisPath('pool-energy-basis-cushion') });
+/** v1.203.0 — SEEDED, read-only, from the worker's runway tracker file (pool-energy-basis.json) while this one has no ratio of its own
+ *  (it arrived after the Cores went dark and has never seen one): the per-Core ratios at their own timestamps, so the planner counts
+ *  the pool on the same held / lowest-known scale the runway does, at every instant (poolEnergyBasis.ts seedPath). */
+const cushionPoolBasisTracker = new PoolEnergyBasisTracker({ path: defaultPoolEnergyBasisPath('pool-energy-basis-cushion'), seedPath: defaultPoolEnergyBasisPath('pool-energy-basis') });
 /** v1.199.0 — THE PLANNER'S ONE MEASURED INPUT (runwayBasisContracts.test.ts, the SCOPE exception):
  *  the house pool's measured capacity scale, from the device map the planner read its pool from, at
  *  the same instant. null when the tracker throws: the planner then keeps the nameplate line.
@@ -3081,6 +3084,8 @@ let lastLoggedCostLoadKey: string | null = null;
 let lastLoggedCushionScaleKey: string | null = null;
 // v1.201.0 — the Cores' standby figure for the outage cushion: last logged figure and Core count (log on change only).
 let lastLoggedCushionStandbyKey: string | null = null;
+/** v1.203.0 — the cushion-only fallback's log line, on change only (recomputeNightChargePlan). */
+let lastLoggedCushionOnlyKey: string | null = null;
 /**
  * v1.125.0 — the ISLANDED load, kW: the SHP2's own circuit sum.
  *
@@ -4135,6 +4140,12 @@ async function recomputeNightChargePlan(
     // v1.200.0 (Fix9 review 2) — the armed record with no line ask: a recompute of its window claims no ON the record cannot make. Not
     // the plan the evening job arms from: a Saturday record sharing Sunday's window must not stop Sunday's arm carrying its ask.
     armedNoLineStartMs: shadowLeg == null && opts.arming !== true ? armedNoLineStartMs(nightActuationMem) : null,
+    // ★★★ v1.203.0 — the cushion-only fallback (nightChargeAdvisor.ts buildNightChargeInputs): with the solar basis refused, the live
+    // overnight plan in a write mode on a fresh panel is sized on the outage cushion alone. Never a shadow leg (mid-day, backup,
+    // morning refresh), never advisory mode (lineForceChargeOn is a write mode's gate), never the 22:30 last resort on a stale panel.
+    cushionOnlyEligible: shadowLeg == null && lineForceChargeOn(legRole) && panel.fresh,
+    // v1.203.0 — the floor such a plan counts the pool on where no pack capacity ratio is known (the scale's own floor).
+    cushionOnlyFloorScale: CAPACITY_SCALE_MIN,
     // R2 — the leg: the overnight window (resolved above) for every live plan, its role the caller's.
     // R4 — a shadow leg's own spec (its pinned window, taper line and backup hold).
     windowSpec: shadowLeg ? shadowLeg.spec : legRole === 'cost' ? OVERNIGHT_WINDOW_SPEC : { kind: 'overnight', role: legRole },
@@ -4144,7 +4155,22 @@ async function recomputeNightChargePlan(
   const plan = computeNightChargePlan(inputs);
   // v1.174.0 — the evening job's last resort: sized on a stale reading, and it says so.
   if (!panel.fresh) {
-    plan.rationale += ` NOTE: sized on a panel reading ${panel.ageMs != null ? `~${Math.round(panel.ageMs / 60_000)} min old` : 'of unknown age'} (${panel.why}) — it did not recover before the deferral deadline. The reserve write and force-charge still wait for a live readback.`;
+    // v1.203.0 — a refused plan was sized on nothing: it names the reading's age, and that no cushion-only plan is made on it.
+    plan.rationale += plan.basisComplete
+      ? ` NOTE: sized on a panel reading ${panel.ageMs != null ? `~${Math.round(panel.ageMs / 60_000)} min old` : 'of unknown age'} (${panel.why}) — it did not recover before the deferral deadline. The reserve write and force-charge still wait for a live readback.`
+      : ` NOTE: the panel reading is ${panel.ageMs != null ? `~${Math.round(panel.ageMs / 60_000)} min old` : 'of unknown age'} (${panel.why}); it did not recover before the deferral deadline, and no cushion-only plan is made on it.`;
+  }
+  // v1.203.0 — the live overnight plan's fallback, logged on change only: made (its solar refusal), or refused (why).
+  if (!shadowLeg) {
+    // (A plan on the long-gap fill is sized on the cushion and the fill: cushionOnlyFills, its own key.)
+    const coFills = plan.cushionOnly != null && cushionOnlyFills(plan.cushionOnly, plan);
+    const coKey = plan.cushionOnly != null ? `co:${coFills ? 'fill:' : ''}${plan.cushionOnly.refusedBy}`
+      : plan.basisBlockedBy != null && plan.basisBlockedBy.includes('; no cushion-only plan: ') ? `no:${plan.basisBlockedBy}` : 'none';
+    if (coKey !== lastLoggedCushionOnlyKey) {
+      lastLoggedCushionOnlyKey = coKey;
+      if (plan.cushionOnly != null) app.log.info(`night-charge: the solar basis is refused (${plan.cushionOnly.refusedBy}) — tonight's plan is sized on the outage cushion at the window close${coFills ? ' and the long-gap fill' : ' alone'}, with no solar credited`);
+      else if (coKey.startsWith('no:')) app.log.info(`night-charge: no cushion-only plan — ${plan.basisBlockedBy!.slice(plan.basisBlockedBy!.indexOf('; no cushion-only plan: ') + '; no cushion-only plan: '.length)}`);
+    }
   }
   // v1.200.0 (Fix10) — a record WITH its ask whose start is closed: the plan the card and the entities serve says so, computed apart, so
   // `plan` stays the plan of record. The snapshot, the ledger row and its strike rule read that one: disclosing here must never take
@@ -4366,6 +4392,9 @@ function recordNightPlanRow(planDate: string, plan: NightChargePlan, extras: Nig
     // v1.187.22 — the expected buy and start beside buy_kwh (the worst case), so the scorer can
     // grade them. Written unconditionally (null with none) for the same reason as above.
     ...expectedBuyLedgerColumns(plan),
+    // ★★★ v1.203.0 — a cushion-only plan's solar refusal (its basis), the scorer's key to leave the row unscored. Written
+    // unconditionally (null on every other plan, a refusal included), so a re-issued plan never leaves an earlier one's beside it.
+    cushion_only_refused_by: plan.cushionOnly?.refusedBy ?? null,
     // v1.189.0 — the cost leg's window (the charge cycle's ledger columns): every plan of record is
     // the overnight leg until the mid-day switch.
     window_kind: 'overnight',
@@ -4762,6 +4791,12 @@ function scoreNightRow(
     // v1.188.1 (review) — with the held verdict when there is one: the marker keeps the held
     // repair from resetting this row on every sweep (basisIncompleteNote).
     scoreNotes = basisIncompleteNote(heldVerdict, deviceNameOf);
+  } else if (y.cushion_only_refused_by != null) {
+    // ★★★ v1.203.0 — a CUSHION-ONLY row is never scored, in any outcome (the Cores' actuals covered included): its buy was sized on
+    // the outage cushion with no solar credited, so the planner-sizing metric has no solar forecast to grade, and a buy_err against
+    // a forecast the buy never used would read as an over-buy. Before the held branch, with the held verdict (and its marker) when
+    // there is one, as basisIncompleteNote does. The realized cushion verdict below still grades the one claim the plan made.
+    scoreNotes = cushionOnlyNote(heldVerdict, deviceNameOf, y.cushion_only_refused_by);
   } else if (heldVerdict != null) {
     scoreNotes = heldLedgerNote(heldVerdict, deviceNameOf);
   } else if (!covOk) {

@@ -257,27 +257,32 @@ const ALL_ZERO = { m1: 0, m2: 0, m3: 0, m4: 0, undisclosedUnder: 0, carrierRest:
  *  next hour 6 → 11), and kinds 777 → 859: those 17, and 65 whose sizing fell short, which keep their caps note and now name
  *  that close too (lineNotHeldOf 'closeUnder'; 58 at 0.944). At 0.944 the walks are on the measured pool too (v1.201.0: armed
  *  5664, carried 5030, closeUnder 32, kinds 895 / 194 / 209, eFalls 395, eFallsNonBoundGt5 18, eFallMaxNonBound 19.9,
- *  buyFalls 138, closeUnderVanish 4, buyFallMax 9.24 at 2027-01-27 21:30 16 → 17 h). */
+ *  buyFalls 138, closeUnderVanish 4, buyFallMax 9.24 at 2027-01-27 21:30 16 → 17 h).
+ *  v1.203.0 — re-measured with the panel's point (the 50% reserve holds the pool at 49, so a line in (49, 50] is the line
+ *  force-charge's): 218 / 229 more plans armed and every one carried (v1.202.0: armed 5262 / 5687, carried 4802 / 5023); eFalls
+ *  384 → 389 / 484 → 487 and buyFalls 136 → 137 / 163 → 164 as the newly armed lines join the h steps; meanBuyQual moves with the
+ *  set it averages. Every zero above stays zero, and every other figure is v1.202.0's. */
 const PIN_A5: Record<Basis, ReturnType<typeof PINNED>> = {
   np: {
-    armed: 5262, carried: 4802, nearFull: 418, closeUnder: 42, kinds: { closeUnder: 859, aboveFull: 95, nearFull: 175 },
-    eFalls: 384, eFallsNonBoundGt5: 29, eFallMaxNonBound: 18.9, buyFalls: 136, closeUnderVanish: 11,
+    armed: 5480, carried: 5020, nearFull: 418, closeUnder: 42, kinds: { closeUnder: 859, aboveFull: 95, nearFull: 175 },
+    eFalls: 389, eFallsNonBoundGt5: 29, eFallMaxNonBound: 18.9, buyFalls: 137, closeUnderVanish: 11,
     eFallMax: { d: 40, at: '2026-11-13 13:00 np 15 → 16 h' }, buyFallMax: { d: 9.25, at: '2026-10-13 13:00 np 10 → 11 h' },
-    meanBuyQual: { 4: null, 5: 40.35, 6: 29.96, 7: 32.29, 8: 28.89, 9: 30.44, 10: 32.1, 11: 32.09, 12: 32.44, 13: 33.09, 14: 33.23, 15: 34.07, 16: 35.18, 17: 35.87, 18: 36.18, 19: 36.99, 20: 37.66 },
+    meanBuyQual: { 4: null, 5: 31.52, 6: 28.12, 7: 31.2, 8: 28.97, 9: 31.28, 10: 32.19, 11: 32.04, 12: 31.92, 13: 32.69, 14: 32.96, 15: 34.19, 16: 35.27, 17: 35.36, 18: 36.24, 19: 37.05, 20: 37.63 },
   },
   m: {
-    armed: 5687, carried: 5023, nearFull: 602, closeUnder: 62, kinds: { closeUnder: 931, aboveFull: 194, nearFull: 210 },
-    eFalls: 484, eFallsNonBoundGt5: 29, eFallMaxNonBound: 19.6, buyFalls: 163, closeUnderVanish: 15,
+    armed: 5916, carried: 5252, nearFull: 602, closeUnder: 62, kinds: { closeUnder: 931, aboveFull: 194, nearFull: 210 },
+    eFalls: 487, eFallsNonBoundGt5: 29, eFallMaxNonBound: 19.6, buyFalls: 164, closeUnderVanish: 15,
     eFallMax: { d: 43.8, at: '2027-05-28 21:30 m 19 → 20 h' }, buyFallMax: { d: 8.26, at: '2027-01-27 21:30 m 16 → 17 h' },
-    meanBuyQual: { 4: null, 5: 30.41, 6: 27.56, 7: 29.77, 8: 28.8, 9: 31.08, 10: 31.43, 11: 31.35, 12: 31.6, 13: 32.32, 14: 32.88, 15: 33.96, 16: 35.07, 17: 35.29, 18: 36.14, 19: 36.77, 20: 37.01 },
+    meanBuyQual: { 4: null, 5: 29.06, 6: 29.34, 7: 28.87, 8: 29.78, 9: 30.91, 10: 30.8, 11: 31.12, 12: 31.82, 13: 32.12, 14: 32.77, 15: 34.14, 16: 34.49, 17: 35.35, 18: 36.14, 19: 36.59, 20: 37.1 },
   },
 };
 /** (T22) Measured on the landed change: window-bound line-mode plans of the year at 4-20 h (the live cost gate), and those
  *  whose stated close is the 50% floor above the window's reach (every one disclosed: T15) — the only ones the spoken
  *  notice says end short. The rest state the capped close, which the window reaches as it closes. */
 const PIN_SPOKEN: Record<Basis, { boundLine: number; endsShort: number; mismatch: number }> = {
-  np: { boundLine: 919, endsShort: 206, mismatch: 0 },
-  m: { boundLine: 962, endsShort: 226, mismatch: 0 }, // v1.202.0 — on the measured pool (v1.201.0: 1037, 224)
+  // v1.203.0 — with the lines in (49, 50] the line force-charge now carries (v1.202.0: 919 / 206 and 962 / 226).
+  np: { boundLine: 937, endsShort: 215, mismatch: 0 },
+  m: { boundLine: 983, endsShort: 233, mismatch: 0 }, // v1.202.0 — on the measured pool (v1.201.0: 1037, 224)
 };
 /** (L1) ARB_COST_MAX_SOC_PCT 100 on the year's cost cases at 90 or more: the start-target falls as a line crosses 90%. */
 const PIN_A5_COST100: Record<Basis, { m1: number }> = { np: { m1: 14 }, m: { m1: 19 } };

@@ -102,15 +102,18 @@ const nights = (n: number, f: Record<string, unknown>) => Array.from({ length: n
 
 // ── The defect, and the fix, on the plan's own rows ────────────────────────────────────
 
-test('★★★ an M5 resilience night (written 32%, P50 morning low ~23.6%) is no strike; the old rule made it one', () => {
+// v1.203.0 — the writes below are the line's whole percent and one point more (the panel holds a point under a reserve it charged up
+// to: nightChargeAdvisor.ts lineReserveAskPct): M5's 32% is 33%, and the 2.0 kW island's 28% is 29%. The verdicts are the same.
+test('★★★ an M5 resilience night (written 33%, P50 morning low ~24.6%) is no strike; the old rule made it one', () => {
   const { p, written, low, cols } = m5Night();
   assert.equal(p.cushionBasis, 'islanded-outage');
   assert.equal(p.chargeTonight, true);
   assert.equal(p.cushionShortfall, false, 'the plan claims the cushion holds');
   assert.equal(p.cushionLineSocPct, 31.13);
-  assert.equal(written, 32, 'M5 writes the line, rounded up');
+  assert.equal(written, 33, 'M5 writes the line, rounded up, and the panel\'s point (v1.203.0)');
   assert.ok(low > 16 && low < 31, `the P50 low after the close ${low}% is under 16 + 15`);
-  assert.ok(Math.abs(low - 23.6) < 0.3, `~23.6%: ${low}`);
+  // (v1.203.0 — ~24.6%: the walk after the close starts at the 33% write, a point above v1.202.0's 32% and its ~23.6%.)
+  assert.ok(Math.abs(low - 24.6) < 0.3, `~24.6%: ${low}`);
   assert.equal(oldRule(cols), 1, 'precondition: the pre-v1.196.0 scorer stores a realized breach');
   assert.equal(cushionClaimAtClose(cols), true);
   assert.equal(realizedCushionBreach(cols), 0, '★ graded on the claim: the pool at the close held 31.13%');
@@ -128,11 +131,11 @@ test('★★★ an M5 resilience night (written 32%, P50 morning low ~23.6%) is 
   assert.equal(fixed.metrics.realizedStrikesSetAside, 0);
 });
 
-test('★★★ a 2.0 kW island: the 28% write is under 16 + 15 at the close itself, and holds its 27.55% line', () => {
+test('★★★ a 2.0 kW island: the 29% write is under 16 + 15 at the close itself, and holds its 27.55% line', () => {
   const { p, written, cols } = m5Night({ islandedLoadKw: 2.0 });
   assert.equal(p.cushionShortfall, false);
   assert.equal(p.cushionLineSocPct, 27.55);
-  assert.equal(written, 28);
+  assert.equal(written, 29);
   assert.equal(oldRule({ ...cols, actual_min_soc_pct: written }), 1, 'precondition: under 31% with no drain at all');
   assert.equal(realizedCushionBreach(cols), 0);
   // A row captured before the close reading existed: its low after the close bounds the pool there.

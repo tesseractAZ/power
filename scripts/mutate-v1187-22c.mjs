@@ -192,8 +192,9 @@ const MUTANTS = [
     // v1.187.22 — re-pointed at the sizing sentence, the one place it is named.
     id: 'C-xvii. ★★ the worst case named is the raw figure, not the announced (de-biased) one',
     file: NCA,
-    find: '  const sizingNote = ` ${sizingBasisText(buyKwhDebiased, calNote, walkStandbyW)}${projSocAtWindowStartPct != null',
-    to: '  const sizingNote = ` ${sizingBasisText(buyKwh, calNote, walkStandbyW)}${projSocAtWindowStartPct != null /* MUTANT */',
+    // v1.203.0 — anchor moved: the cushion-only plan's words beside it.
+    find: '  const sizingNote = ` ${sizingBasisText(buyKwhDebiased, calNote, walkStandbyW, co != null)}${projSocAtWindowStartPct != null',
+    to: '  const sizingNote = ` ${sizingBasisText(buyKwh, calNote, walkStandbyW, co != null)}${projSocAtWindowStartPct != null /* MUTANT */',
     why: 'With a learned calibration the worst case named disagrees with the calibration note beside it.',
   },
   {
@@ -287,14 +288,16 @@ const MUTANTS = [
     // v1.187.22 — re-pointed: the title is the level and the expected draw.
     id: 'C-xxx. ★★★ the push title says the worst case',
     file: NOTIFY,
-    find: "      + (expected == null ? '' : ` (~${kwh(expected)})`),",
-    to: "      + ` (~${kwh(plan.buyKwh)})`, /* MUTANT */",
+    // v1.203.0 — anchor moved: the cushion-only plan's words beside it.
+    find: "      + (expected == null ? '' : ` (~${kwh(expected)})`) + cushionOnlyTitle,",
+    to: "      + ` (~${kwh(plan.buyKwh)})` + cushionOnlyTitle, /* MUTANT */",
     why: 'The phone shows "~64.2 kWh" in the title — the figure the 10-12 night was cancelled on.',
   },
   {
     id: 'C-xxxi. ★★ the push body drops the expected figure',
     file: NOTIFY,
-    find: "      + (expected == null ? '. ' : `, ~${kwh(expected)} of grid energy expected. `)",
+    // v1.203.0 — anchor moved: the cushion-only plan's words beside it.
+    find: "      + (expected == null ? '. ' : `, ~${kwh(expected)} of grid energy expected${plan.cushionOnly != null ? ', with no solar credited' : ''}. `)",
     to: "      + '. ' /* MUTANT */",
     why: 'The push says where the pool is charged to but not how much it is expected to buy.',
   },
@@ -508,8 +511,9 @@ const MUTANTS = [
     // v1.187.22 — re-pointed: the calibration rides in the sizing sentence.
     id: 'C-lvi. ★★ the sizing sentence drops the calibration',
     file: NCA,
-    find: '  const sizingNote = ` ${sizingBasisText(buyKwhDebiased, calNote, walkStandbyW)}${projSocAtWindowStartPct != null',
-    to: '  const sizingNote = ` ${sizingBasisText(buyKwhDebiased, \'\', walkStandbyW)}${projSocAtWindowStartPct != null /* MUTANT */',
+    // v1.203.0 — anchor moved: the cushion-only plan's words beside it.
+    find: '  const sizingNote = ` ${sizingBasisText(buyKwhDebiased, calNote, walkStandbyW, co != null)}${projSocAtWindowStartPct != null',
+    to: '  const sizingNote = ` ${sizingBasisText(buyKwhDebiased, \'\', walkStandbyW, co != null)}${projSocAtWindowStartPct != null /* MUTANT */',
     why: 'With a learned de-bias the worst case is named at ×1.66 with nothing saying so.',
   },
   // ── what is spoken and pushed: the charge the write arms ──
@@ -539,8 +543,9 @@ const MUTANTS = [
     id: 'C-lx. ★★ the island troughs lose their label',
     file: NOTIFY,
     // v1.187.22 (recheck) — re-pointed: the projection is shared by the charge and held shapes.
-    find: '  const projection = `Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~${pct(plan.baselineMinSocPct)} `',
-    to: '  const projection = `Tomorrow’s low SoC ~${pct(plan.baselineMinSocPct)} ` /* MUTANT */',
+    // v1.203.0 — anchor moved: the cushion-only plan's words beside it.
+    find: '    : `Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~${pct(plan.baselineMinSocPct)} `',
+    to: '    : `Tomorrow’s low SoC ~${pct(plan.baselineMinSocPct)} ` /* MUTANT */',
     why: '"Tomorrow’s low SoC ~0% with it" reads as the outcome; with the grid present the SHP2 holds the reserve.',
   },
   {
@@ -638,8 +643,9 @@ const MUTANTS = [
   {
     id: 'C-lxxiii. ★★ the rationale repeats the worst-case arrival as "expected"',
     file: NCA,
-    find: "    ? ` The reserve ${lineStanding ? 'reads' : 'is set to'} ${writtenPct}%${truncated ? ` — ${askName} asks for ${setpointSocPct}%, but the panel only accepts a backup reserve up to ${RESERVE_WRITE_MAX_PCT}%` : ` (${askName})`}.`",
-    to: "    ? ` The reserve ${lineStanding ? 'reads' : 'is set to'} ${writtenPct}%${truncated ? ` — ${askName} asks for ${setpointSocPct}%, but the panel only accepts a backup reserve up to ${RESERVE_WRITE_MAX_PCT}%` : ` (${askName})`}, and the window is only expected to reach ~${targetSocPct}%.` /* MUTANT */",
+    // v1.203.0 — anchor moved: the ask is named with the panel's point where it set the write (askWords).
+    find: "    ? ` The reserve ${lineStanding ? 'reads' : 'is set to'} ${writtenPct}%${truncated ? ` — ${askName} asks for ${setpointSocPct}%, but the panel only accepts a backup reserve up to ${RESERVE_WRITE_MAX_PCT}%` : ` (${askWords})`}.`",
+    to: "    ? ` The reserve ${lineStanding ? 'reads' : 'is set to'} ${writtenPct}%${truncated ? ` — ${askName} asks for ${setpointSocPct}%, but the panel only accepts a backup reserve up to ${RESERVE_WRITE_MAX_PCT}%` : ` (${askWords})`}, and the window is only expected to reach ~${targetSocPct}%.` /* MUTANT */",
     why: 'The worst case\'s arrival is stated twice, the second time as what the window is expected to reach, beside the Expected: sentence\'s 50%.',
   },
   {
@@ -865,8 +871,9 @@ const MUTANTS = [
   {
     id: 'C-civ. ★★ an advisory no-charge push claims the add-on holds the reserve',
     file: NOTIFY,
-    find: '      title: `Night-charge: ${supervised ? `reserve held at ${reserveText}` : `reserve hold at ${reserveText} recommended`} tonight — no charge expected`,',
-    to: '      title: `Night-charge: reserve held at ${reserveText} tonight — no charge expected`, /* MUTANT */',
+    // v1.203.0 — anchor moved: the cushion-only plan's words beside it.
+    find: '      title: `Night-charge: ${supervised ? `reserve held at ${reserveText}` : `reserve hold at ${reserveText} recommended`} tonight — no charge expected${cushionOnlyTitle}`,',
+    to: '      title: `Night-charge: reserve held at ${reserveText} tonight — no charge expected${cushionOnlyTitle}`, /* MUTANT */',
     why: 'In advisory mode nothing is written; the title would claim an action the add-on does not take.',
   },
   {

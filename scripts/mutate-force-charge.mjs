@@ -369,7 +369,8 @@ const MUTANTS = [
   {
     id: 'xlvi. ★★★ the planner inputs drop the median and the long gap',
     file: NCA,
-    find: '    morningPvSurplusP50Kwh,\n    longGapAhead,\n    prePeakPvSurplusP10Kwh,\n    buyDebiasFactor,',
+    // v1.203.0 — re-anchored: each is now forwarded beside the cushion-only plan's null.
+    find: '    morningPvSurplusP50Kwh: cushionOnly != null ? null : morningPvSurplusP50Kwh,\n    longGapAhead: cushionOnly != null ? cushionOnly.longGapAfter : longGapAhead,\n    prePeakPvSurplusP10Kwh: cushionOnly != null ? null : prePeakPvSurplusP10Kwh,\n    buyDebiasFactor,',
     to: '    buyDebiasFactor, /* MUTANT */',
     why: 'Both are computed and never reach the sizing — the v1.125.0 field-copy trap, rebuilt.',
   },

@@ -32,6 +32,8 @@ test('★★★ every hwSpec value is today\'s (a hardware fact changes only wit
     DPU_PACK_GUARD_WH: 6200,
     RESERVE_WRITE_MIN_PCT: 10,
     RESERVE_WRITE_MAX_PCT: 50,
+    // v1.203.0 — the panel holds the pool one point under a reserve it charged up to (11 of 11 charge-ups to 50 closed at 49).
+    PANEL_RESERVE_HOLD_UNDERSHOOT_PCT: 1,
     FORCE_CHARGE_CEILING_MIN_PCT: 80,
     FORCE_CHARGE_CEILING_MAX_PCT: 100,
     MAINS_V: { line: 120, split: 240 },
@@ -44,6 +46,8 @@ test('★★★ every hwSpec value is today\'s (a hardware fact changes only wit
   assert.ok(hw.DPU_PACK_GUARD_WH > hw.DPU_PACK_NAMEPLATE_WH, 'the guard sits above one pack\'s nameplate (DECISION 11 keeps both)');
   assert.ok(hw.SOH_CRIT_PCT < hw.SOH_WARN_PCT);
   assert.equal(hw.MAINS_V.split, 2 * hw.MAINS_V.line);
+  assert.ok(hw.PANEL_RESERVE_HOLD_UNDERSHOOT_PCT >= 0 && hw.RESERVE_WRITE_MAX_PCT - hw.PANEL_RESERVE_HOLD_UNDERSHOOT_PCT > hw.RESERVE_WRITE_MIN_PCT,
+    'the pool the panel holds under its maximum reserve is above the minimum one');
 });
 
 test('★★★ the SHP2 projection builds every circuit, channel 12 included', () => {

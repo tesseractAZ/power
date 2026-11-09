@@ -779,6 +779,11 @@ export interface NightLedgerRow {
    *  pool_full_kwh. NULL in both on rows written before v1.202.0, whose walks are on pool_full_kwh with no standby. */
   plan_pool_kwh: number | null;
   plan_walk_standby_w: number | null;
+  /** ★★★ v1.203.0 — a CUSHION-ONLY plan (NightChargePlan.cushionOnly): the solar basis gate's words as it refused, the plan then
+   *  sized on the outage cushion at the window close with no solar credited. The scorer leaves such a row unscored in every outcome
+   *  (nightLedgerScoring cushionOnlyNote); its realized cushion verdict still stands. Written unconditionally: NULL on every other
+   *  plan (a full plan, a refusal), and on every row written before v1.203.0. */
+  cushion_only_refused_by: string | null;
   /** v1.200.0 — the outage line above the 50% reserve the plan CARRIES with the night force-charge to the
    *  window close: its ask, ⌈line⌉ (NightChargePlan.forceChargeLine.askPct; lineForceChargeLedgerColumns).
    *  NULL where the plan carries none, on a null plan, and on every row written before v1.200.0. A strike on
@@ -1169,6 +1174,8 @@ const NIGHT_LEDGER_COLUMNS: readonly (keyof NightLedgerRow)[] = [
   'cushion_standby_w', 'cushion_standby_basis', 'cushion_standby_kwh',
   // v1.202.0 — the pool and the standby the plan's walks counted.
   'plan_pool_kwh', 'plan_walk_standby_w',
+  // v1.203.0 — a cushion-only plan's solar refusal.
+  'cushion_only_refused_by',
   // v1.200.0 — the outage line above the reserve envelope: carried (its ask) or disclosed.
   'cushion_line_force_charge_pct', 'cushion_envelope_shortfall',
   // v1.189.0 — the charge cycle (NightLedgerRow.window_kind).
@@ -1455,6 +1462,8 @@ export function createRecorder(
     'cushion_standby_w REAL', 'cushion_standby_basis TEXT', 'cushion_standby_kwh REAL',
     // v1.202.0 — see NightLedgerRow.plan_pool_kwh.
     'plan_pool_kwh REAL', 'plan_walk_standby_w REAL',
+    // v1.203.0 — see NightLedgerRow.cushion_only_refused_by.
+    'cushion_only_refused_by TEXT',
     // v1.200.0 — see NightLedgerRow.cushion_line_force_charge_pct.
     'cushion_line_force_charge_pct REAL', 'cushion_envelope_shortfall INTEGER',
     // v1.189.0 — the charge cycle, from the list the allowlist reads (CHARGE_CYCLE_LEDGER_SCHEMA).

@@ -308,7 +308,9 @@ test('★★★ SCOPE — source pins: the planner, JIT force-charge and MPC nev
   // ── (b) THE DOOR, pinned exactly ─────────────────────────────────────────────────────────────
   // The house panel's own main-thread tracker and file, and the helper that reads it: the scale and
   // its basis, nothing else of the basis, null when it throws.
-  assert.ok(index.includes("const cushionPoolBasisTracker = new PoolEnergyBasisTracker({ path: defaultPoolEnergyBasisPath('pool-energy-basis-cushion') });"));
+  // v1.203.0 — seeded, read-only, from the worker's file while it has no ratio of its own (poolEnergyBasis.ts seedPath): the one new
+  // reader of 'pool-energy-basis', on this line alone (below).
+  assert.ok(index.includes("const cushionPoolBasisTracker = new PoolEnergyBasisTracker({ path: defaultPoolEnergyBasisPath('pool-energy-basis-cushion'), seedPath: defaultPoolEnergyBasisPath('pool-energy-basis') });"));
   const DOOR = [
     'function measuredCushionScale(',
     "  devs: FleetSnapshot['devices'], panel: NonNullable<ReturnType<typeof findShp2>>, nowMs: number,",
@@ -330,8 +332,15 @@ test('★★★ SCOPE — source pins: the planner, JIT force-charge and MPC nev
   assert.equal(count(index, 'PoolEnergyBasisTracker('), 2, "the main thread's two trackers: the secondary panels' and the cushion's");
   assert.equal(count(index, 'panelPoolBasisTracker.evaluate('), 1, "the secondary panels' tracker, in their loop only");
   // The tracker's file is named once, where the tracker is built: nothing else opens it.
-  assert.equal(count(index, 'defaultPoolEnergyBasisPath('), 2, "the two trackers' files, and no third reader");
+  // v1.203.0 — and the cushion tracker's seed, the worker's file, read on the same line: the third call, and no fourth reader.
+  assert.equal(count(index, 'defaultPoolEnergyBasisPath('), 3, "the two trackers' files and the cushion tracker's seed, and no fourth reader");
   assert.equal(count(index, 'pool-energy-basis-cushion'), 1, "the cushion tracker's file, on its construction line alone");
+  assert.equal(count(index, "defaultPoolEnergyBasisPath('pool-energy-basis')"), 1, "the worker's file, as the cushion tracker's seed alone");
+  assert.equal(count(index, 'seedPath:'), 1, 'one seeded tracker');
+  // v1.203.0 — the capacity floor a cushion-only plan counts its pool on with no ratio known: the scale's own floor (an option),
+  // imported and passed to the planner on one line, never a measurement.
+  assert.equal(count(index, 'CAPACITY_SCALE_MIN'), 2, 'imported, and passed once');
+  assert.equal(count(index, '    cushionOnlyFloorScale: CAPACITY_SCALE_MIN,\n'), 1);
   // The ledger helper returns the scale, so it is a door too: called once, by the ledger writer,
   // whose line writes it to the row (write-only — no consumer below may reach recordNightPlanRow).
   const LEDGER = '    ...cushionPoolScaleLedgerColumns(plan),\n';
@@ -500,7 +509,10 @@ test('★★★ SCOPE — source pins: the planner, JIT force-charge and MPC nev
   assert.deepEqual(planScaleUses, [
     'const planScale = pool.applied ?? cushionLine.applied;',
     'const measuredCushionNote = planScale != null && planScale.scale < 1',
-    "? `, ${round1(((targetFloorKwh - reserveKwh) / fullKwh) * 100)}% of the packs' measured capacity at ×${planScale.scale.toFixed(3)} of nameplate`",
+    // v1.203.0 — the capacity floor a cushion-only plan counts its pool on, named as what it is (no measurement).
+    "? planScale.basis === 'floor'",
+    '? `, ${round1(((targetFloorKwh - reserveKwh) / fullKwh) * 100)}% of the pool counted on the capacity floor, ×${planScale.scale.toFixed(3)} of nameplate`',
+    ": `, ${round1(((targetFloorKwh - reserveKwh) / fullKwh) * 100)}% of the packs' measured capacity at ×${planScale.scale.toFixed(3)} of nameplate`",
     '...(planScale != null ? { cushionPoolScale: planScale } : {}),',
     '...(planScale != null ? { cushionPoolScale: planScale } : {}),',
   ]);
@@ -538,7 +550,9 @@ test('★★★ SCOPE — source pins: the planner, JIT force-charge and MPC nev
     '...(standby != null ? { cushionStandby: standby } : {}),',
     "const standbyCounted = standby?.basis === 'runway-overhead' && standby.kwh > 0;",
     'window: { hours: horizon, fromMs: effChargeStartMs, windowEndMs: windowEnd, dischargeEff, chargeCapKw, envelopeKw, acceptKw, standbyW: walkStandbyW },', // the expected walks
-    ": `the pool should open the window near ~${expectedStartSocPct}% with the grid present (${walkStandbyW > 0 ? \"median load, PV and the Cores' standby\" : 'median load and PV'}, never below the ${round1(reserveFloorPct)}% reserve)`}${expectedWriteNote(expectedStartSocPct, expected.levelPct)}.`",
+    // v1.203.0 — a cushion-only plan's expected basis: the median load (and the Cores' standby), no solar credited.
+    '? `${walkStandbyW > 0 ? "median load and the Cores\' standby" : \'median load\'}, no solar credited`',
+    ': walkStandbyW > 0 ? "median load, PV and the Cores\' standby" : \'median load and PV\'}, never below the ${round1(reserveFloorPct)}% reserve)`}${expectedWriteNote(expectedStartSocPct, expected.levelPct)}.`',
     '...(standby != null ? { cushionStandby: standby } : {}),',
   ]);
   // v1.201.0 (review) — the one sizing use of the gate: an unmeetable line is sized at the window's full effort
@@ -561,7 +575,11 @@ test('★★★ SCOPE — source pins: the planner, JIT force-charge and MPC nev
       '...(planScale != null ? { cushionPoolScale: planScale } : {}),', // the charge plan
       'cushionPoolScale?: CushionPoolScale | null;', // NightChargeInputDeps
       'cushionPoolScale,', // buildNightChargeInputs' destructure
-      '...(cushionPoolScale !== undefined ? { cushionPoolScale } : {}),', // and its pass-through
+      // v1.203.0 — a cushion-only plan with no ratio known passes the capacity floor in the scale's place (buildNightChargeInputs).
+      'const coPoolFloor = cushionOnly != null && !ratioKnown(cushionPoolScale) && floorOk ? cushionOnlyFloorScale! : null;',
+      'const coPoolMissing = cushionOnly != null && !ratioKnown(cushionPoolScale) && !floorOk;',
+      "const planPoolScale: CushionPoolScale | null | undefined = coPoolFloor != null ? { scale: coPoolFloor, basis: 'floor' } : cushionPoolScale;",
+      '...(planPoolScale !== undefined ? { cushionPoolScale: planPoolScale } : {}),', // and its pass-through
       'export function cushionPoolScaleLedgerColumns(', // the ledger helper: the plan's scale, to the row
       "plan: Pick<NightChargePlan, 'cushionPoolScale'>,",
       '): { cushion_pool_scale: number | null; cushion_pool_scale_basis: string | null } {',
@@ -649,7 +667,7 @@ test('★★★ SCOPE — source pins: the planner, JIT force-charge and MPC nev
   const importers = files.filter((f) => /from '(?:\.\.?\/)+poolEnergyBasis(?:\.js)?'|import\(\s*'(?:\.\.?\/)+poolEnergyBasis/.test(src(f))).sort();
   assert.deepEqual(importers, ['alertMonitor.ts', 'analytics.ts', 'index.ts', 'panelRunway.ts']);
   assert.deepEqual([...index.matchAll(/^import [^;]*? from '\.\/poolEnergyBasis\.js';$/gm)].map((m) => m[0]),
-    ["import { PoolEnergyBasisTracker, defaultPoolEnergyBasisPath } from './poolEnergyBasis.js';"]);
+    ["import { PoolEnergyBasisTracker, defaultPoolEnergyBasisPath, CAPACITY_SCALE_MIN } from './poolEnergyBasis.js';"]);
   const constructs = Object.fromEntries(files.map((f): [string, number] => [f, count(src(f), 'new PoolEnergyBasisTracker(')]).filter(([, n]) => n > 0));
   assert.deepEqual(constructs, { 'analytics.ts': 1, 'index.ts': 2 });
   for (const fn of ['candidatePoolScale(', 'coreCapacityRatio(']) {

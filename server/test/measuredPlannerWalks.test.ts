@@ -51,13 +51,17 @@ const S944: CushionPoolScale = { scale: 0.944, basis: 'measured' };
 const N = 92.16;
 const POOL = Math.round(N * 0.944 * 1000) / 1000; // 86.999
 const written = (p: NightChargePlan): number | null => (p.chargeTonight && p.setpointSocPct != null ? clampReserveTarget(p.setpointSocPct) : null);
+/** v1.203.0 — this file measures v1.202.0's walks against v1.201.0's frozen figures, so its plans are the planner's with no hold
+ *  point (computeNightChargePlan's holdUndershootPct 0: v1.202.0's writes). The point the panel holds under a reserve it charged up
+ *  to is accounted on the same year by reserveHoldPoint.test.ts, and T9 holds the planner's own figures (`c`, regenerated for it). */
+const HOLD0 = 0;
 const yearPlan = (deps: NightChargeInputDeps, o: { scale?: unknown; w?: unknown; st?: FigState; h?: number } = {}): NightChargePlan =>
   computeNightChargePlan(buildNightChargeInputs({
     ...(o.st != null ? stateDeps(deps, o.st) : deps),
     ...(o.h != null ? { outageCushionHours: o.h } : {}),
     ...(o.scale !== undefined ? { cushionPoolScale: o.scale } : {}),
     ...(o.w !== undefined ? { cushionStandbyW: o.w } : {}),
-  } as NightChargeInputDeps));
+  } as NightChargeInputDeps), HOLD0);
 const HOURS = Array.from({ length: 17 }, (_, i) => 4 + i);
 const clock = (ms: number | null | undefined): string | null => (ms == null ? null : new Date(ms - 7 * 3_600_000).toISOString().slice(11, 16));
 
@@ -166,7 +170,8 @@ test('★★★ T3 (pin) THE LINE is v1.201.0\'s percent on every plan of the ye
 
 /* ══ T4 — the fail-safes ════════════════════════════════════════════════════════════════════════════════ */
 
-const GOLDEN = JSON.parse(readFileSync(resolve(HERE, 'fixtures/legacyIdentity.golden.json'), 'utf8')) as { digests: Record<string, string> };
+// v1.203.0 — the digests of the planner with no hold point (HOLD0): v1.202.0's, kept as legacyIdentity.v1202.golden.json.
+const GOLDEN = JSON.parse(readFileSync(resolve(HERE, 'fixtures/legacyIdentity.v1202.golden.json'), 'utf8')) as { digests: Record<string, string> };
 const withoutScale = (p: NightChargePlan): string => {
   const { cushionPoolScale: _s, ...rest } = p;
   return planDigest(rest as NightChargePlan);
@@ -225,7 +230,7 @@ test('★★★ T5 THE RESILIENCE FLOOR OF EVERY WRITE at s ∈ {1, 0.97, 0.944,
   let n = 0, starved = 0, minBuyHolds = 0, maxGapPts = 0;
   for (const s of [1, 0.97, 0.944, 0.9, 0.8]) for (const h of [4, 8, 12, 16, 20]) for (const c of CASES) {
     const deps = { ...stateDeps(c.deps, 'write'), outageCushionHours: h, cushionStandbyW: 270, cushionPoolScale: { scale: s, basis: 'measured' } } as NightChargeInputDeps;
-    const p = computeNightChargePlan(buildNightChargeInputs(deps));
+    const p = computeNightChargePlan(buildNightChargeInputs(deps), HOLD0);
     if (p.cushionLineSocPct == null || (p.cushionBasis !== 'islanded-outage' && p.cushionBasis !== 'disabled')) continue;
     if (p.chargeTonight) {
       n += 1;
@@ -265,7 +270,10 @@ const FIG = JSON.parse(readFileSync(PLANNER_WALKS_FIGURES_PATH, 'utf8')) as {
 };
 /** The groups as this tree plans them, computed once for T6, T8 and T9. */
 let nowGroups: Record<string, string> | null = null;
-const groupsNow = (): Record<string, string> => (nowGroups ??= figGroups());
+// v1.203.0 — the groups on the planner with no hold point (HOLD0), against v1.201.0's frozen parts; T9 holds the planner's own to `c`.
+const groupsNow = (): Record<string, string> => (nowGroups ??= figGroups(HOLD0));
+let ownGroups: Record<string, string> | null = null;
+const groupsOwn = (): Record<string, string> => (ownGroups ??= figGroups());
 /** The cost stops that fall against v1.201.0 in the figures' groups: each a night v1.201.0's walks disclosed short of its
  *  line (so its de-bias kept the raw surplus) that the walks on the measured pool hold, so the de-bias v1.201.0 applies to
  *  every night that holds its line applies — never the room itself (the de-biased headroom is wider than the raw one). */
@@ -309,12 +317,12 @@ test('★★★ T6 THE COST ROOM\'S CONVERSION IS v1.201.0\'s: COST55\'s 40.3% a
       assert.ok(!(x.charge && !y.charge), `${k} ${c.label}: a charge night held`);
       if (x.stop != null && y.stop != null && y.stop < x.stop - 1e-9) {
         falls.push(`${k} ${c.label}`);
-        const p = figPlan(c.deps, st, b, h);
+        const p = figPlan(c.deps, st, b, h, undefined, HOLD0);
         assert.ok(p.costCeilingSurplusKwh! > p.costCeilingSurplusRawKwh! + 0.005 && !p.cushionShortfall, `${k} ${c.label}: a stop fall is the de-bias applied on a night that holds its line`);
       }
       if (y.stop != null && y.written != null) {
         costWrites += 1;
-        const p = figPlan(c.deps, st, b, h);
+        const p = figPlan(c.deps, st, b, h, undefined, HOLD0);
         assert.ok(y.written >= Math.min(RESERVE_WRITE_MAX_PCT, Math.ceil(p.cushionLineSocPct! - 1e-9)), `${k} ${c.label}: a cost write under ⌈line⌉`);
       }
     });
@@ -397,7 +405,7 @@ test('★★★ T6b THE DE-BIAS\'S GATE AT 0, 90 AND 336 W: against v1.201.0 at 
     assert.equal(mainT.length, CASES.length, k);
     groups += 1;
     CASES.forEach((c, idx) => {
-      const p = figPlan(c.deps, st, b, h, w);
+      const p = figPlan(c.deps, st, b, h, w, HOLD0);
       const x = parseToken(mainT[idx]), y = parseToken(figToken(p, stateDeps(c.deps, st)));
       assert.ok(!(x.charge && !y.charge), `${k} ${c.label}: a charge night held`);
       if (x.charge && y.charge && y.written! < x.written!) {
@@ -422,7 +430,7 @@ test('★★★ T6b THE DE-BIAS\'S GATE AT 0, 90 AND 336 W: against v1.201.0 at 
   // Every pinned fall, between the hours and on the substitute scales: the gate, a write at ⌈line⌉, a stop at or above it.
   for (const f of PIN_T6B_FALLS) {
     const deps = { ...stateDeps(caseOf(f.label).deps, 'write'), outageCushionHours: f.h, cushionStandbyW: f.w, cushionPoolScale: { scale: f.scale, basis: f.basis } } as NightChargeInputDeps;
-    const p = computeNightChargePlan(buildNightChargeInputs(deps));
+    const p = computeNightChargePlan(buildNightChargeInputs(deps), HOLD0);
     const at = `${f.label} ${f.h} h ${f.basis} ${f.w} W`;
     const ceilL = Math.ceil(p.cushionLineSocPct! - 1e-9);
     assert.equal(p.objective, 'cost_arbitrage', at);
@@ -536,8 +544,22 @@ test('★★ T8 THE YEAR against v1.201.0 (c692f30e, the frozen `main` figures):
 });
 
 test('★★★ T9 THE FIGURES as measured (measuredPlannerWalks.figures.json `c`), group by group', () => {
-  assert.equal(FIG.c.generatedAt.startsWith('v1.202.0'), true);
-  const now = groupsNow();
+  // v1.203.0 — regenerated for the panel's hold point: the planner's own groups (groupsOwn), and v1.202.0's are the planner with
+  // none (groupsNow, the pins above). Against them every token that moved is a write one point higher.
+  assert.equal(FIG.c.generatedAt.startsWith('v1.203.0'), true);
+  const now = groupsOwn();
+  const v1202 = groupsNow();
+  for (const k of Object.keys(now)) {
+    const a = v1202[k].split(','), z = now[k].split(',');
+    a.forEach((t, i) => {
+      if (t === z[i]) return;
+      const x = parseToken(t), y = parseToken(z[i]);
+      // A write one point higher, its stop as it was; or a line in (49, 50] the line force-charge now carries (its cost stop gives
+      // way to the line mode, which the token does not name).
+      assert.ok(x.charge && y.charge && ((y.written === x.written! + 1 && y.stop === x.stop) || (y.written === x.written && x.stop != null && y.stop == null && x.written === 50)),
+        `${k} #${i}: ${t} → ${z[i]}`);
+    });
+  }
   const moved = Object.keys(FIG.c.groups).filter((k) => FIG.c.groups[k] !== now[k]);
   assert.deepEqual(moved, [], `${moved.length} group(s) moved`);
   assert.deepEqual(Object.keys(now), Object.keys(FIG.main.groups), 'the same groups as the frozen v1.201.0 part');
@@ -680,7 +702,7 @@ test('★★★ T13 NO LINE NIGHT UNDER ITS LINE UNDISCLOSED, in a write mode, a
   let lineNights = 0;
   for (const st of ['write', 'advisory', 'stand'] as const) for (const sc of [S944, undefined]) for (const h of HOURS) for (const c of CASES) {
     const deps = { ...stateDeps(c.deps, st), outageCushionHours: h, cushionStandbyW: 270, ...(sc ? { cushionPoolScale: sc } : {}) } as NightChargeInputDeps;
-    const p = computeNightChargePlan(buildNightChargeInputs(deps));
+    const p = computeNightChargePlan(buildNightChargeInputs(deps), HOLD0);
     if (p.forceChargeLine == null && p.cushionEnvelopeReason == null) continue;
     lineNights += 1;
     if (p.cushionShortfall) continue;
@@ -752,7 +774,7 @@ test('★★★ T14 A LINE NIGHT THE COST FORCE-CHARGE CARRIES walks its drawbac
   const count = { disclosed: { m: 0, np: 0 }, capped: { m: 0, np: 0 } };
   for (const [b, sc] of [['m', S944], ['np', undefined]] as const) for (const h of HOURS) for (const c of CASES) {
     const deps = { ...stateDeps(c.deps, 'write'), outageCushionHours: h, cushionStandbyW: 270, ...(sc ? { cushionPoolScale: sc } : {}) } as NightChargeInputDeps;
-    const p = computeNightChargePlan(buildNightChargeInputs(deps));
+    const p = computeNightChargePlan(buildNightChargeInputs(deps), HOLD0);
     const at = `${c.label} ${h} h ${b}`;
     if (p.forceChargeLine != null && p.expectedForceChargeMode !== 'line' && p.chargeTonight && p.cushionShortfall && p.expectedCloseAfterStopPct == null) {
       const close = drawbackClose(p, deps);

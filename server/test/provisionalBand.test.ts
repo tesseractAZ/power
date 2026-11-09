@@ -225,7 +225,7 @@ test('★★★ the gate: 4 scored days plan on the widened band; 3 are refused 
   const p4 = computeNightChargePlan(at4);
   assert.equal(p4.basisComplete, true);
   assert.equal(p4.chargeTonight, true, 'a pool at its floor gets a charge plan');
-  assert.equal(p4.setpointSocPct, 32, 'the islanded line 31.12%, asked to the whole percent above it');
+  assert.equal(p4.setpointSocPct, 33, 'the islanded line 31.12%, asked to the whole percent above it and one point more (v1.203.0: the panel holds a point under a reserve it charged up to)');
 
   const at13 = buildNightChargeInputs(night1117({ n: 13 }));
   assert.equal(at13.basisComplete, true);
@@ -663,12 +663,12 @@ test('★★★ the write path: a provisional plan arms and, in auto mode with r
   const p = planOf(night1117());
   const armed = armFromPlan(emptyActuationState(), '2026-11-17', p, NOW_1117, 16);
   assert.ok(armed, 'the provisional plan arms');
-  assert.equal(armed!.targetPct, 32);
+  assert.equal(armed!.targetPct, 33, 'v1.203.0: ⌈31.12⌉ + the panel\'s point');
   // Readiness BLOCKED/LEARNING: writeReady false demotes auto to supervised — the same write.
   const act = decideActuation(armed!, WIN_START, {
     mode: 'auto', writeReady: false, currentReservePct: 16, socCoherent: true, vitalsRed: false, gridPresent: true,
   });
-  assert.deepEqual(act, { kind: 'apply', targetPct: clampReserveTarget(32) });
+  assert.deepEqual(act, { kind: 'apply', targetPct: clampReserveTarget(33) });
 });
 
 /* ── integration pins (index.ts has no seam a unit test can drive) ─────── */

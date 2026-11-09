@@ -236,6 +236,10 @@ export interface ChargeFigurePlan {
   setpointSocPct: number | null;
   /** v1.198.0 — the plan was sized on the provisional solar band; absent on the full basis. */
   pvBandWiden?: PvBandWidenText | null;
+  /** v1.203.0 — a cushion-only plan (the server's NightChargePlan.cushionOnly); absent on every other plan. */
+  cushionOnly?: CushionOnlyText | null;
+  costCeilingSocPct?: number | null;
+  longGapAhead?: boolean | null;
   /** v1.202.0 — the pool and the Cores' standby the plan's walks counted (NightChargePlan.planPool); absent where neither
    *  differs from the panel's figure with no standby, and on older plans. */
   planPool?: { kwh: number; standbyW: number } | null;
@@ -321,9 +325,17 @@ export function outageLineRow(plan: CushionNotePlan, maxPct: number | null = nul
   const lineText = (l: number | null | undefined): string => {
     if (l == null || !Number.isFinite(l)) return '';
     const r = r1(l);
+    // v1.203.0 — a line at or under the reserve (one in (49, 50]) beside the level the panel holds as well, as the server does.
+    if (l <= max) {
+      const b = r === max - 1 || r === max || r === 100 ? Math.round(l * 100) / 100 : r;
+      return b > max - 1 && b < max ? `${b}% ` : '';
+    }
     const n = r === max || r === 100 ? Math.round(l * 100) / 100 : r;
     return n > max ? `${n}% ` : '';
   };
+  // v1.203.0 — what the line is above (the server's lineOverReserveText): the reserve, or for a line at or under it the level the
+  // panel holds the pool at under it, one point below (a line in (49, 50] is the line force-charge's).
+  const over = (l: number | null | undefined, form: 'reserve' | 'accepts'): string => lineOverReserveCard(l, max, form);
   const armed = plan.forceChargeLine != null;
   if (plan.cushionShortfallCause != null && !armed) {
     const l = plan.cushionLineSocPct;
@@ -332,14 +344,14 @@ export function outageLineRow(plan: CushionNotePlan, maxPct: number | null = nul
         : plan.cushionEnvelopeReason === 'reserveAtTarget' ? `not claimed tonight (the reserve reads ${plan.reserveFloorPct ?? max}%: no write while it does, no force-charge without one)`
           : plan.cushionEnvelopeReason === 'armedNoLine' ? 'not claimed tonight (no write armed for this window carries a force-charge for it)'
             : plan.cushionEnvelopeReason === 'startClosed' ? `not claimed tonight (${plan.cushionStartClosedWords ?? 'no force-charge for it starts'})` : 'not held tonight';
-    return `outage line ${lineText(l)}is above the ${max}% the panel accepts as a reserve — ${why}; residual risk remains`;
+    return `outage line ${lineText(l)}is above ${over(l, 'accepts')} — ${why}; residual risk remains`;
   }
   // A5 — an ARMED night: the force-charge's row (what it does), then what its walk cannot hold. Never "not held tonight".
   const kind = lineNotHeldOfCard(plan);
   const notHeld = kind === 'closeUnder' ? ' — under the line; residual risk remains'
     : kind === 'aboveFull' ? ' — the line is above a full pool; residual risk remains'
       : kind === 'nearFull' ? ' — within 10 points of a full pool, not held with its usual margin; residual risk remains' : '';
-  const row = outageLineArmedRow(plan, max, r1, lineText);
+  const row = outageLineArmedRow(plan, max, r1, lineText, over);
   if (row == null && armed && (plan.cushionShortfallCause != null || kind === 'closeUnder')) {
     // Never silent on a disclosed night, whatever the walk's mode. v1.202.0 — a night the cost force-charge carries whose walk
     // past its stop closes under the line (kind 'closeUnder', whether or not its sizing fell short) names that close, and the
@@ -350,11 +362,20 @@ export function outageLineRow(plan: CushionNotePlan, maxPct: number | null = nul
     if (kind === 'closeUnder' && c != null && Number.isFinite(c)) {
       const stop = plan.expectedWriteLevelPct;
       const stopText = stop != null && Number.isFinite(stop) ? ` (the cost force-charge's stop is ~${r1(stop)}%)` : '';
-      return `outage line ${lineText(l)}is above the ${max}% the panel accepts as a reserve — ~${r1(c)}% expected at the close, under the line${stopText}; residual risk remains`;
+      return `outage line ${lineText(l)}is above ${over(l, 'accepts')} — ~${r1(c)}% expected at the close, under the line${stopText}; residual risk remains`;
     }
-    return `outage line ${lineText(l)}is above the ${max}% the panel accepts as a reserve — its force-charge runs, but the line is not claimed; residual risk remains`;
+    return `outage line ${lineText(l)}is above ${over(l, 'accepts')} — its force-charge runs, but the line is not claimed; residual risk remains`;
   }
   return row == null ? null : `${row}${notHeld}`;
+}
+
+/** v1.203.0 — the server's lineOverReserveText (nightForceCharge.ts), mirrored: what an outage line is above. A line above the
+ *  reserve maximum: the reserve, as before. One at or under it (a line in (49, 50], which the line force-charge carries because
+ *  the panel holds the pool one point under a reserve it charged up to): the level it holds, one point under the maximum. */
+export function lineOverReserveCard(linePct: number | null | undefined, max: number, form: 'reserve' | 'accepts'): string {
+  if (linePct == null || !Number.isFinite(linePct) || linePct > max) return form === 'reserve' ? `the ${max}% reserve` : `the ${max}% the panel accepts as a reserve`;
+  return form === 'accepts' ? `the ${max - 1}% the panel holds the pool at under the ${max}% it accepts as a reserve`
+    : `the ${max - 1}% the panel holds the pool at under a ${max}% reserve`;
 }
 
 /** v1.200.0 (Fix10 review 1) — the card's lead on a closed start no write stands behind: the plan's expected figures and the write's
@@ -368,12 +389,15 @@ export function startClosedLead(plan: CushionNotePlan): { headline: string; deta
 }
 
 /** v1.200.0 — the armed line force-charge's own row (outageLineRow): line mode only. */
-function outageLineArmedRow(plan: CushionNotePlan, max: number, r1: (n: number) => number, lineText: (l: number) => string): string | null {
+function outageLineArmedRow(
+  plan: CushionNotePlan, max: number, r1: (n: number) => number, lineText: (l: number) => string,
+  over: (l: number, form: 'reserve' | 'accepts') => string,
+): string | null {
   if (plan.expectedForceChargeMode === 'line' && plan.forceChargeLine != null) {
     // v1.200.0 (review) — armed but not expected to start (the pool stays at or above the panel ceiling):
     // never "stays on to the window close" for a force-charge that does not switch on.
     if (plan.expectedForceChargeStartMs === null) {
-      return `outage line ${lineText(plan.forceChargeLine.linePct)}is above the ${max}% reserve — the panel's force-charge is armed for it, not expected to start (the pool stays at or above its ceiling)`;
+      return `outage line ${lineText(plan.forceChargeLine.linePct)}is above ${over(plan.forceChargeLine.linePct, 'reserve')} — the panel's force-charge is armed for it, not expected to start (the pool stays at or above its ceiling)`;
     }
     const lvl = plan.expectedWriteLevelPct;
     const tail = lvl != null && Number.isFinite(lvl) && plan.expectedForceChargeStartMs != null ? `, ~${r1(lvl)}% expected at the close` : '';
@@ -381,10 +405,10 @@ function outageLineArmedRow(plan: CushionNotePlan, max: number, r1: (n: number) 
     // add-on switches it back on under the start target before the close. Never "stays on to the window close".
     const stop = plan.expectedLineCeilingStop;
     if (stop != null) {
-      return `outage line ${lineText(plan.forceChargeLine.linePct)}is above the ${max}% reserve — the panel's force-charge runs until the panel `
+      return `outage line ${lineText(plan.forceChargeLine.linePct)}is above ${over(plan.forceChargeLine.linePct, 'reserve')} — the panel's force-charge runs until the panel `
         + `switches it off at its ${stop.ceilingPct}% ceiling, and ${stop.noReOnWords ?? `the add-on switches it back on under ${stop.startTargetPct}% before the close (at most ${LINE_REON_TIMES_TEXT})`}${tail}`;
     }
-    return `outage line ${lineText(plan.forceChargeLine.linePct)}is above the ${max}% reserve — the panel's force-charge stays on to the window close${tail}`;
+    return `outage line ${lineText(plan.forceChargeLine.linePct)}is above ${over(plan.forceChargeLine.linePct, 'reserve')} — the panel's force-charge stays on to the window close${tail}`;
   }
   return null;
 }
@@ -408,6 +432,62 @@ export function provisionalBandText(w: PvBandWidenText | null | undefined): stri
   return ` PROVISIONAL SOLAR BAND: ${w.calScoredDays} of ${w.fullCalScoredDays} calibration days scored, so the P10 PV this plan is sized on`
     + ` is widened ×${w.factor.toFixed(2)} (the next 24 h: ~${r1(w.bandP10Kwh)} → ~${r1(w.widenedP10Kwh)} kWh)`
     + ` and the multi-day carry by ±${Math.round(w.rollupHalfFrac * 100)}% per √day; the full band returns at ${w.fullCalScoredDays} scored days.`;
+}
+
+/** ★★★ v1.203.0 — the server's CushionOnlyBasis (nightChargeAdvisor.ts): a plan sized with the solar basis refused, on the outage
+ *  cushion at the window close alone. */
+export interface CushionOnlyText {
+  refusedBy: string;
+  transient?: boolean;
+  gapAfterMs: number | null;
+  longGapAfter: boolean;
+  poolFloorScale?: number;
+}
+
+/** v1.203.0 — the server's gapAfterWindowText, mirrored word for word. */
+export function gapAfterWindowCardText(gapAfterMs: number | null): string {
+  return gapAfterMs == null
+    ? 'no further charge window is found within the tariff scan after this one'
+    : `the next charge window opens ~${Math.round(gapAfterMs / 3_600_000)} h after this one closes`;
+}
+
+/** v1.203.0 — the server's cushionOnlyFills (nightChargeAdvisor.ts), mirrored: a cushion-only plan on the long-gap fill (cost mode,
+ *  before a gap of more than a day after its window), sized on the cushion and the fill, so never called "cushion only". */
+export function cushionOnlyFillsCard(
+  co: Pick<CushionOnlyText, 'longGapAfter'>,
+  plan: { costCeilingSocPct?: number | null; longGapAhead?: boolean | null },
+): boolean {
+  return co.longGapAfter && plan.longGapAhead === true && plan.costCeilingSocPct != null;
+}
+
+/** v1.203.0 — the card's Basis stat on a cushion-only plan (in place of the confidence tier): the cushion only, or on the long-gap
+ *  fill the cushion and the fill. */
+export function cushionOnlyBasisValue(
+  co: Pick<CushionOnlyText, 'longGapAfter'>,
+  plan: { costCeilingSocPct?: number | null; longGapAhead?: boolean | null },
+): string {
+  return cushionOnlyFillsCard(co, plan) ? 'cushion + long-gap fill' : 'cushion only';
+}
+
+/** ★★★ v1.203.0 — the server's cushionOnlyText (nightChargeAdvisor.ts), mirrored word for word: a cushion-only plan's disclosure. ''
+ *  on every other plan. */
+export function cushionOnlyCardText(
+  co: CushionOnlyText | null | undefined,
+  plan: { costCeilingSocPct?: number | null; longGapAhead?: boolean | null },
+): string {
+  if (co == null) return '';
+  const r1 = (n: number): number => Math.round(n * 10) / 10;
+  const costFill = cushionOnlyFillsCard(co, plan);
+  const head = costFill
+    ? ` NO SOLAR BASIS; THE OUTAGE CUSHION AND THE LONG-GAP FILL: the solar basis is refused (${co.refusedBy}), so this plan is sized only on the outage cushion at the window close and, before the gap, the long-gap fill — no solar is credited, no solar calibration is used, and no mid-day charge is planned.`
+    : ` OUTAGE CUSHION ONLY; NO SOLAR BASIS: the solar basis is refused (${co.refusedBy}), so this plan is sized only to hold the outage cushion at the window close — no solar is credited, no solar calibration is used, and no cost target or mid-day charge is planned.`;
+  const g = gapAfterWindowCardText(co.gapAfterMs);
+  const gap = !co.longGapAfter ? ''
+    : costFill
+      ? ` Before the gap (${g}) tonight's cost target is the long-gap fill: the ${r1(plan.costCeilingSocPct!)}% state-of-charge ceiling, with the solar headroom set aside.`
+      : ` ${g.charAt(0).toUpperCase()}${g.slice(1)}; the cushion is sized for this window's close only, and no long-gap fill runs in resilience mode.`;
+  const floor = co.poolFloorScale != null ? ` The pool is counted on the capacity floor, ×${co.poolFloorScale.toFixed(2)} of nameplate: no pack capacity ratio is known.` : '';
+  return `${head}${gap}${floor}`;
 }
 
 /** v1.187.22 — below this an expected draw is NO charge (the server's NO_CHARGE_EXPECTED_KWH,
@@ -481,8 +561,10 @@ export function sizingLine(plan: ChargeFigurePlan): string | null {
   // drained it (the server's sizingBasisText).
   const sb = plan.planPool?.standbyW;
   const standby = sb != null && Number.isFinite(sb) && sb > 0 ? ` and the Cores' ~${Math.round(sb)} W standby` : '';
-  return `Sized on an islanded worst case (P10 PV, P90 load including any committed EV session${standby}, no grid) of ~${r1(worst)} kWh${cal}.`
-    + provisionalBandText(plan.pvBandWiden);
+  // v1.203.0 — a cushion-only plan credits no solar: "no PV" (the server's NO_PV_WORST_CASE_BASIS), and its disclosure.
+  const pv = plan.cushionOnly != null ? 'no PV' : 'P10 PV';
+  return `Sized on an islanded worst case (${pv}, P90 load including any committed EV session${standby}, no grid) of ~${r1(worst)} kWh${cal}.`
+    + provisionalBandText(plan.pvBandWiden) + cushionOnlyCardText(plan.cushionOnly, plan);
 }
 
 /** The plan fields the card's HOLD summary reads (a subset of /api/night-charge/status → plan). */
@@ -500,6 +582,10 @@ export interface HoldSummaryPlan {
   cushionPct: number;
   /** v1.198.0 — the hold was sized on the provisional solar band; absent on the full basis. */
   pvBandWiden?: PvBandWidenText | null;
+  /** v1.203.0 — a cushion-only hold (the server's NightChargePlan.cushionOnly); absent on every other plan. */
+  cushionOnly?: CushionOnlyText | null;
+  costCeilingSocPct?: number | null;
+  longGapAhead?: boolean | null;
 }
 
 /**
@@ -547,7 +633,7 @@ function holdVerdict(plan: HoldSummaryPlan, none: string): { headline: string; d
   }
   // v1.198.0 — a hold SIZED on the provisional solar band closes its detail with the sentence the
   // push closes it with ('' on the full basis); a hold with no window, above, was sized on nothing.
-  const provisionalDetail = provisionalBandText(plan.pvBandWiden);
+  const provisionalDetail = provisionalBandText(plan.pvBandWiden) + cushionOnlyCardText(plan.cushionOnly, plan);
   if (plan.cushionShortfall) {
     return {
       headline: 'No overnight charge tonight — the window cannot cover the cushion.',

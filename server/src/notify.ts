@@ -11,13 +11,17 @@ import {
   // v1.198.0 — a plan sized on the provisional solar band says so: beside a charge's confidence
   // tier, and at the end of a sized hold.
   provisionalBandText,
+  // v1.203.0 — a cushion-only plan's gap after its window, in the rationale's words, and whether it takes the long-gap fill.
+  gapAfterWindowText, cushionOnlyFills,
 } from './nightChargeAdvisor.js';
 import {
   forceChargeStopPct, partialForceChargeOnFailureSlots, forceChargeFailedSlotsText, FORCE_CHARGE_LINE_REON_MAX, lineReOnTimesWords,
   lineAboveReserveWords, lineBesidePct, type ForceChargeNightOutcome, type ForceChargeSlotCore, type LineAtRisk,
   lineStartClosedWords, type ForceChargeStartClosed,
+  // v1.203.0 — the level a line in (49, 50] is above: the 49% the panel holds under a 50% reserve.
+  lineOverReserveText,
 } from './nightForceCharge.js';
-import { isNoChargeKwh, revertRetryText, RESERVE_WRITE_MAX_PCT, type NightChargeMode, type RevertResendOnReport, type RestoreSummaryKind } from './nightChargeActuator.js';
+import { isNoChargeKwh, revertRetryText, RESERVE_WRITE_MAX_PCT, PANEL_RESERVE_HOLD_UNDERSHOOT_PCT, type NightChargeMode, type RevertResendOnReport, type RestoreSummaryKind } from './nightChargeActuator.js';
 // R5 — the day-aware formatter's clocks (chargeText.ts), shared with the mid-day texts.
 import { phxParts, phxShortClock } from './chargeText.js';
 
@@ -492,7 +496,7 @@ export function buildNightChargeMessage(
     // v1.198.0 — a hold SIZED on the provisional solar band says so, as the charge shape does: the
     // sentence closes each sized hold's body. '' on the full basis (the body as before); a hold with
     // no window, above, was sized on nothing and carries no pvBandWiden.
-    const provisionalHold = provisionalBandText(plan.pvBandWiden);
+    const provisionalHold = provisionalBandText(plan.pvBandWiden) + cushionOnlyPushText(plan, 'short');
     if (plan.cushionShortfall) {
       return {
         ...base,
@@ -545,14 +549,14 @@ export function buildNightChargeMessage(
         title: 'Night-charge: planned reserve hold NOT armed tonight',
         body:
           `Tonight's plan holds the backup reserve at ${reserveText} overnight as a floor, with no charge expected, but ${write} `
-          + `was not armed — ${armRefused}. The add-on will not raise the reserve tonight.${shortfallNote}`,
+          + `was not armed — ${armRefused}. The add-on will not raise the reserve tonight.${shortfallNote}${cushionOnlyPushText(plan, 'short')}`,
       }
       : {
         ...base,
         title: 'Night-charge: planned charge NOT armed tonight',
         body:
           `Tonight's plan calls for a charge, but ${write} was not armed — ${armRefused}. `
-          + `The add-on will not charge tonight.${shortfallNote}`,
+          + `The add-on will not charge tonight.${shortfallNote}${cushionOnlyPushText(plan, 'short')}`,
       };
   }
   const overBuyNote = plan.bindingCap === 'overBuy'
@@ -616,7 +620,7 @@ export function buildNightChargeMessage(
     : `After the window the reserve returns to ${round1(plan.reserveFloorPct)}% and the house uses the pool as usual. `;
   const lineClause = (l: { linePct: number; panelCeilingPct: number }): string => {
     // (Fix8) The line beside the reserve (and the note's full pool) as lineBesidePct names it; a line stated at the reserve unnumbered.
-    const why = `${lineAboveReserveWords(l.linePct, "for tonight's ", ' outage line')} (above the ${RESERVE_WRITE_MAX_PCT}% the panel holds as a reserve)`;
+    const why = `${lineAboveReserveWords(l.linePct, "for tonight's ", ' outage line')} (above ${lineOverReserveText(l.linePct, 'holds')})`;
     const lineStartMs = plan.expectedForceChargeStartMs;
     if (held || lineStartMs === null) {
       // v1.200.0 (review) — armed, never switched on: nothing "on until the window closes".
@@ -677,9 +681,14 @@ export function buildNightChargeMessage(
   const lowSoc = plan.cushionEnvelopeReason === 'reserveAtTarget'
     ? `with no charge, ~${pct(plan.minProjSocPct)} with the plan's full buy`
     : `without ${held && !stands ? "tonight's write" : 'this charge'}, ~${pct(plan.minProjSocPct)} with it`;
-  const projection = `Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~${pct(plan.baselineMinSocPct)} `
-    + `${lowSoc}; the floor+cushion line is ${pct(line)}. `
-    + `Confidence: ${plan.confidenceTier}.${shortfallNote}${overBuyNote}${economicNote}${held ? '' : evNote} `;
+  // v1.203.0 — a cushion-only plan states its basis in place of the projection and the confidence tier (cushionOnlyPushText).
+  const projection = plan.cushionOnly != null
+    ? `${cushionOnlyPushText(plan, 'charge')}${shortfallNote}${overBuyNote}${economicNote}${held ? '' : evNote} `
+    : `Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~${pct(plan.baselineMinSocPct)} `
+      + `${lowSoc}; the floor+cushion line is ${pct(line)}. `
+      + `Confidence: ${plan.confidenceTier}.${shortfallNote}${overBuyNote}${economicNote}${held ? '' : evNote} `;
+  // v1.203.0 — and the title says it; on the long-gap fill (cushionOnlyFills) the plan is not the cushion only.
+  const cushionOnlyTitle = plan.cushionOnly == null ? '' : cushionOnlyFills(plan.cushionOnly, plan) ? ' — no solar basis, long-gap fill' : ' — outage cushion only';
   // v1.198.0 — a plan sized on the provisional solar band says so, after its confidence tier.
   const provisionalNote = plan.pvBandWiden != null ? `${provisionalBandText(plan.pvBandWiden).trim()} ` : '';
   if (held) {
@@ -690,7 +699,7 @@ export function buildNightChargeMessage(
       ? ` — the pool should open the window near ~${pct(start)} and stay at or above ${reserveText}` : '';
     return {
       ...base,
-      title: `Night-charge: ${supervised ? `reserve held at ${reserveText}` : `reserve hold at ${reserveText} recommended`} tonight — no charge expected`,
+      title: `Night-charge: ${supervised ? `reserve held at ${reserveText}` : `reserve hold at ${reserveText} recommended`} tonight — no charge expected${cushionOnlyTitle}`,
       body:
         `${supervised ? 'Holding' : 'Recommended: hold'} the backup reserve at ${reserveText} overnight as a floor; `
         + `no charge is expected${stays}. ${projection}${provisionalNote}${tail}`,
@@ -699,11 +708,11 @@ export function buildNightChargeMessage(
   return {
     ...base,
     title: `Night-charge: ${supervised ? `charging ${to} ${levelText}` : `charge ${to} ${levelText} recommended`} tonight`
-      + (expected == null ? '' : ` (~${kwh(expected)})`),
+      + (expected == null ? '' : ` (~${kwh(expected)})`) + cushionOnlyTitle,
     body:
       `${supervised ? 'Charging' : 'Recommended: charge'} the backup pool ${to} ${levelText} overnight`
       + (bound ? ', as far as the window can deliver' : '')
-      + (expected == null ? '. ' : `, ~${kwh(expected)} of grid energy expected. `)
+      + (expected == null ? '. ' : `, ~${kwh(expected)} of grid energy expected${plan.cushionOnly != null ? ', with no solar credited' : ''}. `)
       + projection
       + provisionalNote
       + tail,
@@ -1119,8 +1128,9 @@ export function buildNightChargeForeignReserve(o: {
     : (l.started
       ? ` The force-charge for tonight's ${named}% outage line rode ${stood ? 'that reading' : 'that write'}, so the add-on switches it off, and it does not start again, whatever the reserve reads later.`
       : ` No force-charge for tonight's ${named}% outage line starts: the reserve was ${stood ? 'changed' : 'set outside the add-on'}, and setting it back does not change that.`)
-      // (Fix8) Only a line named above the reserve can the pool close under.
-      + `${named! > RESERVE_WRITE_MAX_PCT ? ' The pool may close under the line.' : ''} ${lineChargeNowByHandWords(l.closeText)}`;
+      // (Fix8) Only a line named above the reserve can the pool close under. v1.203.0 — above the pool the panel holds at it: one point
+      // under a reserve it charged up to (PANEL_RESERVE_HOLD_UNDERSHOOT_PCT), so a line in (49, 50] too.
+      + `${l.linePct > RESERVE_WRITE_MAX_PCT - PANEL_RESERVE_HOLD_UNDERSHOOT_PCT ? ' The pool may close under the line.' : ''} ${lineChargeNowByHandWords(l.closeText)}`;
   if (stood) {
     return {
       severity: l == null ? 'info' : 'warning',
@@ -1277,8 +1287,9 @@ export function buildNightForceChargeOnFailure(o: {
   const head = `The night-charge for ${o.day ?? '—'} switched force-charge ("Charge Now") ON, but the Smart Home Panel 2 `
     + `still reads slot(s) ${named.text} OFF after ${o.retries} re-issue(s)${o.noRetry ? ' (too close to the window end to re-issue)' : ''}. `;
   const line = o.lineLinePct != null && Number.isFinite(o.lineLinePct) ? lineBesidePct(o.lineLinePct, RESERVE_WRITE_MAX_PCT) : null;
-  // (Fix8) Only where the line, as named, is above the reserve can the pool close under it: a line stated at 50.00 the reserve holds.
-  const underReach = line != null && line > RESERVE_WRITE_MAX_PCT;
+  // (Fix8) Only where the line, as named, is above what the reserve holds can the pool close under it. v1.203.0 — a 50% reserve holds
+  // the pool one point under it (PANEL_RESERVE_HOLD_UNDERSHOOT_PCT), so a line stated at 50.00, or anywhere in (49, 50], is not held.
+  const underReach = line != null && line > RESERVE_WRITE_MAX_PCT - PANEL_RESERVE_HOLD_UNDERSHOOT_PCT;
   // v1.200.0 (review) — a LINE night is the outage cushion, not a buy: say what the failure does to the line, and
   // what can still lift the pool — never "no action needed". The add-on's close OFF goes to these slots too. (Fix10 review 1) Never
   // "to hold the line": a start held late and an ON that does not take can leave too little of the window for that.
@@ -1326,11 +1337,12 @@ export function buildLineForceChargeDeclinedStart(o: {
     // (Fix8 review 2) "yet", as the body and the log say it: decideForceCharge decides every tick, so a held start may still come.
     title: 'Night-charge: the force-charge for the outage line cannot start yet',
     // (Fix8) In words true in every outcome: the pool may already read above the line, or a person's Charge Now may be lifting it
-    // (a declined cause) — never "is expected to close under the line", never "near the 50% reserve"; a line stated at 50.00 (the
-    // reserve holds it) is not said to close under it. (Fix8 review 1) Nor "only the 50% reserve holds it": with the grid absent (a
+    // (a declined cause) — never "is expected to close under the line", never "near the 50% reserve"; a line the reserve holds
+    // is not said to close under it (v1.203.0: one at or under 49, since a 50% reserve holds the pool at 49; a line stated at 50.00, or
+    // anywhere in (49, 50], is not held). (Fix8 review 1) Nor "only the 50% reserve holds it": with the grid absent (a
     // declined cause) the pool drains through the reserve, and a person's Charge Now lifts it — the add-on adds nothing above it.
     body: `Night-charge: the force-charge for tonight's ${line}% outage line cannot start yet — ${o.why}. `
-      + (line > RESERVE_WRITE_MAX_PCT
+      + (line > RESERVE_WRITE_MAX_PCT - PANEL_RESERVE_HOLD_UNDERSHOOT_PCT
         ? o.latestStartText != null
           ? `If it has not started by ~${o.latestStartText}, the pool may close under the line; if it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.`
           : `The later it starts, the lower the pool may close, perhaps under the line; if it never starts, the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve.`
@@ -1426,6 +1438,31 @@ function forceChargeOffWords(reason: string): string {
   }
 }
 
+/**
+ * ★★★ v1.203.0 — a CUSHION-ONLY plan's basis sentence in the evening push (plan.cushionOnly): the solar refusal it was made on, and
+ * — on a charge, in place of the whole-house projection and its confidence tier, which no solar figure here supports — what the line
+ * is: the reserve floor plus the cushion's hours of islanded backup load at the window close, no solar credited, and no cost target
+ * but the long-gap fill's. Before a gap of more than a day after this window, the gap as fact (gapAfterWindowText) and what runs.
+ * '' on every other plan. PURE.
+ */
+function cushionOnlyPushText(plan: NightChargePlan | null, form: 'charge' | 'short'): string {
+  const co = plan?.cushionOnly;
+  if (plan == null || co == null) return '';
+  // On the long-gap fill the plan is sized on the cushion and the fill: "no solar basis", never "outage cushion only".
+  const costFill = cushionOnlyFills(co, plan);
+  const basis = costFill ? 'No solar basis' : 'Outage cushion only; no solar basis';
+  const gap = !co.longGapAfter ? ''
+    : costFill
+      ? ` Before the gap (${gapAfterWindowText(co.gapAfterMs)}) the cost target is the long-gap fill: the ${round1(plan.costCeilingSocPct!)}% state-of-charge ceiling, with the solar headroom set aside.`
+      : ` ${gapAfterWindowText(co.gapAfterMs).replace(/^./, (c) => c.toUpperCase())}; the cushion is sized for this window's close only.`;
+  if (form === 'short') return ` ${basis} (${co.refusedBy}).${gap}`;
+  const line = floorCushionLinePct(plan);
+  const lineText = line == null ? 'the line' : `the ${round1(line)}% line`;
+  return `${basis} (${co.refusedBy}): ${lineText} is the ${round1(plan.reserveFloorPct)}% reserve floor plus `
+    + `${round1(plan.cushionOutageHours ?? 4)} h of islanded backup load at the window close, with no solar credited and `
+    + `${costFill ? 'no cost target but the long-gap fill' : 'no cost target'}.${gap}`;
+}
+
 /** v1.200.0 — the plan's SIZING fell short (the caps note): a shortfall the envelope alone did not make. PURE. */
 function sizingShortfall(plan: Pick<NightChargePlan, 'cushionShortfall' | 'cushionShortfallCause'>): boolean {
   return plan.cushionShortfall === true && plan.cushionShortfallCause !== 'envelope';
@@ -1454,7 +1491,7 @@ function envelopeShortfallNote(plan: Pick<NightChargePlan, 'cushionShortfallCaus
     if (kind === 'nearFull') return ` NOTE: ${line} is within 10 points of a full pool, so the force-charge cannot hold it with its usual margin — residual risk remains.`;
     // Armed and disclosed with no walk that says why (a plan this build does not make): armed, not claimed.
     if (plan.cushionShortfallCause != null) {
-      return ` NOTE: ${line} is above the ${RESERVE_WRITE_MAX_PCT}% the panel accepts as a reserve; its force-charge runs, but the plan does not claim the line — residual risk remains.`;
+      return ` NOTE: ${line} is above ${lineOverReserveText(plan.cushionLineSocPct ?? Infinity, 'accepts')}; its force-charge runs, but the plan does not claim the line — residual risk remains.`;
     }
     return '';
   }
@@ -1463,7 +1500,7 @@ function envelopeShortfallNote(plan: Pick<NightChargePlan, 'cushionShortfallCaus
     : plan.cushionEnvelopeReason === 'advisory' ? 'and no force-charge runs in advisory mode'
       : plan.cushionEnvelopeReason === 'reserveAtTarget' ? `and the reserve reads ${round1(plan.reserveFloorPct)}%: no write is due while it does, and no force-charge runs without one`
         : 'and no force-charge carries it to the window close';
-  return ` NOTE: ${line} is above the ${RESERVE_WRITE_MAX_PCT}% the panel accepts as a reserve, ${why} — residual risk remains.`;
+  return ` NOTE: ${line} is above ${lineOverReserveText(plan.cushionLineSocPct ?? Infinity, 'accepts')}, ${why} — residual risk remains.`;
 }
 
 /** One-decimal rounding for the human-facing advisory strings. */

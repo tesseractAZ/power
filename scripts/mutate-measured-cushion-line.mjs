@@ -160,8 +160,9 @@ const MUTANTS = [
     id: 'A-vii. ★★★ the setpoint asks its line on the panel\'s figure, not the pool',
     file: NCA, tests: [T_LINE],
     // v1.200.0 (review) — anchor moved: the reserve path's ask reads askOf (the one expression).
-    find: '  const lineAskPct = !setpointOnWalk && !baselineHolds ? askOf(targetFloorKwh, fullKwh) : 0;',
-    to: '  const lineAskPct = !setpointOnWalk && !baselineHolds ? askOf(targetFloorKwh, panelFullKwh) : 0; /* MUTANT */',
+    // v1.203.0 — anchor moved: the reserve path's ask is lineReserveAskPct (askOf and the panel's point).
+    find: "    ? lineReserveAskPct(targetFloorKwh, fullKwh, cushionBasis === 'islanded-outage' ? holdUndershootPct : 0) : 0;",
+    to: "    ? lineReserveAskPct(targetFloorKwh, panelFullKwh, cushionBasis === 'islanded-outage' ? holdUndershootPct : 0) : 0; /* MUTANT */",
     why: 'The ask is ⌈29.89⌉ = 30 under a 31.67% line, so the setpoint is the arrival (31.7, not 32); on the year a 32.02% line writes 32, under it (2026-10-12 resilience).',
   },
   {
@@ -190,15 +191,17 @@ const MUTANTS = [
   {
     id: 'A-xii. ★★ the rationale\'s share divides by the scale a second time',
     file: NCA, tests: [T_LINE],
-    find: "    ? `, ${round1(((targetFloorKwh - reserveKwh) / fullKwh) * 100)}% of the packs' measured capacity at ×${planScale.scale.toFixed(3)} of nameplate`",
-    to: "    ? `, ${round1(((targetFloorKwh - reserveKwh) / fullKwh / planScale.scale) * 100)}% of the packs' measured capacity at ×${planScale.scale.toFixed(3)} of nameplate` /* MUTANT */",
+    // v1.203.0 — anchor moved: the measured branch beside the capacity floor's.
+    find: "      : `, ${round1(((targetFloorKwh - reserveKwh) / fullKwh) * 100)}% of the packs' measured capacity at ×${planScale.scale.toFixed(3)} of nameplate`",
+    to: "      : `, ${round1(((targetFloorKwh - reserveKwh) / fullKwh / planScale.scale) * 100)}% of the packs' measured capacity at ×${planScale.scale.toFixed(3)} of nameplate` /* MUTANT */",
     why: '"23% of the packs\' measured capacity" for a cushion that is 21.7% of it.',
   },
   {
     id: 'A-xiii. ★★★ buildNightChargeInputs drops the scale',
     file: NCA, tests: [T_LINE],
-    find: '    ...(cushionPoolScale !== undefined ? { cushionPoolScale } : {}),',
-    to: '    ...(cushionPoolScale === undefined ? { cushionPoolScale } : {}), /* MUTANT */',
+    // v1.203.0 — anchor moved: the scale is forwarded as planPoolScale (the capacity floor on a cushion-only plan with none known).
+    find: '    ...(planPoolScale !== undefined ? { cushionPoolScale: planPoolScale } : {}),',
+    to: '    ...(planPoolScale === undefined ? { cushionPoolScale: planPoolScale } : {}), /* MUTANT */',
     why: 'The v1.125.0 destructure hazard: index.ts passes the scale and every plan stays on nameplate.',
   },
 
@@ -220,8 +223,9 @@ const MUTANTS = [
   {
     id: 'D-iii. ★★★ the cushion tracker writes the secondary panels\' file',
     file: IDX, tests: [T_SCOPE],
-    find: "const cushionPoolBasisTracker = new PoolEnergyBasisTracker({ path: defaultPoolEnergyBasisPath('pool-energy-basis-cushion') });",
-    to: "const cushionPoolBasisTracker = new PoolEnergyBasisTracker({ path: defaultPoolEnergyBasisPath('pool-energy-basis-panels') }); /* MUTANT */",
+    // v1.203.0 — anchor moved: the construction line carries the read-only seed.
+    find: "const cushionPoolBasisTracker = new PoolEnergyBasisTracker({ path: defaultPoolEnergyBasisPath('pool-energy-basis-cushion'), seedPath: defaultPoolEnergyBasisPath('pool-energy-basis') });",
+    to: "const cushionPoolBasisTracker = new PoolEnergyBasisTracker({ path: defaultPoolEnergyBasisPath('pool-energy-basis-panels'), seedPath: defaultPoolEnergyBasisPath('pool-energy-basis') }); /* MUTANT */",
     why: 'Two trackers write one file: each restart loads the other\'s panels and held ratios.',
   },
   {

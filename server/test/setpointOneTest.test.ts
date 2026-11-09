@@ -40,7 +40,10 @@ const inputs = (o: Partial<NightChargeInputs> = {}): NightChargeInputs => ({
 const plan = (o: Partial<NightChargeInputs> = {}): NightChargePlan => computeNightChargePlan(inputs(o));
 const COST55 = { objectiveMode: 'cost', costMaxSocPct: 90, morningPvSurplusP50Kwh: 55, morningPvSurplusP90Kwh: 70, forceChargeEligible: true } as const;
 
-test('★★★ THE MEASURED DEFECT: a resilience night writes its cushion line (31%), not the 50% maximum', () => {
+// v1.203.0 — the write is the line's whole percent and ONE POINT MORE (lineReserveAskPct): the panel holds the pool one point under a
+// reserve it charged up to (PANEL_RESERVE_HOLD_UNDERSHOOT_PCT; 11 of 11 charge-ups to 50 closed at 49), so a 31% write held 30%,
+// under the 30.45% line. Every write below that was ⌈line⌉ is ⌈line⌉ + 1; what the plan is sized on is unchanged.
+test('★★★ THE MEASURED DEFECT: a resilience night writes its cushion line (31%) and the panel\'s point (32%), not the 50% maximum', () => {
   const p = plan();
   assert.equal(p.cushionBasis, 'islanded-outage');
   assert.equal(p.cushionKwh, 18.85, '1.445 kW × 8 h × 1.5 ÷ 0.92');
@@ -51,14 +54,16 @@ test('★★★ THE MEASURED DEFECT: a resilience night writes its cushion line 
   assert.equal(p.cushionTroughSocPct, 30.45);
   assert.equal(p.buyKwh, 27.56);
   assert.equal(p.cushionShortfall, false);
-  // The write: the line, to the whole percent above it (was 100, written 50).
-  assert.equal(p.setpointSocPct, 31);
-  assert.equal(clampReserveTarget(p.setpointSocPct!), 31);
-  assert.equal(chargeReservePct(p), 31);
-  assert.equal(armFromPlan(emptyActuationState(), '2026-10-19', p, B, 10)!.targetPct, 31, 'the reserve the actuator arms');
-  assert.equal(p.expectedWriteLevelPct, 31);
-  assert.equal(p.expectedBuyKwh, 12.22, 'the expected draw to 31% (it was 31.11 kWh, to 50%)');
-  assert.match(p.rationale, / The reserve is set to 31% \(the resilience requirement\)\. /);
+  // The write: the line, to the whole percent above it (was 100, written 50), and v1.203.0's point (31 → 32).
+  assert.equal(p.setpointSocPct, 32);
+  assert.equal(clampReserveTarget(p.setpointSocPct!), 32);
+  assert.equal(chargeReservePct(p), 32);
+  assert.equal(armFromPlan(emptyActuationState(), '2026-10-19', p, B, 10)!.targetPct, 32, 'the reserve the actuator arms');
+  assert.equal(p.expectedWriteLevelPct, 32);
+  assert.equal(p.expectedBuyKwh, 13.21, 'the expected draw to 32% (12.22 kWh to 31% on v1.202.0; 31.11 kWh, to 50%, before v1.196.0)');
+  assert.match(p.rationale, / The reserve is set to 32% \(the resilience requirement: one point above the 30\.45% outage line's whole percent, since the panel holds the pool one point under a reserve it charges up to\)\. /);
+  // v1.203.0 — the point is the panel's hold, and nothing else: with none, v1.202.0's 31.
+  assert.equal(computeNightChargePlan(inputs(), 0).setpointSocPct, 31);
   assert.doesNotMatch(p.rationale, /asks for|only accepts/);
   // The premise: the whole-house walk from the arrival falls under the line (disclosed, not tested).
   assert.ok(p.minProjSocPct! < p.cushionLineSocPct!, `whole-house trough ${p.minProjSocPct}%`);
@@ -96,7 +101,7 @@ test('★★★ cost mode with no surplus known: the 90% cost target is the ask,
   assert.doesNotMatch(p.rationale, /resilience requirement asks/);
 });
 
-test('★★★ a cushion-shortfall night writes the line (31%), above the derated arrival (28.6%)', () => {
+test('★★★ a cushion-shortfall night writes the line and the panel\'s point (32%), above the derated arrival (28.6%)', () => {
   // A 2 kW charger delivers 6 h × 2 × 0.927 = 11.1 kWh of pack: the arrival misses the line. The
   // write is the requirement, never the arrival (v1.60.0): with full power the device reaches it.
   const p = plan({ chargeCapKw: 2 });
@@ -104,9 +109,9 @@ test('★★★ a cushion-shortfall night writes the line (31%), above the derat
   assert.equal(p.bindingCap, 'chargePower');
   assert.equal(p.targetSocPct, 28.6);
   assert.equal(p.cushionTroughSocPct, 28.58);
-  assert.equal(p.setpointSocPct, 31);
-  assert.equal(chargeReservePct(p), 31);
-  assert.match(p.rationale, / The reserve is set to 31% \(the resilience requirement\)\. /);
+  assert.equal(p.setpointSocPct, 32);
+  assert.equal(chargeReservePct(p), 32);
+  assert.match(p.rationale, / The reserve is set to 32% \(the resilience requirement: one point above the 30\.45% outage line's whole percent, since the panel holds the pool one point under a reserve it charges up to\)\. /);
 });
 
 test('★★ a disabled cushion: the line is the floor, and the write is the floor (no raise)', () => {
@@ -150,10 +155,14 @@ test('★★★ SWEEP: a year of overnight plans — every pack-at-close charge 
     if (p.objective === 'resilience_cushion') {
       resilience++;
       // The resilience ask is the line to the whole percent above it, or the arrival where higher.
-      // (cushionLineSocPct is the line to 0.01; the planner ceils the exact one.)
+      // (cushionLineSocPct is the line to 0.01; the planner ceils the exact one.) v1.203.0 — and one point more on the islanded-outage
+      // basis wherever that is at most 50 (the panel holds a point under a reserve it charged up to): the pool it holds is ⌈line⌉.
       if (p.setpointSocPct !== p.targetSocPct) {
         assert.ok(Number.isInteger(p.setpointSocPct) && p.setpointSocPct > p.targetSocPct!, `${c.label}: ${p.setpointSocPct}`);
-        assert.ok(p.setpointSocPct >= line - 0.005 && p.setpointSocPct < line + 1.005, `${c.label}: ${p.setpointSocPct} vs line ${line}`);
+        // (A line in (49, 50] keeps its 50: ⌈line⌉ + 1 is past the envelope, and the line force-charge carries it where eligible.)
+        const point = p.cushionBasis === 'islanded-outage' && line <= RESERVE_WRITE_MAX_PCT - 1 + 0.005 ? 1 : 0;
+        assert.ok(p.setpointSocPct - point >= line - 0.005 && p.setpointSocPct - point < line + 1.005, `${c.label}: ${p.setpointSocPct} vs line ${line}`);
+        if (point === 1) assert.ok(p.setpointSocPct - 1 >= line - 0.005, `${c.label}: the pool the panel holds (${p.setpointSocPct - 1}) is at or above the ${line}% line`);
       }
       if (written > RESERVE_WRITE_MAX_PCT - 1e-9) atMax++;
     } else cost++;

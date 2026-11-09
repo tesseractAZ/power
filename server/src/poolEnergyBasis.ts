@@ -47,6 +47,10 @@
  * (nightChargeAdvisor.ts cushionLineKwh); v1.202.0 — and counts the night-charge plan's pool on
  * (plannerPoolKwh: every walk of the plan). The state is read and written in the thread that
  * evaluates it — never set on one thread and read on the other.
+ * v1.203.0 — the cushion tracker is SEEDED from the worker's file (seedPath), read-only, while it has no ratio of its own: it
+ * arrived after the Cores went dark on the vendor cloud and never saw one, so it answered 'nameplate' while the runway counted the
+ * pool on the Cores' held ratios. The seed is the per-Core ratios at their own timestamps, never the worker's panel figures, and
+ * the worker's file is still written by the worker alone.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -200,6 +204,11 @@ export function defaultPoolEnergyBasisPath(name: string): string | null {
 export interface PoolEnergyBasisTrackerOptions {
   /** Persistence file; null/'' = in memory only. */
   path?: string | null;
+  /** v1.203.0 — another tracker's file to SEED from, read-only, at load: only while this tracker has no ratio of its own (its own
+   *  file holds no Core), the other file's per-Core ratios are taken with their original timestamps, so they age out
+   *  (HELD_RATIO_MAX_AGE_MS) on that tracker's own schedule. Never its panels' applied figures, never written back; a missing or
+   *  corrupt file seeds nothing. A seeded entry reaches this tracker's own file only with a live reading's save. null/'' = none. */
+  seedPath?: string | null;
   holdMs?: number;
   maxHeldAgeMs?: number;
 }
@@ -207,6 +216,7 @@ export interface PoolEnergyBasisTrackerOptions {
 /** The stateful half: held per-Core ratios and each panel's applied scale (asymmetric). */
 export class PoolEnergyBasisTracker {
   private readonly path: string | null;
+  private readonly seedPath: string | null;
   private readonly holdMs: number;
   private readonly maxHeldAgeMs: number;
   private loaded = false;
@@ -216,6 +226,7 @@ export class PoolEnergyBasisTracker {
 
   constructor(opts: PoolEnergyBasisTrackerOptions = {}) {
     this.path = opts.path ? opts.path : null;
+    this.seedPath = opts.seedPath ? opts.seedPath : null;
     this.holdMs = opts.holdMs ?? CAPACITY_INCREASE_HOLD_MS;
     this.maxHeldAgeMs = opts.maxHeldAgeMs ?? HELD_RATIO_MAX_AGE_MS;
   }
@@ -223,6 +234,24 @@ export class PoolEnergyBasisTracker {
   private load(): void {
     if (this.loaded) return;
     this.loaded = true;
+    this.loadOwn();
+    if (this.cores.size === 0) this.loadSeed();
+  }
+
+  /** v1.203.0 — the seed (seedPath): the other file's valid per-Core ratios, `{ ratio, atMs }` as recorded. Not marked persisted
+   *  (persistedAtMs), and the panels' figures are never read. */
+  private loadSeed(): void {
+    if (!this.seedPath) return;
+    try {
+      if (!existsSync(this.seedPath)) return;
+      const raw = JSON.parse(readFileSync(this.seedPath, 'utf8')) as Partial<PersistShape>;
+      for (const [sn, h] of Object.entries(raw?.cores ?? {})) {
+        if (h && Number.isFinite(h.ratio) && h.ratio > 0 && Number.isFinite(h.atMs)) this.cores.set(sn, { ratio: h.ratio, atMs: h.atMs });
+      }
+    } catch { /* absent or corrupt → no seed: nameplate, as before */ }
+  }
+
+  private loadOwn(): void {
     if (!this.path) return;
     try {
       if (!existsSync(this.path)) return;

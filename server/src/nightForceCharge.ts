@@ -240,7 +240,7 @@
  */
 
 import {
-  APPLY_LATE_MS, RESERVE_WRITE_MAX_PCT, armedForceChargeCeilingPct, clampReserveTarget, type NightActuationState,
+  APPLY_LATE_MS, RESERVE_WRITE_MAX_PCT, PANEL_RESERVE_HOLD_UNDERSHOOT_PCT, armedForceChargeCeilingPct, clampReserveTarget, type NightActuationState,
   writeWindowEndMs, ON_PEAK_PAGE_LEAD_MS, REVERT_VERIFY_AFTER_MS, REVERT_DEADLINE_HOLD_MAX_MS,
 } from './nightChargeActuator.js';
 import type { ForceChargeCommands } from './settingsDrift.js';
@@ -903,12 +903,14 @@ export function forceChargeLineArmNote(o: {
   // (Fix8) The line beside the 50% reserve and a full pool (the tail) as lineBesidePct names it: never "the 50% outage line is
   // above the 50% reserve"; a line stated at the reserve (asked a whole percent above it) unnumbered.
   const line = lineAboveReserveWords(o.linePct, "tonight's ", ' outage line');
+  // v1.203.0 — a line in (49, 50] is above the 49% a 50% reserve holds, not above the reserve (lineOverReserveText).
+  const over = lineOverReserveText(o.linePct, 'reserve');
   if (o.ceilingStop === true) {
-    return `Force-charge: LINE — ${line} is above the ${RESERVE_WRITE_MAX_PCT}% reserve: `
+    return `Force-charge: LINE — ${line} is above ${over}: `
       + `${from} (timed to ${round1(o.startTargetPct)}% by ${o.timedByText}); expected to reach the panel's ${o.panelCeilingPct}% ceiling, where the panel `
       + `switches it off; switched back on under ${round1(o.startTargetPct)}% before the close (at most ${lineReOnTimesWords(FORCE_CHARGE_LINE_REON_MAX)}).${tail}`;
   }
-  return `Force-charge: LINE — ${line} is above the ${RESERVE_WRITE_MAX_PCT}% reserve: `
+  return `Force-charge: LINE — ${line} is above ${over}: `
     + `${from} (timed to ${round1(o.startTargetPct)}% by ${o.timedByText}) to the window close; panel ceiling ${o.panelCeilingPct}% as backstop.${tail}`;
 }
 
@@ -927,8 +929,33 @@ export function lineBesidePct(linePct: number, ...levelsPct: number[]): number {
  *  beside the reserve and a full pool; a line stated AT the reserve — 50.00, its raw value a hair above it, asked at 51 (2026-11-25
  *  on nameplate at 11 h) — unnumbered ("<lead><tail>"): its own number would read as the reserve it is said to be above. */
 export function lineAboveReserveWords(linePct: number, lead: string, tail: string): string {
+  const unnumbered = [lead.trim(), tail.trim()].filter((w) => w !== '').join(' ');
+  // v1.203.0 — a line at or under the reserve (one in (49, 50], which the line force-charge carries: lineOverReserveText) is named
+  // beside the 49% the panel holds as well, and unnumbered where it would read as either level.
+  if (linePct <= RESERVE_WRITE_MAX_PCT) {
+    const held = RESERVE_WRITE_MAX_PCT - PANEL_RESERVE_HOLD_UNDERSHOOT_PCT;
+    const b = lineBesidePct(linePct, held, RESERVE_WRITE_MAX_PCT, 100);
+    return b > held && b < RESERVE_WRITE_MAX_PCT ? `${lead}${b}%${tail}` : unnumbered;
+  }
   const n = lineBesidePct(linePct, RESERVE_WRITE_MAX_PCT, 100);
-  return n > RESERVE_WRITE_MAX_PCT ? `${lead}${n}%${tail}` : [lead.trim(), tail.trim()].filter((w) => w !== '').join(' ');
+  return n > RESERVE_WRITE_MAX_PCT ? `${lead}${n}%${tail}` : unnumbered;
+}
+
+/**
+ * v1.203.0 — PURE. The level a sentence says the outage line is ABOVE, as words. A line above the 50% reserve: the reserve, in the
+ * form the sentence used ('reserve': "the 50% reserve"; 'accepts': "the 50% the panel accepts as a reserve"; 'holds': "the 50% the
+ * panel holds as a reserve"), word for word as before. A line at or under it — one in (49, 50], which the line force-charge carries
+ * because the panel holds the pool one point under a reserve it charged up to (PANEL_RESERVE_HOLD_UNDERSHOOT_PCT) — is above that
+ * hold, never the reserve: "the 49% the panel holds the pool at under a 50% reserve". Keyed on the line as stated (two decimals): a
+ * line stated at 50.00 is above the 49% whichever side of 50 it lies, so the words hold for it too. The web card mirrors it
+ * (lineOverReserveCard, nightChargeText.ts).
+ */
+export function lineOverReserveText(linePct: number, form: 'reserve' | 'accepts' | 'holds'): string {
+  const max = RESERVE_WRITE_MAX_PCT;
+  if (linePct > max) return form === 'reserve' ? `the ${max}% reserve` : form === 'accepts' ? `the ${max}% the panel accepts as a reserve` : `the ${max}% the panel holds as a reserve`;
+  const held = max - PANEL_RESERVE_HOLD_UNDERSHOOT_PCT;
+  return form === 'accepts' ? `the ${held}% the panel holds the pool at under the ${max}% it accepts as a reserve`
+    : `the ${held}% the panel holds the pool at under a ${max}% reserve`;
 }
 
 /** v1.200.0 (Fix8) — PURE. The outage line the add-on's own log lines name on a night whose record carries a line ask (index.ts:

@@ -70,6 +70,13 @@ const digestWithoutStandby = (p: NightChargePlan): string => {
   const { cushionStandby: _s, ...rest } = SB(p);
   return planDigest(rest as NightChargePlan);
 };
+/** v1.203.0 — the panel's hold point the plans below are made with: the planner's own (undefined) everywhere but the year sweeps of
+ *  S5–S8, which measure the standby's effect and keep their v1.202.0 counts on the planner with no hold point (onV1202: 0). The +1
+ *  itself is accounted on the same year, scales, figures and modes by reserveHoldPoint.test.ts, and in the figures regenerated for
+ *  it (S8 case by case). */
+let HOLD: number | undefined;
+/** Run `f` on the planner with no hold point (v1.202.0's lines), restoring the planner's own after. */
+const onV1202 = (f: () => void): void => { HOLD = 0; try { f(); } finally { HOLD = undefined; } };
 /** A year case planned with an optional scale, standby figure and line force-charge eligibility. */
 const yearPlan = (deps: NightChargeInputDeps, scale?: CushionPoolScale | null, w?: unknown, line?: boolean): StandbyPlan =>
   SB(computeNightChargePlan(buildNightChargeInputs({
@@ -77,7 +84,7 @@ const yearPlan = (deps: NightChargeInputDeps, scale?: CushionPoolScale | null, w
     ...(scale != null ? { cushionPoolScale: scale } : {}),
     ...(w !== undefined ? { cushionStandbyW: w } : {}),
     ...(line !== undefined ? { lineForceChargeEligible: line } : {}),
-  } as NightChargeInputDeps)));
+  } as NightChargeInputDeps), ...(HOLD !== undefined ? [HOLD] : [])));
 
 /** measuredCushionLine.test.ts's scenario: a 92.16 kWh pool, a 10% floor, 1.445 kW × 8 h × 1.5 ÷ 0.92 =
  *  18.85 kWh of cushion, 25% at 21:00, a 23:00–05:00 window, a 3.6 kW P90 house and no sun. */
@@ -94,15 +101,17 @@ const inputs = (o: Partial<NightChargeInputs> & { cushionStandbyW?: unknown } = 
   objectiveMode: 'resilience',
   ...o,
 } as NightChargeInputs);
-const plan = (o: Partial<NightChargeInputs> & { cushionStandbyW?: unknown } = {}): StandbyPlan => SB(computeNightChargePlan(inputs(o)));
+const plan = (o: Partial<NightChargeInputs> & { cushionStandbyW?: unknown } = {}): StandbyPlan => SB(computeNightChargePlan(inputs(o), ...(HOLD !== undefined ? [HOLD] : [])));
 const COST55 = { objectiveMode: 'cost', costMaxSocPct: 90, morningPvSurplusP50Kwh: 55, morningPvSurplusP90Kwh: 70, forceChargeEligible: true } as const;
 
 /* ══ S1 — the reference plant ═════════════════════════════════════════════════ */
 
-test('★★★ S1 THE REFERENCE PLANT: 2026-10-12 resilience at ×0.944 with 270 W — cushion 13.94 → 15.02, line 32.02 → 33.26, written 33 → 34', () => {
+// v1.203.0 — every write below that was the line's whole percent is that and one point more: the panel holds the pool one point under
+// a reserve it charged up to (PANEL_RESERVE_HOLD_UNDERSHOOT_PCT), so the pool it holds is the line's whole percent.
+test('★★★ S1 THE REFERENCE PLANT: 2026-10-12 resilience at ×0.944 with 270 W — cushion 13.94 → 15.02, line 32.02 → 33.26, written 34 → 35 (v1.203.0: the panel\'s point)', () => {
   const deps = caseOf('2026-10-12 resilience').deps;
   const before = yearPlan(deps, S944);
-  assert.deepEqual([before.cushionKwh, before.cushionLineSocPct, written(before)], [13.94, 32.02, 33]);
+  assert.deepEqual([before.cushionKwh, before.cushionLineSocPct, written(before)], [13.94, 32.02, 34]);
   // v1.202.0 — on the measured pool (v1.201.0's walks on nameplate: 23.38 and 25.22 kWh).
   assert.deepEqual([before.requiredExtraKwh, before.buyKwh, before.targetSocPct], [24.25, 26.16, 32]);
   assert.equal('cushionStandby' in before, false);
@@ -113,29 +122,31 @@ test('★★★ S1 THE REFERENCE PLANT: 2026-10-12 resilience at ×0.944 with 27
   assert.equal(p.cushionKwh, 15.02);
   // The line: 16 + 100 × 15.02 ÷ (92.16 × 0.944) = 16 + 1502 ÷ 86.99904 = 33.2647%.
   assert.equal(p.cushionLineSocPct, 33.26);
-  assert.equal(p.setpointSocPct, 34);
-  assert.equal(written(p), 34);
-  assert.equal(chargeReservePct(p), 34);
+  assert.equal(p.setpointSocPct, 35);
+  assert.equal(written(p), 35);
+  assert.equal(chargeReservePct(p), 35);
   assert.equal(floorCushionLinePct(p), 33.26, 'every surface states the one line');
-  // v1.202.0 — the walks drain the 270 W too, on the measured pool (v1.201.0: 24.3 and 26.22 kWh).
-  assert.deepEqual([p.requiredExtraKwh, p.buyKwh, p.targetSocPct, p.expectedWriteLevelPct], [26.42, 28.5, 33.3, 34]);
+  // v1.202.0 — the walks drain the 270 W too, on the measured pool (v1.201.0: 24.3 and 26.22 kWh). v1.203.0 — what is sized does not
+  // move; the expected walk runs to the 35% write.
+  assert.deepEqual([p.requiredExtraKwh, p.buyKwh, p.targetSocPct, p.expectedWriteLevelPct], [26.42, 28.5, 33.3, 35]);
   assert.equal(p.cushionShortfall, false);
-  // The write holds the whole cushion on the measured capacity: (34 − 16)% × 86.999 = 15.66 ≥ 15.02 kWh,
-  // 4.17 h at k·L + 270 W = 2.62 × 1.25 ÷ 0.94 + 0.27 = 3.754 kW (3.94 h before: 17% × 86.999 = 14.79).
+  // The pool the panel holds under the 35% write, 34%, holds the whole cushion on the measured capacity: (34 − 16)% × 86.999 =
+  // 15.66 ≥ 15.02 kWh, 4.17 h at k·L + 270 W = 2.62 × 1.25 ÷ 0.94 + 0.27 = 3.754 kW. v1.202.0's 34% write held 33%: 17% × 86.999 =
+  // 14.79 kWh, 3.94 h — under the cushion it was sized on, as the 08-31…09-17 charge-ups closed (11 of 11 at R − 1).
   const drainKw = (2.62 * 1.25) / 0.94 + 0.27;
-  const held = ((34 - 16) / 100) * MEASURED_KWH;
-  const heldBefore = ((33 - 16) / 100) * MEASURED_KWH;
+  const held = ((35 - 1 - 16) / 100) * MEASURED_KWH;
+  const heldBefore = ((34 - 1 - 16) / 100) * MEASURED_KWH;
   assert.ok(held >= 15.02 && heldBefore < 15.02, `${held} / ${heldBefore}`);
   assert.deepEqual([Math.round((held / drainKw) * 100) / 100, Math.round((heldBefore / drainKw) * 100) / 100], [4.17, 3.94]);
   // The rationale states the figure as the runway's, as part of what the line is sized on (R6) — as printed.
   assert.ok(p.rationale.includes("the 16% reserve floor plus 4 h of islanded backup load (15 kWh, 1.1 kWh of it the runway's 270 W standby figure, 17.3% of the packs' measured capacity at ×0.944 of nameplate)"), p.rationale);
-  assert.match(p.rationale, / The reserve is set to 34% \(the resilience requirement\)\. /);
+  assert.match(p.rationale, / The reserve is set to 35% \(the resilience requirement: one point above the 33\.26% outage line's whole percent, since the panel holds the pool one point under a reserve it charges up to\)\. /);
 
-  // On nameplate (the live basis while no pack ratio has been measured): 31.13 → 32.30, written 32 → 33.
+  // On nameplate (the live basis while no pack ratio has been measured): 31.13 → 32.30, written 33 → 34 (v1.203.0: 32 → 33 before).
   const np0 = yearPlan(deps);
   const np = yearPlan(deps, null, 270);
-  assert.deepEqual([np0.cushionLineSocPct, written(np0)], [31.13, 32]);
-  assert.deepEqual([np.cushionKwh, np.cushionLineSocPct, written(np)], [15.02, 32.3, 33]);
+  assert.deepEqual([np0.cushionLineSocPct, written(np0)], [31.13, 33]);
+  assert.deepEqual([np.cushionKwh, np.cushionLineSocPct, written(np)], [15.02, 32.3, 34]);
   assert.ok(np.rationale.includes("plus 4 h of islanded backup load (15 kWh, 1.1 kWh of it the runway's 270 W standby figure)"), np.rationale);
   assert.doesNotMatch(np.rationale, /measured capacity/);
 });
@@ -343,6 +354,8 @@ function sweepW(
 }
 
 test('★★★ S5 MONOTONE — on the year, w = 0…1500 in 30 W steps on both bases: line, setpoint, write, requirement, worst-case buy and cost ceiling never fall as w rises; expected buy, write level and target SoC never fall below the w = 0 plan', () => {
+  // v1.203.0 — on the planner with no hold point: this test measures the standby's effect (see HOLD).
+  onV1202(() => {
   const out = sweepW(CASES, [null, S944]);
   assert.ok(out.plans > 70_000, `${out.plans} plans`);
   assert.deepEqual(out.underW0, [], 'nothing under the w = 0 plan (no line force-charge eligibility passed)');
@@ -357,6 +370,7 @@ test('★★★ S5 MONOTONE — on the year, w = 0…1500 in 30 W steps on both 
   assert.deepEqual([a.expectedBuyKwh, b.expectedBuyKwh], PIN_S5_FALL.expected);
   assert.ok(b.cushionLineSocPct! > a.cushionLineSocPct! && b.buyKwh! >= a.buyKwh!);
   assert.ok(b.expectedBuyKwh! >= yearPlan(deps, S944, 0).expectedBuyKwh!, 'never under the w = 0 plan');
+  });
 });
 
 /** v1.202.0 — re-measured with the walks on the measured pool and draining w (the figures below are v1.202.0's; the
@@ -380,6 +394,8 @@ const PIN_S5_LINE = {
 };
 
 test('★★★ S5 LINE NIGHTS — with line force-charge eligibility (a write mode) the monotone set holds as w rises; the expected buy and its write level are ≥ the w = 0 plan except on carried line nights, as measured', () => {
+  // v1.203.0 — on the planner with no hold point: this test measures the standby's effect (see HOLD).
+  onV1202(() => {
   // Eligibility moves only a plan whose line is above the envelope (carried or disclosed): every other plan is the
   // S5 plan byte for byte (I-A0 / I-A1), checked here at both ends of the sweep. A line that qualifies at some figure
   // qualifies at 1500 W (the line only rises, no charge night holds), so the sweep takes the cases that do.
@@ -457,6 +473,7 @@ test('★★★ S5 LINE NIGHTS — with line force-charge eligibility (a write m
   assert.deepEqual([x16.expectedBuyKwh, y16.expectedBuyKwh], PIN_S5_LINE.example16.expectedBuyKwh);
   assert.deepEqual([x16.expectedWriteLevelPct, y16.expectedWriteLevelPct], PIN_S5_LINE.example16.expectedWriteLevelPct);
   assert.deepEqual([x16.forceChargeLine != null, y16.forceChargeLine != null, x16.cushionEnvelopeReason ?? null, y16.cushionEnvelopeReason], [true, true, null, 'nearFull'], 'still armed past an ask of 90, and disclosed');
+  });
 });
 
 /** Measured (v1.201.0 review): where the standby lifts the line past 100% of the pool. v1.202.0 — re-measured with the
@@ -586,6 +603,8 @@ const PIN_S6_COST = {
 };
 
 test('★★★ S6 SCOPE — on the year, a cost night whose cost ceiling is at or above ⌈the new line⌉ writes what it did (v1.202.0: or more, where its de-bias falls away) and buys no less; one between the line and ⌈line⌉ writes ⌈line⌉', () => {
+  // v1.203.0 — on the planner with no hold point: this test measures the standby's effect (see HOLD).
+  onV1202(() => {
   const rose: Record<'m' | 'np', string[]> = { m: [], np: [] };
   for (const [name, scale] of [['m', S944], ['np', null]] as const) {
     let atOrAbove = 0;
@@ -620,6 +639,7 @@ test('★★★ S6 SCOPE — on the year, a cost night whose cost ceiling is at 
   assert.deepEqual([b.cushionLineSocPct, p.cushionLineSocPct], E.line);
   assert.deepEqual([written(b), written(p)], E.written);
   assert.deepEqual([b.buyKwh, p.buyKwh], E.buyKwh);
+  });
 });
 
 test('★★★ S6 (I-B3, the tripwire) — the standby is divided by the scale with the load leg, once: line = floor + 100 · cushion ÷ (pool · s) on every islanded row', () => {
@@ -660,6 +680,8 @@ test('★★★ S6 (I-B3, the tripwire) — the standby is divided by the scale 
 const PIN_S7_HOLD = { label: '2026-10-25 21:30', buyKwh: 2.02 };
 
 test('★★ S7 AGREEMENT — a hold whose pack at the close sits between the two lines charges; a charge-bound night that held the old line discloses a shortfall and still writes the line', () => {
+  // v1.203.0 — on the planner with no hold point: this test measures the standby's effect (see HOLD).
+  onV1202(() => {
   const deps = caseOf(PIN_S7_HOLD.label).deps;
   const before = yearPlan(deps, S944);
   const p = yearPlan(deps, S944, 270);
@@ -688,6 +710,7 @@ test('★★ S7 AGREEMENT — a hold whose pack at the close sits between the tw
     assert.ok(written(q)! >= Math.min(RESERVE_WRITE_MAX_PCT, Math.ceil(q.cushionLineSocPct! - 0.005 - 1e-9)), `${c.label}: line ${q.cushionLineSocPct}, written ${written(q)}`);
   }
   assert.ok(n >= 250, `${n} nights`);
+  });
 });
 
 test('★★ S7 LEGS — the backup leg asks more against the higher line; the mid-day T_mid line term is ⌈the new line⌉; the re-entry line is not a cushion', () => {
@@ -751,6 +774,8 @@ const PIN_S8_LIVE = {
 };
 
 test('★★★ S8 THE YEAR at (0.944, 270) and (nameplate, 270) against v1.200.1: nothing written or sized falls, the counts as measured; A\'s carrier holds (rest = 0)', () => {
+  // v1.203.0 — on the planner with no hold point: this test measures the standby's effect (see HOLD).
+  onV1202(() => {
   // v1.202.0 — against the same plan with no figure (the walks then drain none): the line, a charge night's setpoint and
   // write, the requirement, the worst-case buy and the cost ceiling never fall; the walks' disclosures (the expected buy,
   // its level, the arrival) and a hold's no-buy setpoint may, counted (`soft`); a shortfall can vanish only where A's
@@ -805,9 +830,12 @@ test('★★★ S8 THE YEAR at (0.944, 270) and (nameplate, 270) against v1.200.
     assert.equal(carrier.rest, 0, `${name}: an over-envelope line neither carried nor disclosed`);
     assert.deepEqual(carrier, PIN_S8_CARRIER[name], `${name}: the carrier's counts`);
   }
+  });
 });
 
 test('★★★ S8 THE YEAR in a write mode and in advisory mode (eligibility true / false): nothing written or sized falls either, the counts as measured', () => {
+  // v1.203.0 — on the planner with no hold point: this test measures the standby's effect (see HOLD).
+  onV1202(() => {
   for (const [state, line] of [['on', true], ['off', false]] as const) {
     for (const [name, scale] of [['m', S944], ['np', null]] as const) {
       const k = { writtenUp: 0, shortfallOn: 0, holdToCharge: 0, chargeToHold: 0, carried: [0, 0], carryDropped: 0, soft: {} as Record<string, number>, reCarried: 0 };
@@ -837,6 +865,7 @@ test('★★★ S8 THE YEAR in a write mode and in advisory mode (eligibility tr
       assert.deepEqual(k, PIN_S8_LIVE[state][name], `${state} ${name}: the year's counts`);
     }
   }
+  });
 });
 
 /** Measured on v1.200.1 (v1.201.0): the year's line nights (an ask above the 50% reserve: armed, or disclosed unarmed)
@@ -868,6 +897,8 @@ const PIN_S8_MODES = {
 };
 
 test('★★★ S8 THE LINE NIGHTS by mode: more nights carry a line above 50 at 270 W; none is left undisclosed under its line; the closes and expected buys that fall, counted', () => {
+  // v1.203.0 — on the planner with no hold point: this test measures the standby's effect (see HOLD).
+  onV1202(() => {
   const gate = (d: NightChargeInputDeps) => d.objectiveMode === 'cost' && (d.costMaxSocPct ?? 90) > 50;
   const STATES: Record<keyof typeof PIN_S8_MODES, (d: NightChargeInputDeps) => NightChargeInputDeps> = {
     write: (d) => ({ ...d, lineForceChargeEligible: true, forceChargeEligible: gate(d) }) as NightChargeInputDeps,
@@ -906,6 +937,7 @@ test('★★★ S8 THE LINE NIGHTS by mode: more nights carry a line above 50 at
       assert.equal(k.undisclosed[1], 0, `${state} ${name}: a line night under its line with nothing disclosed`);
     }
   }
+  });
 });
 
 test('★★★ S8 THE YEAR, case by case: the figures as measured (cushionStandby.figures.json)', () => {
@@ -924,7 +956,8 @@ test('★★★ S8 THE YEAR, case by case: the figures as measured (cushionStand
     assert.deepEqual(moved.map((l) => [l, pinned.figures[l], got[l]]).slice(0, 5), [], `${name}: ${moved.length} case(s) moved`);
   }
   // Spot one by hand: the reference night at (0.944, 270).
-  assert.deepEqual(FIGURES.sets.m270.figures['2026-10-12 resilience'].slice(0, 4), [1, 33.26, 34, 34]);
+  // v1.203.0 — written 35: the 33.26% line's whole percent and the panel's point (34 on v1.202.0).
+  assert.deepEqual(FIGURES.sets.m270.figures['2026-10-12 resilience'].slice(0, 4), [1, 33.26, 35, 35]);
   assert.deepEqual(figuresOf(yearPlan(caseOf('2026-10-12 resilience').deps, S944, 270)), FIGURES.sets.m270.figures['2026-10-12 resilience']);
 });
 

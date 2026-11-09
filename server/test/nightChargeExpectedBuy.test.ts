@@ -961,8 +961,8 @@ test('★★ the rationale names the worst-case arrival once, in the sizing sent
   // window, not on the test the plan is sized on (the pack at the window close against the 27.5%
   // line: 16% of 92.16 + 8 h × 1.0 kW × 1.25 / 0.94 = 25.38 kWh, no walk, so the charge leg does not
   // move it). The write is now that line, to the whole percent above it, so nothing is truncated
-  // (setpointOneTest.test.ts).
-  assert.match(resilience8().rationale, / The reserve is set to 28% \(the resilience requirement\)\. /);
+  // (setpointOneTest.test.ts). v1.203.0 — and one point more (29%): the panel holds a point under a reserve it charged up to.
+  assert.match(resilience8().rationale, / The reserve is set to 29% \(the resilience requirement: one point above the 27\.55% outage line's whole percent, since the panel holds the pool one point under a reserve it charges up to\)\. /);
   assert.doesNotMatch(resilience8().rationale, /asks for/);
 });
 
@@ -1170,7 +1170,8 @@ test('★★ the card labels the worst-case arrival and the island troughs as wh
   assert.doesNotMatch(card, /label="Expected SoC"|label="Trough with(out)? buy"/);
   assert.match(card, /label="Worst-case arrival"\n\s+value=\{fmtSoc\(plan\.targetSocPct\)\}/);
   assert.match(card, /\[\n\s+'sizing basis',\n/);
-  assert.match(card, /<Stat label="Island low, no charge" value=\{fmtSoc\(plan\.baselineMinSocPct\)\} sub="if the grid were lost · P10 PV \/ P90 load" \/>/);
+  // v1.203.0 — a cushion-only plan's island low is a no-PV walk, and says so.
+  assert.match(card, /<Stat label="Island low, no charge" value=\{fmtSoc\(plan\.baselineMinSocPct\)\} sub=\{plan\.cushionOnly != null \? 'if the grid were lost · no PV \/ P90 load' : 'if the grid were lost · P10 PV \/ P90 load'\} \/>/);
   assert.match(card, /<Stat label="Island low, with charge" value=\{fmtSoc\(plan\.minProjSocPct\)\} sub=\{`if the grid were lost · floor\+cushion/);
 });
 
@@ -1275,9 +1276,10 @@ test('★★★ every night expected to charge nothing: no "~0 kWh", "about 0" o
     const texts = Object.fromEntries(nightTexts(p));
     // v1.196.0 — the reserve each night writes (chargeReservePct): 50% on the two cost nights, 28%
     // on the resilience night, which writes its 27.6% line to the whole percent above it — it held
-    // 50% only because its setpoint was solved on the whole-house walk (setpointOneTest.test.ts).
+    // 50% only because its setpoint was solved on the whole-house walk (setpointOneTest.test.ts). v1.203.0 — 29%: the line's
+    // whole percent and the point the panel holds under a reserve it charged up to.
     const r = chargeReservePct(p)!;
-    assert.equal(r, name === 'resilience 8 h, 60%' ? 28 : 50, name);
+    assert.equal(r, name === 'resilience 8 h, 60%' ? 29 : 50, name);
     assert.equal(texts['push title'], `Night-charge: reserve held at ${r}% tonight — no charge expected`, name);
     assert.ok(texts['push body'].startsWith(`Holding the backup reserve at ${r}% overnight as a floor; no charge is expected — the pool should open the window near ~`), `${name}: ${texts['push body']}`);
     assert.match(texts['spoken en'], new RegExp(`^Night charge notice\\. The backup reserve will be held at ${r} percent in the charge window that opens on Monday at 00:00; no charge is expected\\. `), name);
@@ -1299,7 +1301,7 @@ test('★★★ every night expected to charge nothing: no "~0 kWh", "about 0" o
   // The resilience night writes the line it is sized on, to the whole percent above it (v1.196.0:
   // it wrote the clamped whole-house walk, > 50), and states that line.
   const res = heldResilience();
-  assert.equal(res.setpointSocPct, 28);
+  assert.equal(res.setpointSocPct, 29, 'v1.203.0: the line\'s whole percent and the panel\'s point');
   assert.equal(res.cushionLineSocPct, 27.55);
   assert.match(Object.fromEntries(nightTexts(res))['push body'], /the floor\+cushion line is 27\.6%\./);
 });
