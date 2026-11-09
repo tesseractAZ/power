@@ -655,9 +655,9 @@ test('★★ the log line names the basis and the scale; unavailable and never-m
   assert.equal(cushionScaleLogText({ scale: 0.95, basis: 'held', connectedCores: 3 }),
     "night-charge: night-charge plans count the pool and the outage-cushion line on the packs' measured capacity, ×0.950 of nameplate (held, 3 connected Core(s))");
   assert.equal(cushionScaleLogText({ scale: 1, basis: 'nameplate', connectedCores: 3 }),
-    'night-charge: night-charge plans count the pool and the outage-cushion line on nameplate — no pack capacity ratio has been measured yet (3 connected Core(s))');
+    'night-charge: night-charge plans count the pool and the outage-cushion line on nameplate — no pack capacity ratio has been measured yet (3 connected Core(s)); a cushion-only plan counts them on the capacity floor instead');
   assert.equal(cushionScaleLogText(null),
-    "night-charge: the packs' measured capacity is unavailable (capacity tracker error) — night-charge plans count the pool and the outage-cushion line on nameplate");
+    "night-charge: the packs' measured capacity is unavailable (capacity tracker error) — night-charge plans count the pool and the outage-cushion line on nameplate; a cushion-only plan counts them on the capacity floor instead");
 });
 
 /** The reference fleet: a panel with three connected Cores of five packs each at `ratio`. */

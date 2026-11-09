@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  buildNightChargeInputs, computeNightChargePlan, eveningBasisDefers, cushionOnlyText, gapAfterWindowText, sizingBasisText,
+  buildNightChargeInputs, computeNightChargePlan, eveningBasisDefers, cushionOnlyText, cushionOnlyFills, gapAfterWindowText, sizingBasisText,
   NO_PV_WORST_CASE_BASIS, NIGHT_PLAN_STALE_DEFER_UNTIL_MIN, LONG_GAP_MS,
   type NightChargeInputDeps, type NightChargePlan,
 } from '../src/nightChargeAdvisor.js';
@@ -392,6 +392,7 @@ const shapes = (): Array<[string, NightChargePlan, NightChargeInputDeps]> => {
 test('★★★ T9 THE TEXTS: rationale, push and card on every cushion-only shape — the disclosure always, "no PV" never "P10 PV", no confidence tier, the basis sentence; server and card word for word', () => {
   for (const [name, p, d] of shapes()) {
     assert.ok(p.cushionOnly != null, name);
+    assert.equal(cushionOnlyFills(p.cushionOnly!, p), false, `${name}: no long-gap fill`);
     const tail = cushionOnlyText(p.cushionOnly!, p as never);
     assert.ok(p.rationale.endsWith(tail), `${name}: the rationale closes with the disclosure`);
     assert.match(tail, /^ OUTAGE CUSHION ONLY; NO SOLAR BASIS: the solar basis is refused \(only 0 scored calibration day\(s\), need 4 [^]*\), so this plan is sized only to hold the outage cushion at the window close — no solar is credited, no solar calibration is used, and no cost target or mid-day charge is planned\./);
@@ -435,7 +436,12 @@ test('★★★ T9 THE TEXTS: rationale, push and card on every cushion-only sha
 
 test('★★ T9 the card\'s stats name the basis, not a confidence tier, and the island low credits no PV (source pins)', () => {
   const card = readFileSync(resolve(HERE, '../../web/src/cards/NightChargeCard.tsx'), 'utf8');
-  assert.ok(card.includes("        {plan.cushionOnly != null\n          ? <Stat label=\"Basis\" value=\"cushion only\" sub={ws && we ? `no solar basis · ${ws}–${we}` : 'no solar basis'} />\n          : <Stat label=\"Confidence\""));
+  assert.ok(card.includes("        {plan.cushionOnly != null\n          ? <Stat label=\"Basis\" value={cushionOnlyBasisValue(plan.cushionOnly, plan)} sub={ws && we ? `no solar basis · ${ws}–${we}` : 'no solar basis'} />\n          : <Stat label=\"Confidence\""));
+  // The value: the cushion only, or on the long-gap fill the cushion and the fill (never "cushion only" of a night that fills).
+  const co = { longGapAfter: true };
+  assert.equal(web.cushionOnlyBasisValue({ longGapAfter: false }, { longGapAhead: false, costCeilingSocPct: null }), 'cushion only');
+  assert.equal(web.cushionOnlyBasisValue(co, { longGapAhead: undefined, costCeilingSocPct: null }), 'cushion only', 'a resilience-mode long gap holds the cushion only');
+  assert.equal(web.cushionOnlyBasisValue(co, { longGapAhead: true, costCeilingSocPct: 90 }), 'cushion + long-gap fill');
   assert.ok(card.includes("sub={plan.cushionOnly != null ? 'if the grid were lost · no PV / P90 load' : 'if the grid were lost · P10 PV / P90 load'}"));
 });
 
@@ -444,6 +450,9 @@ test('★★ T9 the card\'s stats name the basis, not a confidence tier, and the
 test('★★★ T11 the flag is passed once, on the live overnight plan alone: never a shadow leg, never advisory mode, never a stale panel', () => {
   assert.equal(INDEX.split('cushionOnlyEligible:').length - 1, 1);
   assert.ok(INDEX.includes('    cushionOnlyEligible: shadowLeg == null && lineForceChargeOn(legRole) && panel.fresh,\n'));
+  // The log line, on change only: the long-gap fill named, never "the outage cushion only" of a night that fills.
+  assert.ok(INDEX.includes("tonight's plan is sized on the outage cushion at the window close${coFills ? ' and the long-gap fill' : ' alone'}, with no solar credited`"));
+  assert.ok(INDEX.includes('    const coFills = plan.cushionOnly != null && cushionOnlyFills(plan.cushionOnly, plan);\n'));
   // advisory: lineForceChargeOn is the write mode's gate.
   assert.ok(INDEX.includes("const lineForceChargeOn = (role: ChargeLegRole = 'cost'): boolean => legForceChargeEligible(role, lineForceChargeEnabled({ mode: NIGHT_CHARGE_MODE }));"));
 });
@@ -511,9 +520,23 @@ test('★★★ T15 FRIDAY: before a gap of more than a day after its window, a 
       assert.equal(p.costCeilingSocPct, deps.costMaxSocPct ?? 90, `${c.label}: the owner's ceiling, no solar headroom`);
       assert.equal(p.costCeilingSurplusBasis, 'none');
       assert.ok(p.rationale.includes(`Before the gap (${gapAfterWindowText(p.cushionOnly.gapAfterMs)}) tonight's cost target is the long-gap fill: the ${p.costCeilingSocPct}% state-of-charge ceiling, with the solar headroom set aside.`), p.rationale);
+      // Sized on the cushion AND the fill: no text of it says "outage cushion only" or "sized only to hold the outage cushion".
+      assert.equal(cushionOnlyFills(p.cushionOnly, p), true, c.label);
+      const tail = cushionOnlyText(p.cushionOnly, p as never);
+      assert.ok(p.rationale.endsWith(tail) && tail.startsWith(` NO SOLAR BASIS; THE OUTAGE CUSHION AND THE LONG-GAP FILL: the solar basis is refused (${p.cushionOnly.refusedBy}), so this plan is sized only on the outage cushion at the window close and, before the gap, the long-gap fill — no solar is credited, no solar calibration is used, and no mid-day charge is planned. Before the gap (`), tail);
+      assert.equal(web.cushionOnlyCardText(p.cushionOnly as never, p as never), tail, `${c.label}: the card word for word`);
+      assert.doesNotMatch(p.rationale, /OUTAGE CUSHION ONLY|sized only to hold the outage cushion/, c.label);
+      for (const shape of p.chargeTonight ? ['charge'] as const : ['hold'] as const) {
+        const m = buildNightChargeMessage(p, shape, p.chargeTonight ? { cancelDeadlineText: 'at 11:00 PM', targetPct: written(p) ?? 50 } : null);
+        assert.doesNotMatch(`${m.title} ${m.body}`, /[Oo]utage cushion only/, `${c.label}: ${m.title} ${m.body}`);
+        assert.ok(m.body.includes(`No solar basis (${p.cushionOnly.refusedBy})`), m.body);
+        if (p.chargeTonight) assert.ok(m.title.endsWith(' — no solar basis, long-gap fill'), m.title);
+      }
       if (p.chargeTonight) {
         const body = buildNightChargeMessage(p, 'charge', null).body;
         assert.ok(body.includes('with no solar credited and no cost target but the long-gap fill.') && body.includes(`Before the gap (${gapAfterWindowText(p.cushionOnly.gapAfterMs)}) the cost target is the long-gap fill: the ${p.costCeilingSocPct}% state-of-charge ceiling, with the solar headroom set aside.`), body);
+        const refused = buildNightChargeMessage(p, 'charge', null, 'the 2026-10-11 reserve write is still applied and not yet restored').body;
+        assert.ok(refused.includes(` No solar basis (${p.cushionOnly.refusedBy}). Before the gap (`) && !/[Oo]utage cushion only/.test(refused), refused);
       }
       if (p.chargeTonight && p.window != null) {
         const a = armFromPlan(emptyActuationState(), c.label, p, deps.nowMs, deps.reserveFloorPct, costGate(c.deps), nextOnPeakStartMs(MODEL, p.window.startMs), true);
@@ -524,6 +547,9 @@ test('★★★ T15 FRIDAY: before a gap of more than a day after its window, a 
       assert.equal(i.objectiveMode, 'resilience');
       assert.equal(p.costCeilingSocPct ?? null, null);
       assert.ok(p.rationale.includes('; the cushion is sized for this window\'s close only, and no long-gap fill runs in resilience mode.'), p.rationale);
+      // No fill: the cushion only, said so.
+      assert.equal(cushionOnlyFills(p.cushionOnly, p), false, c.label);
+      assert.ok(p.rationale.includes(' OUTAGE CUSHION ONLY; NO SOLAR BASIS: '), c.label);
     }
   }
   assert.deepEqual({ costFill, resilience, thursday }, PIN_T15);

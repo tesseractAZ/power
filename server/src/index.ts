@@ -331,7 +331,7 @@ import {
   nextForceChargeOpenMs, withLiveTrailing, MISSED_APPLY_FALLBACK_REASON,
   type ChargeCycleState, type ChargeLegState,
 } from './chargeCycle.js';
-import { parsePersistedIslandedLoad, eveningBasisDefers } from './nightChargeAdvisor.js';
+import { parsePersistedIslandedLoad, eveningBasisDefers, cushionOnlyFills } from './nightChargeAdvisor.js';
 // v1.191.0 (S6) — the night-charge schedule of the tariff in effect (the APS constants on the preset).
 import { nightScheduleOf, nightScheduleLogLine, nightScheduleRepairIssues, fmtMinuteOfDay, type NightSchedule } from './nightSchedule.js';
 import { tariffModelFromEnv, legacyTariffFromEnv, resolveTariffFromEnv, rateOptionsHint, tariffRepairIssues, rateAt, localParts, seasonAt, cheapPeriodIdOf, APS_PERIOD } from './tariff.js';
@@ -4162,11 +4162,13 @@ async function recomputeNightChargePlan(
   }
   // v1.203.0 — the live overnight plan's fallback, logged on change only: made (its solar refusal), or refused (why).
   if (!shadowLeg) {
-    const coKey = plan.cushionOnly != null ? `co:${plan.cushionOnly.refusedBy}`
+    // (A plan on the long-gap fill is sized on the cushion and the fill: cushionOnlyFills, its own key.)
+    const coFills = plan.cushionOnly != null && cushionOnlyFills(plan.cushionOnly, plan);
+    const coKey = plan.cushionOnly != null ? `co:${coFills ? 'fill:' : ''}${plan.cushionOnly.refusedBy}`
       : plan.basisBlockedBy != null && plan.basisBlockedBy.includes('; no cushion-only plan: ') ? `no:${plan.basisBlockedBy}` : 'none';
     if (coKey !== lastLoggedCushionOnlyKey) {
       lastLoggedCushionOnlyKey = coKey;
-      if (plan.cushionOnly != null) app.log.info(`night-charge: the solar basis is refused (${plan.cushionOnly.refusedBy}) — tonight's plan holds the outage cushion only, with no solar credited`);
+      if (plan.cushionOnly != null) app.log.info(`night-charge: the solar basis is refused (${plan.cushionOnly.refusedBy}) — tonight's plan is sized on the outage cushion at the window close${coFills ? ' and the long-gap fill' : ' alone'}, with no solar credited`);
       else if (coKey.startsWith('no:')) app.log.info(`night-charge: no cushion-only plan — ${plan.basisBlockedBy!.slice(plan.basisBlockedBy!.indexOf('; no cushion-only plan: ') + '; no cushion-only plan: '.length)}`);
     }
   }

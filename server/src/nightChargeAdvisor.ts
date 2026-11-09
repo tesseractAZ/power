@@ -1809,9 +1809,23 @@ export function gapAfterWindowText(gapAfterMs: number | null): string {
 }
 
 /**
+ * ★★★ v1.203.0 — PURE. A cushion-only plan that takes the LONG-GAP FILL: cost mode, before a gap of more than a day after its
+ * window (Friday's 1 h window before Monday), its cost target the ARB_COST_MAX_SOC_PCT ceiling with the solar headroom set aside.
+ * Such a plan is sized on the cushion AND the fill, so no text of it says "outage cushion only" (the rationale, the push, the card,
+ * the log). The card mirrors it (web/src/cards/nightChargeText.ts cushionOnlyFillsCard).
+ */
+export function cushionOnlyFills(
+  co: Pick<CushionOnlyBasis, 'longGapAfter'>,
+  plan: { longGapAhead?: boolean | null; costCeilingSocPct?: number | null },
+): boolean {
+  return co.longGapAfter && plan.longGapAhead === true && plan.costCeilingSocPct != null;
+}
+
+/**
  * ★★★ v1.203.0 — PURE. A cushion-only plan's closing disclosure (computeNightChargePlan), true in every outcome a sized plan has:
  *  - what it is: the solar basis is refused (its words), so the plan is sized only to hold the outage cushion at the window close
  *    — sized, not held: a night the charge rate or an EV cannot carry keeps its "toward" headline and its caps note beside this;
+ *    on the long-gap fill (cushionOnlyFills) sized only on that cushion and the fill, never "outage cushion only";
  *  - what it is not: no solar credited, no solar calibration used, no mid-day charge planned, and no cost target but the long-gap
  *    fill's;
  *  - before a gap of more than a day after this window (Friday's 1 h window before Monday), the gap as fact; in cost mode the
@@ -1823,10 +1837,14 @@ export function cushionOnlyText(
   co: CushionOnlyBasis,
   plan: Pick<NightChargePlan, 'objective' | 'costCeilingSocPct'> & { longGapAhead?: boolean },
 ): string {
-  const costFill = co.longGapAfter && plan.longGapAhead === true && plan.costCeilingSocPct != null;
-  const head = ` OUTAGE CUSHION ONLY; NO SOLAR BASIS: the solar basis is refused (${co.refusedBy}), `
-    + 'so this plan is sized only to hold the outage cushion at the window close — no solar is credited, no solar calibration is used, '
-    + (costFill ? 'and no mid-day charge is planned.' : 'and no cost target or mid-day charge is planned.');
+  const costFill = cushionOnlyFills(co, plan);
+  const head = costFill
+    ? ` NO SOLAR BASIS; THE OUTAGE CUSHION AND THE LONG-GAP FILL: the solar basis is refused (${co.refusedBy}), `
+      + 'so this plan is sized only on the outage cushion at the window close and, before the gap, the long-gap fill — no solar is credited, '
+      + 'no solar calibration is used, and no mid-day charge is planned.'
+    : ` OUTAGE CUSHION ONLY; NO SOLAR BASIS: the solar basis is refused (${co.refusedBy}), `
+      + 'so this plan is sized only to hold the outage cushion at the window close — no solar is credited, no solar calibration is used, '
+      + 'and no cost target or mid-day charge is planned.';
   const gap = !co.longGapAfter ? ''
     : costFill
       ? ` Before the gap (${gapAfterWindowText(co.gapAfterMs)}) tonight's cost target is the long-gap fill: the ${round1(plan.costCeilingSocPct!)}% state-of-charge ceiling, with the solar headroom set aside.`
@@ -5136,12 +5154,14 @@ export function lineForceChargeLedgerColumns(
  *  v1.202.0 — the basis of the plan's pool (plannerPoolKwh), which the line is counted on: a rule for the plans that
  *  are sized, never a plan (a refused plan counts no pool). */
 export function cushionScaleLogText(s: (CushionPoolScale & { connectedCores?: number }) | null): string {
+  // v1.203.0 — with no ratio known a cushion-only plan counts them on the capacity floor instead (buildNightChargeInputs), said so.
+  const coFloor = '; a cushion-only plan counts them on the capacity floor instead';
   if (s == null) {
-    return "night-charge: the packs' measured capacity is unavailable (capacity tracker error) — night-charge plans count the pool and the outage-cushion line on nameplate";
+    return `night-charge: the packs' measured capacity is unavailable (capacity tracker error) — night-charge plans count the pool and the outage-cushion line on nameplate${coFloor}`;
   }
   const cores = s.connectedCores != null ? `, ${s.connectedCores} connected Core(s)` : '';
   if (s.basis === 'nameplate') {
-    return `night-charge: night-charge plans count the pool and the outage-cushion line on nameplate — no pack capacity ratio has been measured yet${cores ? ` (${cores.slice(2)})` : ''}`;
+    return `night-charge: night-charge plans count the pool and the outage-cushion line on nameplate — no pack capacity ratio has been measured yet${cores ? ` (${cores.slice(2)})` : ''}${coFloor}`;
   }
   return `night-charge: night-charge plans count the pool and the outage-cushion line on the packs' measured capacity, ×${s.scale.toFixed(3)} of nameplate (${s.basis}${cores})`;
 }

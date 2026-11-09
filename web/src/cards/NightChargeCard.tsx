@@ -3,7 +3,7 @@ import {
   actuationBannerState, actuationBannerVisible, actuationKey, cancelOutcome, cancelRequestInit, chargeFigureParts, floorCushionLinePct, fmtLinePct,
   holdSummary, noChargeExpected, noPlanText, refusedArmLead, reserveWriteLabel, sizingLine, startClosedLead, withConfirmedCancel, writeStands,
   capsShortfallShown, outageLineRow, lineNotHeldOfCard,
-  writtenReservePct, middayShadowView, type MiddayShadowStatus, type MiddayShadowPreviewStatus, type CushionOnlyText,
+  writtenReservePct, middayShadowView, cushionOnlyBasisValue, type MiddayShadowStatus, type MiddayShadowPreviewStatus, type CushionOnlyText,
 } from './nightChargeText';
 import { apiUrl } from '../api';
 import { fmtHHMMIn } from '../siteTime';
@@ -98,6 +98,7 @@ interface NightChargePlan {
   /** v1.203.0 — a cushion-only plan (the server's NightChargePlan.cushionOnly): its basis instead of a confidence tier. */
   cushionOnly?: CushionOnlyText | null;
   longGapAhead?: boolean | null;
+  costCeilingSocPct?: number | null;
   confidenceTier: 'forecast' | 'mixed' | 'climatology';
   window: { startMs: number; endMs: number } | null;
   reserveFloorPct: number;
@@ -435,7 +436,7 @@ export const NightChargeCard = memo(function NightChargeCard() {
         />
         {/* v1.203.0 — a cushion-only plan reads no forecast PV, so it states its basis, not a confidence tier. */}
         {plan.cushionOnly != null
-          ? <Stat label="Basis" value="cushion only" sub={ws && we ? `no solar basis · ${ws}–${we}` : 'no solar basis'} />
+          ? <Stat label="Basis" value={cushionOnlyBasisValue(plan.cushionOnly, plan)} sub={ws && we ? `no solar basis · ${ws}–${we}` : 'no solar basis'} />
           : <Stat label="Confidence" value={plan.confidenceTier} sub={ws && we ? `${ws}–${we}` : undefined} />}
       </div>
 

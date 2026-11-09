@@ -451,6 +451,24 @@ export function gapAfterWindowCardText(gapAfterMs: number | null): string {
     : `the next charge window opens ~${Math.round(gapAfterMs / 3_600_000)} h after this one closes`;
 }
 
+/** v1.203.0 — the server's cushionOnlyFills (nightChargeAdvisor.ts), mirrored: a cushion-only plan on the long-gap fill (cost mode,
+ *  before a gap of more than a day after its window), sized on the cushion and the fill, so never called "cushion only". */
+export function cushionOnlyFillsCard(
+  co: Pick<CushionOnlyText, 'longGapAfter'>,
+  plan: { costCeilingSocPct?: number | null; longGapAhead?: boolean | null },
+): boolean {
+  return co.longGapAfter && plan.longGapAhead === true && plan.costCeilingSocPct != null;
+}
+
+/** v1.203.0 — the card's Basis stat on a cushion-only plan (in place of the confidence tier): the cushion only, or on the long-gap
+ *  fill the cushion and the fill. */
+export function cushionOnlyBasisValue(
+  co: Pick<CushionOnlyText, 'longGapAfter'>,
+  plan: { costCeilingSocPct?: number | null; longGapAhead?: boolean | null },
+): string {
+  return cushionOnlyFillsCard(co, plan) ? 'cushion + long-gap fill' : 'cushion only';
+}
+
 /** ★★★ v1.203.0 — the server's cushionOnlyText (nightChargeAdvisor.ts), mirrored word for word: a cushion-only plan's disclosure. ''
  *  on every other plan. */
 export function cushionOnlyCardText(
@@ -459,9 +477,10 @@ export function cushionOnlyCardText(
 ): string {
   if (co == null) return '';
   const r1 = (n: number): number => Math.round(n * 10) / 10;
-  const costFill = co.longGapAfter && plan.longGapAhead === true && plan.costCeilingSocPct != null;
-  const head = ` OUTAGE CUSHION ONLY; NO SOLAR BASIS: the solar basis is refused (${co.refusedBy}), so this plan is sized only to hold the outage cushion at the window close — no solar is credited, no solar calibration is used, `
-    + (costFill ? 'and no mid-day charge is planned.' : 'and no cost target or mid-day charge is planned.');
+  const costFill = cushionOnlyFillsCard(co, plan);
+  const head = costFill
+    ? ` NO SOLAR BASIS; THE OUTAGE CUSHION AND THE LONG-GAP FILL: the solar basis is refused (${co.refusedBy}), so this plan is sized only on the outage cushion at the window close and, before the gap, the long-gap fill — no solar is credited, no solar calibration is used, and no mid-day charge is planned.`
+    : ` OUTAGE CUSHION ONLY; NO SOLAR BASIS: the solar basis is refused (${co.refusedBy}), so this plan is sized only to hold the outage cushion at the window close — no solar is credited, no solar calibration is used, and no cost target or mid-day charge is planned.`;
   const g = gapAfterWindowCardText(co.gapAfterMs);
   const gap = !co.longGapAfter ? ''
     : costFill

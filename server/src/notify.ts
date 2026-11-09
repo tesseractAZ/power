@@ -11,8 +11,8 @@ import {
   // v1.198.0 — a plan sized on the provisional solar band says so: beside a charge's confidence
   // tier, and at the end of a sized hold.
   provisionalBandText,
-  // v1.203.0 — a cushion-only plan's gap after its window, in the rationale's words.
-  gapAfterWindowText,
+  // v1.203.0 — a cushion-only plan's gap after its window, in the rationale's words, and whether it takes the long-gap fill.
+  gapAfterWindowText, cushionOnlyFills,
 } from './nightChargeAdvisor.js';
 import {
   forceChargeStopPct, partialForceChargeOnFailureSlots, forceChargeFailedSlotsText, FORCE_CHARGE_LINE_REON_MAX, lineReOnTimesWords,
@@ -687,7 +687,8 @@ export function buildNightChargeMessage(
     : `Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~${pct(plan.baselineMinSocPct)} `
       + `${lowSoc}; the floor+cushion line is ${pct(line)}. `
       + `Confidence: ${plan.confidenceTier}.${shortfallNote}${overBuyNote}${economicNote}${held ? '' : evNote} `;
-  const cushionOnlyTitle = plan.cushionOnly != null ? ' — outage cushion only' : '';
+  // v1.203.0 — and the title says it; on the long-gap fill (cushionOnlyFills) the plan is not the cushion only.
+  const cushionOnlyTitle = plan.cushionOnly == null ? '' : cushionOnlyFills(plan.cushionOnly, plan) ? ' — no solar basis, long-gap fill' : ' — outage cushion only';
   // v1.198.0 — a plan sized on the provisional solar band says so, after its confidence tier.
   const provisionalNote = plan.pvBandWiden != null ? `${provisionalBandText(plan.pvBandWiden).trim()} ` : '';
   if (held) {
@@ -1442,18 +1443,20 @@ function forceChargeOffWords(reason: string): string {
  * but the long-gap fill's. Before a gap of more than a day after this window, the gap as fact (gapAfterWindowText) and what runs.
  * '' on every other plan. PURE.
  */
-function cushionOnlyPushText(plan: NightChargePlan, form: 'charge' | 'short'): string {
-  const co = plan.cushionOnly;
-  if (co == null) return '';
-  const costFill = co.longGapAfter && plan.longGapAhead === true && plan.costCeilingSocPct != null;
+function cushionOnlyPushText(plan: NightChargePlan | null, form: 'charge' | 'short'): string {
+  const co = plan?.cushionOnly;
+  if (plan == null || co == null) return '';
+  // On the long-gap fill the plan is sized on the cushion and the fill: "no solar basis", never "outage cushion only".
+  const costFill = cushionOnlyFills(co, plan);
+  const basis = costFill ? 'No solar basis' : 'Outage cushion only; no solar basis';
   const gap = !co.longGapAfter ? ''
     : costFill
       ? ` Before the gap (${gapAfterWindowText(co.gapAfterMs)}) the cost target is the long-gap fill: the ${round1(plan.costCeilingSocPct!)}% state-of-charge ceiling, with the solar headroom set aside.`
       : ` ${gapAfterWindowText(co.gapAfterMs).replace(/^./, (c) => c.toUpperCase())}; the cushion is sized for this window's close only.`;
-  if (form === 'short') return ` Outage cushion only; no solar basis (${co.refusedBy}).${gap}`;
+  if (form === 'short') return ` ${basis} (${co.refusedBy}).${gap}`;
   const line = floorCushionLinePct(plan);
   const lineText = line == null ? 'the line' : `the ${round1(line)}% line`;
-  return `Outage cushion only; no solar basis (${co.refusedBy}): ${lineText} is the ${round1(plan.reserveFloorPct)}% reserve floor plus `
+  return `${basis} (${co.refusedBy}): ${lineText} is the ${round1(plan.reserveFloorPct)}% reserve floor plus `
     + `${round1(plan.cushionOutageHours ?? 4)} h of islanded backup load at the window close, with no solar credited and `
     + `${costFill ? 'no cost target but the long-gap fill' : 'no cost target'}.${gap}`;
 }
