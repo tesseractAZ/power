@@ -170,7 +170,7 @@ The machine Power runs on, read from the kernel; each reads unknown where it can
 
 ## Night charge
 
-Refreshed from the latest plan, recomputed every 30 minutes. These carry a 25-hour expiry: a stopped planner turns them unavailable instead of leaving a stale "charge tonight". A plan older than 12 hours, or one built on an incomplete basis, publishes no figures and "charge tonight" off.
+Refreshed from the latest plan, recomputed every 30 minutes. These carry a 25-hour expiry: a stopped planner turns them unavailable instead of leaving a stale "charge tonight". A plan older than 12 hours, or one built on an incomplete basis, publishes no figures and "charge tonight" off. In `supervised` or `auto` mode a plan made while the solar basis is refused holds the outage cushion only and publishes its figures like any other; they credit no solar.
 
 | entity_id (fresh install) | unique_id | Meaning | Unit |
 |---|---|---|---|
@@ -178,7 +178,7 @@ Refreshed from the latest plan, recomputed every 30 minutes. These carry a 25-ho
 | `sensor.power_night_charge_target_soc` | `ecoflow_night_charge_target_soc` | The reserve SETPOINT to write, clamped to the panel's 10–50 range; not a prediction of where the pool ends | % |
 | `sensor.power_night_charge_arrival_soc_worst_case` | `ecoflow_night_charge_expected_soc` | Arrival SoC (Worst Case): the pool level at the window close projected on the islanded worst case the plan is sized on, not the charge the write is expected to make | % |
 | `sensor.power_night_charge_buy_worst_case` | `ecoflow_night_charge_buy_kwh` | Buy (Worst Case): the grid energy the plan is sized on, assuming the islanded worst case | kWh |
-| `sensor.power_night_charge_expected_buy` | `ecoflow_night_charge_expected_buy_kwh` | An estimate of the grid energy the charge is expected to put into the Cores, from the expected pool level at the window open; unknown with no median basis. It is never a meter reading: the grid meter also counts the house load the grid serves during the window and the Cores' own standby while the grid charges them. On a night whose outage line is above the 50 % reserve and is force-charged to the window close, it counts the charge to the expected close, so it can exceed the worst-case figure the plan is sized on | kWh |
+| `sensor.power_night_charge_expected_buy` | `ecoflow_night_charge_expected_buy_kwh` | An estimate of the grid energy the charge is expected to put into the Cores, from the expected pool level at the window open; unknown with no median basis. It is never a meter reading: the grid meter also counts the house load the grid serves during the window and the Cores' own standby while the grid charges them. On a night whose outage line is above 49 % (a 50 % reserve holds the pool at 49 %) and is force-charged to the window close, it counts the charge to the expected close, so it can exceed the worst-case figure the plan is sized on | kWh |
 | `sensor.power_night_charge_window_start` | `ecoflow_night_charge_window_start` | Charge window start, in site time (`23:00`, or `Mon 00:00` when more than a day away) | text |
 | `sensor.power_night_charge_window_end` | `ecoflow_night_charge_window_end` | Charge window end, same format | text |
 | `sensor.power_night_charge_readiness` | `ecoflow_night_charge_readiness` | `LEARNING`, `READY_TO_CONSIDER_WRITES` or `BLOCKED`: the write-readiness gate (diagnostic) | text |
