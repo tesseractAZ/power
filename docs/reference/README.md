@@ -119,6 +119,8 @@ Frozen, unedited and not part of the printable manual:
   removed HACS cards from chapter 11.
 - [performance-record-1.md](../history/performance-record-1.md): section 4b of the
   [performance record](../PERFORMANCE.md), the analytics path's first runtime measurement (2026-09-11).
+- [performance-record-2.md](../history/performance-record-2.md): section 4a of the
+  [performance record](../PERFORMANCE.md), the runway replay backtest (2026-10-11) and its live check (2026-10-15).
 - [reference-plant-notes.md](../history/reference-plant-notes.md): the reference plant's own Core roster and
   its circuit 1 wiring note, from chapter 2 (a circuit name replaced by an example).
 
