@@ -3453,14 +3453,19 @@ interface NightChargeLatch {
   armRefused?: ArmRefusalRecord | null;
   /** v1.200.0 (Fix10 review 1) — the window whose no-write push went (chargeCycle.lineNotArmedPushDue), stamped before it goes. */
   lineNotArmedWindowStartMs?: number | null;
-  /** ★★★ v1.204.0 (M1, L2) — the solar basis this evening chose for its window, with E and the window: every recompute until the
-   *  window's close selects it (panelPvSelection.latchedPvBasis). null/absent: no basis latched — a latch written before v1.204.0, or
-   *  an evening that reached no decision — which reads as the published (or cushion-only) basis to the close. */
+  /** ★★★ v1.204.0 (M1, L2) — the solar basis this evening chose for its window, with E and the window: every recompute but the next
+   *  evening job's own call (F1) selects it until the window's close (panelPvSelection.latchedPvBasis). null/absent: no basis latched —
+   *  a latch written before v1.204.0, or an evening that reached no decision — which reads as the published (or cushion-only) basis to
+   *  the close. */
   pv?: PvBasisLatch | null;
   /** ★★★ v1.204.0 (F1) — this day's evening job did not decide before its cutoff (written by the cutoff path only, never inherited by a
    *  later day's latch): the latch, with no basis, reads as the published basis to its window's close, and a recompute there says no
    *  evening decision was made (panelPvSelection 'latched', decided false). */
   noDecision?: boolean;
+  /** ★★★ v1.204.0 (G3) — a key v1.203.0 never wrote: every latch this release writes carries it, true unless the writer re-writes a
+   *  latch it read without it (the push stamp spreads the latch it read). A latch read without it was written before v1.204.0: with
+   *  no basis it records no decision either way, and a recompute there says so (panelPvSelection 'latched', decided null). */
+  pvRecorded?: boolean;
 }
 /** v1.204.0 — a persisted latch basis, or null when it is not one. */
 function coercePvBasisLatch(raw: any): PvBasisLatch | null {
@@ -3479,9 +3484,10 @@ function readNightChargeLatchFile(): NightChargeLatch {
       lineNotArmedWindowStartMs: typeof raw?.lineNotArmedWindowStartMs === 'number' ? raw.lineNotArmedWindowStartMs : null,
       pv: coercePvBasisLatch(raw?.pv),
       ...(raw?.noDecision === true ? { noDecision: true } : {}),
+      pvRecorded: raw?.pvRecorded === true,
     };
   } catch {
-    return { lastNotifyDay: null, armRefused: null, lineNotArmedWindowStartMs: null, pv: null };
+    return { lastNotifyDay: null, armRefused: null, lineNotArmedWindowStartMs: null, pv: null, pvRecorded: false };
   }
 }
 // In-memory mirror of the persisted latch, seeded once from disk at module load.
@@ -3502,6 +3508,8 @@ function writeNightChargeLatch(l: NightChargeLatch): void {
     // v1.204.0 (F1) — the evening that did not decide before its cutoff: only the writer that says so sets it (the cutoff path; the
     // push stamp keeps its own day's by spreading the latch it read).
     ...(l.noDecision === true ? { noDecision: true } : {}),
+    // v1.204.0 (G3) — this release's marker, on every write: false only where the writer carries a latch it read without it.
+    pvRecorded: l.pvRecorded !== false,
   };
   try {
     atomicWriteFileSync(NIGHT_CHARGE_LATCH_PATH, JSON.stringify(nightChargeLatchMem));
@@ -4065,9 +4073,13 @@ async function recomputeNightChargePlan(
     lastNotifyDay: readNightChargeLatch().lastNotifyDay,
     pv: readNightChargeLatch().pv,
     noDecision: readNightChargeLatch().noDecision === true,
+    recorded: readNightChargeLatch().pvRecorded === true,
     windowStartMs: window.startMs, windowEndMs: window.endMs, nowMs,
     planDate: planDateOwningCycle({ nowMs, firstLegStartMs: window.startMs, timezone: siteTimeZone(), notifyMinuteOfDay: nightSched.notify.fireMin }),
-    armed: { day: nightActuationMem.day, windowStartMs: nightActuationMem.windowStartMs },
+    armed: {
+      day: nightActuationMem.day, windowStartMs: nightActuationMem.windowStartMs,
+      standing: nightActuationMem.targetPct != null && nightActuationMem.revertedAtMs == null && nightActuationMem.cancelled !== true,
+    },
   });
   const pvAsOfDay: string | null = shadowLeg ? null : planAsOfDay({
     arming: opts.arming === true, todayYmd: siteYmd(nowMs), latched: pvLatchHere,
@@ -5648,7 +5660,8 @@ async function runNightChargeEveningJobInner(): Promise<void> {
       lastNotifyDay: today,
       armRefused: notArmed && plan?.window
         ? { reason: notArmed, windowStartMs: plan.window.startMs, windowEndMs: plan.window.endMs } : null,
-      // ★★★ v1.204.0 (M1, L2) — the basis this evening chose for its window, with E: every recompute to the close selects it.
+      // ★★★ v1.204.0 (M1, L2) — the basis this evening chose for its window, with E: every recompute but the next evening job's own
+      // call (F1) selects it until the window's close.
       pv: pvLatchOf(fresh, today),
     }); // latch AFTER a successful send
     app.log.info(`night-charge: evening advisory sent (${shape}) and latched for ${today}.`);

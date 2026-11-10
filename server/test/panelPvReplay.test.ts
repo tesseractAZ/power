@@ -99,8 +99,9 @@ interface NightOut {
   };
 }
 
-/** The latch file as an evening left it (index.ts NightChargeLatch): its day, its basis, and the armed record's day and window. */
-interface ReplayLatch { lastNotifyDay: string; pv: PvBasisLatch | null; armed: { day: string | null; windowStartMs: number | null } }
+/** The latch file as an evening left it (index.ts NightChargeLatch): its day, its basis, this release's marker (G3: false, a latch
+ *  v1.203.0 wrote), and the armed record's day and window. */
+interface ReplayLatch { lastNotifyDay: string; pv: PvBasisLatch | null; pvRecorded: boolean; armed: { day: string | null; windowStartMs: number | null } }
 interface ReplayOpts {
   /** A fault on the record itself (panelPvRecordFixtures' `fault`: the field and the panel's daily total alike), which the balance sees. */
   ro?: Partial<RecordOptions>;
@@ -167,9 +168,9 @@ function replay(n: ReplayNight, objective: 'cost' | 'resilience' = 'cost', scale
     const d0 = withWindow(base, t, soc);
     const w = plan(d0).window;
     const here = latch == null || w == null ? null : latchedPvBasis({
-      lastNotifyDay: latch.lastNotifyDay, pv: latch.pv, noDecision: false, windowStartMs: w.startMs, windowEndMs: w.endMs, nowMs: t,
+      lastNotifyDay: latch.lastNotifyDay, pv: latch.pv, noDecision: false, recorded: latch.pvRecorded, windowStartMs: w.startMs, windowEndMs: w.endMs, nowMs: t,
       planDate: planDateOwningCycle({ nowMs: t, firstLegStartMs: w.startMs, timezone: siteTimeZone(), notifyMinuteOfDay: NOTIFY_MIN }),
-      armed: latch.armed,
+      armed: { ...latch.armed, standing: latch.armed.day != null },
     });
     const avail = o.planningAt?.(t) ?? true;
     const sel = selectPvBasis({
@@ -202,7 +203,7 @@ function replay(n: ReplayNight, objective: 'cost' | 'resilience' = 'cost', scale
   // The latch the evening writes (index.ts pvLatchOf): the basis it chose, as of E, with its window.
   const wD = decided.p.window;
   const own: ReplayLatch | null = wD == null ? null : {
-    lastNotifyDay: E, armed: { day: armB.a ? E : null, windowStartMs: armB.a ? wD.startMs : null },
+    lastNotifyDay: E, armed: { day: armB.a ? E : null, windowStartMs: armB.a ? wD.startMs : null }, pvRecorded: true,
     pv: { basis: decided.sel.use === 'planning' ? 'planning' : 'published', asOfDay: E, windowStartMs: wD.startMs, windowEndMs: wD.endMs },
   };
   // 00:30: the pool after 1.5 h of the armed reserve from 23:00 (charged toward it at the plan's cap, else drained toward it).
@@ -366,12 +367,13 @@ test('★★★ F1 (e), the evening job on the record: Sunday 11-01 with Saturda
   assert.deepEqual(a.b.latchAt[2], { basis: 'published', asOfDay: '2026-11-01', decided: true });
   assert.deepEqual(a.b.sels[2].reason, { code: 'latched', asOfDay: '2026-11-01', decided: true });
 
-  // (b) Saturday latched the published basis (a refused or transient Saturday, or advisory); Sunday passes. (c) A v1.203.0 latch.
+  // (b) Saturday latched the published basis (a refused or transient Saturday, or advisory); Sunday passes. (c) A v1.203.0 latch (no
+  // basis, no marker: G3, it records no decision either way).
   const pub = { ...satLatch, pv: { ...satLatch.pv!, basis: 'published' as const } };
-  const v1203 = { ...satLatch, pv: null };
+  const v1203 = { ...satLatch, pv: null, pvRecorded: false };
   for (const prior of [pub, v1203]) {
     const o = replay(sun, 'cost', 1, { prior });
-    assert.deepEqual(o.b.latchAt[0], { basis: 'published', asOfDay: '2026-10-31', decided: true });
+    assert.deepEqual(o.b.latchAt[0], { basis: 'published', asOfDay: '2026-10-31', decided: prior === v1203 ? null : true });
     assert.deepEqual(o.b.sels.map((x) => x.use), ['planning', 'planning', 'planning']);
     assert.equal(o.b.at, '21:30');
     assert.equal(fmt(o.b.arm), '50/71.7', 'Sunday\'s own panel plan, as the unlatched replay arms it');

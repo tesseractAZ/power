@@ -8,14 +8,17 @@
  *  - L2  the latch: a missing report keeps the previous plan; a latch with no basis reads published to its close;
  *  - F1  the evening job's own call selects afresh as of its own day (Saturday's latch never decides Sunday's evening), and every
  *        'latched' refusal names the latch's own day and says no decision was made where the evening reached its cutoff without one;
+ *  - G2  where an earlier evening's arm for the window still stands, the 'latched' words name it and speak of the plan shown only;
+ *  - G3  every latch this release writes carries pvRecorded; one read without it (v1.203.0's) says it records no panel basis;
  *  - L5  the ledger's PV actual on a panel row, said; L6  Home Assistant's two attributes, exactly;
  *  and the readiness gate's panelApart. The replay on the recorded plant is panelPvReplay.test.ts.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { transformSync } from 'esbuild';
 import {
   latchedPvBasis, planAsOfDay, selectPvBasis, planningClauses, pvBasisDecoration, withPvBasis, pvBasisReasonText, pvBasisRefusedText,
   panelPvBasisText, pvBasisPushText, bandCoverageRefusalText, uncountedCauseText,
@@ -37,6 +40,7 @@ import {
   panelPvAdmission, panelPvRecaptureDue, panelPvRecaptureColumns, spanSiteDays, PANEL_PV_PENDING_MARKER, FORECAST_SPAN_MS,
 } from '../src/nightLedgerScoring.js';
 import { computeNightChargeReadiness, panelApart, CURRENT_ALGO_VERSION } from '../src/nightChargeGate.js';
+import { coerceArmRefusalRecord } from '../src/nightChargeActuator.js';
 import type { NightLedgerRow } from '../src/recorder.js';
 import * as web from '../../web/src/cards/nightChargeText.js';
 import { legacyIdentityCases, planDigest } from './fixtures/legacyIdentityFixtures.js';
@@ -44,6 +48,7 @@ import { darkDeps } from './fixtures/cushionOnlyFigures.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const INDEX = readFileSync(resolve(HERE, '../src/index.ts'), 'utf8');
+type Any = any;
 const H = 3_600_000;
 const NOTIFY_MIN = 21 * 60 + 30;
 const E = '2026-10-29';
@@ -86,7 +91,7 @@ test('★★★ M1: E is the evening that owns the window — Saturday 10-31 jud
   const latch: PvBasisLatch = { basis: 'planning', asOfDay: '2026-10-31', windowStartMs: monStart, windowEndMs: monEnd };
   const at = (ms: number) => {
     const planDate = planDateOwningCycle({ nowMs: ms, firstLegStartMs: monStart, timezone: siteTimeZone(), notifyMinuteOfDay: NOTIFY_MIN });
-    const l = latchedPvBasis({ lastNotifyDay: '2026-10-31', pv: latch, noDecision: false, windowStartMs: monStart, windowEndMs: monEnd, nowMs: ms, planDate, armed: { day: '2026-10-31', windowStartMs: monStart } });
+    const l = latchedPvBasis({ lastNotifyDay: '2026-10-31', pv: latch, noDecision: false, recorded: true, windowStartMs: monStart, windowEndMs: monEnd, nowMs: ms, planDate, armed: { day: '2026-10-31', windowStartMs: monStart, standing: true } });
     return { l, E: planAsOfDay({ arming: false, todayYmd: '-', latched: l, planDate }) };
   };
   const sat = siteDayStartMs('2026-10-31');
@@ -103,23 +108,23 @@ test('★★★ M1: E is the evening that owns the window — Saturday 10-31 jud
   assert.equal(planAsOfDay({ arming: false, todayYmd: '2026-10-31', latched: null, planDate }), '2026-10-31');
 });
 
-test('★★★ L2: a latch written by v1.203.0 (no basis) reads as the published basis to its window\'s close — v1.204.0 may deploy inside an armed window', () => {
+test('★★★ L2: a latch written by v1.203.0 (no basis, no marker) reads as the published basis to its window\'s close — v1.204.0 may deploy inside an armed window — and says it records no panel basis (G3)', () => {
   const mon = siteDayStartMs('2026-11-09');
   const ws = mon + 23 * H;
   const we = ws + 6 * H;
   const deploy = siteDayStartMs('2026-11-10') + 3.43 * H; // Tue 03:26, inside Monday's window
   const planDate = planDateOwningCycle({ nowMs: deploy, firstLegStartMs: ws, timezone: siteTimeZone(), notifyMinuteOfDay: NOTIFY_MIN });
-  const old = { lastNotifyDay: '2026-11-09', pv: undefined, noDecision: false, windowStartMs: ws, windowEndMs: we, planDate, armed: { day: '2026-11-09', windowStartMs: ws } };
-  assert.deepEqual(latchedPvBasis({ ...old, nowMs: deploy }), { basis: 'published', asOfDay: '2026-11-09', decided: true });
+  const old = { lastNotifyDay: '2026-11-09', pv: undefined, noDecision: false, recorded: false, windowStartMs: ws, windowEndMs: we, planDate, armed: { day: '2026-11-09', windowStartMs: ws, standing: true } };
+  assert.deepEqual(latchedPvBasis({ ...old, nowMs: deploy }), { basis: 'published', asOfDay: '2026-11-09', decided: null });
   assert.equal(latchedPvBasis({ ...old, nowMs: we }), null, 'to the close, and no further');
   // The selection inside it never takes the planning band, even passing: the window's evening decided without it.
-  const sel = selectPvBasis(input({ latched: { basis: 'published', asOfDay: E, decided: true } }));
+  const sel = selectPvBasis(input({ latched: { basis: 'published', asOfDay: E, decided: null } }));
   assert.equal(sel.use, 'published');
-  assert.equal(sel.reason?.code, 'latched');
+  assert.deepEqual(sel.reason, { code: 'latched', asOfDay: E, decided: null });
   // A latch for another window (Monday's, read on Tuesday afternoon for Tuesday's window) governs nothing.
   const tue = siteDayStartMs('2026-11-10') + 14 * H;
   const tuePlanDate = planDateOwningCycle({ nowMs: tue, firstLegStartMs: ws + 24 * H, timezone: siteTimeZone(), notifyMinuteOfDay: NOTIFY_MIN });
-  assert.equal(latchedPvBasis({ ...old, windowStartMs: ws + 24 * H, windowEndMs: we + 24 * H, nowMs: tue, planDate: tuePlanDate, armed: { day: '2026-11-09', windowStartMs: ws } }), null);
+  assert.equal(latchedPvBasis({ ...old, windowStartMs: ws + 24 * H, windowEndMs: we + 24 * H, nowMs: tue, planDate: tuePlanDate, armed: { day: '2026-11-09', windowStartMs: ws, standing: true } }), null);
 });
 
 test('★★★ L2: inside a window latched on the planning basis, a missing or other-evening report keeps the previous plan (never a fresh (c)); its report passing, the planning band', () => {
@@ -144,15 +149,20 @@ const SAT = '2026-11-14';
 const SUN = '2026-11-15';
 const at = (day: string, h: number): number => siteDayStartMs(day) + h * H;
 const SAT_W = winAt(at(SAT, 21.5));
-interface LatchFile { lastNotifyDay: string; pv: PvBasisLatch | null; noDecision?: boolean; armed: { day: string | null; windowStartMs: number | null } }
+interface LatchFile {
+  lastNotifyDay: string; pv: PvBasisLatch | null; noDecision?: boolean;
+  /** G3: v1.204.0's marker (absent: a latch written by v1.203.0). */
+  pvRecorded?: boolean;
+  armed: { day: string | null; windowStartMs: number | null; standing?: boolean };
+}
 /** recomputeNightChargePlan's latch, E and selection at `ms` with the latch file `latch` standing: latchedPvBasis and planAsOfDay as
  *  index.ts calls them, and the selection's latch by the expression index.ts carries (ARMING, pinned in each test below). */
 function chainAt(ms: number, arming: boolean, latch: LatchFile, o: Partial<PvSelectionInput> = {}) {
   const w = winAt(ms);
   const planDate = planDateOwningCycle({ nowMs: ms, firstLegStartMs: w.startMs, timezone: siteTimeZone(), notifyMinuteOfDay: SCHED.notify.fireMin });
   const here = latchedPvBasis({
-    lastNotifyDay: latch.lastNotifyDay, pv: latch.pv, noDecision: latch.noDecision === true,
-    windowStartMs: w.startMs, windowEndMs: w.endMs, nowMs: ms, planDate, armed: latch.armed,
+    lastNotifyDay: latch.lastNotifyDay, pv: latch.pv, noDecision: latch.noDecision === true, recorded: latch.pvRecorded === true,
+    windowStartMs: w.startMs, windowEndMs: w.endMs, nowMs: ms, planDate, armed: { ...latch.armed, standing: latch.armed.standing !== false },
   });
   const E = planAsOfDay({ arming, todayYmd: siteYmd(ms), latched: here, planDate });
   const sel = selectPvBasis(input({ asOfDay: E, latched: arming ? null : here, ...o }));
@@ -160,8 +170,9 @@ function chainAt(ms: number, arming: boolean, latch: LatchFile, o: Partial<PvSel
 }
 /** index.ts: `latched: opts.arming === true ? null : pvLatchHere` — the evening job's own call reads no latch. */
 const ARMING = /\n\s+latched: opts\.arming === true \? null : pvLatchHere,\n/;
+/** Saturday's latch for the Monday window: v1.204.0's with a basis; with none, v1.203.0's (no marker). */
 const satLatch = (basis: 'planning' | 'published' | null): LatchFile => ({
-  lastNotifyDay: SAT, armed: { day: SAT, windowStartMs: SAT_W.startMs },
+  lastNotifyDay: SAT, armed: { day: SAT, windowStartMs: SAT_W.startMs }, pvRecorded: basis != null,
   pv: basis == null ? null : { basis, asOfDay: SAT, windowStartMs: SAT_W.startMs, windowEndMs: SAT_W.endMs },
 });
 const reportAsOf = (day: string, state: UcVerdict['state'] = 'pass', reason: UcVerdict['reason'] = null, gate: PvSelectionInput['published']['gate'] = PASS_GATE): Partial<PvSelectionInput> => ({
@@ -223,20 +234,22 @@ test('★★★ F1 (b): Sunday\'s evening job under Saturday\'s published latch 
 test('★★★ F1 (c): a v1.203.0 latch (no basis) for Saturday\'s arm of the Monday window — this release deployed over the weekend — and Sunday\'s evening job selects afresh: passing, the planning band; its report missing, the transient class', () => {
   assert.match(INDEX, ARMING);
   const c = chainAt(at(SUN, 21.5), true, satLatch(null), reportAsOf(SUN));
-  assert.deepEqual(c.here, { basis: 'published', asOfDay: SAT, decided: true }, 'it reads as the published basis');
+  assert.deepEqual(c.here, { basis: 'published', asOfDay: SAT, decided: null }, 'it reads as the published basis');
   assert.equal(c.sel.use, 'planning');
   const t = chainAt(at(SUN, 21.5), true, satLatch(null), { planning: null, planningRollupOk: false });
   assert.deepEqual([t.sel.use, t.sel.transient, t.sel.reason], ['published', true, null]);
-  // Saturday 23:30 (deployed after Saturday decided on v1.203.0): inside Saturday's latch, the decided words name Saturday.
+  // Saturday 23:30 (deployed after Saturday's evening on v1.203.0): inside Saturday's latch, the words name Saturday and say the latch
+  // records no panel basis (G3: it does not say whether that evening decided).
   const sat = chainAt(at(SAT, 23.5), false, satLatch(null), reportAsOf(SAT));
-  assert.deepEqual(sat.sel.reason, { code: 'latched', asOfDay: SAT, decided: true });
+  assert.deepEqual(sat.sel.reason, { code: 'latched', asOfDay: SAT, decided: null });
+  assert.equal(pvBasisReasonText(sat.sel.reason!), `this window's latch was written on ${SAT} by a release before v1.204.0 and records no panel basis`);
 });
 
 test('★★★ F1 (d): inside Sunday\'s own latched window every other recompute still selects the latched basis (L2 unchanged) — planning: its report passing, the planning band; missing, keep-previous; published: a passing reading refused as \'latched\', naming Sunday — and the reason names the latch\'s own day, whatever E it is handed', () => {
   const sunW = winAt(at(SUN, 21.5));
   assert.equal(sunW.startMs, SAT_W.startMs);
   const own = (basis: 'planning' | 'published'): LatchFile => ({
-    lastNotifyDay: SUN, armed: { day: SUN, windowStartMs: sunW.startMs },
+    lastNotifyDay: SUN, armed: { day: SUN, windowStartMs: sunW.startMs }, pvRecorded: true,
     pv: { basis, asOfDay: SUN, windowStartMs: sunW.startMs, windowEndMs: sunW.endMs },
   });
   for (const ms of [at(SUN, 23.5), at('2026-11-16', 0.5), at('2026-11-16', 4.5)]) {
@@ -253,10 +266,10 @@ test('★★★ F1 (d): inside Sunday\'s own latched window every other recomput
     { code: 'latched', asOfDay: '2026-10-28', decided: true });
 });
 
-test('★★★ F1 the \'latched\' words on every path that serves them: a decided evening (a published latch, a v1.203.0 latch, an evening that decided with no plan) — "this window\'s evening decision was made on <its day> without them"; an evening job that did not decide before its cutoff latches noDecision, and its window says no evening decision was made that day — en and es, never a decision on a day that made none', () => {
-  // Sunday's cutoff (the add-on down 21:30–23:00, or a panel stale throughout): the latch has no basis and says so; Saturday's arm
-  // of the window stands.
-  const cut: LatchFile = { lastNotifyDay: SUN, pv: null, noDecision: true, armed: { day: SAT, windowStartMs: SAT_W.startMs } };
+test('★★★ F1 the \'latched\' words on every path that serves them: a decided evening (a published latch, an evening that decided with no plan) — "this window\'s evening decision was made on <its day> without them"; an evening job that did not decide before its cutoff latches noDecision, and its window says no evening decision was made that day — en and es, never a decision on a day that made none (with no earlier arm standing: G2 has the other case)', () => {
+  // Sunday's cutoff (the add-on down 21:30–23:00, or a panel stale throughout): the latch has no basis and says so; no earlier arm of
+  // the window stands (Saturday held, or its arm was cancelled or restored).
+  const cut: LatchFile = { lastNotifyDay: SUN, pv: null, noDecision: true, pvRecorded: true, armed: { day: null, windowStartMs: null } };
   for (const ms of [at(SUN, 23.5), at('2026-11-16', 0.5)]) {
     const c = chainAt(ms, false, cut, reportAsOf(SUN));
     assert.deepEqual(c.here, { basis: 'published', asOfDay: SUN, decided: false });
@@ -272,7 +285,7 @@ test('★★★ F1 the \'latched\' words on every path that serves them: a decid
     assert.equal(pvBasisRefusedText(c.sel.reason!), ` The panel's own solar readings are not used tonight: ${en}.`);
   }
   // An evening that decided with no plan (inputs unavailable) latches no basis, and decided: the decided words name it.
-  const noPlan: LatchFile = { lastNotifyDay: SUN, pv: null, armed: { day: null, windowStartMs: null } };
+  const noPlan: LatchFile = { lastNotifyDay: SUN, pv: null, pvRecorded: true, armed: { day: null, windowStartMs: null } };
   const n = chainAt(at(SUN, 23.5), false, noPlan, reportAsOf(SUN));
   assert.deepEqual(n.sel.reason, { code: 'latched', asOfDay: SUN, decided: true });
   assert.equal(pvBasisReasonText(n.sel.reason!), `this window's evening decision was made on ${SUN} without them`);
@@ -291,6 +304,130 @@ test('★★★ F1 the \'latched\' words on every path that serves them: a decid
   assert.match(INDEX, /\n\s+noDecision: readNightChargeLatch\(\)\.noDecision === true,\n/);
   assert.match(INDEX, /\n\s+\.\.\.\(l\.noDecision === true \? \{ noDecision: true \} : \{\}\),\n/);
   assert.match(INDEX, /\n\s+\.\.\.\(raw\?\.noDecision === true \? \{ noDecision: true \} : \{\}\),\n/);
+});
+
+test('★★★ G2: after Sunday\'s cutoff with no decision, Saturday\'s arm for the shared window still standing — the words name Saturday\'s arm and say the plan shown is not it, never that the panel\'s readings are not used tonight (that arm may be on them, and it writes), en and es, the rationale and the push; with no earlier arm standing (none, restored or cancelled, another window\'s) the no-decision words; an evening that decided but delivered no arm of its own says the same of the arm that stands', () => {
+  const cut = (armed: LatchFile['armed']): LatchFile => ({ lastNotifyDay: SUN, pv: null, noDecision: true, pvRecorded: true, armed });
+  const satArm = { day: SAT, windowStartMs: SAT_W.startMs, standing: true };
+  for (const ms of [at(SUN, 23.5), at('2026-11-16', 0.5)]) {
+    const c = chainAt(ms, false, cut(satArm), reportAsOf(SUN));
+    assert.deepEqual(c.here, { basis: 'published', asOfDay: SUN, decided: false, armedDay: SAT });
+    assert.equal(c.sel.use, 'published');
+    assert.deepEqual(c.sel.reason, { code: 'latched', asOfDay: SUN, decided: false, armedDay: SAT });
+    const en = pvBasisReasonText(c.sel.reason!);
+    const es = pvBasisReasonText(c.sel.reason!, 'es');
+    assert.equal(en, `no evening decision was made for this window on ${SUN} (the evening job did not decide before its cutoff); the arm made on ${SAT} for this window still applies, and the plan shown here is not that arm`);
+    assert.equal(es, `el ${SUN} no se tomó ninguna decisión de la tarde para esta ventana (el trabajo de la tarde no decidió antes de su hora límite); el armado hecho el ${SAT} para esta ventana sigue vigente, y el plan que se muestra aquí no es ese armado`);
+    // The sentence the served cushion-only plan's rationale closes with (and the card shows), and the push's: the plan shown only.
+    const d = pvBasisDecoration({ sel: c.sel, asOfDay: c.E, plan: { sized: true, cushionOnly: true }, calScoredDays: 0, admittedDays: null })!;
+    assert.equal(d.pvBasisText, ` The plan shown is computed without the panel's own solar readings: ${en}.`);
+    assert.equal(pvBasisRefusedText(c.sel.reason!, 'es'), ` El plan que se muestra se calcula sin las lecturas solares propias del panel: ${es}.`);
+    assert.equal(pvBasisPushText({ pvBasis: null, pvBasisChecks: null, pvBasisRefusedBy: c.sel.reason }), ` Panel solar not used in the plan shown: ${en}.`);
+    assert.equal(pvBasisPushText({ pvBasis: null, pvBasisChecks: null, pvBasisRefusedBy: c.sel.reason }, 'es'), ` Solar del panel no usada en el plan que se muestra: ${es}.`);
+    for (const t of [d.pvBasisText, pvBasisRefusedText(c.sel.reason!, 'es')]) assert.doesNotMatch(t, /not used tonight|no se usan esta noche/);
+  }
+  // No earlier arm standing: none; Saturday's restored or cancelled; an arm of another window — the no-decision words, as F1.
+  for (const armed of [{ day: null, windowStartMs: null }, { ...satArm, standing: false }, { ...satArm, windowStartMs: SAT_W.startMs - 72 * H }]) {
+    const c = chainAt(at(SUN, 23.5), false, cut(armed), reportAsOf(SUN));
+    assert.deepEqual(c.sel.reason, { code: 'latched', asOfDay: SUN, decided: false }, JSON.stringify(armed));
+    assert.equal(pvBasisRefusedText(c.sel.reason!), ` The panel's own solar readings are not used tonight: no evening decision was made for this window on ${SUN} (the evening job did not decide before its cutoff).`);
+  }
+  // Sunday decided on the published basis but delivered no arm (refused, or no channel delivered it): Saturday's arm stands.
+  const sunPub: LatchFile = {
+    lastNotifyDay: SUN, pvRecorded: true, armed: satArm,
+    pv: { basis: 'published', asOfDay: SUN, windowStartMs: SAT_W.startMs, windowEndMs: SAT_W.endMs },
+  };
+  const dec = chainAt(at(SUN, 23.5), false, sunPub, reportAsOf(SUN));
+  assert.deepEqual(dec.sel.reason, { code: 'latched', asOfDay: SUN, decided: true, armedDay: SAT });
+  assert.equal(pvBasisRefusedText(dec.sel.reason!), ` The plan shown is computed without the panel's own solar readings: this window's evening decision was made on ${SUN} without them; the arm made on ${SAT} for this window still applies, and the plan shown here is not that arm.`);
+  // Saturday's own latch with its own arm: nothing earlier stands.
+  assert.deepEqual(chainAt(at(SUN, 14), false, satLatch('published'), reportAsOf(SAT)).sel.reason, { code: 'latched', asOfDay: SAT, decided: true });
+  // The wiring: index.ts hands latchedPvBasis whether the armed record's arm still stands (a target, not restored, not cancelled).
+  assert.match(INDEX, /\n\s+armed: \{\n\s+day: nightActuationMem\.day, windowStartMs: nightActuationMem\.windowStartMs,\n\s+standing: nightActuationMem\.targetPct != null && nightActuationMem\.revertedAtMs == null && nightActuationMem\.cancelled !== true,\n\s+\},\n/);
+});
+
+/** index.ts's latch file reader and writer, as written there, over an in-memory file: each boot() reads the file afresh (a restart). */
+function latchFileIo(initial: string | null) {
+  const pick = (head: string): string => {
+    const at0 = INDEX.indexOf(head);
+    assert.ok(at0 > 0, head);
+    return INDEX.slice(at0, INDEX.indexOf('\n}\n', at0) + 2);
+  };
+  const ts = `function __make(readFileSync, atomicWriteFileSync, coerceArmRefusalRecord, app) {
+const NIGHT_CHARGE_LATCH_PATH = 'latch.json';
+${pick('function coercePvBasisLatch(')}
+${pick('function readNightChargeLatchFile(')}
+let nightChargeLatchMem = readNightChargeLatchFile();
+${pick('function readNightChargeLatch(')}
+${pick('function writeNightChargeLatch(')}
+return { read: readNightChargeLatch, write: writeNightChargeLatch };
+}`;
+  const make = new Function(`${transformSync(ts, { loader: 'ts' }).code}\nreturn __make;`)() as (...a: unknown[]) => { read: () => Any; write: (l: Any) => void };
+  const file = { text: initial };
+  const boot = () => make(
+    () => { if (file.text == null) throw new Error('ENOENT'); return file.text; },
+    (_p: string, d: string) => { file.text = d; }, coerceArmRefusalRecord, { log: { debug: () => {} } },
+  );
+  return { file, boot };
+}
+
+test('★★★ G3: every latch this release writes carries pvRecorded, a key v1.203.0 never wrote; a latch read without it — v1.203.0\'s decided or cutoff shape — reads decided null and says it records no panel basis, never that a decision was made; each v1.204.0 shape reads as written across a restart; the push stamp carries a latch as it read it; the file has one reader', () => {
+  const DAY = '2026-11-17';
+  const w = winAt(at(DAY, 21.5));
+  const sel = (l: Any) => chainAt(at(DAY, 23.5), false, {
+    lastNotifyDay: l.lastNotifyDay, pv: l.pv ?? null, noDecision: l.noDecision === true, pvRecorded: l.pvRecorded === true,
+    armed: { day: null, windowStartMs: null },
+  }, reportAsOf(DAY)).sel;
+  const NEUTRAL = `this window's latch was written on ${DAY} by a release before v1.204.0 and records no panel basis`;
+  // v1.203.0's two shapes (its writer: lastNotifyDay, armRefused, lineNotArmedWindowStartMs): an evening that decided, and its cutoff
+  // (which kept an earlier evening's refusal). Neither says whether a decision was made.
+  const v1203 = [
+    { lastNotifyDay: DAY, armRefused: null, lineNotArmedWindowStartMs: null },
+    { lastNotifyDay: DAY, armRefused: { reason: 'the charge window opened more than 30 minutes ago', windowStartMs: w.startMs, windowEndMs: w.endMs }, lineNotArmedWindowStartMs: null },
+  ];
+  for (const shape of v1203) {
+    const io = latchFileIo(JSON.stringify(shape));
+    const api = io.boot();
+    assert.equal(api.read().pvRecorded, false);
+    assert.deepEqual(sel(api.read()).reason, { code: 'latched', asOfDay: DAY, decided: null });
+    assert.equal(pvBasisReasonText(sel(api.read()).reason!), NEUTRAL);
+    assert.equal(pvBasisReasonText(sel(api.read()).reason!, 'es'), `el registro de esta ventana lo escribió el ${DAY} una versión anterior a la v1.204.0, y no guarda ninguna base del panel`);
+    assert.doesNotMatch(pvBasisRefusedText(sel(api.read()).reason!), /decision was made|did not decide/);
+    // The push stamp (index.ts spreads the latch it read): still v1.203.0's after a restart.
+    api.write({ ...api.read(), lineNotArmedWindowStartMs: w.startMs });
+    assert.equal(JSON.parse(io.file.text!).pvRecorded, false);
+    assert.deepEqual(sel(io.boot().read()).reason, { code: 'latched', asOfDay: DAY, decided: null });
+  }
+  // This release's shapes, as the evening job writes them (no writer names the marker): each reads as written after a restart.
+  const pv = (basis: 'planning' | 'published'): PvBasisLatch => ({ basis, asOfDay: DAY, windowStartMs: w.startMs, windowEndMs: w.endMs });
+  const v1204: Array<[Any, (s: ReturnType<typeof sel>) => void]> = [
+    [{ lastNotifyDay: DAY, armRefused: null, pv: pv('planning') }, (s) => assert.equal(s.use, 'planning')],
+    [{ lastNotifyDay: DAY, armRefused: null, pv: pv('published') }, (s) => assert.deepEqual(s.reason, { code: 'latched', asOfDay: DAY, decided: true })],
+    [{ lastNotifyDay: DAY, pv: null }, (s) => assert.equal(pvBasisReasonText(s.reason!), `this window's evening decision was made on ${DAY} without them`)],
+    [{ lastNotifyDay: DAY, armRefused: null, noDecision: true }, (s) => assert.deepEqual(s.reason, { code: 'latched', asOfDay: DAY, decided: false })],
+  ];
+  for (const [write, check] of v1204) {
+    const io = latchFileIo(null);
+    const api = io.boot();
+    api.write(write);
+    assert.equal(JSON.parse(io.file.text!).pvRecorded, true, JSON.stringify(write));
+    check(sel(api.read()));
+    check(sel(io.boot().read()));
+    const again = io.boot();
+    again.write({ ...again.read(), lineNotArmedWindowStartMs: w.startMs });
+    check(sel(io.boot().read()));
+  }
+  // The wiring: the recompute reads the marker; no evening writer names it (the writer marks every write it is not told to carry).
+  assert.match(INDEX, /\n\s+recorded: readNightChargeLatch\(\)\.pvRecorded === true,\n/);
+  const jobAt = INDEX.indexOf('async function runNightChargeEveningJobInner(');
+  assert.doesNotMatch(INDEX.slice(jobAt, INDEX.indexOf('\n}\n', jobAt)), /pvRecorded/);
+  assert.match(INDEX, /\n\s+writeNightChargeLatch\(\{ \.\.\.latch, lineNotArmedWindowStartMs: due\.windowStartMs \}\);\n/);
+  // Its one reader: the file is read in one place, and no other source names it (the status route reads the latch's own fields).
+  assert.equal(INDEX.split('readFileSync(NIGHT_CHARGE_LATCH_PATH').length - 1, 1);
+  const srcDir = resolve(HERE, '../src');
+  const others = readdirSync(srcDir, { recursive: true }).map(String).filter((f) => f.endsWith('.ts') && f !== 'index.ts')
+    .filter((f) => /night-charge-latch|NIGHT_CHARGE_LATCH/.test(readFileSync(resolve(srcDir, f), 'utf8')));
+  assert.deepEqual(others, []);
 });
 
 /* ══ the selection (a)/(b)/(c), M2, L1 ═══════════════════════════════════════════════════════════════════════════════════ */
@@ -406,6 +543,9 @@ const ALL_REASONS: PvBasisReason[] = [
   { code: 'band', blockedBy: 'PV band coverage 74% < 78%' },
   { code: 'latched', asOfDay: '2026-11-09', decided: true },
   { code: 'latched', asOfDay: '2026-11-09', decided: false },
+  { code: 'latched', asOfDay: '2026-11-09', decided: null },
+  { code: 'latched', asOfDay: '2026-11-09', decided: false, armedDay: '2026-11-08' },
+  { code: 'latched', asOfDay: '2026-11-09', decided: true, armedDay: '2026-11-08' },
 ];
 
 test('★★★ L1: every reason has its words in English and in Spanish — figures, slot numbers and days only, never a slot key', () => {
@@ -421,8 +561,10 @@ test('★★★ L1: every reason has its words in English and in Spanish — fig
       assert.doesNotMatch(t, /#|undefined|null|NaN/, `${r.code}: ${t}`);
       assert.ok(!/refused$/.test(t), `${r.code}: not the fallback word`);
     }
-    assert.match(pvBasisRefusedText(r, 'en'), /^ The panel's own solar readings are not used tonight: .+\.$/);
-    assert.match(pvBasisRefusedText(r, 'es'), /^ Las lecturas solares propias del panel no se usan esta noche: .+\.$/);
+    // G2: with an earlier evening's arm standing, the sentence is about the plan shown, never tonight's write.
+    const shown = r.code === 'latched' && r.armedDay != null;
+    assert.match(pvBasisRefusedText(r, 'en'), shown ? /^ The plan shown is computed without the panel's own solar readings: .+\.$/ : /^ The panel's own solar readings are not used tonight: .+\.$/);
+    assert.match(pvBasisRefusedText(r, 'es'), shown ? /^ El plan que se muestra se calcula sin las lecturas solares propias del panel: .+\.$/ : /^ Las lecturas solares propias del panel no se usan esta noche: .+\.$/);
   }
 });
 
