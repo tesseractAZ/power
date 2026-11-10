@@ -3866,7 +3866,7 @@ function logPvBasisOnChange(sel: PvSelection, reason: PvBasisReason | null, asOf
   } else if (sel.use === 'planning') {
     app.log.info(`night-charge: solar basis as of ${asOfDay} — the panel's own per-slot readings (${v?.basis ?? 'panel'})${slots}${figs}`);
   } else if (sel.transient) {
-    app.log.info(`night-charge: solar basis as of ${asOfDay} — the panel-basis report is not available yet (a start-up, or one built for another evening); ${plan.cushionOnly != null ? 'the cushion-only plan stands in, and the evening decision waits to its deferral end' : 'the published basis stands in'}`);
+    app.log.info(`night-charge: solar basis as of ${asOfDay} — the panel-basis report is not available yet (a start-up, or one built for another evening); ${plan.cushionOnly != null ? "v1.203.0's plan (cushion-only, or its long-gap fill) stands in, and the evening decision waits to its deferral end" : 'the published basis stands in'}`);
   } else {
     app.log.info(`night-charge: solar basis as of ${asOfDay} — the panel's own readings are not used: ${reason != null ? pvBasisReasonText(reason) : 'refused'}${slots}${figs}`);
   }
@@ -4383,7 +4383,8 @@ async function recomputeNightChargePlan(
     // v1.203.0 — the floor such a plan counts the pool on where no pack capacity ratio is known (the scale's own floor).
     cushionOnlyFloorScale: CAPACITY_SCALE_MIN,
     // ★★★ v1.204.0 (M2) — the published band passed its gate without covering every connected slot's Core: refused (so (c) is always
-    // v1.203.0's cushion-only plan where eligible). (L1) — and why the panel basis is not used, for a refused plan's push.
+    // v1.203.0's plan where eligible: cushion-only, or before a long gap its long-gap fill). (L1) — and why the panel basis is not used,
+    // for a refused plan's push.
     bandCoverageRefusedBy: pvSel?.bandCoverageRefusedBy ?? null,
     panelBasisRefusal: pvReason != null && !pvPlanning ? pvBasisReasonText(pvReason) : null,
     // R2 — the leg: the overnight window (resolved above) for every live plan, its role the caller's.

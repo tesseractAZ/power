@@ -43,6 +43,7 @@ import { priorArmSuperseded } from '../src/chargeCycle.js';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const INDEX = readFileSync(resolve(HERE, '../src/index.ts'), 'utf8');
 const DOC15_1 = readFileSync(resolve(HERE, '../../docs/reference/15-1-night-charge-planning.md'), 'utf8');
+const DOC_PERF = readFileSync(resolve(HERE, '../../docs/PERFORMANCE.md'), 'utf8');
 interface ReplayNight {
   plan_date: string; nowMs: number; socAt21: number | null; socAt2130: number | null; l50: number; l90: number; islandedKw: number;
   hours: Array<[number, number | null, number | null]>;
@@ -418,4 +419,49 @@ test('★★★ V2: a fault the balance sees (planted on the record from 10-20, 
   assert.ok(DOC15_1.includes("Planted on the record itself from 10-20 (the panel's daily total scaled alike), the balance refuses it after 0–1 accepted nights, and each night it refuses is v1.203.0's plan"));
   assert.ok(DOC15_1.includes('the reserve write falls from 50 to 29–30% or none on every night but Friday 10-30, whose fill rises from 79.1 to the long-gap fill to 90'));
   assert.ok(!DOC15_1.includes('leaves every reserve write and every line as it is and only lowers the cost fill. On the resilience'));
+});
+
+test('★★★ W2: the band\'s provenance, on the record (cost) — a ±5% band moves each panel night\'s fill by up to about 2 points but the two on the 90 ceiling (10-29, and the superseded 10-31), which do not move; the reserve writes and the line do not move from ×0.95 through ×1.4; at ×1.5 three writes fall (11-01 and 11-02 to 49, 11-04 to none) and the line still does not move — and the chapter and the performance record say so', () => {
+  const run = (scale: number) => NIGHTS.map((n) => replay(n, 'cost', scale));
+  const writesMoved = (o: NightOut[]) => o.map((x, i) => [x, COST[i]] as const).filter(([x, h]) => x.b.arm.write !== h.b.arm.write)
+    .map(([x, h]) => `${x.date.slice(5)} ${h.b.arm.write ?? '—'}->${x.b.arm.write ?? '—'}`);
+  const linesMoved = (o: NightOut[]) => o.filter((x, i) => x.b.plan.cushionLineSocPct !== COST[i].b.plan.cushionLineSocPct).map((x) => x.date);
+  for (const scale of [0.95, 1.05]) {
+    const o = run(scale);
+    const moves = o.map((x, i) => [x, COST[i]] as const).filter(([x]) => x.sel.use === 'planning')
+      .map(([x, h]) => [x.date.slice(5), Math.round(Math.abs(x.b.arm.fc! - h.b.arm.fc!) * 10) / 10] as const);
+    assert.equal(moves.length, 9, `×${scale}: the nine panel nights`);
+    assert.deepEqual(moves.filter(([, d]) => d === 0).map(([day]) => day), ['10-29', '10-31'], `×${scale}: the fills on the 90 ceiling do not move`);
+    for (const [day, d] of moves.filter(([, x]) => x !== 0)) assert.ok(d >= 1.4 && d <= 2.3, `×${scale} ${day}: ${d} points`);
+    assert.deepEqual([writesMoved(o), linesMoved(o)], [[], []], `×${scale}`);
+  }
+  const o14 = run(1.4);
+  assert.deepEqual([writesMoved(o14), linesMoved(o14)], [[], []], '×1.4');
+  const o15 = run(1.5);
+  assert.deepEqual(writesMoved(o15), ['11-01 50->49', '11-02 50->49', '11-04 50->—'], '×1.5: three writes fall');
+  assert.deepEqual(linesMoved(o15), [], '×1.5: the line does not move');
+  const clause = 'a ±5% band moves each fill by up to about 2 points, except the fills on the 90 ceiling (10-29, and the superseded 10-31), which do not move, and the panel-night sums about 9–11 kWh; the reserve writes (50) and the line do not move with the band from ×0.95 through ×1.4';
+  assert.ok(DOC15_1.includes(`${clause} on the record, and at ×1.5 three writes fall (11-01 and 11-02 to 49, 11-04 to none) while the line still does not move.`));
+  assert.ok(DOC_PERF.includes(clause));
+  assert.ok(DOC_PERF.includes('and at ×1.5 three writes fall (11-01 and 11-02 to 49, 11-04 to none) while the line still does not move.'));
+  for (const d of [DOC15_1, DOC_PERF]) assert.ok(!d.includes('a ±5% band moves each fill about 2 points'), 'the unscoped clause is gone');
+});
+
+test('★★★ W1: a fault planted from another recorded evening — the starts that run longest (×1.05 from 10-30, ×1.10 from 10-28, ×1.25 from 10-29) are accepted on 6, 3 and 2 nights before the balance refuses it or the replay ends (11-05), every accepted write 50 and the line unmoved; the 24 starts 10-27..11-03 were measured by probe (the longest are these) — and the chapter and the performance record say so', () => {
+  const fmt = (x: { write: number | null; fc: number | null }): string => `${x.write ?? '—'}/${x.fc == null ? '—' : Math.round(x.fc * 10) / 10}`;
+  const want: Array<[number, string, string[]]> = [
+    [1.05, '2026-10-30', ['10-31 50/90', '11-01 50/69.4', '11-02 50/69.4', '11-03 50/73.7', '11-04 50/65.5', '11-05 50/80.1']],
+    [1.10, '2026-10-28', ['10-29 50/90', '10-30 50/76.2', '10-31 50/90']],
+    [1.25, '2026-10-29', ['10-30 50/71.8', '10-31 50/90']],
+  ];
+  for (const [scale, fromDay, accepted] of want) {
+    const real = NIGHTS.map((n) => replay(n, 'cost', scale, { ro: { fault: { scale, fromDay } } }));
+    const got = real.filter((o) => o.date > fromDay && o.sel.use === 'planning').map((o) => `${o.date.slice(5)} ${fmt(o.b.arm)}`);
+    assert.deepEqual(got, accepted, `×${scale} from ${fromDay}`);
+    real.forEach((o, i) => assert.equal(o.b.plan.cushionLineSocPct, COST[i].b.plan.cushionLineSocPct, `${o.date} ×${scale} from ${fromDay}: the line`));
+  }
+  const sentence = 'it was accepted on up to 6, 3 and 2 nights (×1.05, ×1.10, ×1.25) before the balance refused it or the replay ended (11-05); every accepted write was 50 and the line never moved.';
+  assert.ok(DOC15_1.includes(`Planted from another recorded evening (each of 10-27..11-03), ${sentence}`));
+  assert.ok(DOC_PERF.includes(`Planted from another recorded evening (each of 10-27 → 11-03), ${sentence}`));
+  assert.ok(DOC_PERF.includes('planted on the record itself from 10-20 (the panel\'s daily total scaled alike), the balance refuses it after 0–1 accepted nights'));
 });
