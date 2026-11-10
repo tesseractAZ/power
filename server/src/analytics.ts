@@ -2865,6 +2865,9 @@ export interface PlanningForecast {
   planningSlotHours: Record<HourSource, number>;
   /** Distinct site days with at least one admitted field slot-day. */
   planningAdmittedDays: number;
+  /** v1.204.0 — slot number → the site days admitted to the planning model as of E (ascending): the ledger's panel-row PV
+   *  actual reads only admitted days (index.ts panelAdmissionMem). Slot numbers only. */
+  planningAdmittedSlotDays: Record<string, string[]>;
   /** Slots proved under charge (G11) inside the window. */
   planningProvedUnderCharge: number[];
 }
@@ -2924,6 +2927,7 @@ export async function getPlanningForecast(
     generatedAt: now, forecastTs: fc.generatedAt, asOfDay, planningAsOfDay: asOfDay,
     planningModelKeys: inputs.keys, planningPvBasis: verdict.basis, planningVerdict: verdict,
     planningSlotHours: inputs.hourSources, planningAdmittedDays: admittedDays.size, planningProvedUnderCharge: proved,
+    planningAdmittedSlotDays: Object.fromEntries([...inputs.admitted.entries()].map(([slot, days]) => [String(slot), [...days].sort()])),
   };
   let value: PlanningForecast;
   if (identity) {

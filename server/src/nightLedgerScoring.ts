@@ -31,6 +31,8 @@ import { DELIVERED_BASIS, medianFilter3 } from './nightChargeAdvisor.js';
 import { saturationThresholdPct, meanChargeCeilingPct } from './chargeTaper.js';
 import { LEGACY_REVERT_LAG_MS } from './nightChargeActuator.js';
 import { SHP2_SOURCE_SLOTS } from './hwSpec.js';
+// v1.204.0 — a panel row's PV actual waits for the site day after its span (panelPvAdmission).
+import { addDaysYmd, siteTimeZone, siteYmd, zonedWallTimeMs } from './siteTime.js';
 
 const HOUR_MS = 3_600_000;
 
@@ -531,20 +533,116 @@ export function panelRowPvActual(i: {
   };
 }
 
-/** ★★★ v1.204.0 (L5) — the score note of a 'panel' / 'mixed' row's PV actual: its sources, the evening its 7-day energy balance passed
- *  as of and the window ratio stored with the row (not re-judged at capture), and that the row is kept apart. PURE. */
-export function panelPvActualNote(r: Pick<NightLedgerRow, 'plan_date' | 'pv_upper_ratio'>, basis: string | null, withheldWhy: string | null): string {
+/**
+ * ★★★ v1.204.0 (L5) — THE ADMISSION OF A PANEL ROW'S PV ACTUAL. A slot-day of the panel's reading reaches the ledger only if the
+ * 7-day energy balance admitted it (panelPvBasis.admittedSlotDays: complete and clean, and every window holding it passed) as of
+ * an evening after it — the one predicate the planning model's fit, bias and skill read. The row's span is [issue, +24 h]: its
+ * last site day is the day after the plan's evening, which no evening's balance can have judged before the next one, and whose
+ * daily total from the panel's own ledger is fetched 06:35-09:00 the morning after it. So:
+ *  - PENDING until a planning report as of an evening after the span's last day, built no earlier than 09:00 the morning after
+ *    that day, has been read (index.ts panelAdmissionMem): the row is captured at the usual time with its PV actual empty (its
+ *    PV-independent columns — the cushion verdict, the strikes — as usual), and re-captured once that report is in
+ *    (panelPvRecaptureDue);
+ *  - ADMITTED when every P slot's every span day is in that report's admitted set;
+ *  - WITHHELD otherwise (a span day the balance did not pass, as of that evening).
+ * A C slot (its Core's own meter) needs no admission. PURE.
+ */
+export interface PanelAdmission {
+  /** The evening the planning report judged as of (E). */
+  asOfDay: string;
+  /** When the worker built it (the planning layer's generatedAt). */
+  builtAtMs: number;
+  /** Slot number → the site days admitted to the planning model as of that evening. */
+  slotDays: Readonly<Record<string, readonly string[]>>;
+}
+/** The site hour of the morning after a span's last day before which no judgement of that day is read: the vendor's daily row for
+ *  the day is fetched 06:35-09:00 that morning, and a day judged before it is in is judged without it (not counted). */
+export const PANEL_PV_JUDGE_HOUR = 9;
+/** The marker of a panel row captured with its PV actual pending: its presence makes the re-capture find it. */
+export const PANEL_PV_PENDING_MARKER = 'PV actual pending the energy balance';
+
+/** The site days a span touches, ascending. PURE. */
+export function spanSiteDays(span: TimeSpan): string[] {
+  if (!(span.endMs > span.startMs)) return [];
+  const out: string[] = [];
+  const last = siteYmd(span.endMs - 1);
+  for (let d = siteYmd(span.startMs); d <= last; d = addDaysYmd(d, 1)) out.push(d);
+  return out;
+}
+
+export type PanelPvAdmission =
+  | { state: 'admitted'; asOfDay: string | null }
+  | { state: 'pending'; lastDay: string; judgeFromMs: number }
+  | { state: 'withheld'; asOfDay: string; slot: number; day: string };
+
+/** Whether a panel row's PV actual may be written now (above). `basis`: its per-slot sources ('1:P,2:P,3:C'). PURE. */
+export function panelPvAdmission(i: { basis: string | null | undefined; span: TimeSpan; admission: PanelAdmission | null | undefined }): PanelPvAdmission {
+  const days = spanSiteDays(i.span);
+  const pSlots = String(i.basis ?? '').split(',').filter((x) => /^\d+:P$/.test(x)).map((x) => Number(x.split(':')[0]));
+  if (pSlots.length === 0 || days.length === 0) return { state: 'admitted', asOfDay: i.admission?.asOfDay ?? null };
+  const lastDay = days[days.length - 1];
+  const judgeFromMs = zonedWallTimeMs(addDaysYmd(lastDay, 1), PANEL_PV_JUDGE_HOUR, 0, siteTimeZone());
+  const a = i.admission;
+  if (a == null || !(a.asOfDay > lastDay) || !(a.builtAtMs >= judgeFromMs)) return { state: 'pending', lastDay, judgeFromMs };
+  for (const slot of pSlots) {
+    const admitted = new Set(a.slotDays[String(slot)] ?? []);
+    const day = days.find((d) => !admitted.has(d));
+    if (day != null) return { state: 'withheld', asOfDay: a.asOfDay, slot, day };
+  }
+  return { state: 'admitted', asOfDay: a.asOfDay };
+}
+
+/** A captured panel row whose PV actual was left pending, now judgeable: the sweep resets it for re-capture (index.ts
+ *  repairPendingPanelPv). Inside `horizonMs` of its issue only (the raw telemetry it re-captures from). PURE. */
+export function panelPvRecaptureDue(
+  row: Pick<NightLedgerRow, 'pv_basis' | 'outcome_captured_at_ms' | 'score_notes' | 'issued_at_ms'> & Partial<Pick<NightLedgerRow, 'actual_pv_basis' | 'pv_basis_slots'>>,
+  admission: PanelAdmission | null | undefined,
+  nowMs: number,
+  horizonMs: number,
+): boolean {
+  if (row.outcome_captured_at_ms == null || !isPanelBasisRow(row)) return false;
+  if (!String(row.score_notes ?? '').includes(PANEL_PV_PENDING_MARKER)) return false;
+  if (typeof row.issued_at_ms !== 'number' || !Number.isFinite(row.issued_at_ms) || nowMs - row.issued_at_ms > horizonMs) return false;
+  const span = { startMs: row.issued_at_ms, endMs: row.issued_at_ms + FORECAST_SPAN_MS };
+  return panelPvAdmission({ basis: row.actual_pv_basis ?? row.pv_basis_slots, span, admission }).state !== 'pending';
+}
+
+/** The columns the sweep writes to reset a pending panel row (forecastSpanResetColumns, with its own note). PURE. */
+export function panelPvRecaptureColumns(admissionAsOfDay: string): Partial<NightLedgerRow> {
+  return {
+    ...forecastSpanResetColumns(0),
+    actual_pv_basis: null,
+    score_notes: `reset — its PV actual was pending the 7-day energy balance, which has judged its span's days as of ${admissionAsOfDay}; re-captured by the backfill sweep.`,
+  };
+}
+
+/** ★★★ v1.204.0 (L5) — the score note of a 'panel' / 'mixed' row's PV actual: its sources and the evening the energy balance had
+ *  passed its span's days as of (the capture's own reading), or why it is pending or withheld; the window ratio stored with the row
+ *  (the plan's, as of its own evening, not re-judged); and that the row is kept apart. PURE. */
+export function panelPvActualNote(
+  r: Pick<NightLedgerRow, 'plan_date' | 'pv_upper_ratio'>,
+  basis: string | null,
+  withheldWhy: string | null,
+  admission?: PanelPvAdmission | null,
+): string {
   const slots = String(basis ?? '').split(',').filter((x) => x !== '');
   const p = slots.filter((x) => x.endsWith(':P')).map((x) => x.split(':')[0]);
   const c = slots.filter((x) => x.endsWith(':C')).map((x) => x.split(':')[0]);
-  const src = `${p.length > 0 ? `the panel's own per-slot reading for slot${p.length === 1 ? '' : 's'} ${p.join(', ')}` : ''}`
-    + `${p.length > 0 && c.length > 0 ? '; ' : ''}${c.length > 0 ? `the Core's own meter for slot${c.length === 1 ? '' : 's'} ${c.join(', ')}` : ''}`;
-  const ratio = typeof r.pv_upper_ratio === 'number' && Number.isFinite(r.pv_upper_ratio) ? ` (window ratio ${r.pv_upper_ratio.toFixed(4)})` : '';
-  const head = withheldWhy != null
-    ? ` PV actual withheld (${withheldWhy}).`
-    : ` PV actual is ${src || 'the per-slot resolver'}.`;
-  return `${head} The plan's 7-day energy balance passed as of ${r.plan_date}${ratio}, the evening it was made; it is not re-judged at capture. `
-    + "The row is kept apart from the readiness gate's sizing figures.";
+  const list = (xs: string[]): string => (xs.length <= 1 ? xs.join('') : `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`);
+  const src = `${p.length > 0 ? `the panel's own per-slot reading for slot${p.length === 1 ? '' : 's'} ${list(p)}` : ''}`
+    + `${p.length > 0 && c.length > 0 ? '; ' : ''}${c.length > 0 ? `the Core's own meter for slot${c.length === 1 ? '' : 's'} ${list(c)}` : ''}`;
+  const ratio = typeof r.pv_upper_ratio === 'number' && Number.isFinite(r.pv_upper_ratio)
+    ? ` The plan's own 7-day energy balance read ${r.pv_upper_ratio.toFixed(4)} as of ${r.plan_date}, the evening it was made.` : '';
+  const head = admission?.state === 'pending'
+    ? ` ${PANEL_PV_PENDING_MARKER}: ${admission.lastDay} is judged no earlier than ${PANEL_PV_JUDGE_HOUR}:00 the next morning, once its daily `
+      + "total from the panel's own ledger is in, and the row is re-captured once the night planner has read that judgement."
+    : admission?.state === 'withheld'
+      ? ` PV actual withheld — slot ${admission.slot}'s ${admission.day} was not passed by the 7-day energy balance as of ${admission.asOfDay}.`
+      : withheldWhy != null
+        ? ` PV actual withheld (${withheldWhy}).`
+        : ` PV actual is ${src || 'the per-slot resolver'}${p.length > 0 && admission?.state === 'admitted' && admission.asOfDay != null
+          ? `, on days the 7-day energy balance passed as of ${admission.asOfDay} (the newest evening it had judged as of when the row was captured)` : ''}.`;
+  return `${head}${ratio} The row is kept apart from the readiness gate's sizing figures.`;
 }
 
 /**

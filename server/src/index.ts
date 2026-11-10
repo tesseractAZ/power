@@ -143,6 +143,8 @@ type PlanningProbabilisticReport = ProbabilisticForecast & {
   planningVerdict?: UcVerdict | null;
   planningModelKeys?: string[];
   planningAdmittedDays?: number;
+  planningAdmittedSlotDays?: Record<string, string[]>;
+  planningGeneratedAt?: number;
 };
 import { startSshServer, loadOrCreateHostKey } from './console/server.js';
 import { authFromEnv, authConfigProblems, describeSshAuth } from './console/session.js';
@@ -373,6 +375,8 @@ import {
   heldLedgerVerdict, heldLedgerNote, heldLedgerRepair, heldRepairColumns, heldRepairClause, heldSides, basisIncompleteNote, cushionOnlyNote,
   // v1.204.0 — a row planned on the panel's own readings: its PV actual from the per-slot sources, and its note.
   isPanelBasisRow, panelRowPvActual, panelPvActualNote,
+  // v1.204.0 (L5) — a panel row's PV actual only on slot-days the 7-day energy balance admitted, judged after its span.
+  panelPvAdmission, panelPvRecaptureDue, panelPvRecaptureColumns, type PanelAdmission,
   // v1.196.0 — the saturation that censors a row's PV for the cost ceiling's PV factor.
   pvSaturationColumns,
 } from './nightLedgerScoring.js';
@@ -3802,6 +3806,18 @@ function forceChargeStateAt(hourStartMs: number): 'on' | 'off' | 'unknown' {
 function round2(n: number): number { return Math.round(n * 100) / 100; }
 function round1(n: number): number { return Math.round(n * 10) / 10; }
 
+/** ★★★ v1.204.0 (L5) — the admitted slot-days of the newest planning report read (the latest evening it judged as of, and when the
+ *  worker built it): a panel row's PV actual reads only these (nightLedgerScoring.panelPvAdmission). In memory only: after a restart a
+ *  pending row waits for the next report. Never regresses to an earlier evening. */
+let panelAdmissionMem: PanelAdmission | null = null;
+function notePanelAdmission(r: PlanningProbabilisticReport | null, asOfDay: string | null, nowMs: number): void {
+  if (r == null || asOfDay == null || r.asOfDay !== asOfDay || r.planningAdmittedSlotDays == null) return;
+  const builtAtMs = typeof r.planningGeneratedAt === 'number' && Number.isFinite(r.planningGeneratedAt) ? r.planningGeneratedAt : nowMs;
+  const m = panelAdmissionMem;
+  if (m != null && (asOfDay < m.asOfDay || (asOfDay === m.asOfDay && builtAtMs <= m.builtAtMs))) return;
+  panelAdmissionMem = { asOfDay, builtAtMs, slotDays: r.planningAdmittedSlotDays };
+}
+
 /** ★★★ v1.204.0 — the selection's latch and ledger figures (NightPlanExtras.pvSelection). PURE. */
 function pvSelectionExtras(sel: PvSelection, reason: PvBasisReason | null, asOfDay: string): NonNullable<NightPlanExtras['pvSelection']> {
   const v = sel.verdict != null && sel.verdict.asOfDay === asOfDay ? sel.verdict : null;
@@ -4078,6 +4094,9 @@ async function recomputeNightChargePlan(
       ? analytics.report<(MultiDayForecast & { basis?: string; asOfDay?: string }) | null>('multiDayForecast', { days: 4, basis: 'planning', asOfDay: pvAsOfDay! }).catch(() => null)
       : Promise.resolve(null),
   ]);
+
+  // v1.204.0 (L5) — the planning report's admitted slot-days, for a panel row's PV actual (only a report as of the E it was asked for).
+  notePanelAdmission(probPlanning, pvAsOfDay, nowMs);
 
   // Day-ahead hours by hour-epoch — the load side (probabilistic band is PV-only).
   const dayAheadByEpoch = new Map<number, ForecastHour>();
@@ -4766,6 +4785,8 @@ function scoreCompletedNights(nowMs: number): void {
   let rows = recorder.readNightLedger(LEDGER_BACKFILL_SWEEP_DAYS);
   // v1.188.1 — a row captured on held readings is reset first, so the loop below re-captures it.
   if (repairHeldNightOutcomes(rows, shp2Sn, nowMs)) rows = recorder.readNightLedger(LEDGER_BACKFILL_SWEEP_DAYS);
+  // v1.204.0 (L5) — and a panel row captured with its PV actual pending, once the energy balance has judged its span's days.
+  if (repairPendingPanelPv(rows, nowMs)) rows = recorder.readNightLedger(LEDGER_BACKFILL_SWEEP_DAYS);
   // ★ THE v1.39.0 COMPLETION GATE (review HIGH ×2): a night may be captured
   // only once its FULL scored span has elapsed — 16 h past its REAL window
   // close. The pre-fix midnight tick captured yesterday's row while its
@@ -4923,6 +4944,7 @@ function scoreNightRow(
   // sources go to actual_pv_basis; the note (panelPvActualNote) says what it is and that the row is kept apart.
   const panelRow = isPanelBasisRow(y);
   let panelPv: ReturnType<typeof panelRowPvActual> | null = null;
+  let panelAdmission: ReturnType<typeof panelPvAdmission> | null = null;
   if (panelRow) {
     const houseSrc = (findShp2(store.get().devices)?.projection?.sources ?? []) as Array<{ slot?: number; sn?: string; isConnected?: boolean }>;
     panelPv = panelRowPvActual({
@@ -4932,9 +4954,14 @@ function scoreNightRow(
       minCoverage: PV_LEDGER_MIN_CORE_COVERAGE,
     });
     const held = heldSide.pv || heldSide.load;
-    actualPvKwh = held ? null : panelPv.kwh;
+    // v1.204.0 (L5) — and only on slot-days the 7-day energy balance admitted, as of an evening after the span, read after the
+    // morning its last day's daily total comes in (panelPvAdmission): pending until then (re-captured: repairPendingPanelPv), withheld
+    // where a span day was not passed. The PV-independent columns are captured now either way.
+    panelAdmission = panelPvAdmission({ basis: panelPv.basis, span: { startMs: fcSpanStart, endMs: fcSpanEnd }, admission: panelAdmissionMem });
+    actualPvKwh = held || panelAdmission.state !== 'admitted' ? null : panelPv.kwh;
     actualPvCoverage = panelPv.worstCoverage;
     if (held) panelPv = { ...panelPv, kwh: null, why: 'held telemetry over the span' };
+    else if (panelAdmission.state !== 'admitted') panelPv = { ...panelPv, kwh: null };
   }
   const actualLoadKwh = loadPts.length && !heldSide.load ? round2(integrateWh(loadPts, false) / 1000) : null;
   // v1.196.0 — did the pool reach the charge taper over the same span (pvSaturationColumns)? A day
@@ -5067,7 +5094,10 @@ function scoreNightRow(
   // v1.187.22 — the plan's expected buy against what was delivered, and its expected window-open
   // SoC against the measured one (expectedBuyScoreNote; '' on a row without them). Notes only.
   // v1.204.0 (L5) — a panel row's PV actual, said: its sources, the evening its balance passed as of, the stored ratio, kept apart.
-  if (panelRow && panelPv != null) scoreNotes += panelPvActualNote(y, panelPv.basis, panelPv.kwh == null ? (panelPv.why ?? 'withheld') : null);
+  if (panelRow && panelPv != null) {
+    const why = panelPv.why != null ? panelPv.why : panelPv.kwh == null && panelAdmission?.state === 'admitted' ? 'withheld' : null;
+    scoreNotes += panelPvActualNote(y, panelPv.basis, why, why != null ? null : panelAdmission);
+  }
   scoreNotes += expectedBuyScoreNote({
     expectedBuyKwh: y.expected_buy_kwh ?? null,
     expectedStartSocPct: y.expected_start_soc_pct ?? null,
@@ -5785,6 +5815,26 @@ async function runMiddayShadowTickInner(nowMs: number): Promise<void> {
  * row always carries the verdict and is not reset again. Rows are corrected in place, never
  * deleted. Returns true when it reset one.
  */
+/** ★★★ v1.204.0 (L5) — a 'panel' / 'mixed' row captured with its PV actual PENDING (its span's last day not yet judged by the 7-day
+ *  energy balance) is reset for re-capture once a planning report as of a later evening, built after that day's daily total came in,
+ *  has been read (nightLedgerScoring.panelPvRecaptureDue): the loop then captures it with its PV actual admitted or withheld. Inside
+ *  the re-capture horizon only. */
+function repairPendingPanelPv(rows: NightLedgerRow[], nowMs: number): boolean {
+  let reset = false;
+  try {
+    const horizonMs = forecastSpanRecaptureHorizonMs(config.retentionDays, LEDGER_BACKFILL_SWEEP_DAYS);
+    for (const y of rows) {
+      if (!panelPvRecaptureDue(y, panelAdmissionMem, nowMs, horizonMs) || panelAdmissionMem == null) continue;
+      recorder.recordNightOutcome(String(y.plan_date), panelPvRecaptureColumns(panelAdmissionMem.asOfDay));
+      reset = true;
+      app.log.info(`night-charge: reset ${y.plan_date} for re-capture — its PV actual was pending the 7-day energy balance, which has judged its span's days as of ${panelAdmissionMem.asOfDay}.`);
+    }
+  } catch (e: any) {
+    app.log.debug(`night-charge: pending panel PV repair skipped (${e?.message ?? e})`);
+  }
+  return reset;
+}
+
 function repairHeldNightOutcomes(rows: NightLedgerRow[], shp2Sn: string, nowMs: number): boolean {
   let reset = false;
   try {

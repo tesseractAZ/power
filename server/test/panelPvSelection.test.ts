@@ -30,6 +30,7 @@ import { siteDayStartMs, siteTimeZone, addDaysYmd } from '../src/siteTime.js';
 import { SENSORS, sensorDiscoveryConfig, NIGHT_CHARGE_ATTRIBUTES_TEMPLATE } from '../src/mqttDiscovery.js';
 import {
   panelRowPvActual, panelPvActualNote, pvVerdictSetAside, panelPvVerdictSetAside, isPanelBasisRow,
+  panelPvAdmission, panelPvRecaptureDue, panelPvRecaptureColumns, spanSiteDays, PANEL_PV_PENDING_MARKER, FORECAST_SPAN_MS,
 } from '../src/nightLedgerScoring.js';
 import { computeNightChargeReadiness, panelApart, CURRENT_ALGO_VERSION } from '../src/nightChargeGate.js';
 import type { NightLedgerRow } from '../src/recorder.js';
@@ -383,9 +384,9 @@ test('★★★ L5: a panel row\'s PV actual is the per-slot resolver (the panel
   const thin = panelRowPvActual({ slots: '1:P', span, panelSn: 'PANEL', coreOfSlot: () => null, query: () => flat(1000).slice(0, 100), minCoverage: 0.9 });
   assert.equal(thin.kwh, null);
   assert.match(thin.why!, /worst per-slot PV coverage 0\.\d\d < 0\.9/);
-  const note = panelPvActualNote({ plan_date: '2026-11-05', pv_upper_ratio: 1.0041 }, '1:P,2:P,3:C', null);
-  assert.equal(note, " PV actual is the panel's own per-slot reading for slots 1, 2; the Core's own meter for slot 3. The plan's 7-day energy balance passed as of 2026-11-05 (window ratio 1.0041), the evening it was made; it is not re-judged at capture. The row is kept apart from the readiness gate's sizing figures.");
-  assert.match(panelPvActualNote({ plan_date: '2026-11-05', pv_upper_ratio: null }, '1:P', 'held telemetry over the span'), /^ PV actual withheld \(held telemetry over the span\)\./);
+  const note = panelPvActualNote({ plan_date: '2026-11-05', pv_upper_ratio: 1.0041 }, '1:P,2:P,3:C', null, { state: 'admitted', asOfDay: '2026-11-07' });
+  assert.equal(note, " PV actual is the panel's own per-slot reading for slots 1 and 2; the Core's own meter for slot 3, on days the 7-day energy balance passed as of 2026-11-07 (the newest evening it had judged as of when the row was captured). The plan's own 7-day energy balance read 1.0041 as of 2026-11-05, the evening it was made. The row is kept apart from the readiness gate's sizing figures.");
+  assert.match(panelPvActualNote({ plan_date: '2026-11-05', pv_upper_ratio: null }, '1:P', 'held telemetry over the span'), /^ PV actual withheld \(held telemetry over the span\)\. The row is kept apart/);
   // pvVerdictSetAside takes the panel rule FIRST — even where the keys would match the actuals.
   assert.equal(pvVerdictSetAside('A,B,C', ['A', 'B', 'C'], 'panel'), panelPvVerdictSetAside('panel'));
   assert.equal(pvVerdictSetAside('A,B,C', ['A', 'B', 'C'], 'cores'), null);
@@ -401,6 +402,53 @@ test('★★★ L5: a panel row\'s PV actual is the per-slot resolver (the panel
   assert.match(INDEX, /pv_basis: extras\.pvSelection\?\.pvBasis \?\? null,\n\s+pv_basis_slots: extras\.pvSelection\?\.pvBasisSlots \?\? null,\n\s+pv_basis_refused_by: extras\.pvSelection\?\.pvBasisRefusedBy \?\? null,\n\s+pv_upper_ratio: extras\.pvSelection\?\.pvUpperRatio \?\? null,/);
   const gate = readFileSync(resolve(HERE, '../src/nightChargeGate.ts'), 'utf8');
   assert.ok(gate.includes('export const CURRENT_ALGO_VERSION = 3;'), 'CURRENT_ALGO_VERSION stays 3');
+});
+
+test('★★★ L5: a panel row\'s PV actual waits for the energy balance to judge its span\'s last day (pending, captured with the PV-independent columns; re-captured once judged), is admitted only on admitted slot-days, and is withheld on a day the balance did not pass', () => {
+  // The 11-05 row: issued 11-05 21:30, span to 11-06 21:30 (days 11-05 and 11-06). Its last day's daily total comes in 11-07 06:35-09:00.
+  const issued = siteDayStartMs('2026-11-05') + (21 * 60 + 30) * 60_000;
+  const span = { startMs: issued, endMs: issued + FORECAST_SPAN_MS };
+  assert.deepEqual(spanSiteDays(span), ['2026-11-05', '2026-11-06']);
+  const at9 = siteDayStartMs('2026-11-07') + 9 * H;
+  const adm = (asOfDay: string, builtAtMs: number, days: Record<string, string[]>) => ({ asOfDay, builtAtMs, slotDays: days });
+  const both = { 1: ['2026-11-04', '2026-11-05', '2026-11-06'], 2: ['2026-11-05', '2026-11-06'], 3: ['2026-11-05', '2026-11-06'] };
+  // No report read; one as of the plan's own evening; one as of 11-07 built before 09:00 (the daily total may not be in): pending.
+  assert.equal(panelPvAdmission({ basis: '1:P,2:P,3:P', span, admission: null }).state, 'pending');
+  assert.equal(panelPvAdmission({ basis: '1:P,2:P,3:P', span, admission: adm('2026-11-06', at9 + H, both) }).state, 'pending', 'as of 11-06: 11-06 itself is not judged');
+  assert.equal(panelPvAdmission({ basis: '1:P,2:P,3:P', span, admission: adm('2026-11-07', at9 - 1, both) }).state, 'pending', 'built before 09:00 the morning after');
+  const p = panelPvAdmission({ basis: '1:P,2:P,3:P', span, admission: null });
+  assert.deepEqual(p, { state: 'pending', lastDay: '2026-11-06', judgeFromMs: at9 });
+  // Judged: admitted on every P slot's every span day; withheld on the first day a slot was not passed.
+  assert.deepEqual(panelPvAdmission({ basis: '1:P,2:P,3:P', span, admission: adm('2026-11-07', at9, both) }), { state: 'admitted', asOfDay: '2026-11-07' });
+  assert.deepEqual(panelPvAdmission({ basis: '1:P,2:P,3:P', span, admission: adm('2026-11-07', at9, { ...both, 2: ['2026-11-05'] }) }),
+    { state: 'withheld', asOfDay: '2026-11-07', slot: 2, day: '2026-11-06' });
+  // A C slot needs no admission (its Core's own meter): slot 3 on its Core, slot 3's days absent, admitted.
+  assert.equal(panelPvAdmission({ basis: '1:P,2:P,3:C', span, admission: adm('2026-11-08', at9 + 86_400_000, { 1: both[1], 2: both[2] }) }).state, 'admitted');
+  // The notes: pending carries the marker the re-capture finds; withheld names the slot-day and the evening; both say kept apart.
+  const pendingNote = panelPvActualNote({ plan_date: '2026-11-05', pv_upper_ratio: 1.0041 }, '1:P,2:P,3:P', null, p);
+  assert.ok(pendingNote.includes(PANEL_PV_PENDING_MARKER));
+  assert.equal(pendingNote, ` ${PANEL_PV_PENDING_MARKER}: 2026-11-06 is judged no earlier than 9:00 the next morning, once its daily total from the panel's own ledger is in, and the row is re-captured once the night planner has read that judgement. The plan's own 7-day energy balance read 1.0041 as of 2026-11-05, the evening it was made. The row is kept apart from the readiness gate's sizing figures.`);
+  assert.equal(panelPvActualNote({ plan_date: '2026-11-05', pv_upper_ratio: null }, '1:P,2:P', null, { state: 'withheld', asOfDay: '2026-11-07', slot: 2, day: '2026-11-06' }),
+    " PV actual withheld — slot 2's 2026-11-06 was not passed by the 7-day energy balance as of 2026-11-07. The row is kept apart from the readiness gate's sizing figures.");
+  // The re-capture: a captured pending panel row, once judgeable, inside the horizon; never a row without the marker or a Core row.
+  const row = { pv_basis: 'panel', pv_basis_slots: '1:P,2:P,3:P', actual_pv_basis: '1:P,2:P,3:P', outcome_captured_at_ms: issued + FORECAST_SPAN_MS, score_notes: `x.${pendingNote}`, issued_at_ms: issued };
+  const horizon = 28 * 86_400_000;
+  assert.equal(panelPvRecaptureDue(row, adm('2026-11-07', at9 - 1, both), at9, horizon), false, 'still pending: left as captured');
+  assert.equal(panelPvRecaptureDue(row, adm('2026-11-07', at9, both), at9, horizon), true);
+  assert.equal(panelPvRecaptureDue({ ...row, score_notes: 'x' }, adm('2026-11-07', at9, both), at9, horizon), false, 'no marker: not pending');
+  assert.equal(panelPvRecaptureDue({ ...row, pv_basis: 'cores', actual_pv_basis: null }, adm('2026-11-07', at9, both), at9, horizon), false);
+  assert.equal(panelPvRecaptureDue({ ...row, outcome_captured_at_ms: null }, adm('2026-11-07', at9, both), at9, horizon), false, 'not captured yet: the loop captures it');
+  assert.equal(panelPvRecaptureDue(row, adm('2026-11-07', at9, both), issued + horizon + 1, horizon), false, 'past the re-capture horizon: kept');
+  const reset = panelPvRecaptureColumns('2026-11-07');
+  assert.equal(reset.outcome_captured_at_ms, null);
+  assert.equal(reset.actual_pv_kwh, null);
+  assert.ok(!String(reset.score_notes).includes(PANEL_PV_PENDING_MARKER), 'the reset note carries no marker (the re-capture writes the verdict)');
+  // index.ts: the memo from the planning report as of the E asked; the scorer reads it; the sweep resets a pending row before the loop.
+  assert.match(INDEX, /notePanelAdmission\(probPlanning, pvAsOfDay, nowMs\);/);
+  assert.match(INDEX, /panelAdmission = panelPvAdmission\(\{ basis: panelPv\.basis, span: \{ startMs: fcSpanStart, endMs: fcSpanEnd \}, admission: panelAdmissionMem \}\);\n\s+actualPvKwh = held \|\| panelAdmission\.state !== 'admitted' \? null : panelPv\.kwh;/);
+  const sweep = INDEX.slice(INDEX.indexOf('function scoreCompletedNights('), INDEX.indexOf('function scoreNightRow('));
+  assert.ok(sweep.indexOf('repairPendingPanelPv(rows, nowMs)') > 0 && sweep.indexOf('repairPendingPanelPv(rows, nowMs)') < sweep.indexOf('ledgerRowsDueForCapture('));
+  assert.match(INDEX, /if \(m != null && \(asOfDay < m\.asOfDay \|\| \(asOfDay === m\.asOfDay && builtAtMs <= m\.builtAtMs\)\)\) return;/, 'never regresses to an earlier evening');
 });
 
 /* ══ readiness ═══════════════════════════════════════════════════════════════════════════════════════════════════════════ */

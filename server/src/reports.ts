@@ -257,6 +257,11 @@ const BUILDERS: Record<string, Builder> = {
       planningModelKeys: p.planningModelKeys,
       // v1.204.0 — the window mix the plan's basis sentence discloses (days of the 30 with an admitted panel reading).
       planningAdmittedDays: p.planningAdmittedDays,
+      // v1.204.0 — and the admitted days per slot, for the ledger's panel-row PV actual (slot numbers only).
+      planningAdmittedSlotDays: p.planningAdmittedSlotDays,
+      // v1.204.0 (L5) — when the planning layer (its verdict and admitted set) was built: a panel row's PV actual reads the admitted
+      // set only from a layer built after the morning its last span day's daily total comes in.
+      planningGeneratedAt: p.generatedAt,
     };
   },
   bayesianSolar: (ctx) => computeBayesianSolarModel(devicesOf(ctx), ctx.recorder),
