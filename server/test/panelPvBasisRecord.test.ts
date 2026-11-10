@@ -15,7 +15,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  assembleUcTable, upperCheck, admittedSlotDays, windowBalance, UC_THRESHOLD,
+  assembleUcTable, upperCheck, admittedSlotDays, windowBalance, isFieldDay, UC_THRESHOLD,
   type UcVerdict,
 } from '../src/panelPvBasis.js';
 import { addDaysYmd } from '../src/siteTime.js';
@@ -299,6 +299,33 @@ test('★★ L1: one reason per clause, in precedence — the record, the capaci
   const nv = run('2026-10-28', { vendor: { '2026-10-27': null } }).v;
   assert.equal(nv.reason?.code, 'too-few-field-days');
   assert.deepEqual((nv.reason as { uncounted: Array<{ day: string; cause: string }> }).uncounted.find((u) => u.day === '2026-10-27'), { day: '2026-10-27', cause: 'no-vendor-row' });
+});
+
+test('★★★ (owner) 1.040 is strict: a window reading exactly the threshold passes, a hair above refuses', () => {
+  const E = '2026-10-28';
+  const { table } = assembleUcTable(recordSources(E), E);
+  const v = upperCheck(table, E);
+  assert.equal(v.state, 'pass');
+  // The one full window as of 10-28 (7 field days): its exact ratio.
+  const M = table.mapAsOf(E)!;
+  const F = v.checks.fieldSlots;
+  const days: string[] = [];
+  for (let d = addDaysYmd(E, -1); days.length < 7; d = addDaysYmd(d, -1)) if (isFieldDay(table.days.get(d), F, M)) days.unshift(d);
+  const exact = windowBalance(table, days, F).ratio;
+  assert.equal(Math.round(exact * 1e4) / 1e4, v.checks.max7);
+  const at = (threshold: number) => { const t = assembleUcTable(recordSources(E, { threshold }), E).table; return upperCheck(t, E); };
+  assert.equal(at(exact).state, 'pass', 'at the threshold: refused only ABOVE it');
+  assert.equal(at(exact - 1e-9).reason?.code, 'balance', 'a hair above: refused');
+});
+
+test('★★★ a day a slot\'s Core covered is no field day for that slot, though the panel read it too (the window counts field days only)', () => {
+  // Slot 1 on its Core 10-21..10-23 (the panel's field present and the vendor row matching); E−1 on the field, so slot 1 takes it.
+  const v = run('2026-10-28', { coreSourced: { slots: [1], fromDay: '2026-10-21', toDay: '2026-10-23' } }).v;
+  assert.equal(v.reason?.code, 'too-few-field-days');
+  const r = v.reason as { n: number; uncounted: Array<{ day: string; cause: string; slot?: number }> };
+  assert.equal(r.n, 4);
+  for (const day of ['2026-10-21', '2026-10-22', '2026-10-23']) assert.deepEqual(r.uncounted.find((u) => u.day === day), { day, cause: 'core-day', slot: 1 });
+  assert.equal(run('2026-10-28').v.state, 'pass', 'the same evening on the record: 7 field days');
 });
 
 test('★★ Core-only days never count, and a day with partial rows names its cause', () => {

@@ -254,6 +254,25 @@ test('★★★ the published band, the published rollup and the runway are unto
   assert.ok(at > 0 && !/\bplanning[A-Z]\w*|PlanningForecast|planningDayForecast/.test(body), 'computeRunway reads no planning field');
 });
 
+test('★★★ the planning band\'s cache is keyed by E: another evening\'s layer, built at the same instant, is never served from it', async () => {
+  const devices = devicesWith();
+  const fc = await getDayForecast(devices, dark.recorder, () => {});
+  const p = (await getPlanningForecast(devices, dark.recorder, () => {}, E))!;
+  const sp = await computeForecastSkill(devices, dark.recorder, fc, 30, 'realized', undefined, { kind: 'planning', planning: p });
+  const bandE = await computeProbabilisticForecast(fc, sp, p);
+  assert.equal(await computeProbabilisticForecast(fc, sp, p), bandE, 'the same evening: from its cache slot');
+  // Sunday's layer, as Saturday's but for its own evening (the same build instant: only the key tells them apart).
+  const other = { ...p, asOfDay: addDaysYmd(E, 1), planningAsOfDay: addDaysYmd(E, 1) };
+  const bandOther = await computeProbabilisticForecast(fc, sp, other);
+  assert.notEqual(bandOther, bandE, 'another evening\'s band is built for it, not read from this evening\'s slot');
+  assert.deepEqual(bandOther.hours, bandE.hours, 'and, on the same layer, reads the same');
+  // The planning skill is a realized-GHI reader (reports.ts): the planning band's report asks for it on the realized basis.
+  const rpt = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src/reports.ts'), 'utf8');
+  const at = rpt.indexOf('planningProbabilisticForecast: async');
+  assert.ok(at > 0);
+  assert.match(rpt.slice(at, at + 900), /computeForecastSkill\(\n\s+devicesOf\(ctx\), ctx\.recorder, fc, PV_BAND_CAL_WINDOW_DAYS, 'realized', undefined, \{ kind: 'planning', planning: p \},/);
+});
+
 test('★★ the reports echo E: planningForecast, planningProbabilisticForecast, multiDayForecast {basis: planning}', async () => {
   resetReportBasisForTesting();
   const ctx = { recorder: dark.recorder, snapshot: { devices: devicesWith() } as Any, log: () => {} };

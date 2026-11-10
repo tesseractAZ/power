@@ -133,7 +133,7 @@ const MUTANTS = [
   },
   {
     id: 'PB-K-ii. ★★ the constants with no charge hours (20 → 0)',
-    file: PB, tests: [T_UNIT],
+    file: PB, tests: [T_UNIT, T_REC],
     find: 'export const CONSTANTS_MIN_CHARGE_HOURS = 20;',
     to: 'export const CONSTANTS_MIN_CHARGE_HOURS = 0; /* MUTANT */',
     why: 'g is fitted on no grid charge at all: the night side of the balance is unconstrained.',
@@ -170,7 +170,7 @@ const MUTANTS = [
   },
   {
     id: 'PB-U-ii. ★★ (owner) 1.040 is strict: a window at the threshold passes',
-    file: PB, tests: [T_UNIT],
+    file: PB, tests: [T_UNIT, T_REC],
     find: '  if (worst.b.ratio > T) {',
     to: '  if (worst.b.ratio >= T) { /* MUTANT */',
     why: 'The owner\'s rule is "refused above 1.04".',
@@ -190,11 +190,13 @@ const MUTANTS = [
     why: 'Three days of readings carry a verdict; 10-23 passes.',
   },
   {
-    id: 'PB-U-v. ★★★ fewer than 7 field days passes',
+    // The design's "fewer than 7 → pass" is guarded twice — the count clause (PB-U-vi) and the full-window test here — and no
+    // single-site mutant of either passes it: a window can only be short below 7 field days, where the count already refuses.
+    id: 'PB-U-v. ★★★ a window of fewer than 7 field days is judged',
     file: PB, tests: [T_UNIT, T_REC],
-    find: "  if (worst == null) return verdict('refused', { code: 'too-few-field-days', n: fd.length, need: UC_WINDOW_DAYS, firstFieldDay: fd[0], uncounted: [] }, sources);",
-    to: "  if (worst == null) return verdict('pass', null, sources); /* MUTANT */",
-    why: 'With no full window the field is taken unchecked.',
+    find: '  return w.length === UC_WINDOW_DAYS ? w.reverse() : null;',
+    to: '  return w.length > 0 ? w.reverse() : null; /* MUTANT */',
+    why: 'The windows ending on the first field days are judged on one to six days: the hysteresis reads noise.',
   },
   {
     id: 'PB-U-vi. ★★ the count clause skipped (no restart, no uncounted days)',
@@ -212,21 +214,21 @@ const MUTANTS = [
   },
   {
     id: 'PB-U-viii. ★★★ days under another slot→Core map counted (no restart)',
-    file: PB, tests: [T_UNIT],
+    file: PB, tests: [T_UNIT, T_REC],
     find: '  if (!d || d.map == null || !sameMap(d.map, M) || d.vendorOk !== true || F.length === 0) return false;',
     to: '  if (!d || d.vendorOk !== true || F.length === 0) return false; /* MUTANT */',
     why: 'A swapped-in Core is judged on the old Core\'s days.',
   },
   {
     id: 'PB-U-ix. ★★★ staleness removed (a week-old window passes)',
-    file: PB, tests: [T_UNIT],
+    file: PB, tests: [T_UNIT, T_REC],
     find: "  if (newest < minNewest) return verdict('refused', { code: 'stale', newest, minNewest }, sources);",
     to: '  /* MUTANT */',
     why: 'A vendor outage leaves the last good week standing for days.',
   },
   {
     id: 'PB-U-x. ★★ staleness E−2 → E−9',
-    file: PB, tests: [T_UNIT],
+    file: PB, tests: [T_UNIT, T_REC],
     find: 'export const UC_NEWEST_MAX_AGE_DAYS = 2;',
     to: 'export const UC_NEWEST_MAX_AGE_DAYS = 9; /* MUTANT */',
     why: 'The options text says "the newest no more than two days old".',
@@ -268,7 +270,7 @@ const MUTANTS = [
   },
   {
     id: 'PB-U-xvi. ★★ G6 tolerance ×10',
-    file: PB, tests: [T_UNIT],
+    file: PB, tests: [T_UNIT, T_REC],
     find: 'export const G6_TOLERANCE_WH = 500;\nexport const G6_TOLERANCE_FRAC = 0.02;',
     to: 'export const G6_TOLERANCE_WH = 5000;\nexport const G6_TOLERANCE_FRAC = 0.2; /* MUTANT */',
     why: 'A field 15% over the panel\'s own daily total passes G6.',
@@ -282,28 +284,28 @@ const MUTANTS = [
   },
   {
     id: 'PB-U-xviii. ★★★ (M5) judged-bad on the post-check day (the holds can never start)',
-    file: PB, tests: [T_UNIT],
+    file: PB, tests: [T_UNIT, T_REC],
     find: '    if (!d || !x || !slotPreChecked(x)) continue;',
     to: '    if (!d || !x || !slotPreChecked(x) || !isFieldDay(d, [slot], d.map ?? {})) continue; /* MUTANT */',
     why: 'A G4 or G6 day is merely uncounted: the next evening passes on the other six.',
   },
   {
     id: 'PB-U-xix. ★★★ the judged-bad hold one day (14 → 1)',
-    file: PB, tests: [T_UNIT],
+    file: PB, tests: [T_UNIT, T_REC],
     find: '  const bad = F.flatMap((s) => judgedBad(table, s, lo, last).map((b) => ({ ...b, slot: s })))',
     to: '  const bad = F.flatMap((s) => judgedBad(table, s, last, last).map((b) => ({ ...b, slot: s }))) /* MUTANT */',
     why: 'A night reading of 35 W refuses one evening and is forgotten.',
   },
   {
     id: 'PB-U-xx. ★★ G4 20 → 2,000 W',
-    file: PB, tests: [T_UNIT],
+    file: PB, tests: [T_UNIT, T_REC],
     find: 'export const G4_NIGHT_FIELD_MAX_W = 20;',
     to: 'export const G4_NIGHT_FIELD_MAX_W = 2000; /* MUTANT */',
     why: 'A field reading AC charge at night is taken for solar.',
   },
   {
     id: 'PB-U-xxi. ★★ G10 1.02 → 1.2',
-    file: PB, tests: [T_UNIT],
+    file: PB, tests: [T_UNIT, T_REC],
     find: 'export const G10_MAX_RATIO = 1.02;',
     to: 'export const G10_MAX_RATIO = 1.2; /* MUTANT */',
     why: 'A returning Core shows its slot\'s field 10% high and the hold never starts.',
@@ -363,7 +365,7 @@ const MUTANTS = [
   },
   {
     id: 'PB-W-iv. ★★★ the planning skill calibrates on the first-write GHI',
-    file: RPT, tests: [T_GHI],
+    file: RPT, tests: [T_GHI, T_PF],
     find: "      devicesOf(ctx), ctx.recorder, fc, PV_BAND_CAL_WINDOW_DAYS, 'realized', undefined, { kind: 'planning', planning: p },",
     to: "      devicesOf(ctx), ctx.recorder, fc, PV_BAND_CAL_WINDOW_DAYS, 'first-write', undefined, { kind: 'planning', planning: p }, /* MUTANT */",
     why: 'The planning band is calibrated on a 3-4-day-lead forecast error instead of the realized weather.',

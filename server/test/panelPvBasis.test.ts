@@ -167,6 +167,9 @@ test('★★★ the constants: recovered from rows that follow them; none below 
   const few = fitPlantConstants(syntheticDays(25, K, 2).map((d, i) => (i < 15 ? { ...d, hours: d.hours.map((h) => ({ ...h, inWh: 0 })) } : d)), 30_720);
   assert.equal(few.chargeHours, 20);
   assert.ok(few.constants != null, 'exactly 20 charge hours');
+  const fewer = fitPlantConstants(syntheticDays(25, K, 2).map((d, i) => (i < 16 ? { ...d, hours: d.hours.map((h) => ({ ...h, inWh: 0 })) } : d)), 30_720);
+  assert.equal(fewer.chargeHours, 18);
+  assert.equal(fewer.constants, null, '18 charge hours: g is measured on too few (the fit would solve)');
   assert.equal(fitPlantConstants(syntheticDays(25, K, 2), null).constants, null, 'no capacity');
   // A day missing the Core's own meter in one hour is not a fit day.
   const days = syntheticDays(22, K, 2);

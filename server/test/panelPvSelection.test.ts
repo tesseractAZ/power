@@ -311,6 +311,20 @@ test('★★★ L7: the accepted basis sentence — each slot\'s source is its E
   assert.deepEqual(web.panelBasisStat({ pvBasis: 'mixed', pvBasisChecks: { ratio: 1.01, threshold: 1.04 } }), { value: 'Cores + panel solar', sub: 'balance 1.0100 ≤ 1.04' });
   assert.deepEqual(web.panelBasisStat({ pvBasis: null, pvBasisRefusedBy: { code: 'balance' }, cushionOnly: {} }), { value: null, sub: 'no solar basis · panel solar refused' });
   assert.equal(web.panelBasisStat({}), null, 'a plan of the Cores\' band: nothing new on the card');
+  // Through the real push: a charge plan and a hold sized on the planning band say so; the same plans unselected do not.
+  const sel = selectPvBasis(input());
+  for (const want of [true, false]) {
+    const c = legacyIdentityCases().find((x) => {
+      const q = computeNightChargePlan(buildNightChargeInputs(x.deps));
+      return q.basisComplete && q.cushionOnly == null && q.window != null && q.chargeTonight === want && !q.cushionShortfall;
+    })!;
+    const base = computeNightChargePlan(buildNightChargeInputs(c.deps));
+    const sized = withPvBasis(base, pvBasisDecoration({ sel, asOfDay: E, plan: { sized: true, cushionOnly: false }, calScoredDays: 22, admittedDays: 13 })) as NightChargePlan;
+    const shape = want ? 'charge' : 'hold';
+    const msg = buildNightChargeMessage(sized, shape, null, null, 'supervised');
+    assert.ok(msg.body.includes(" Solar from the panel's readings (7-day energy balance 0.9997, refused above 1.04)."), `${c.label} (${shape}): ${msg.body}`);
+    assert.ok(!buildNightChargeMessage(base, shape, null, null, 'supervised').body.includes('panel\'s readings'), `${c.label}: not on the Cores' band`);
+  }
 });
 
 /* ══ a refused night is v1.203.0's, but for the sentence and the pvBasis* fields ══════════════════════════════════════════ */
@@ -466,12 +480,13 @@ test('★★★ readiness: panel/mixed rows are kept apart from the actuated poo
   } as unknown as NightLedgerRow);
   const cores = [10, 9, 8, 7].map((d) => row(d));
   const panel = [6, 5, 4, 3].map((d) => row(d, { pv_basis: 'panel', buy_err_kwh: -3, pv_in_band: 0 }));
-  const r = computeNightChargeReadiness([...cores, ...panel], NOW);
+  // One more panel night that bought enough (buy_err +2): apart, but no under-buy in the diagnostic.
+  const r = computeNightChargeReadiness([...cores, ...panel, row(2, { pv_basis: 'mixed', buy_err_kwh: 2 })], NOW);
   assert.equal(r.metrics.actuatedNights, 4, 'the panel nights are not in the actuated pool');
   assert.equal(r.metrics.underBuyRate, 0, 'nor in the under-buy rate (each reads −3 kWh)');
   assert.equal(r.metrics.pvBandCoverage, 1, 'nor in the PV statistics');
-  assert.equal(r.metrics.panelApartNights, 4);
-  assert.equal(r.metrics.panelBasisUnderBuyNights, 4, 'the diagnostic says what they would show');
+  assert.equal(r.metrics.panelApartNights, 5);
+  assert.equal(r.metrics.panelBasisUnderBuyNights, 4, 'the diagnostic says what they would show: the four under-buys, not the fifth');
   // A strike on a panel night counts; panel nights after it cannot clear it.
   const struck = [...cores, row(6, { pv_basis: 'panel', cushion_trough_soc_pct: 20, cushion_line_soc_pct: 30, plan_traj_floor_breached: 1 }),
     ...[5, 4, 3, 2, 1].map((d) => row(d, { pv_basis: 'mixed' }))];
@@ -496,6 +511,12 @@ test('★★★ wiring: the window resolved first; E asked of both planning repo
   assert.match(fn, /const pvAsOfDay: string \| null = shadowLeg \? null : planAsOfDay\(\{\n\s+arming: opts\.arming === true, todayYmd: siteYmd\(nowMs\), latched: pvLatchHere,/);
   assert.match(fn, /const pvAsk = pvAsOfDay != null && pvWriteMode && panel\.fresh && !pvCancelled;/);
   assert.match(fn, /const pvSel: PvSelection \| null = shadowLeg \? null : selectPvBasis\(\{/);
+  // M1: the plan date that will own the window (never the site day now: a recompute at 00:30 with no latch keeps the evening's E).
+  assert.match(fn, /planDate: window == null \? siteYmd\(nowMs\)\n\s+: planDateOwningCycle\(\{ nowMs, firstLegStartMs: window\.startMs, timezone: siteTimeZone\(\), notifyMinuteOfDay: nightSched\.notify\.fireMin \}\),\n\s+\}\);/);
+  // M2: the coverage refusal reaches the planner; L1/G4: the hour's force-charge from the armed record; L5: the window ratio stored.
+  assert.match(fn, /\n\s+bandCoverageRefusedBy: pvSel\?\.bandCoverageRefusedBy \?\? null,\n/);
+  assert.match(fn, /hourClock: fmtSiteClock\(pvSel\.reason\.hourStartMs\), forceCharge: forceChargeStateAt\(pvSel\.reason\.hourStartMs\) \}/);
+  assert.match(INDEX, /pvUpperRatio: v != null && !sel\.published \? \(v\.checks\.ratio \?\? null\) : null,/);
   assert.match(fn, /const prob: ProbabilisticForecast \| null = pvPlanning \? probPlanning : probPublished;\n\s+const multiDay: MultiDayForecast \| null = pvPlanning \? multiDayPlanning : multiDayPublished;/);
   // The connected slots come from the one devs snapshot the planner read (sp = shp2.projection of `devs`).
   assert.match(fn, /const houseSlots = \(Array\.isArray\(sp\.sources\) \? sp\.sources : \[\]\)/);
