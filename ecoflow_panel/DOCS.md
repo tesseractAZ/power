@@ -199,8 +199,15 @@ cut off from the grid, so the pack still holds the reserve plus an outage cushio
 (`ARB_OUTAGE_CUSHION_HOURS` of the panel's own load). A flat plan, or a two-tier plan without
 `NIGHT_CHARGE_CHEAP_PERIOD` `off_peak`, has no cheap window, so the planner holds every night.
 
+While the Cores are dark on the vendor cloud, a `supervised` or `auto` plan takes its solar from the
+panel's own per-slot readings of the Cores' chargers once 7 whole days of those readings (the newest
+no more than two days old) pass the add-on's checks: a 7-day energy balance against the plant's own
+metered flows, refused above 1.04, and the panel's own daily solar total. The notice and the card
+say which basis a night was planned on, and why the panel's readings were not used when they were
+not. The runway alarm still counts no sun from a Core that does not report its own.
+
 While the solar basis is refused (for example while the Cores are dark on the vendor cloud and no
-solar calibration day scores), a `supervised` or `auto` plan is a cushion-only plan: it credits no
+such week has passed yet), a `supervised` or `auto` plan is a cushion-only plan: it credits no
 solar, sizes the reserve plus the cushion at the window close, and says so in the notice and on the
 card. Before a gap of more than a day after its window (Friday before Monday) it also fills toward
 `ARB_COST_MAX_SOC_PCT` with `ARB_OBJECTIVE` `cost`, and says that too; in resilience mode it holds
