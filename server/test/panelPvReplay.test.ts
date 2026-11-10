@@ -42,6 +42,7 @@ import { priorArmSuperseded } from '../src/chargeCycle.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const INDEX = readFileSync(resolve(HERE, '../src/index.ts'), 'utf8');
+const DOC15_1 = readFileSync(resolve(HERE, '../../docs/reference/15-1-night-charge-planning.md'), 'utf8');
 interface ReplayNight {
   plan_date: string; nowMs: number; socAt21: number | null; socAt2130: number | null; l50: number; l90: number; islandedKw: number;
   hours: Array<[number, number | null, number | null]>;
@@ -308,7 +309,7 @@ test('★★★ L4: the sums with Saturday\'s superseded arm dropped — panel n
   assert.deepEqual(COST.filter((o) => superseded(o.date)).map((o) => o.date), ['2026-10-17', '2026-10-24', '2026-10-31']);
 });
 
-test('★★★ the outage line is PV-independent: with the field reading ×1.00, ×1.05, ×1.10 and ×1.25, every resilience night arms the same write, and every cost night the same reserve write and line; a high field lowers only the cost fill', () => {
+test('★★★ the outage line is PV-independent: with the planning band alone ×1.00, ×1.05, ×1.10 and ×1.25 (the balance\'s verdict held), every resilience night arms the same write, and every cost night the same reserve write and line; a high band lowers only the cost fill', () => {
   const res = NIGHTS.map((n) => replay(n, 'resilience', 1));
   for (const scale of [1.05, 1.10, 1.25]) {
     const r = NIGHTS.map((n) => replay(n, 'resilience', scale));
@@ -380,3 +381,39 @@ test('★★★ F1 (e), the evening job on the record: Sunday 11-01 with Saturda
   }
 });
 
+test('★★★ V2: a fault the balance sees (planted on the record from 10-20, the panel\'s daily total scaled alike) ×1.05, ×1.10 and ×1.25 is refused after 0–1 accepted nights, and every night it refuses is v1.203.0\'s own plan — the reserve write falls from 50 to 29–30% or none, Friday 10-30\'s fill rises from 79.1 to the long-gap fill to 90, resilience 11-02 arms 30 where the panel plan armed nothing; the outage line never moves — and the reference chapter says so', () => {
+  const fmt = (x: { write: number | null; fc: number | null }): string => `${x.write ?? '—'}/${x.fc == null ? '—' : r2(x.fc)}`;
+  const costDiff = (accepted1028: string): string[] => [
+    `10-28 50/80.4->${accepted1028}`, '10-29 50/90->29/—', '10-30 50/79.1->50/90', '10-31 50/90->29/—', '11-01 50/71.7->30/—',
+    '11-02 50/71.6->30/—', '11-03 50/75.6->—/—', '11-04 50/67.7->—/—', '11-05 50/81.5->30/—',
+  ];
+  const want: Record<string, { diff: string[]; asV1203: number; accepted: number }> = {
+    'cost 1.05': { diff: costDiff('50/78.7'), asV1203: 20, accepted: 1 },
+    'cost 1.1': { diff: costDiff('30/—'), asV1203: 21, accepted: 0 },
+    'cost 1.25': { diff: costDiff('30/—'), asV1203: 21, accepted: 0 },
+    'resilience 1.05': { diff: ['11-02 —/—->30/—'], asV1203: 21, accepted: 1 },
+    'resilience 1.1': { diff: ['11-02 —/—->30/—'], asV1203: 21, accepted: 0 },
+    'resilience 1.25': { diff: ['11-02 —/—->30/—'], asV1203: 21, accepted: 0 },
+  };
+  for (const obj of ['cost', 'resilience'] as const) {
+    const honest = obj === 'cost' ? COST : NIGHTS.map((n) => replay(n, obj, 1));
+    for (const scale of [1.05, 1.10, 1.25]) {
+      const real = NIGHTS.map((n) => replay(n, obj, scale, { ro: { fault: { scale, fromDay: '2026-10-20' } } }));
+      const got = {
+        diff: real.map((o, i) => [o, honest[i]] as const).filter(([o, h]) => fmt(o.b.arm) !== fmt(h.b.arm)).map(([o, h]) => `${o.date.slice(5)} ${fmt(h.b.arm)}->${fmt(o.b.arm)}`),
+        asV1203: real.filter((o) => fmt(o.b.arm) === fmt(o.a.arm)).length,
+        accepted: real.filter((o) => o.sel.use === 'planning').length,
+      };
+      assert.deepEqual(got, want[`${obj} ${scale}`], `${obj} ×${scale}`);
+      real.forEach((o, i) => {
+        assert.equal(o.b.plan.cushionLineSocPct, honest[i].b.plan.cushionLineSocPct, `${o.date} ×${scale} ${obj}: the line`);
+        if (o.sel.use !== 'planning') assert.equal(fmt(o.b.arm), fmt(o.a.arm), `${o.date} ×${scale} ${obj}: a refused night is v1.203.0's`);
+      });
+    }
+  }
+  // The reference chapter states it so (the band alone, and the balance seeing it).
+  assert.ok(DOC15_1.includes("On the planning band alone (the balance's verdict held), a reading ×1.05, ×1.10 or ×1.25 leaves every reserve write and every line as it is and only lowers the cost fill."));
+  assert.ok(DOC15_1.includes("Planted on the record itself from 10-20 (the panel's daily total scaled alike), the balance refuses it after 0–1 accepted nights, and each night it refuses is v1.203.0's plan"));
+  assert.ok(DOC15_1.includes('Friday 10-30 rises from 79.1 to the long-gap fill to 90'));
+  assert.ok(!DOC15_1.includes('leaves every reserve write and every line as it is and only lowers the cost fill. On the resilience'));
+});

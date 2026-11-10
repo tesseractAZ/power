@@ -535,8 +535,9 @@ export function panelRowPvActual(i: {
 
 /**
  * ★★★ v1.204.0 (L5) — THE ADMISSION OF A PANEL ROW'S PV ACTUAL. A slot-day of the panel's reading reaches the ledger only if the
- * 7-day energy balance admitted it (panelPvBasis.admittedSlotDays: complete and clean, and every window holding it passed) as of
- * an evening after it — the one predicate the planning model's fit, bias and skill read. The row's span is [issue, +24 h]: its
+ * 7-day energy balance admitted it (panelPvBasis.admittedSlotDays: complete and clean, and every window holding it that can still be
+ * re-judged as of that evening passed — in a mixed state a failed window is not remembered once another of its field slots cannot be
+ * re-judged; no failed set is kept durably) as of an evening after it — the one predicate the planning model's fit, bias and skill read. The row's span is [issue, +24 h]: its
  * last site day is the day after the plan's evening, which no evening's balance can have judged before the next one, and whose
  * daily total from the panel's own ledger is fetched 06:35-09:00 the morning after it. So:
  *  - PENDING until a planning report as of an evening after the span's last day, built no earlier than 09:00 the morning after

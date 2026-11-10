@@ -664,7 +664,7 @@ test('★★★ readiness: panel/mixed rows are kept apart from the actuated poo
 
 /* ══ the option texts ═══════════════════════════════════════════════════════════════════════════════════════════════════ */
 
-test('★★ the option texts: while the Cores are dark a write-mode plan takes the panel\'s readings once 7 whole days of them pass the checks; advisory never; the refused basis keeps v1.203.0\'s cushion-only rules (en, es, the options guide, the operator guide)', () => {
+test('★★ the option texts: while the Cores are dark a write-mode plan takes the panel\'s readings once 7 whole days of them pass the checks; advisory never; the refused basis keeps v1.203.0\'s cushion-only rules; the long-gap target is the lower of the ceiling and full less the P10 pre-peak surplus (en, es, the options guide, the operator guide)', () => {
   const root = resolve(HERE, '../..');
   const desc = (lang: string, key: string): string => {
     const y = readFileSync(resolve(root, `ecoflow_panel/translations/${lang}.yaml`), 'utf8');
@@ -676,12 +676,19 @@ test('★★ the option texts: while the Cores are dark a write-mode plan takes 
   assert.ok(enObj.includes("While the Cores are dark on the vendor cloud, a supervised or auto plan takes its solar from the panel''s own per-slot readings of their chargers once 7 whole days of those readings (the newest no more than two days old) have passed the add-on''s checks, and the rules above apply; while the solar basis is refused (no such week yet, or a check fails), a supervised or auto plan is cushion-only"));
   assert.ok(enObj.includes("In advisory mode a refused solar basis means no plan, and the panel''s readings are not used."));
   assert.ok(desc('en', 'ARB_COST_MAX_SOC_PCT').includes("On a night planned on the panel''s readings, Thursday fills as above."));
+  // V5: "as above" is the long-gap rule, stated as the median rule beside it is (nightChargeAdvisor: min(this, full − P10 pre-peak
+  // surplus), this value with no P10): 90 on 10-29 (7.88 kWh), 81.5 on 11-05 (17.02 kWh) on the record.
+  assert.ok(desc('en', 'ARB_COST_MAX_SOC_PCT').includes("the target is this value OR the room the pessimistic (P10) solar surplus expected before the next on-peak needs, whichever is lower (this value when no P10 is known)."));
+  assert.ok(!desc('en', 'ARB_COST_MAX_SOC_PCT').includes('the solar room is set aside'));
   const esObj = desc('es', 'ARB_OBJECTIVE');
   assert.ok(esObj.includes('Mientras los Cores no informan a la nube del fabricante, un plan supervised o auto toma su solar de las lecturas que el propio panel hace de sus cargadores en cada ranura'));
   assert.ok(esObj.includes('y las lecturas del panel no se usan.'));
   assert.ok(desc('es', 'ARB_COST_MAX_SOC_PCT').includes('En una noche planificada sobre las lecturas del panel, el jueves llena como se indica arriba.'));
+  assert.ok(desc('es', 'ARB_COST_MAX_SOC_PCT').includes('el objetivo es este valor O el espacio que necesita el excedente solar pesimista (P10) previsto antes de la siguiente punta, lo que sea menor (este valor cuando no se conoce el P10).'));
+  assert.ok(!desc('es', 'ARB_COST_MAX_SOC_PCT').includes('se deja de lado el espacio solar'));
   const guide = readFileSync(resolve(root, 'docs/guide/options.md'), 'utf8');
   assert.ok(guide.includes("a `supervised` or `auto` plan takes its solar from the panel's own per-slot readings of their chargers once 7 whole days of those readings (the newest no more than two days old) have passed the add-on's checks"));
+  assert.ok(guide.includes("On a night planned on the panel's readings, Thursday, before a long gap, fills toward the lower of it and full less the pessimistic (P10) solar surplus expected before the next on-peak (toward it when no P10 is known)."));
   const docs = readFileSync(resolve(root, 'ecoflow_panel/DOCS.md'), 'utf8');
   assert.ok(docs.includes('The runway alarm still counts no sun from a Core that does not\nreport its own.'));
 });

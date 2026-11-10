@@ -1081,6 +1081,13 @@ export function upperCheck(table: UcTable, asOfDay: string): UcVerdict {
  * of record). A slot-day is admitted when at least one such window holding it was judged with that slot
  * summed and none of them failed, its own checks pass, its day passed G6, and its Core is the slot's
  * Core in the map of record as of E. Day E and later never enter. Returns slot → admitted days. Pure.
+ *
+ * Each window is re-judged as of E, on the constants, capacities, trust and rows known then, and no failed
+ * set is kept durably: an evening that can no longer be re-judged (a field slot of it with no constants or
+ * no capacity as of E, its trust revoked, the slot removed from the map, or its end day no longer a field
+ * day) is skipped. So in a mixed state a window that failed is not remembered once another of its field
+ * slots cannot be re-judged, and the days it held of the slots still judged can be admitted through later
+ * passing windows: the planning fit, bias and skill and the ledger (the cost fill), never the outage line.
  */
 export function admittedSlotDays(table: UcTable, asOfDay: string): Map<number, Set<string>> {
   const T = table.threshold ?? UC_THRESHOLD;
