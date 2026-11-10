@@ -224,10 +224,20 @@ test('★★★ every planning window ends at the start of E: the skill scores E
   assert.equal(await getPlanningForecast(devices, dark.recorder, () => {}, 'tomorrow'), null);
 });
 
-test('★★★ the published band, the published rollup and the runway are untouched by the planning layer; the caches are apart', async () => {
+test('★★★ the published band, the published rollup and the runway are untouched by the planning layer; the caches are apart', async (t) => {
   const devices = devicesWith();
   const fc = await getDayForecast(devices, dark.recorder, () => {});
-  const runway0 = await computeRunway(devices, dark.recorder, fc);
+  // computeRunway reads the clock (its reserveAtMs, emptyAtMs and troughAtMs are now + hours): both computes run at ONE instant. That
+  // instant is half an hour into E, so the world's panel load (it ends at the start of E) lies in the hour before it and the runway is
+  // a real projection whatever the wall clock reads. At the wall clock this test compared the unavailable runway in 23 of 24 hours
+  // and two projections ~0.5 s apart in the first one.
+  const runwayAt = () => {
+    t.mock.timers.enable({ apis: ['Date'], now: END + H / 2 });
+    try { return computeRunway(devices, dark.recorder, fc); } finally { t.mock.timers.reset(); }
+  };
+  const runway0 = runwayAt();
+  assert.equal(runway0.unavailable, null, 'a real runway: the panel load of the hour before');
+  assert.ok(runway0.hoursToEmpty != null && runway0.emptyAtMs != null && runway0.troughAtMs != null, 'with its crossings');
   const skill0 = await computeForecastSkill(devices, dark.recorder, fc, 30, 'realized');
   const band0 = await computeProbabilisticForecast(fc, skill0);
   const md0 = await computeMultiDayForecast(devices, dark.recorder, fc, 3);
@@ -240,9 +250,7 @@ test('★★★ the published band, the published rollup and the runway are unto
   assert.deepEqual(await computeProbabilisticForecast(fc, skill0), band0, 'the published band, from its own cache slot');
   assert.deepEqual(await computeMultiDayForecast(devices, dark.recorder, fc, 3), md0);
   resetRunwayCache();
-  const { generatedAt: _g1, ...r1 } = await computeRunway(devices, dark.recorder, fc) as Any;
-  const { generatedAt: _g0, ...r0 } = runway0 as Any;
-  assert.deepEqual(r1, r0, 'the runway reads hours[].forecastPvW alone');
+  assert.deepEqual(runwayAt(), runway0, 'the runway reads hours[].forecastPvW alone');
   assert.ok(band0.hours.every((h) => h.p50W === 0) && bandP.hours.some((h) => h.p50W > 0), 'the planning band carries the panel\'s solar');
   assert.deepEqual(bandP.solarModelSns, p.planningModelKeys);
   assert.ok(mdP.days.some((d) => d.pvKwh > 0) && md0.days.every((d) => d.pvKwh === 0));
