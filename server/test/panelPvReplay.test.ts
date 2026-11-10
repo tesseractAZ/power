@@ -355,7 +355,7 @@ test('★★★ F1 (e), the evening job on the record: Sunday 11-01 with Saturda
 
   // (a) Saturday latched the panel's readings; Sunday's planning report is missing from 21:30 to 23:00.
   const a = replay(sun, 'cost', 1, { prior: satLatch, planningAt: (t) => t >= t00 });
-  assert.deepEqual(a.b.latchAt[0], { basis: 'planning', asOfDay: '2026-10-31', decided: true }, 'Saturday\'s latch stands at Sunday 21:30');
+  assert.deepEqual(a.b.latchAt[0], { basis: 'planning', asOfDay: '2026-10-31', decided: true, armedDay: '2026-10-31' }, 'Saturday\'s latch stands at Sunday 21:30');
   for (const sel of a.b.sels.slice(0, 2)) {
     assert.equal(sel.use, 'published', 'never keep-previous');
     assert.equal(sel.transient, true);

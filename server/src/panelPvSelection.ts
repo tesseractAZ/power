@@ -36,6 +36,7 @@
  */
 import type { UcChecks, UcReason, UcVerdict, SlotSource, UncountedCause } from './panelPvBasis.js';
 import { addDaysYmd } from './siteTime.js';
+import { APPLY_LATE_MS, type NightActuationState } from './nightChargeActuator.js';
 
 export type PvBasisKind = 'panel' | 'mixed';
 export type PvSource = SlotSource;
@@ -81,7 +82,8 @@ export interface PvBasisDecoration {
   pvBasisSlots: Array<{ slot: number; source: PvSource }> | null;
   /** The verdict's figures; null with no verdict. */
   pvBasisChecks: UcChecks | null;
-  /** Why the panel basis is not used tonight (figures only); null when it is, and on the transient class. */
+  /** Why the panel basis is not used in the plan shown (figures only; naming an arm that still applies, G2); null when it is used, and on
+   *  the transient class. */
   pvBasisRefusedBy: PvBasisReason | null;
   /** The transient class: no refusal is printed, and the evening job keeps the 22:30 deferral (eveningBasisDefers). */
   pvBasisTransient?: true;
@@ -131,12 +133,15 @@ export function latchedPvBasis(o: {
   nowMs: number;
   /** chargeWindows.planDateOwningCycle for this window now. */
   planDate: string;
-  /** The armed record: the plan date that armed it, its window, and whether its arm still stands (a target, not reverted or cancelled). */
+  /** The armed record: the plan date that armed it, its window, and whether its arm still applies (armStillApplies). */
   armed: { day: string | null; windowStartMs: number | null; standing: boolean };
 }): LatchedPv | null {
   if (o.lastNotifyDay == null || o.windowStartMs == null || o.windowEndMs == null || !(o.nowMs < o.windowEndMs)) return null;
-  // G2 — an earlier evening's arm for this window that still stands: it, not the plan shown, writes.
-  const armedDay = o.armed.standing && o.armed.day != null && o.armed.day !== o.lastNotifyDay && o.armed.windowStartMs === o.windowStartMs
+  // G2 — an arm for this window that still applies and may be on the panel's readings: an earlier evening's (whatever its basis), or
+  // this latch's own evening's on the planning band. It, not the plan shown, writes. This latch's own arm on the published basis is
+  // not on the panel's readings, so nothing is said of it.
+  const mayBeOnPanel = o.armed.day !== o.lastNotifyDay || (o.pv?.basis === 'planning' && o.pv.asOfDay === o.armed.day);
+  const armedDay = o.armed.standing && o.armed.day != null && o.armed.windowStartMs === o.windowStartMs && mayBeOnPanel
     ? { armedDay: o.armed.day } : {};
   if (o.pv != null) {
     return o.pv.windowStartMs === o.windowStartMs && o.pv.asOfDay === o.lastNotifyDay && o.nowMs < o.pv.windowEndMs
@@ -145,6 +150,26 @@ export function latchedPvBasis(o: {
   const owns = o.planDate === o.lastNotifyDay || (o.armed.day === o.lastNotifyDay && o.armed.windowStartMs === o.windowStartMs);
   const decided = o.noDecision ? false : o.recorded ? true : null;
   return owns ? { basis: 'published', asOfDay: o.lastNotifyDay, decided, ...armedDay } : null;
+}
+
+/**
+ * G2 — whether the armed record's arm still applies to its window now: it holds a raise (applied, or its reserve stood) that is neither
+ * restored nor settled as someone else's reserve, or it can still write — a write mode, its apply window open (decideActuation writes
+ * nothing after windowStart + APPLY_LATE_MS) and no missed-apply push gone. Never a cancelled, restored or grid-lost arm. Advisory mode
+ * applies nothing, so an arm not yet written there does not apply; a raise already written holds to its restore in any mode. PURE.
+ */
+export function armStillApplies(
+  a: Pick<NightActuationState, 'targetPct' | 'windowStartMs' | 'appliedAtMs' | 'revertedAtMs' | 'cancelled'>
+    & Partial<Pick<NightActuationState, 'reserveStandingAtMs' | 'foreignSettledAtMs' | 'gridLostAtMs'>>
+    & { missedApplyPushedAtMs?: number | null },
+  nowMs: number,
+  writeMode: boolean,
+): boolean {
+  if (a.targetPct == null || a.cancelled === true || a.revertedAtMs != null) return false;
+  if (a.foreignSettledAtMs != null || a.gridLostAtMs != null) return false;
+  if (a.appliedAtMs != null || a.reserveStandingAtMs != null) return true;
+  if (!writeMode || a.missedApplyPushedAtMs != null || a.windowStartMs == null) return false;
+  return nowMs <= a.windowStartMs + APPLY_LATE_MS;
 }
 
 /** E for a recompute (M1): the evening job's own day; else the latch's; else the plan date that will own the window. PURE. */

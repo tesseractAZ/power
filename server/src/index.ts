@@ -218,7 +218,7 @@ import * as haStateCache from './haStateCache.js';
 // ★★★ v1.204.0 — the night plan's solar basis, selected (panelPvSelection.ts): the published band, the panel-measured planning band,
 // or v1.203.0's cushion-only plan; E (the evening that owns the window) and the evening's latched basis.
 import {
-  latchedPvBasis, planAsOfDay, selectPvBasis, pvBasisDecoration, withPvBasis, pvBasisReasonText, pvBasisReasonCode,
+  latchedPvBasis, armStillApplies, planAsOfDay, selectPvBasis, pvBasisDecoration, withPvBasis, pvBasisReasonText, pvBasisReasonCode,
   type PvBasisLatch, type PvBasisReason, type PvSelection,
 } from './panelPvSelection.js';
 import type { UcVerdict } from './panelPvBasis.js';
@@ -3456,7 +3456,7 @@ interface NightChargeLatch {
   /** ★★★ v1.204.0 (M1, L2) — the solar basis this evening chose for its window, with E and the window: every live overnight recompute
    *  but the next evening job's own call (F1) selects it until the window's close (panelPvSelection.latchedPvBasis); a shadow leg
    *  never reads it. null/absent: no basis latched —
-   *  a latch written before v1.204.0, or an evening that reached no decision — which reads as the published (or cushion-only) basis to
+   *  a latch written before v1.204.0, or an evening that reached no decision — which reads as the published basis (or v1.203.0's plan) to
    *  the close. */
   pv?: PvBasisLatch | null;
   /** ★★★ v1.204.0 (F1) — this day's evening job did not decide before its cutoff (written by the cutoff path only, never inherited by a
@@ -3859,7 +3859,7 @@ function logPvBasisOnChange(sel: PvSelection, reason: PvBasisReason | null, asOf
   const figs = v?.checks.ratio != null ? `; 7-day energy balance ${v.checks.ratio.toFixed(4)} (max of the last 7 windows ${v.checks.max7?.toFixed(4) ?? '—'}, refused above ${v.checks.threshold.toFixed(2)}; ${v.checks.fieldDays} whole field days, the newest ${v.checks.newestFieldDay})` : '';
   const key = sel.published ? `published:${asOfDay}`
     : sel.use === 'planning' ? `planning:${asOfDay}:${v?.basis}:${v?.checks.ratio}`
-      : sel.transient ? `transient:${asOfDay}` : `refused:${asOfDay}:${pvBasisReasonCode(reason)}:${v?.checks.ratio ?? ''}`;
+      : sel.transient ? `transient:${asOfDay}` : `refused:${asOfDay}:${pvBasisReasonCode(reason)}:${v?.checks.ratio ?? ''}:${reason?.armedDay ?? ''}`;
   if (key === lastLoggedPvBasisKey) return;
   lastLoggedPvBasisKey = key;
   if (sel.published) {
@@ -4079,7 +4079,7 @@ async function recomputeNightChargePlan(
     planDate: planDateOwningCycle({ nowMs, firstLegStartMs: window.startMs, timezone: siteTimeZone(), notifyMinuteOfDay: nightSched.notify.fireMin }),
     armed: {
       day: nightActuationMem.day, windowStartMs: nightActuationMem.windowStartMs,
-      standing: nightActuationMem.targetPct != null && nightActuationMem.revertedAtMs == null && nightActuationMem.cancelled !== true,
+      standing: armStillApplies(nightActuationMem, nowMs, NIGHT_CHARGE_MODE !== 'advisory'),
     },
   });
   const pvAsOfDay: string | null = shadowLeg ? null : planAsOfDay({
