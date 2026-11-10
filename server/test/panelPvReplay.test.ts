@@ -283,3 +283,14 @@ test('★★★ the outage line is PV-independent: with the field reading ×1.00
     });
   }
 });
+
+test('★★★ the decision-time effect, resilience: every night arms what v1.203.0 arms but 11-02, whose 21:30 panel decision (the pool read 60% at 21:00 and 57% at 21:30) arms nothing where v1.203.0\'s 22:30 last resort armed 30 (1.48 kWh)', () => {
+  const res = NIGHTS.map((n) => replay(n, 'resilience', 1));
+  const fmt = (x: { write: number | null; fc: number | null }): string => `${x.write ?? '—'}/${x.fc == null ? '—' : r2(x.fc)}`;
+  const differ = res.filter((o) => fmt(o.a.arm) !== fmt(o.b.arm)).map((o) => [o.date, fmt(o.a.arm), fmt(o.b.arm), o.a.at, o.b.at, r2(o.a.plan.buyKwh ?? 0), r2(o.b.plan.buyKwh ?? 0)]);
+  assert.deepEqual(differ, [['2026-11-02', '30/—', '—/—', '22:30', '21:30', 1.48, 0]]);
+  const n1102 = NIGHTS.find((n) => n.plan_date === '2026-11-02')!;
+  assert.deepEqual([n1102.socAt21, n1102.socAt2130], [60, 57]);
+  // Every refused night is the same plan at the same time; every panel night is decided at 21:30.
+  for (const o of res) assert.equal(o.b.at, o.sel.use === 'planning' ? '21:30' : '22:30', o.date);
+});
