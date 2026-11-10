@@ -497,6 +497,30 @@ test('★★★ readiness: panel/mixed rows are kept apart from the actuated poo
   assert.ok(panelApart({ pv_basis: 'panel' }) && panelApart({ actual_pv_basis: '1:P' }) && !panelApart({ pv_basis: 'cores', actual_pv_basis: null }));
 });
 
+/* ══ the option texts ═══════════════════════════════════════════════════════════════════════════════════════════════════ */
+
+test('★★ the option texts: while the Cores are dark a write-mode plan takes the panel\'s readings once 7 whole days of them pass the checks; advisory never; the refused basis keeps v1.203.0\'s cushion-only rules (en, es, the options guide, the operator guide)', () => {
+  const root = resolve(HERE, '../..');
+  const desc = (lang: string, key: string): string => {
+    const y = readFileSync(resolve(root, `ecoflow_panel/translations/${lang}.yaml`), 'utf8');
+    const at = y.indexOf(`\n  ${key}:\n`);
+    assert.ok(at >= 0, `${lang} ${key}`);
+    return y.slice(at, y.indexOf('\n  ', y.indexOf('description:', at) + 1));
+  };
+  const enObj = desc('en', 'ARB_OBJECTIVE');
+  assert.ok(enObj.includes("While the Cores are dark on the vendor cloud, a supervised or auto plan takes its solar from the panel''s own per-slot readings of their chargers once 7 whole days of those readings (the newest no more than two days old) have passed the add-on''s checks, and the rules above apply; while the solar basis is refused (no such week yet, or a check fails), a supervised or auto plan is cushion-only"));
+  assert.ok(enObj.includes("In advisory mode a refused solar basis means no plan, and the panel''s readings are not used."));
+  assert.ok(desc('en', 'ARB_COST_MAX_SOC_PCT').includes("On a night planned on the panel''s readings, Thursday fills as above."));
+  const esObj = desc('es', 'ARB_OBJECTIVE');
+  assert.ok(esObj.includes('Mientras los Cores no informan a la nube del fabricante, un plan supervised o auto toma su solar de las lecturas que el propio panel hace de sus cargadores en cada ranura'));
+  assert.ok(esObj.includes('y las lecturas del panel no se usan.'));
+  assert.ok(desc('es', 'ARB_COST_MAX_SOC_PCT').includes('En una noche planificada sobre las lecturas del panel, el jueves llena como se indica arriba.'));
+  const guide = readFileSync(resolve(root, 'docs/guide/options.md'), 'utf8');
+  assert.ok(guide.includes("a `supervised` or `auto` plan takes its solar from the panel's own per-slot readings of their chargers once 7 whole days of those readings (the newest no more than two days old) have passed the add-on's checks"));
+  const docs = readFileSync(resolve(root, 'ecoflow_panel/DOCS.md'), 'utf8');
+  assert.ok(docs.includes('The runway alarm still counts no sun from a Core that does not\nreport its own.'));
+});
+
 /* ══ the wiring (index.ts source pins) ═══════════════════════════════════════════════════════════════════════════════════ */
 
 test('★★★ wiring: the window resolved first; E asked of both planning reports in the same Promise.all as the published ones; one devs snapshot; every read takes the selected band; never a shadow leg', () => {

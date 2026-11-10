@@ -201,10 +201,11 @@ cut off from the grid, so the pack still holds the reserve plus an outage cushio
 
 While the Cores are dark on the vendor cloud, a `supervised` or `auto` plan takes its solar from the
 panel's own per-slot readings of the Cores' chargers once 7 whole days of those readings (the newest
-no more than two days old) pass the add-on's checks: a 7-day energy balance against the plant's own
-metered flows, refused above 1.04, and the panel's own daily solar total. The notice and the card
-say which basis a night was planned on, and why the panel's readings were not used when they were
-not. The runway alarm still counts no sun from a Core that does not report its own.
+no more than two days old) pass the add-on's checks, among them a 7-day energy balance against the
+plant's own metered flows (refused above 1.04) and the panel's own daily solar total. The notice and
+the card say which basis a night was planned on and, on a night they are refused for a reason, why
+the panel's readings were not used. The runway alarm still counts no sun from a Core that does not
+report its own.
 
 While the solar basis is refused (for example while the Cores are dark on the vendor cloud and no
 such week has passed yet), a `supervised` or `auto` plan is a cushion-only plan: it credits no
