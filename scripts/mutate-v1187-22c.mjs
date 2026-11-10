@@ -1279,8 +1279,8 @@ const MUTANTS = [
   {
     id: 'C-clix. ★★ the missed evening drops a refusal that still stands',
     file: IDX,
-    find: '    writeNightChargeLatch({ lastNotifyDay: today, armRefused: latch.armRefused ?? null });',
-    to: '    writeNightChargeLatch({ lastNotifyDay: today }); /* MUTANT */',
+    find: '    writeNightChargeLatch({ lastNotifyDay: today, armRefused: latch.armRefused ?? null, noDecision: true });',
+    to: '    writeNightChargeLatch({ lastNotifyDay: today, noDecision: true }); /* MUTANT */',
     why: 'Saturday refused the Monday window; Sunday\'s evening is missed and the card leads with the expected charge.',
   },
   {

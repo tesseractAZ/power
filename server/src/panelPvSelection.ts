@@ -21,9 +21,13 @@
  *
  * EVENING OWNERSHIP (M1, L2). E is the site day of the evening decision that owns the window: the evening job's own day; for every
  * other recompute the day of the latch that planned this window, else the plan date that will own it (chargeWindows
- * planDateOwningCycle). The latch records the basis it chose: a recompute inside the latched window selects that basis when its report
- * is available, and keeps the previous served plan when it is not — never a fresh (c) inside a latched window. A latch with no basis
- * (written before v1.204.0, or an evening that reached no decision) reads as the published basis to its window's close.
+ * planDateOwningCycle). The evening job's own (arming) call selects afresh as of its own day and reads no latch (index.ts passes
+ * none): Saturday's latch for the Monday window Saturday and Sunday share never decides Sunday's evening, whose own latch then
+ * governs the window. The latch records the basis it chose: every other recompute inside the latched window selects that basis when
+ * its report is available, and keeps the previous served plan when it is not — never a fresh (c) inside a latched window. A latch with
+ * no basis (written before v1.204.0, an evening that decided with no plan or no window, or an evening that reached its cutoff without a
+ * decision) reads as the published basis to its window's close; its 'latched' words name the latch's own day, and say no evening
+ * decision was made where none was.
  *
  * Slot keys ('<panelSn>#<n>') and serials are never printed: the words carry slot numbers and days only. PURE throughout.
  */
@@ -56,8 +60,9 @@ export type PvBasisReason =
   | { code: 'no-capacity-ratio' }
   /** The planning band's own gate (solarBasisGate's words), refused persistently. */
   | { code: 'band'; blockedBy: string }
-  /** Inside a window whose plan of record was decided without the panel's readings (the latch reads the published basis). */
-  | { code: 'latched'; asOfDay: string };
+  /** Inside a window whose latch reads the published basis (a recompute other than the evening job's own): `asOfDay` is the day the
+   *  latch was written for; `decided` false when that evening reached its cutoff without a decision (no evening decision was made). */
+  | { code: 'latched'; asOfDay: string; decided: boolean };
 
 /** What a plan carries of the selection (NightChargePlan.pvBasis*): set on every live overnight plan but the published band's (a). */
 export interface PvBasisDecoration {
@@ -88,15 +93,26 @@ export interface PvBasisLatch {
   windowEndMs: number;
 }
 
+/** The latch governing a recompute (latchedPvBasis): its basis, the evening day it was written for, and whether that evening reached a
+ *  decision (false: the evening job did not decide before its cutoff, so the latch, written with no basis, reads as the published one). */
+export interface LatchedPv {
+  basis: 'published' | 'planning';
+  asOfDay: string;
+  decided: boolean;
+}
+
 /**
  * The latched basis that governs a recompute of `window` now, or null (a fresh selection). A latch written with a basis owns the
- * window it recorded until that window's close. A latch with none (written before v1.204.0, or an evening that reached no decision)
- * owns the window its evening planned — the plan date owning the window now, or the armed record's day for this window — and reads
- * as the published basis. PURE.
+ * window it recorded until that window's close. A latch with none (written before v1.204.0, an evening that decided with no plan or
+ * no window, or one that reached its cutoff without a decision) owns the window its evening planned — the plan date owning the window
+ * now, or the armed record's day for this window — and reads as the published basis; `decided` is false for the last only. The
+ * evening job's own (arming) call never selects on it (index.ts passes no latch there, F1). PURE.
  */
 export function latchedPvBasis(o: {
   lastNotifyDay: string | null;
   pv: PvBasisLatch | null | undefined;
+  /** The latch's evening reached its cutoff without a decision (index.ts NightChargeLatch.noDecision). */
+  noDecision: boolean;
   windowStartMs: number | null;
   windowEndMs: number | null;
   nowMs: number;
@@ -104,14 +120,14 @@ export function latchedPvBasis(o: {
   planDate: string;
   /** The armed record: the plan date that armed it, and its window. */
   armed: { day: string | null; windowStartMs: number | null };
-}): { basis: 'published' | 'planning'; asOfDay: string } | null {
+}): LatchedPv | null {
   if (o.lastNotifyDay == null || o.windowStartMs == null || o.windowEndMs == null || !(o.nowMs < o.windowEndMs)) return null;
   if (o.pv != null) {
     return o.pv.windowStartMs === o.windowStartMs && o.pv.asOfDay === o.lastNotifyDay && o.nowMs < o.pv.windowEndMs
-      ? { basis: o.pv.basis, asOfDay: o.pv.asOfDay } : null;
+      ? { basis: o.pv.basis, asOfDay: o.pv.asOfDay, decided: true } : null;
   }
   const owns = o.planDate === o.lastNotifyDay || (o.armed.day === o.lastNotifyDay && o.armed.windowStartMs === o.windowStartMs);
-  return owns ? { basis: 'published', asOfDay: o.lastNotifyDay } : null;
+  return owns ? { basis: 'published', asOfDay: o.lastNotifyDay, decided: !o.noDecision } : null;
 }
 
 /** E for a recompute (M1): the evening job's own day; else the latch's; else the plan date that will own the window. PURE. */
@@ -131,8 +147,9 @@ export interface PvSelectionInput {
   /** May the panel basis be used tonight at all: a write mode, a fresh panel, the night not cancelled (the live overnight leg only:
    *  index.ts never asks for a shadow leg). */
   eligible: { writeMode: boolean; panelFresh: boolean; cancelled: boolean };
-  /** The latched basis governing this recompute (latchedPvBasis), or null. */
-  latched: 'published' | 'planning' | null;
+  /** The latch governing this recompute (latchedPvBasis), or null: none, or the evening job's own (arming) call, which selects afresh as
+   *  of its own day (F1: index.ts passes null there whatever the latch holds). */
+  latched: LatchedPv | null;
   /** The published band: its gate, and the connected slots whose Core it does not cover (empty: it covers every one). */
   published: { gate: BandGate; uncoveredSlots: number[] };
   /** The planning band's report as of E, or null (none, a timeout, no planning layer). */
@@ -214,7 +231,7 @@ export function selectPvBasis(i: PvSelectionInput): PvSelection {
     transient: b != null && !b.ok && b.transient,
     verdict: published ? null : verdict,
   });
-  if (i.latched === 'planning') {
+  if (i.latched?.basis === 'planning') {
     const b = planningClauses(i);
     if (b.ok) return out('planning', b);
     // L2: the latched basis's report is unavailable — the previous served plan stands (never a fresh (c) inside a latched window).
@@ -224,10 +241,12 @@ export function selectPvBasis(i: PvSelectionInput): PvSelection {
     return out('published', b);
   }
   if (pubGate && covers) return out('published', null, true);
-  if (i.latched === 'published') {
+  if (i.latched?.basis === 'published') {
     const b = planningClauses(i);
-    // The plan of record was decided without the panel's readings: a reading that would pass now is not taken, and says so.
-    const r: BEval = b.ok || b.transient ? { ok: false, transient: false, reason: { code: 'latched', asOfDay: i.asOfDay } } : b;
+    // The window's evening decided without the panel's readings (or made no decision): a reading that would pass now is not taken,
+    // and says so — naming the day the latch was written for, never this recompute's.
+    const r: BEval = b.ok || b.transient
+      ? { ok: false, transient: false, reason: { code: 'latched', asOfDay: i.latched.asOfDay, decided: i.latched.decided } } : b;
     return out('published', r);
   }
   const b = planningClauses(i);
@@ -375,9 +394,13 @@ export function pvBasisReasonText(r: PvBasisReason, lang: Lang = 'en'): string {
       ? 'no se conoce ninguna relación de capacidad de las baterías (un plan sobre las lecturas del panel necesita una)'
       : 'no pack capacity ratio is known (a plan on the panel\'s readings needs one)';
     case 'band': return es ? `sobre las lecturas del panel: ${r.blockedBy}` : `on the panel's readings: ${r.blockedBy}`;
-    case 'latched': return es
-      ? `el plan de referencia de esta ventana se decidió el ${r.asOfDay} sin ellas`
-      : `this window's plan of record was decided on ${r.asOfDay} without them`;
+    case 'latched': return r.decided === false
+      ? (es
+        ? `el ${r.asOfDay} no se tomó ninguna decisión de la tarde para esta ventana (el trabajo de la tarde no decidió antes de su hora límite)`
+        : `no evening decision was made for this window on ${r.asOfDay} (the evening job did not decide before its cutoff)`)
+      : (es
+        ? `la decisión de la tarde para esta ventana se tomó el ${r.asOfDay} sin ellas`
+        : `this window's evening decision was made on ${r.asOfDay} without them`);
     default: return es ? 'rechazadas' : 'refused';
   }
 }

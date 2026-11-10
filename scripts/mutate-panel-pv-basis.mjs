@@ -473,8 +473,8 @@ const MUTANTS = [
   {
     id: 'PB-S-xiv. ★★★ (L2) the evening\'s planning latch ignored mid-window',
     file: SEL, tests: [T_SEL],
-    find: "  if (i.latched === 'planning') {",
-    to: "  if ((false as boolean) && i.latched === 'planning') { /* MUTANT */",
+    find: "  if (i.latched?.basis === 'planning') {",
+    to: "  if ((false as boolean) && i.latched?.basis === 'planning') { /* MUTANT */",
     why: 'A report timing out at 00:30 flips the served plan to a fresh (c).',
   },
   {
@@ -487,15 +487,15 @@ const MUTANTS = [
   {
     id: 'PB-S-xvi. ★★★ (L2) a v1.203.0 latch (no basis) reads as no latch',
     file: SEL, tests: [T_SEL],
-    find: "  return owns ? { basis: 'published', asOfDay: o.lastNotifyDay } : null;",
+    find: "  return owns ? { basis: 'published', asOfDay: o.lastNotifyDay, decided: !o.noDecision } : null;",
     to: '  return null; /* MUTANT */',
     why: 'Deployed inside an armed window, v1.204.0 re-selects the basis of a night v1.203.0 decided.',
   },
   {
     id: 'PB-S-xvii. ★★ a cushion-only latch taken over by a passing reading mid-window',
     file: SEL, tests: [T_SEL],
-    find: "  if (i.latched === 'published') {",
-    to: "  if ((false as boolean) && i.latched === 'published') { /* MUTANT */",
+    find: "  if (i.latched?.basis === 'published') {",
+    to: "  if ((false as boolean) && i.latched?.basis === 'published') { /* MUTANT */",
     why: 'The served plan leaves the plan of record the evening armed.',
   },
   {
@@ -536,9 +536,37 @@ const MUTANTS = [
   {
     id: 'PB-S-xxiii. ★★★ the published band\'s planning selection: (b) chosen though (a) holds',
     file: SEL, tests: [T_SEL, T_GOLD],
-    find: '  if (pubGate && covers) return out(\'published\', null, true);\n  if (i.latched === \'published\') {',
-    to: '  if ((false as boolean) && pubGate && covers) return out(\'published\', null, true); /* MUTANT */\n  if (i.latched === \'published\') {',
+    find: '  if (pubGate && covers) return out(\'published\', null, true);\n  if (i.latched?.basis === \'published\') {',
+    to: '  if ((false as boolean) && pubGate && covers) return out(\'published\', null, true); /* MUTANT */\n  if (i.latched?.basis === \'published\') {',
     why: 'Every night v1.203.0 plans on the Cores\' band is re-planned on the panel\'s.',
+  },
+  {
+    id: 'PB-S-xxiv. ★★★ (F1) the evening job\'s own call selects on the window\'s latch (the arming null reverted)',
+    file: IDX, tests: [T_SEL, T_REP],
+    find: '    latched: opts.arming === true ? null : pvLatchHere,',
+    to: '    latched: pvLatchHere, /* MUTANT */',
+    why: 'Sunday\'s evening job under Saturday\'s planning latch stalls on keep-previous to the cutoff (no decision, Saturday\'s arm stands); under a published one a Sunday that passes is planned cushion-only.',
+  },
+  {
+    id: 'PB-S-xxv. ★★★ (F1) the cutoff path latches no noDecision',
+    file: IDX, tests: [T_SEL],
+    find: '    writeNightChargeLatch({ lastNotifyDay: today, armRefused: latch.armRefused ?? null, noDecision: true });',
+    to: '    writeNightChargeLatch({ lastNotifyDay: today, armRefused: latch.armRefused ?? null }); /* MUTANT */',
+    why: 'An evening that never decided is called a decision of that day in the rationale, the push and Home Assistant.',
+  },
+  {
+    id: 'PB-S-xxvi. ★★★ (F1) the latch is read without its noDecision',
+    file: IDX, tests: [T_SEL],
+    find: '    noDecision: readNightChargeLatch().noDecision === true,',
+    to: '    noDecision: false, /* MUTANT */',
+    why: 'As PB-S-xxv, through the read.',
+  },
+  {
+    id: 'PB-S-xxvii. ★★★ (F1) a latch with no basis always reads as decided',
+    file: SEL, tests: [T_SEL],
+    find: "  return owns ? { basis: 'published', asOfDay: o.lastNotifyDay, decided: !o.noDecision } : null;",
+    to: "  return owns ? { basis: 'published', asOfDay: o.lastNotifyDay, decided: true } : null; /* MUTANT */",
+    why: 'As PB-S-xxv, in the selection.',
   },
 
   /* ── T: the words ── */
@@ -569,6 +597,20 @@ const MUTANTS = [
     find: "a night reading above 20 W is not a solar reading, and the readings are held through the evening of ${r.lastHeldDay}`;",
     to: "a night reading above 20 W is not a solar reading`; /* MUTANT */",
     why: 'The owner cannot tell when the readings come back.',
+  },
+  {
+    id: 'PB-T-xi. ★★★ (F1) the \'latched\' reason names the recompute\'s E, not the latch\'s own day',
+    file: SEL, tests: [T_SEL],
+    find: "      ? { ok: false, transient: false, reason: { code: 'latched', asOfDay: i.latched.asOfDay, decided: i.latched.decided } } : b;",
+    to: "      ? { ok: false, transient: false, reason: { code: 'latched', asOfDay: i.asOfDay, decided: i.latched.decided } } : b; /* MUTANT */",
+    why: 'The reason dates the decision to a day that did not make it.',
+  },
+  {
+    id: 'PB-T-xii. ★★★ (F1) an evening that made no decision is said to have decided',
+    file: SEL, tests: [T_SEL],
+    find: "    case 'latched': return r.decided === false",
+    to: "    case 'latched': return (false as boolean) && r.decided === false /* MUTANT */",
+    why: '"This window\'s evening decision was made on <day> without them" for an evening job that reached its cutoff without one.',
   },
   {
     id: 'PB-T-v. ★★★ (L1) G4 without the add-on\'s force-charge in that hour',

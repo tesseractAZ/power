@@ -1778,8 +1778,9 @@ test('★★ a write no announcement delivered is recorded like a refusal; a mis
   const cutoffAt = job.indexOf('if (nowMin >= cutoffMin) {');
   assert.ok(cutoffAt > 0);
   const cutoff = job.slice(cutoffAt, job.indexOf('return;', cutoffAt));
-  assert.match(cutoff, /\n\s+writeNightChargeLatch\(\{ lastNotifyDay: today, armRefused: latch\.armRefused \?\? null \}\);\n/);
-  assert.doesNotMatch(cutoff, /writeNightChargeLatch\(\{ lastNotifyDay: today \}\)/);
+  // (v1.204.0 F1 — and says no decision was made: panelPvSelection.test.ts pins what that latch then says.)
+  assert.match(cutoff, /\n\s+writeNightChargeLatch\(\{ lastNotifyDay: today, armRefused: latch\.armRefused \?\? null, noDecision: true \}\);\n/);
+  assert.doesNotMatch(cutoff, /writeNightChargeLatch\(\{ lastNotifyDay: today(, noDecision: true)? \}\)/);
   assert.ok(job.indexOf('const latch = readNightChargeLatch();') < cutoffAt, 'the latch it keeps is the one read at the top');
   const satRefusal = { reason: 'the 2026-10-09 reserve write is still applied and not yet restored', windowStartMs: WIN_START, windowEndMs: WIN_END };
   assert.equal(servedArmRefusal(coerceArmRefusalRecord(JSON.parse(JSON.stringify(satRefusal))), p, 'auto', WIN_START - 30 * 60_000), satRefusal.reason);

@@ -13,6 +13,11 @@
  * real eveningBasisDefers: v1.203.0's cushion-only plan on its transient refusal (0 scored days) is the 22:30 last resort; a plan
  * on the panel's readings is decided at 21:30. Superseded arms (Saturday's arm of the Monday window, which Sunday's replaces) are
  * dropped before any sum (L4).
+ *
+ * The latch as index.ts reads it (latchedPvBasis): the evening job's own calls (21:30, 22:30) select on none (F1); the 00:30
+ * recompute reads the latch the evening wrote (pvLatchOf: its basis, E and the window). A replay may stand an earlier evening's latch
+ * at the evening job (Saturday's, for the Monday window Saturday and Sunday share), withhold the night's planning report at an
+ * instant, or plant a fault on the record itself, which the balance then sees as a real over-read is seen (F1, V2).
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -25,15 +30,18 @@ import {
   eveningBasisDefers, OVERNIGHT_WINDOW_SPEC, type NightChargeInputDeps, type NightChargePlan,
 } from '../src/nightChargeAdvisor.js';
 import { armFromPlan, decideActuation, emptyActuationState, type NightActuationState } from '../src/nightChargeActuator.js';
-import { nextOnPeakStartMs } from '../src/chargeWindows.js';
+import { nextOnPeakStartMs, planDateOwningCycle } from '../src/chargeWindows.js';
+import { siteTimeZone } from '../src/siteTime.js';
 import { planChargeCapKw } from '../src/nightForceCharge.js';
 import { pvSurplusFromBand, surplusSpanEndMs } from '../src/chargeTaper.js';
 import { rateAt } from '../src/tariff.js';
 import { assembleUcTable, upperCheck, type UcVerdict } from '../src/panelPvBasis.js';
-import { selectPvBasis, pvBasisDecoration, withPvBasis, type PvSelection } from '../src/panelPvSelection.js';
-import { recordSources } from './fixtures/panelPvRecordFixtures.js';
+import { latchedPvBasis, selectPvBasis, pvBasisDecoration, withPvBasis, type PvSelection, type PvBasisLatch } from '../src/panelPvSelection.js';
+import { recordSources, type RecordOptions } from './fixtures/panelPvRecordFixtures.js';
+import { priorArmSuperseded } from '../src/chargeCycle.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+const INDEX = readFileSync(resolve(HERE, '../src/index.ts'), 'utf8');
 interface ReplayNight {
   plan_date: string; nowMs: number; socAt21: number | null; socAt2130: number | null; l50: number; l90: number; islandedKw: number;
   hours: Array<[number, number | null, number | null]>;
@@ -83,11 +91,26 @@ interface NightOut {
   /** v1.203.0: the plan of record (22:30) and its armed record. */
   a: { plan: NightChargePlan; arm: ReturnType<typeof arm>; at: '22:30' };
   /** v1.204.0: the plan of record, its decision time and armed record, and the basis read at each of the three instants. */
-  b: { plan: NightChargePlan; arm: ReturnType<typeof arm>; at: '21:30' | '22:30'; kinds: Array<string | null>; setpoints: Array<number | null> };
+  b: {
+    plan: NightChargePlan; arm: ReturnType<typeof arm>; at: '21:30' | '22:30'; kinds: Array<string | null>; setpoints: Array<number | null>;
+    /** The selection at 21:30, 22:30 and 00:30, the latch latchedPvBasis read at each, and the latch the evening wrote. */
+    sels: PvSelection[]; latchAt: Array<ReturnType<typeof latchedPvBasis>>; own: ReplayLatch | null;
+  };
+}
+
+/** The latch file as an evening left it (index.ts NightChargeLatch): its day, its basis, and the armed record's day and window. */
+interface ReplayLatch { lastNotifyDay: string; pv: PvBasisLatch | null; armed: { day: string | null; windowStartMs: number | null } }
+interface ReplayOpts {
+  /** A fault on the record itself (panelPvRecordFixtures' `fault`: the field and the panel's daily total alike), which the balance sees. */
+  ro?: Partial<RecordOptions>;
+  /** The latch standing when the evening job runs (an earlier evening's); absent: none governs this window. */
+  prior?: ReplayLatch;
+  /** Whether the night's planning report (and its rollup) is available at an instant; absent: always. */
+  planningAt?: (tMs: number) => boolean;
 }
 
 /** One night, both versions; `scale` multiplies the planning band (a field reading high by that factor). */
-function replay(n: ReplayNight, objective: 'cost' | 'resilience' = 'cost', scale = 1): NightOut {
+function replay(n: ReplayNight, objective: 'cost' | 'resilience' = 'cost', scale = 1, o: ReplayOpts = {}): NightOut {
   const byTs = new Map(n.hours.map(([ts, loadW, lvl]) => [ts, { loadW, lvl }]));
   const act24 = n.hours.slice(1, 25).reduce((s, h) => s + (h[1] ?? 1700), 0) / 1000;
   const k50 = n.l50 / act24;
@@ -136,23 +159,31 @@ function replay(n: ReplayNight, objective: 'cost' | 'resilience' = 'cost', scale
     } as NightChargeInputDeps;
   };
   const E = n.plan_date;
-  /** v1.204.0 at an instant: the verdict as of E on the data known then, the selection, the deps it selects, the plan. */
-  const at = (t: number, soc: number) => {
-    const v = upperCheck(assembleUcTable(recordSources(E, { knownAtMs: t }), E).table, E);
-    const sel = selectPvBasis({
-      asOfDay: E, eligible: { writeMode: true, panelFresh: true, cancelled: false }, latched: null,
-      published: { gate: gateOf(0, 0), uncoveredSlots: [1, 2, 3] },
-      planning: { asOfDay: E, keys: KEYS, verdict: v, gate: gateOf(n.calScoredDays, n.coverage ?? 0) },
-      planningRollupOk: true, connectedKeys: KEYS, ratioKnown: true,
-    });
+  /** v1.204.0 at an instant: the verdict as of E on the data known then, the selection, the deps it selects, the plan. `arming`: the
+   *  evening job's own call, which selects on no latch (index.ts F1); else the latch file `latch` governs as latchedPvBasis reads it. */
+  const at = (t: number, soc: number, arming: boolean, latch: ReplayLatch | null) => {
+    const v = upperCheck(assembleUcTable(recordSources(E, { knownAtMs: t, ...o.ro }), E).table, E);
     const d0 = withWindow(base, t, soc);
+    const w = plan(d0).window;
+    const here = latch == null || w == null ? null : latchedPvBasis({
+      lastNotifyDay: latch.lastNotifyDay, pv: latch.pv, noDecision: false, windowStartMs: w.startMs, windowEndMs: w.endMs, nowMs: t,
+      planDate: planDateOwningCycle({ nowMs: t, firstLegStartMs: w.startMs, timezone: siteTimeZone(), notifyMinuteOfDay: NOTIFY_MIN }),
+      armed: latch.armed,
+    });
+    const avail = o.planningAt?.(t) ?? true;
+    const sel = selectPvBasis({
+      asOfDay: E, eligible: { writeMode: true, panelFresh: true, cancelled: false }, latched: arming ? null : here,
+      published: { gate: gateOf(0, 0), uncoveredSlots: [1, 2, 3] },
+      planning: avail ? { asOfDay: E, keys: KEYS, verdict: v, gate: gateOf(n.calScoredDays, n.coverage ?? 0) } : null,
+      planningRollupOk: avail, connectedKeys: KEYS, ratioKnown: true,
+    });
     const d = sel.use === 'planning' ? withWindow(planningDeps(d0), t, soc) : d0;
     const p = plan(d);
     const out = withPvBasis(p, pvBasisDecoration({
       sel, asOfDay: E, plan: { sized: p.basisComplete && p.requiredExtraKwh != null, cushionOnly: p.cushionOnly != null },
       calScoredDays: d.calScoredDays, admittedDays: null,
     }));
-    return { v, sel, d, p: out };
+    return { v, sel, d, p: out, here };
   };
   // v1.203.0: the published deps, its transient refusal deferring to the 22:30 last resort.
   const dA21 = withWindow(base, t21, soc2130);
@@ -161,23 +192,33 @@ function replay(n: ReplayNight, objective: 'cost' | 'resilience' = 'cost', scale
   const dA22 = withWindow(base, t22, soc2230);
   const A22 = plan(dA22);
   const armA = arm(A22, dA22, E);
-  // v1.204.0: decided at 21:30 unless eveningBasisDefers holds it to 22:30.
-  const b21 = at(t21, soc2130);
-  const b22 = at(t22, soc2230);
+  // v1.204.0: decided at 21:30 unless eveningBasisDefers holds it to 22:30 — the evening job's own calls, with the latch standing then.
+  const prior = o.prior ?? null;
+  const b21 = at(t21, soc2130, true, prior);
+  const b22 = at(t22, soc2230, true, prior);
   const decided = eveningBasisDefers(b21.p, minuteOf(n, t21)) ? { ...b22, at: '22:30' as const } : { ...b21, at: '21:30' as const };
   const armB = arm(decided.p, decided.d, E);
+  // The latch the evening writes (index.ts pvLatchOf): the basis it chose, as of E, with its window.
+  const wD = decided.p.window;
+  const own: ReplayLatch | null = wD == null ? null : {
+    lastNotifyDay: E, armed: { day: armB.a ? E : null, windowStartMs: armB.a ? wD.startMs : null },
+    pv: { basis: decided.sel.use === 'planning' ? 'planning' : 'published', asOfDay: E, windowStartMs: wD.startMs, windowEndMs: wD.endMs },
+  };
   // 00:30: the pool after 1.5 h of the armed reserve from 23:00 (charged toward it at the plan's cap, else drained toward it).
   const walk = (target: number | null): number => {
     const ld = (loadAt(t22 + H / 2) / 0.94 + 270) / 1000;
     if (target != null && target > soc2300) return Math.min(target, soc2300 + 1.5 * capKw * LEG / POOL * 100);
     return Math.max(target ?? FLOOR, soc2300 - 1.5 * ld / POOL * 100);
   };
-  const b00 = at(t00, walk(armB.write));
+  const b00 = at(t00, walk(armB.write), false, own);
   const kindOf = (p: NightChargePlan): string | null => (p.window == null ? null : p.cushionOnly ? 'cushion-only' : p.basisComplete ? 'panel' : 'none');
   return {
     date: E, verdict: b21.v, sel: b21.sel,
     a: { plan: A22, arm: armA, at: '22:30' },
-    b: { plan: decided.p, arm: armB, at: decided.at, kinds: [b21.p, b22.p, b00.p].map(kindOf), setpoints: [b21.p, b22.p, b00.p].map((p) => p.setpointSocPct ?? null) },
+    b: {
+      plan: decided.p, arm: armB, at: decided.at, kinds: [b21.p, b22.p, b00.p].map(kindOf), setpoints: [b21.p, b22.p, b00.p].map((p) => p.setpointSocPct ?? null),
+      sels: [b21.sel, b22.sel, b00.sel], latchAt: [b21.here, b22.here, b00.here], own,
+    },
   };
 }
 
@@ -294,3 +335,48 @@ test('★★★ the decision-time effect, resilience: every night arms what v1.2
   // Every refused night is the same plan at the same time; every panel night is decided at 21:30.
   for (const o of res) assert.equal(o.b.at, o.sel.use === 'planning' ? '21:30' : '22:30', o.date);
 });
+
+
+test('★★★ F1 (e), the evening job on the record: Sunday 11-01 with Saturday 10-31\'s latch standing for the Monday window both share decides afresh as of Sunday — Saturday on the panel\'s readings and Sunday\'s report missing to 23:00: v1.203.0\'s plan at 22:30 (30%), never a keep-previous stall, and it supersedes Saturday\'s 50/90; Saturday cushion-only (or a v1.203.0 latch) and Sunday passing: the panel plan 50/71.7 at 21:30; the 00:30 recompute reads Sunday\'s own latch', () => {
+  // index.ts: the evening job's own call selects on no latch; the replay's `at` mirrors exactly this expression.
+  assert.match(INDEX, /\n\s+latched: opts\.arming === true \? null : pvLatchHere,\n/);
+  const fmt = (x: { write: number | null; fc: number | null }): string => `${x.write ?? '—'}/${x.fc == null ? '—' : r2(x.fc)}`;
+  const sat = COST.find((o) => o.date === '2026-10-31')!;
+  assert.equal(fmt(sat.b.arm), '50/90');
+  const satLatch = sat.b.own!;
+  assert.deepEqual(satLatch.pv && { basis: satLatch.pv.basis, asOfDay: satLatch.pv.asOfDay }, { basis: 'planning', asOfDay: '2026-10-31' });
+  const sun = NIGHTS.find((n) => n.plan_date === '2026-11-01')!;
+  const t00 = sun.nowMs + 3 * H;
+  const supersedes = (o: NightOut): boolean => o.b.arm.a != null && o.b.plan.window?.startMs === sat.b.arm.a!.windowStartMs
+    && priorArmSuperseded({ ...sat.b.arm.a!, missedApplyPushedAtMs: null }, o.date);
+
+  // (a) Saturday latched the panel's readings; Sunday's planning report is missing from 21:30 to 23:00.
+  const a = replay(sun, 'cost', 1, { prior: satLatch, planningAt: (t) => t >= t00 });
+  assert.deepEqual(a.b.latchAt[0], { basis: 'planning', asOfDay: '2026-10-31', decided: true }, 'Saturday\'s latch stands at Sunday 21:30');
+  for (const sel of a.b.sels.slice(0, 2)) {
+    assert.equal(sel.use, 'published', 'never keep-previous');
+    assert.equal(sel.transient, true);
+  }
+  assert.equal(a.b.at, '22:30', 'deferred to 22:30 and decided then');
+  assert.equal(fmt(a.b.arm), fmt(a.a.arm));
+  assert.equal(fmt(a.b.arm), '30/—', 'v1.203.0\'s plan for the Monday window');
+  assert.ok(supersedes(a), 'Sunday\'s arm supersedes Saturday\'s 50/90 for the same window');
+  // 00:30 reads the latch Sunday wrote (the published basis, as of Sunday): its report back and passing, refused as 'latched'.
+  assert.deepEqual(a.b.latchAt[2], { basis: 'published', asOfDay: '2026-11-01', decided: true });
+  assert.deepEqual(a.b.sels[2].reason, { code: 'latched', asOfDay: '2026-11-01', decided: true });
+
+  // (b) Saturday latched the published basis (a refused or transient Saturday, or advisory); Sunday passes. (c) A v1.203.0 latch.
+  const pub = { ...satLatch, pv: { ...satLatch.pv!, basis: 'published' as const } };
+  const v1203 = { ...satLatch, pv: null };
+  for (const prior of [pub, v1203]) {
+    const o = replay(sun, 'cost', 1, { prior });
+    assert.deepEqual(o.b.latchAt[0], { basis: 'published', asOfDay: '2026-10-31', decided: true });
+    assert.deepEqual(o.b.sels.map((x) => x.use), ['planning', 'planning', 'planning']);
+    assert.equal(o.b.at, '21:30');
+    assert.equal(fmt(o.b.arm), '50/71.7', 'Sunday\'s own panel plan, as the unlatched replay arms it');
+    assert.equal(o.b.plan.pvBasis, 'panel');
+    assert.ok(supersedes(o));
+    assert.deepEqual(o.b.latchAt[2], { basis: 'planning', asOfDay: '2026-11-01', decided: true });
+  }
+});
+

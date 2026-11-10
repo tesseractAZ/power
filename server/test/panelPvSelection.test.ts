@@ -6,6 +6,8 @@
  *  - M3  the refusal words are figures only (no causal clause);
  *  - L1  one reason per clause of selection (b), in a fixed precedence, with a transient class that prints nothing and defers;
  *  - L2  the latch: a missing report keeps the previous plan; a latch with no basis reads published to its close;
+ *  - F1  the evening job's own call selects afresh as of its own day (Saturday's latch never decides Sunday's evening), and every
+ *        'latched' refusal names the latch's own day and says no decision was made where the evening reached its cutoff without one;
  *  - L5  the ledger's PV actual on a panel row, said; L6  Home Assistant's two attributes, exactly;
  *  and the readiness gate's panelApart. The replay on the recorded plant is panelPvReplay.test.ts.
  */
@@ -25,8 +27,10 @@ import {
   type NightChargeInputDeps, type NightChargePlan,
 } from '../src/nightChargeAdvisor.js';
 import { buildNightChargeMessage } from '../src/notify.js';
-import { planDateOwningCycle } from '../src/chargeWindows.js';
-import { siteDayStartMs, siteTimeZone, addDaysYmd } from '../src/siteTime.js';
+import { planDateOwningCycle, resolveCheapWindow, cheapNightOf } from '../src/chargeWindows.js';
+import { siteDayStartMs, siteTimeZone, addDaysYmd, siteYmd } from '../src/siteTime.js';
+import { tariffModelFromEnv, rateAt, cheapPeriodIdOf } from '../src/tariff.js';
+import { nightScheduleOf } from '../src/nightSchedule.js';
 import { SENSORS, sensorDiscoveryConfig, NIGHT_CHARGE_ATTRIBUTES_TEMPLATE } from '../src/mqttDiscovery.js';
 import {
   panelRowPvActual, panelPvActualNote, pvVerdictSetAside, panelPvVerdictSetAside, isPanelBasisRow,
@@ -82,14 +86,14 @@ test('★★★ M1: E is the evening that owns the window — Saturday 10-31 jud
   const latch: PvBasisLatch = { basis: 'planning', asOfDay: '2026-10-31', windowStartMs: monStart, windowEndMs: monEnd };
   const at = (ms: number) => {
     const planDate = planDateOwningCycle({ nowMs: ms, firstLegStartMs: monStart, timezone: siteTimeZone(), notifyMinuteOfDay: NOTIFY_MIN });
-    const l = latchedPvBasis({ lastNotifyDay: '2026-10-31', pv: latch, windowStartMs: monStart, windowEndMs: monEnd, nowMs: ms, planDate, armed: { day: '2026-10-31', windowStartMs: monStart } });
+    const l = latchedPvBasis({ lastNotifyDay: '2026-10-31', pv: latch, noDecision: false, windowStartMs: monStart, windowEndMs: monEnd, nowMs: ms, planDate, armed: { day: '2026-10-31', windowStartMs: monStart } });
     return { l, E: planAsOfDay({ arming: false, todayYmd: '-', latched: l, planDate }) };
   };
   const sat = siteDayStartMs('2026-10-31');
   const sun = siteDayStartMs('2026-11-01');
   for (const ms of [sat + 22.5 * H, sun + 0.5 * H, sun + 9.5 * H]) {
     const { l, E: e } = at(ms);
-    assert.deepEqual(l, { basis: 'planning', asOfDay: '2026-10-31' });
+    assert.deepEqual(l, { basis: 'planning', asOfDay: '2026-10-31', decided: true });
     assert.equal(e, '2026-10-31', 'never the window\'s start day (Monday)');
   }
   // Sunday's own evening job decides afresh, as of Sunday; its latch then governs the window.
@@ -105,11 +109,11 @@ test('★★★ L2: a latch written by v1.203.0 (no basis) reads as the publishe
   const we = ws + 6 * H;
   const deploy = siteDayStartMs('2026-11-10') + 3.43 * H; // Tue 03:26, inside Monday's window
   const planDate = planDateOwningCycle({ nowMs: deploy, firstLegStartMs: ws, timezone: siteTimeZone(), notifyMinuteOfDay: NOTIFY_MIN });
-  const old = { lastNotifyDay: '2026-11-09', pv: undefined, windowStartMs: ws, windowEndMs: we, planDate, armed: { day: '2026-11-09', windowStartMs: ws } };
-  assert.deepEqual(latchedPvBasis({ ...old, nowMs: deploy }), { basis: 'published', asOfDay: '2026-11-09' });
+  const old = { lastNotifyDay: '2026-11-09', pv: undefined, noDecision: false, windowStartMs: ws, windowEndMs: we, planDate, armed: { day: '2026-11-09', windowStartMs: ws } };
+  assert.deepEqual(latchedPvBasis({ ...old, nowMs: deploy }), { basis: 'published', asOfDay: '2026-11-09', decided: true });
   assert.equal(latchedPvBasis({ ...old, nowMs: we }), null, 'to the close, and no further');
-  // The selection inside it never takes the planning band, even passing: the plan of record was decided without it.
-  const sel = selectPvBasis(input({ latched: 'published' }));
+  // The selection inside it never takes the planning band, even passing: the window's evening decided without it.
+  const sel = selectPvBasis(input({ latched: { basis: 'published', asOfDay: E, decided: true } }));
   assert.equal(sel.use, 'published');
   assert.equal(sel.reason?.code, 'latched');
   // A latch for another window (Monday's, read on Tuesday afternoon for Tuesday's window) governs nothing.
@@ -120,13 +124,173 @@ test('★★★ L2: a latch written by v1.203.0 (no basis) reads as the publishe
 
 test('★★★ L2: inside a window latched on the planning basis, a missing or other-evening report keeps the previous plan (never a fresh (c)); its report passing, the planning band', () => {
   for (const planning of [null, { asOfDay: '2026-10-28', keys: KEYS, verdict: verdict('pass'), gate: PASS_GATE }]) {
-    const sel = selectPvBasis(input({ latched: 'planning', planning }));
+    const sel = selectPvBasis(input({ latched: { basis: 'planning', asOfDay: E, decided: true }, planning }));
     assert.equal(sel.use, 'keep-previous');
     assert.equal(sel.reason, null);
   }
-  assert.equal(selectPvBasis(input({ latched: 'planning' })).use, 'planning');
+  assert.equal(selectPvBasis(input({ latched: { basis: 'planning', asOfDay: E, decided: true } })).use, 'planning');
   // And index.ts keeps the previous served plan on it (or seeds this window's snapshot after a restart): 'panelStale' to its callers.
   assert.match(INDEX, /if \(pvSel\?\.use === 'keep-previous'\) \{\n\s+if \(getLatestNightChargePlan\(\) == null\) seedPlanFromSnapshot\(window\?\.startMs \?\? null\);\n\s+return 'panelStale';\n\s+\}/);
+});
+
+/* ══ F1 — the evening job's own call selects afresh as of its own day; the 'latched' words true on every path ═════════════════════ */
+
+/** The weekend as index.ts resolves it (the real tariff, its cheap window, the evening schedule): Saturday 11-14 and Sunday 11-15 both
+ *  plan the Monday 11-16 window. */
+const TM = tariffModelFromEnv();
+const SCHED = nightScheduleOf(TM, { hour: 21, minute: 30 });
+const winAt = (ms: number) => resolveCheapWindow((t) => rateAt(TM, t).periodId, ms, cheapPeriodIdOf(TM)!, 30, cheapNightOf(TM))!;
+const SAT = '2026-11-14';
+const SUN = '2026-11-15';
+const at = (day: string, h: number): number => siteDayStartMs(day) + h * H;
+const SAT_W = winAt(at(SAT, 21.5));
+interface LatchFile { lastNotifyDay: string; pv: PvBasisLatch | null; noDecision?: boolean; armed: { day: string | null; windowStartMs: number | null } }
+/** recomputeNightChargePlan's latch, E and selection at `ms` with the latch file `latch` standing: latchedPvBasis and planAsOfDay as
+ *  index.ts calls them, and the selection's latch by the expression index.ts carries (ARMING, pinned in each test below). */
+function chainAt(ms: number, arming: boolean, latch: LatchFile, o: Partial<PvSelectionInput> = {}) {
+  const w = winAt(ms);
+  const planDate = planDateOwningCycle({ nowMs: ms, firstLegStartMs: w.startMs, timezone: siteTimeZone(), notifyMinuteOfDay: SCHED.notify.fireMin });
+  const here = latchedPvBasis({
+    lastNotifyDay: latch.lastNotifyDay, pv: latch.pv, noDecision: latch.noDecision === true,
+    windowStartMs: w.startMs, windowEndMs: w.endMs, nowMs: ms, planDate, armed: latch.armed,
+  });
+  const E = planAsOfDay({ arming, todayYmd: siteYmd(ms), latched: here, planDate });
+  const sel = selectPvBasis(input({ asOfDay: E, latched: arming ? null : here, ...o }));
+  return { w, here, E, sel };
+}
+/** index.ts: `latched: opts.arming === true ? null : pvLatchHere` — the evening job's own call reads no latch. */
+const ARMING = /\n\s+latched: opts\.arming === true \? null : pvLatchHere,\n/;
+const satLatch = (basis: 'planning' | 'published' | null): LatchFile => ({
+  lastNotifyDay: SAT, armed: { day: SAT, windowStartMs: SAT_W.startMs },
+  pv: basis == null ? null : { basis, asOfDay: SAT, windowStartMs: SAT_W.startMs, windowEndMs: SAT_W.endMs },
+});
+const reportAsOf = (day: string, state: UcVerdict['state'] = 'pass', reason: UcVerdict['reason'] = null, gate: PvSelectionInput['published']['gate'] = PASS_GATE): Partial<PvSelectionInput> => ({
+  planning: { asOfDay: day, keys: KEYS, verdict: verdict(state, reason, PANEL3, day), gate },
+});
+
+test('★★★ F1 (a): Sunday\'s evening job under Saturday\'s planning latch for the Monday window both share, its planning report missing (or built for another evening, or its band transient) → the published deps, transient: deferred to 22:30 and decided then — never keep-previous, which returned \'panelStale\' every minute to the 23:00 cutoff and left Saturday\'s day-old arm standing', () => {
+  assert.match(INDEX, ARMING);
+  const gone: Array<Partial<PvSelectionInput>> = [
+    { planning: null, planningRollupOk: false },
+    reportAsOf(SAT),
+    reportAsOf(SUN, 'pass', null, ZERO_DAYS),
+    { ...reportAsOf(SUN), planningRollupOk: false },
+  ];
+  for (const o of gone) {
+    for (const h of [21.5, 22.5, 22 + 59 / 60]) {
+      const c = chainAt(at(SUN, h), true, satLatch('planning'), o);
+      assert.equal(c.w.startMs, SAT_W.startMs, 'the window Saturday and Sunday share');
+      assert.deepEqual(c.here, { basis: 'planning', asOfDay: SAT, decided: true }, 'Saturday\'s latch still stands at Sunday\'s evening');
+      assert.equal(c.E, SUN);
+      assert.equal(c.sel.use, 'published', `${h}: not keep-previous`);
+      assert.equal(c.sel.transient, true);
+      assert.equal(c.sel.reason, null, 'the transient class prints nothing');
+      const d = pvBasisDecoration({ sel: c.sel, asOfDay: c.E, plan: { sized: true, cushionOnly: true }, calScoredDays: 0, admittedDays: null })!;
+      assert.equal(d.pvBasisTransient, true);
+      const nowMin = Math.round(h * 60);
+      assert.equal(eveningBasisDefers({ basisComplete: true, pvBasisTransient: true }, nowMin, SCHED.staleDeferUntilMin), nowMin < SCHED.staleDeferUntilMin, `${h}: deferred to 22:30, decided from then`);
+    }
+  }
+  assert.equal(SCHED.staleDeferUntilMin, 22 * 60 + 30);
+  // The Cores back (their band passing and covering every slot), the planning report missing: decided at 21:30 on the Cores' band.
+  const back = chainAt(at(SUN, 21.5), true, satLatch('planning'), { published: { gate: PASS_GATE, uncoveredSlots: [] }, planning: null, planningRollupOk: false });
+  assert.deepEqual([back.sel.use, back.sel.published, back.sel.transient], ['published', true, false]);
+  // L2 unchanged: the same latch read by any other recompute (Sunday 14:00, before Sunday's evening), its report missing, keeps the
+  // previous plan.
+  const tick = chainAt(at(SUN, 14), false, satLatch('planning'), { planning: null, planningRollupOk: false });
+  assert.equal(tick.E, SAT);
+  assert.equal(tick.sel.use, 'keep-previous');
+});
+
+test('★★★ F1 (b): Sunday\'s evening job under Saturday\'s published latch (Saturday refused, decided on a transient at 22:30, or in advisory mode), Sunday\'s verdict passing as of Sunday → the planning band; a Sunday that refuses says its own reason; before Sunday\'s evening the latch\'s \'latched\' refusal names Saturday', () => {
+  assert.match(INDEX, ARMING);
+  for (const h of [21.5, 22.5]) {
+    const c = chainAt(at(SUN, h), true, satLatch('published'), reportAsOf(SUN));
+    assert.deepEqual(c.here, { basis: 'published', asOfDay: SAT, decided: true });
+    assert.equal(c.E, SUN);
+    assert.equal(c.sel.use, 'planning');
+    assert.equal(c.sel.reason, null);
+  }
+  assert.deepEqual(chainAt(at(SUN, 21.5), true, satLatch('published'), reportAsOf(SUN, 'refused', BALANCE)).sel.reason, BALANCE);
+  const tick = chainAt(at(SUN, 14), false, satLatch('published'), reportAsOf(SAT));
+  assert.equal(tick.E, SAT);
+  assert.equal(tick.sel.use, 'published');
+  assert.deepEqual(tick.sel.reason, { code: 'latched', asOfDay: SAT, decided: true });
+  assert.equal(pvBasisReasonText(tick.sel.reason!), `this window's evening decision was made on ${SAT} without them`);
+  assert.equal(pvBasisReasonText(tick.sel.reason!, 'es'), `la decisión de la tarde para esta ventana se tomó el ${SAT} sin ellas`);
+});
+
+test('★★★ F1 (c): a v1.203.0 latch (no basis) for Saturday\'s arm of the Monday window — this release deployed over the weekend — and Sunday\'s evening job selects afresh: passing, the planning band; its report missing, the transient class', () => {
+  assert.match(INDEX, ARMING);
+  const c = chainAt(at(SUN, 21.5), true, satLatch(null), reportAsOf(SUN));
+  assert.deepEqual(c.here, { basis: 'published', asOfDay: SAT, decided: true }, 'it reads as the published basis');
+  assert.equal(c.sel.use, 'planning');
+  const t = chainAt(at(SUN, 21.5), true, satLatch(null), { planning: null, planningRollupOk: false });
+  assert.deepEqual([t.sel.use, t.sel.transient, t.sel.reason], ['published', true, null]);
+  // Saturday 23:30 (deployed after Saturday decided on v1.203.0): inside Saturday's latch, the decided words name Saturday.
+  const sat = chainAt(at(SAT, 23.5), false, satLatch(null), reportAsOf(SAT));
+  assert.deepEqual(sat.sel.reason, { code: 'latched', asOfDay: SAT, decided: true });
+});
+
+test('★★★ F1 (d): inside Sunday\'s own latched window every other recompute still selects the latched basis (L2 unchanged) — planning: its report passing, the planning band; missing, keep-previous; published: a passing reading refused as \'latched\', naming Sunday — and the reason names the latch\'s own day, whatever E it is handed', () => {
+  const sunW = winAt(at(SUN, 21.5));
+  assert.equal(sunW.startMs, SAT_W.startMs);
+  const own = (basis: 'planning' | 'published'): LatchFile => ({
+    lastNotifyDay: SUN, armed: { day: SUN, windowStartMs: sunW.startMs },
+    pv: { basis, asOfDay: SUN, windowStartMs: sunW.startMs, windowEndMs: sunW.endMs },
+  });
+  for (const ms of [at(SUN, 23.5), at('2026-11-16', 0.5), at('2026-11-16', 4.5)]) {
+    const p = chainAt(ms, false, own('planning'), reportAsOf(SUN));
+    assert.equal(p.E, SUN);
+    assert.equal(p.sel.use, 'planning');
+    assert.equal(chainAt(ms, false, own('planning'), { planning: null, planningRollupOk: false }).sel.use, 'keep-previous');
+    const q = chainAt(ms, false, own('published'), reportAsOf(SUN));
+    assert.equal(q.sel.use, 'published');
+    assert.deepEqual(q.sel.reason, { code: 'latched', asOfDay: SUN, decided: true });
+  }
+  assert.deepEqual(
+    selectPvBasis(input({ asOfDay: '2026-10-29', latched: { basis: 'published', asOfDay: '2026-10-28', decided: true } })).reason,
+    { code: 'latched', asOfDay: '2026-10-28', decided: true });
+});
+
+test('★★★ F1 the \'latched\' words on every path that serves them: a decided evening (a published latch, a v1.203.0 latch, an evening that decided with no plan) — "this window\'s evening decision was made on <its day> without them"; an evening job that did not decide before its cutoff latches noDecision, and its window says no evening decision was made that day — en and es, never a decision on a day that made none', () => {
+  // Sunday's cutoff (the add-on down 21:30–23:00, or a panel stale throughout): the latch has no basis and says so; Saturday's arm
+  // of the window stands.
+  const cut: LatchFile = { lastNotifyDay: SUN, pv: null, noDecision: true, armed: { day: SAT, windowStartMs: SAT_W.startMs } };
+  for (const ms of [at(SUN, 23.5), at('2026-11-16', 0.5)]) {
+    const c = chainAt(ms, false, cut, reportAsOf(SUN));
+    assert.deepEqual(c.here, { basis: 'published', asOfDay: SUN, decided: false });
+    assert.equal(c.E, SUN);
+    assert.equal(c.sel.use, 'published');
+    assert.deepEqual(c.sel.reason, { code: 'latched', asOfDay: SUN, decided: false });
+    const en = pvBasisReasonText(c.sel.reason!);
+    const es = pvBasisReasonText(c.sel.reason!, 'es');
+    assert.equal(en, `no evening decision was made for this window on ${SUN} (the evening job did not decide before its cutoff)`);
+    assert.equal(es, `el ${SUN} no se tomó ninguna decisión de la tarde para esta ventana (el trabajo de la tarde no decidió antes de su hora límite)`);
+    assert.doesNotMatch(en, /without them|decided on/);
+    assert.doesNotMatch(es, /sin ellas|se decidió/);
+    assert.equal(pvBasisRefusedText(c.sel.reason!), ` The panel's own solar readings are not used tonight: ${en}.`);
+  }
+  // An evening that decided with no plan (inputs unavailable) latches no basis, and decided: the decided words name it.
+  const noPlan: LatchFile = { lastNotifyDay: SUN, pv: null, armed: { day: null, windowStartMs: null } };
+  const n = chainAt(at(SUN, 23.5), false, noPlan, reportAsOf(SUN));
+  assert.deepEqual(n.sel.reason, { code: 'latched', asOfDay: SUN, decided: true });
+  assert.equal(pvBasisReasonText(n.sel.reason!), `this window's evening decision was made on ${SUN} without them`);
+  // The evening job's own call never serves it, under any latch.
+  for (const l of [cut, noPlan, satLatch('published'), satLatch(null)]) {
+    assert.notEqual(chainAt(at(SUN, 21.5), true, l, reportAsOf(SUN)).sel.reason?.code, 'latched');
+  }
+  // The wiring: the cutoff path alone latches noDecision; the latch is read with it; only a writer that says so sets it.
+  assert.match(INDEX, ARMING);
+  const jobAt = INDEX.indexOf('async function runNightChargeEveningJobInner(');
+  const job = INDEX.slice(jobAt, INDEX.indexOf('\n}\n', jobAt));
+  const cutoffAt = job.indexOf('if (nowMin >= cutoffMin) {');
+  const cutoff = job.slice(cutoffAt, job.indexOf('return;', cutoffAt));
+  assert.match(cutoff, /\n\s+writeNightChargeLatch\(\{ lastNotifyDay: today, armRefused: latch\.armRefused \?\? null, noDecision: true \}\);\n/);
+  assert.equal(job.split('noDecision: true').length - 1, 1, 'no deciding path says it');
+  assert.match(INDEX, /\n\s+noDecision: readNightChargeLatch\(\)\.noDecision === true,\n/);
+  assert.match(INDEX, /\n\s+\.\.\.\(l\.noDecision === true \? \{ noDecision: true \} : \{\}\),\n/);
+  assert.match(INDEX, /\n\s+\.\.\.\(raw\?\.noDecision === true \? \{ noDecision: true \} : \{\}\),\n/);
 });
 
 /* ══ the selection (a)/(b)/(c), M2, L1 ═══════════════════════════════════════════════════════════════════════════════════ */
@@ -240,7 +404,8 @@ const ALL_REASONS: PvBasisReason[] = [
   { code: 'advisory' }, { code: 'stale-panel' }, { code: 'cancelled' },
   { code: 'slot-unresolved', slot: 3 }, { code: 'no-capacity-ratio' },
   { code: 'band', blockedBy: 'PV band coverage 74% < 78%' },
-  { code: 'latched', asOfDay: '2026-11-09' },
+  { code: 'latched', asOfDay: '2026-11-09', decided: true },
+  { code: 'latched', asOfDay: '2026-11-09', decided: false },
 ];
 
 test('★★★ L1: every reason has its words in English and in Spanish — figures, slot numbers and days only, never a slot key', () => {
@@ -535,6 +700,8 @@ test('★★★ wiring: the window resolved first; E asked of both planning repo
   assert.match(fn, /const pvAsOfDay: string \| null = shadowLeg \? null : planAsOfDay\(\{\n\s+arming: opts\.arming === true, todayYmd: siteYmd\(nowMs\), latched: pvLatchHere,/);
   assert.match(fn, /const pvAsk = pvAsOfDay != null && pvWriteMode && panel\.fresh && !pvCancelled;/);
   assert.match(fn, /const pvSel: PvSelection \| null = shadowLeg \? null : selectPvBasis\(\{/);
+  // F1: the evening job's own call selects on no latch; every other recompute on the window's.
+  assert.match(fn, /\n\s+latched: opts\.arming === true \? null : pvLatchHere,\n/);
   // M1: the plan date that will own the window (never the site day now: a recompute at 00:30 with no latch keeps the evening's E).
   assert.match(fn, /planDate: window == null \? siteYmd\(nowMs\)\n\s+: planDateOwningCycle\(\{ nowMs, firstLegStartMs: window\.startMs, timezone: siteTimeZone\(\), notifyMinuteOfDay: nightSched\.notify\.fireMin \}\),\n\s+\}\);/);
   // M2: the coverage refusal reaches the planner; L1/G4: the hour's force-charge from the armed record; L5: the window ratio stored.

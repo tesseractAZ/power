@@ -3457,6 +3457,10 @@ interface NightChargeLatch {
    *  window's close selects it (panelPvSelection.latchedPvBasis). null/absent: no basis latched — a latch written before v1.204.0, or
    *  an evening that reached no decision — which reads as the published (or cushion-only) basis to the close. */
   pv?: PvBasisLatch | null;
+  /** ★★★ v1.204.0 (F1) — this day's evening job did not decide before its cutoff (written by the cutoff path only, never inherited by a
+   *  later day's latch): the latch, with no basis, reads as the published basis to its window's close, and a recompute there says no
+   *  evening decision was made (panelPvSelection 'latched', decided false). */
+  noDecision?: boolean;
 }
 /** v1.204.0 — a persisted latch basis, or null when it is not one. */
 function coercePvBasisLatch(raw: any): PvBasisLatch | null {
@@ -3474,6 +3478,7 @@ function readNightChargeLatchFile(): NightChargeLatch {
       lastNotifyDay: typeof d === 'string' ? d : null, armRefused: coerceArmRefusalRecord(raw?.armRefused),
       lineNotArmedWindowStartMs: typeof raw?.lineNotArmedWindowStartMs === 'number' ? raw.lineNotArmedWindowStartMs : null,
       pv: coercePvBasisLatch(raw?.pv),
+      ...(raw?.noDecision === true ? { noDecision: true } : {}),
     };
   } catch {
     return { lastNotifyDay: null, armRefused: null, lineNotArmedWindowStartMs: null, pv: null };
@@ -3494,6 +3499,9 @@ function writeNightChargeLatch(l: NightChargeLatch): void {
     lineNotArmedWindowStartMs: l.lineNotArmedWindowStartMs ?? nightChargeLatchMem.lineNotArmedWindowStartMs ?? null,
     // v1.204.0 — the basis of THIS write's evening (none when the writer passes none: a latch for a new day never inherits one).
     pv: l.pv ?? null,
+    // v1.204.0 (F1) — the evening that did not decide before its cutoff: only the writer that says so sets it (the cutoff path; the
+    // push stamp keeps its own day's by spreading the latch it read).
+    ...(l.noDecision === true ? { noDecision: true } : {}),
   };
   try {
     atomicWriteFileSync(NIGHT_CHARGE_LATCH_PATH, JSON.stringify(nightChargeLatchMem));
@@ -4056,6 +4064,7 @@ async function recomputeNightChargePlan(
   const pvLatchHere = shadowLeg || window == null ? null : latchedPvBasis({
     lastNotifyDay: readNightChargeLatch().lastNotifyDay,
     pv: readNightChargeLatch().pv,
+    noDecision: readNightChargeLatch().noDecision === true,
     windowStartMs: window.startMs, windowEndMs: window.endMs, nowMs,
     planDate: planDateOwningCycle({ nowMs, firstLegStartMs: window.startMs, timezone: siteTimeZone(), notifyMinuteOfDay: nightSched.notify.fireMin }),
     armed: { day: nightActuationMem.day, windowStartMs: nightActuationMem.windowStartMs },
@@ -4158,7 +4167,10 @@ async function recomputeNightChargePlan(
   const pvSel: PvSelection | null = shadowLeg ? null : selectPvBasis({
     asOfDay: pvAsOfDay!,
     eligible: { writeMode: pvWriteMode, panelFresh: panel.fresh, cancelled: pvCancelled },
-    latched: pvLatchHere?.basis ?? null,
+    // ★★★ F1 — the evening job's own (arming) call selects afresh as of its own day (E = today above) and reads no latch: Saturday's
+    // latch for the Monday window Sunday shares never decides Sunday's evening (no keep-previous stall, no 'latched' refusal of a
+    // Sunday that passes). Its own latch then governs the window; every other recompute reads the window's latch (L2).
+    latched: opts.arming === true ? null : pvLatchHere,
     published: { gate: bandGateOf(probPublished), uncoveredSlots: houseSlots.filter((c) => !publishedSns.has(c.sn)).map((c) => c.slot) },
     planning: probPlanning == null ? null : {
       asOfDay: probPlanning.asOfDay, keys: probPlanning.planningModelKeys ?? [], verdict: probPlanning.planningVerdict ?? null,
@@ -5383,7 +5395,8 @@ async function runNightChargeEveningJobInner(): Promise<void> {
     // v1.187.22 — no decision was reached tonight, so a refusal recorded on an earlier evening still
     // stands (Saturday's, for the window Sat and Sun share): keep it. servedArmRefusal serves it only
     // beside a charge plan for that window, and only until the window closes.
-    writeNightChargeLatch({ lastNotifyDay: today, armRefused: latch.armRefused ?? null });
+    // v1.204.0 (F1) — and says no decision was made, so a recompute inside the window does not call it a decision (noDecision).
+    writeNightChargeLatch({ lastNotifyDay: today, armRefused: latch.armRefused ?? null, noDecision: true });
     return;
   }
 
