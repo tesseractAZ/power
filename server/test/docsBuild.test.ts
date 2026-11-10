@@ -430,7 +430,7 @@ test('--list-sources, --assemble-only and --print-pandoc-argv run with no pandoc
 
 const REFERENCE_DIR = join(ROOT, D, 'reference');
 
-test('the repository: the printed sources are README, the guide pages, SECURITY, the index preamble and all 20 reference files in manifest order', () => {
+test('the repository: the printed sources are README, the guide pages, SECURITY, the index preamble and all 21 reference files in manifest order', () => {
   const r = build(['--list-sources']);
   assert.equal(r.status, 0, out(r));
   const rows = r.stdout.trim().split('\n').map((l) => l.split('\t'));
@@ -439,7 +439,7 @@ test('the repository: the printed sources are README, the guide pages, SECURITY,
   ]);
   const refs = rows.slice(7).map(([, rel]) => rel);
   const onDisk = readdirSync(REFERENCE_DIR).filter((n) => n.endsWith(MD) && n !== 'README' + MD).sort().map((n) => `${D}/reference/${n}`);
-  assert.equal(refs.length, 20);
+  assert.equal(refs.length, 21);
   assert.deepEqual(refs, onDisk, 'the manifest is in file-name order and names every reference file');
   for (const [role, rel] of rows.slice(7)) {
     assert.equal(role, /\/\d\d-[2-9]-/.test(rel) ? 'part' : 'chapter', `${rel} is a ${role}`);

@@ -1199,7 +1199,7 @@ charge limit, `chargeWattPower`, is 7.2 kW for each connected battery (the Delta
 input ceiling; every source slot's `ratePower` reads the same), not for the pool. Measured on
 the reference plant on 2026-09-16/18 and again on 2026-10-13/14, with three Cores connected the grid import pins at
 ~19.1 kW and the pack takes (19.1 − house) × ~0.93, up to ~17 kW (the hardware charge envelope
-in [15-2, failure modes and known limitations](15-2-night-charge-writes.md#11-failure-modes--known-limitations)),
+in [15-4, failure modes and known limitations](15-4-night-charge-surfaces-and-de-bias.md#11-failure-modes--known-limitations)),
 so a clean six-hour night can fill the pool from any evening SoC. The figure the defaults were
 first checked against read that per-battery limit as the pool's (7.2 kW × 6 h = 43.2 kWh,
 about 72 % from a 25 % evening SoC) and under-stated the envelope by more than half; the
