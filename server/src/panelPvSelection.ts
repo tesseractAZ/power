@@ -40,8 +40,11 @@ import { addDaysYmd } from './siteTime.js';
 export type PvBasisKind = 'panel' | 'mixed';
 export type PvSource = SlotSource;
 
-/** One reason per clause of selection (b): the verdict's own, and the selection's. Figures only; the words are below. */
-export type PvBasisReason =
+/** One reason per clause of selection (b): the verdict's own, and the selection's. Figures only; the words are below. Any reason a
+ *  recompute inside a latched window gives carries `armedDay` (G2) when an earlier evening's arm for that window still stands: that
+ *  arm, which may be on the panel's readings, writes, not the plan shown — so the words are about the plan shown only. */
+export type PvBasisReason = PvBasisReasonCore & { armedDay?: string };
+type PvBasisReasonCore =
   | Exclude<UcReason, { code: 'night-reading' }>
   | (Extract<UcReason, { code: 'night-reading' }> & {
     /** The add-on's force-charge in that hour, from the armed record (the night ledger's ON/OFF stamps): index.ts adds it. */
@@ -65,13 +68,12 @@ export type PvBasisReason =
   | { code: 'band'; blockedBy: string }
   /** Inside a window whose latch reads the published basis (a recompute other than the evening job's own): `asOfDay` is the day the
    *  latch was written for; `decided` false when that evening reached its cutoff without a decision (no evening decision was made),
-   *  null when the latch was written before v1.204.0 (it records no panel basis, nor whether a decision was made); `armedDay`: an
-   *  earlier evening whose arm for this window still stands (G2) — that arm writes, not the plan shown. */
-  | { code: 'latched'; asOfDay: string; decided: boolean | null; armedDay?: string };
+   *  null when the latch was written before v1.204.0 (it records no panel basis, nor whether a decision was made). */
+  | { code: 'latched'; asOfDay: string; decided: boolean | null };
 
 /** What a plan carries of the selection (NightChargePlan.pvBasis*): set on every live overnight plan but the published band's (a). */
 export interface PvBasisDecoration {
-  /** 'panel' | 'mixed': planned on the planning band; null: not (the cushion-only plan, or no plan). */
+  /** 'panel' | 'mixed': planned on the planning band; null: not (v1.203.0's plan, cushion-only or its long-gap fill, or no plan). */
   pvBasis: PvBasisKind | null;
   /** E. */
   pvBasisAsOfDay: string;
@@ -235,6 +237,9 @@ export function bandCoverageRefusalText(uncoveredSlots: readonly number[]): stri
 }
 
 const armedDayOf = (l: LatchedPv): { armedDay?: string } => (l.armedDay != null ? { armedDay: l.armedDay } : {});
+/** G2: a refusal inside a latched window, whatever its clause, names the earlier evening's arm that still stands there. */
+const withArmedDay = (b: BEval, l: LatchedPv): BEval =>
+  (!b.ok && !b.transient && l.armedDay != null ? { ...b, reason: { ...b.reason, armedDay: l.armedDay } } : b);
 
 /** The selection (a)/(b)/(c), from one recompute's inputs. PURE. */
 export function selectPvBasis(i: PvSelectionInput): PvSelection {
@@ -255,7 +260,7 @@ export function selectPvBasis(i: PvSelectionInput): PvSelection {
     if (b.transient) return out('keep-previous', b);
     // A refusal the evening's verdict could not have made (the slots changed, the mode, the panel): the published deps, said so.
     if (pubGate && covers) return out('published', null, true);
-    return out('published', b);
+    return out('published', withArmedDay(b, i.latched));
   }
   if (pubGate && covers) return out('published', null, true);
   if (i.latched?.basis === 'published') {
@@ -263,7 +268,8 @@ export function selectPvBasis(i: PvSelectionInput): PvSelection {
     // The window's evening decided without the panel's readings (or made no decision): a reading that would pass now is not taken,
     // and says so — naming the day the latch was written for, never this recompute's.
     const r: BEval = b.ok || b.transient
-      ? { ok: false, transient: false, reason: { code: 'latched', asOfDay: i.latched.asOfDay, decided: i.latched.decided, ...armedDayOf(i.latched) } } : b;
+      ? { ok: false, transient: false, reason: { code: 'latched', asOfDay: i.latched.asOfDay, decided: i.latched.decided, ...armedDayOf(i.latched) } }
+      : withArmedDay(b, i.latched);
     return out('published', r);
   }
   const b = planningClauses(i);
@@ -325,10 +331,23 @@ export function uncountedCauseText(c: { day: string } & UncountedCause, lang: La
 }
 
 /**
- * Why the panel's own solar readings are not used tonight, in words, from the reason's figures only (M3: no cause is asserted). Every
- * hold names the evening it is held through. PURE.
+ * Why the panel's own solar readings are not used, in words, from the reason's figures only (M3: no cause is asserted). Every hold
+ * names the evening it is held through; a reason with an earlier evening's arm standing (G2) names that arm and says the plan shown is
+ * not it. PURE.
  */
 export function pvBasisReasonText(r: PvBasisReason, lang: Lang = 'en'): string {
+  return reasonClauseText(r, lang) + standingArmText(r.armedDay, lang);
+}
+
+/** G2: '' with no earlier evening's arm standing for this window; else the clause naming it. PURE. */
+function standingArmText(armedDay: string | undefined, lang: Lang): string {
+  if (armedDay == null) return '';
+  return lang === 'es'
+    ? `; el armado hecho el ${armedDay} para esta ventana sigue vigente, y el plan que se muestra aquí no es ese armado`
+    : `; the arm made on ${armedDay} for this window still applies, and the plan shown here is not that arm`;
+}
+
+function reasonClauseText(r: PvBasisReason, lang: Lang): string {
   const es = lang === 'es';
   switch (r.code) {
     case 'no-membership-record': return es
@@ -421,10 +440,7 @@ export function pvBasisReasonText(r: PvBasisReason, lang: Lang = 'en'): string {
           : `this window's latch was written on ${r.asOfDay} by a release before v1.204.0 and records no panel basis`)
         : (es
           ? `la decisión de la tarde para esta ventana se tomó el ${r.asOfDay} sin ellas`
-          : `this window's evening decision was made on ${r.asOfDay} without them`))
-      + (r.armedDay == null ? '' : es
-        ? `; el armado hecho el ${r.armedDay} para esta ventana sigue vigente, y el plan que se muestra aquí no es ese armado`
-        : `; the arm made on ${r.armedDay} for this window still applies, and the plan shown here is not that arm`);
+          : `this window's evening decision was made on ${r.asOfDay} without them`));
     default: return es ? 'rechazadas' : 'refused';
   }
 }
@@ -438,7 +454,7 @@ export function pvBasisReasonCode(r: PvBasisReason | null | undefined): string |
  *  evening's arm for the window still stands (G2) it may be on the panel's readings and it writes: the sentence is about the plan
  *  shown only, never tonight's write. PURE. */
 export function pvBasisRefusedText(r: PvBasisReason, lang: Lang = 'en'): string {
-  if (r.code === 'latched' && r.armedDay != null) {
+  if (r.armedDay != null) {
     return lang === 'es'
       ? ` El plan que se muestra se calcula sin las lecturas solares propias del panel: ${pvBasisReasonText(r, 'es')}.`
       : ` The plan shown is computed without the panel's own solar readings: ${pvBasisReasonText(r, 'en')}.`;
@@ -496,7 +512,7 @@ export function pvBasisPushText(d: Pick<PvBasisDecoration, 'pvBasis' | 'pvBasisC
   }
   if (d.pvBasisRefusedBy != null) {
     // G2: with an earlier evening's arm standing, about the plan shown only.
-    const shown = d.pvBasisRefusedBy.code === 'latched' && d.pvBasisRefusedBy.armedDay != null;
+    const shown = d.pvBasisRefusedBy.armedDay != null;
     return es ? ` Solar del panel no usada${shown ? ' en el plan que se muestra' : ''}: ${pvBasisReasonText(d.pvBasisRefusedBy, 'es')}.` : ` Panel solar not used${shown ? ' in the plan shown' : ''}: ${pvBasisReasonText(d.pvBasisRefusedBy, 'en')}.`;
   }
   return '';
