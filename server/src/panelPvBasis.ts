@@ -57,8 +57,9 @@ const H = 3_600_000;
 
 /* ─── constants (measured or structural; none is an owner option) ──────────────────────────── */
 
-/** The 7-day energy balance refuses above this. Measured: honest windows 0 of 62 (Core era, max
- *  1.025) and 0 of 9 (dark era, max 1.0245) above it; a code constant, not an option. */
+/** The 7-day energy balance refuses above this (strict). Measured on the specified basis (nameplate
+ *  fullCap, the record-vouched days): 0 of the 45 Core-era windows (in sample, 0.9900–1.0291) and 0 of
+ *  the dark evenings 10-28..11-07 (0.9882–1.0285) above it; a code constant, not an option. */
 export const UC_THRESHOLD = 1.04;
 /** Field days in one balance window. */
 export const UC_WINDOW_DAYS = 7;
