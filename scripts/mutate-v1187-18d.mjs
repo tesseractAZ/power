@@ -294,14 +294,16 @@ const MUTANTS = [
   {
     id: 'M-ii. ★★ the multi-day rollup is cached from an incomplete forecast',
     file: AN,
-    find: '  if (!forecast.structurallyIncomplete && cacheWritable()) multiDayCache = { ts: now, horizonDays, forecastTs: forecast.generatedAt, value };',
-    to: '  if (cacheWritable()) multiDayCache = { ts: now, horizonDays, forecastTs: forecast.generatedAt, value }; /* MUTANT */',
+    // v1.204.0 — anchor moved: the published rollup's cache write is the else of the planning rollup's.
+    find: '  } else if (!forecast.structurallyIncomplete && cacheWritable()) multiDayCache = { ts: now, horizonDays, forecastTs: forecast.generatedAt, value };',
+    to: '  } else if (cacheWritable()) multiDayCache = { ts: now, horizonDays, forecastTs: forecast.generatedAt, value }; /* MUTANT */',
     why: 'A rollup on the boot forecast is served for 30 min.',
   },
   {
     id: 'M-iii. ★★ the multi-day rollup is not bound to its forecast',
     file: AN,
-    find: '    (forecast == null || multiDayCache.forecastTs === forecast.generatedAt)\n  )',
+    // v1.204.0 — anchor moved: the parameter is forecastIn (the planning rollup walks a planning view of it).
+    find: '    (forecastIn == null || multiDayCache.forecastTs === forecastIn.generatedAt)\n  )',
     to: '    true /* MUTANT */\n  )',
     why: 'A rollup stands 30 min after the forecast it was built on is rebuilt.',
   },

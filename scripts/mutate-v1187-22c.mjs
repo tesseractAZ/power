@@ -1322,8 +1322,8 @@ const MUTANTS = [
   {
     id: 'C-clxv. ★★ the push keeps the EV note on a night expected to charge nothing',
     file: NOTIFY,
-    find: "    + `Confidence: ${plan.confidenceTier}.${shortfallNote}${overBuyNote}${economicNote}${held ? '' : evNote} `;",
-    to: '    + `Confidence: ${plan.confidenceTier}.${shortfallNote}${overBuyNote}${economicNote}${evNote} `; /* MUTANT */',
+    find: "      + `Confidence: ${plan.confidenceTier}.${panelBasisPushText(plan)}${shortfallNote}${overBuyNote}${economicNote}${held ? '' : evNote} `;",
+    to: '      + `Confidence: ${plan.confidenceTier}.${panelBasisPushText(plan)}${shortfallNote}${overBuyNote}${economicNote}${evNote} `; /* MUTANT */',
     why: '"no charge is expected" beside "leaving ~2.5 kW for the packs while the car charges".',
   },
   {

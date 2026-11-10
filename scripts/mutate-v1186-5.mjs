@@ -45,15 +45,17 @@ const MUTANTS = [
   {
     id: 'iii. ★★ the band cache ignores which forecast it was built on',
     file: AN,
-    find: '      && (forecast == null || probabilisticCache.forecastTs === forecast.generatedAt)) return probabilisticCache.value;',
+    // v1.204.0 — anchor moved: the published band's cache read beside the planning band's (its own slot keyed by E).
+    find: '      && (forecastIn == null || probabilisticCache.forecastTs === forecastIn.generatedAt)) return probabilisticCache.value;',
     to: '      /* MUTANT */) return probabilisticCache.value;',
     why: 'The basis gate reads a band calibrated on an earlier forecast for 15 minutes.',
   },
   {
     id: 'iv. ★★ a band built on an incomplete forecast is cached',
     file: AN,
-    find: '  if (!forecast.structurallyIncomplete && cacheWritable()) probabilisticCache = { ts: now, forecastTs: forecast.generatedAt, value };',
-    to: '  if (cacheWritable()) probabilisticCache = { ts: now, forecastTs: forecast.generatedAt, value }; /* MUTANT */',
+    // v1.204.0 — anchor moved: the published band's cache write is the else of the planning band's.
+    find: '  } else if (!forecast.structurallyIncomplete && cacheWritable()) probabilisticCache = { ts: now, forecastTs: forecast.generatedAt, value };',
+    to: '  } else if (cacheWritable()) probabilisticCache = { ts: now, forecastTs: forecast.generatedAt, value }; /* MUTANT */',
     why: 'A band with calScoredDays 0 would fail the gate after the forecast became complete (if its generatedAt were reused).',
   },
   {
@@ -88,16 +90,18 @@ const MUTANTS = [
     id: 'ix. ★★ a persistent basis failure defers too',
     file: NCA,
     // v1.203.0 — anchor moved: the cushion-only plan's transient refusal defers beside it.
-    find: '  return (plan == null || (!plan.basisComplete && plan.basisTransient === true) || plan.cushionOnly?.transient === true)',
-    to: '  return (plan == null || !plan.basisComplete || plan.cushionOnly?.transient === true) /* MUTANT */',
+    // v1.204.0 — and the panel basis's transient class on the next line.
+    find: '  return (plan == null || (!plan.basisComplete && plan.basisTransient === true) || plan.cushionOnly?.transient === true\n',
+    to: '  return (plan == null || !plan.basisComplete || plan.cushionOnly?.transient === true /* MUTANT */\n',
     why: 'A genuine coverage miss is announced at 22:30 instead of 21:30 — an hour less for the owner to act.',
   },
   {
     id: 'x. ★★ zero scored calibration days is not treated as transient',
     file: NCA,
     // v1.203.0 — anchor moved: the solar refusal's transience is computed once, before the cushion-only plan reads it.
-    find: '  const solarBasisTransient = !basisComplete && (!forecastPresent || calScoredDays === 0);',
-    to: '  const solarBasisTransient = !basisComplete && !forecastPresent; /* MUTANT */',
+    // v1.204.0 — and now in solarBasisGate, the one gate the planner and the basis selector read.
+    find: '  const transient = !basisComplete && (!forecastPresent || calScoredDays === 0);',
+    to: '  const transient = !basisComplete && !forecastPresent; /* MUTANT */',
     why: 'An empty skill after a restart (the partial-map case) is decided at 21:30 as "no plan" and cancels a prior arm.',
   },
   {

@@ -105,15 +105,16 @@ const MUTANTS = [
   {
     id: 'vii. ★★★ every incomplete-basis night is dropped from the PV statistics (survivorship)',
     file: GATE,
-    find: '  const pvEvidence = (r: NightLedgerRow): boolean => r.pv_verdict_set_aside == null;',
-    to: '  const pvEvidence = (r: NightLedgerRow): boolean => r.pv_verdict_set_aside == null && r.min_proj_soc_pct !== null; /* MUTANT */',
+    // v1.204.0 — anchor moved: a row planned on the panel's readings is kept apart beside it.
+    find: '  const pvEvidence = (r: NightLedgerRow): boolean => r.pv_verdict_set_aside == null && !panelApart(r);',
+    to: '  const pvEvidence = (r: NightLedgerRow): boolean => r.pv_verdict_set_aside == null && !panelApart(r) && r.min_proj_soc_pct !== null; /* MUTANT */',
     why: 'The lasting-failure nights (09-11: 72% < 78%) vanish and PV coverage reads better than it is.',
   },
   {
     id: 'viii. ★★ the gate ignores the set-aside',
     file: GATE,
-    find: '  const pvEvidence = (r: NightLedgerRow): boolean => r.pv_verdict_set_aside == null;',
-    to: '  const pvEvidence = (_r: NightLedgerRow): boolean => true; /* MUTANT */',
+    find: '  const pvEvidence = (r: NightLedgerRow): boolean => r.pv_verdict_set_aside == null && !panelApart(r);',
+    to: '  const pvEvidence = (r: NightLedgerRow): boolean => !panelApart(r); /* MUTANT */',
     why: 'The 09-27 one-Core band still counts as a covered night.',
   },
   {
@@ -140,7 +141,8 @@ const MUTANTS = [
   {
     id: 'xii. ★★ the scorer never records the set-aside',
     file: NLS,
-    find: '  const pvSetAside = pvVerdictSetAside(i.row.pv_model_sns, i.homeSns) ?? knownFleetMismatchReason(i.row);',
+    // v1.204.0 — anchor moved: the row's pv_basis is passed (the panel rule first).
+    find: '  const pvSetAside = pvVerdictSetAside(i.row.pv_model_sns, i.homeSns, i.row.pv_basis) ?? knownFleetMismatchReason(i.row);',
     to: '  const pvSetAside = null; /* MUTANT */',
     why: 'The check exists and nothing writes it — the AUTO-write readiness gate keeps counting the band.',
   },
