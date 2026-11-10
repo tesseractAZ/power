@@ -381,7 +381,7 @@ test('★★★ F1 (e), the evening job on the record: Sunday 11-01 with Saturda
   }
 });
 
-test('★★★ V2: a fault the balance sees (planted on the record from 10-20, the panel\'s daily total scaled alike) ×1.05, ×1.10 and ×1.25 is refused after 0–1 accepted nights, and every night it refuses is v1.203.0\'s own plan — the reserve write falls from 50 to 29–30% or none, Friday 10-30\'s fill rises from 79.1 to the long-gap fill to 90, resilience 11-02 arms 30 where the panel plan armed nothing; the outage line never moves — and the reference chapter says so', () => {
+test('★★★ V2: a fault the balance sees (planted on the record from 10-20, the panel\'s daily total scaled alike) ×1.05, ×1.10 and ×1.25 is refused after 0–1 accepted nights, and every night it refuses is v1.203.0\'s own plan — the reserve write falls from 50 to 29–30% or none on every night but Friday 10-30, whose fill rises from 79.1 to the long-gap fill to 90; resilience 11-02 arms 30 where the panel plan armed nothing; the outage line never moves — and the reference chapter says so', () => {
   const fmt = (x: { write: number | null; fc: number | null }): string => `${x.write ?? '—'}/${x.fc == null ? '—' : r2(x.fc)}`;
   const costDiff = (accepted1028: string): string[] => [
     `10-28 50/80.4->${accepted1028}`, '10-29 50/90->29/—', '10-30 50/79.1->50/90', '10-31 50/90->29/—', '11-01 50/71.7->30/—',
@@ -414,6 +414,6 @@ test('★★★ V2: a fault the balance sees (planted on the record from 10-20, 
   // The reference chapter states it so (the band alone, and the balance seeing it).
   assert.ok(DOC15_1.includes("On the planning band alone (the balance's verdict held), a reading ×1.05, ×1.10 or ×1.25 leaves every reserve write and every line as it is and only lowers the cost fill."));
   assert.ok(DOC15_1.includes("Planted on the record itself from 10-20 (the panel's daily total scaled alike), the balance refuses it after 0–1 accepted nights, and each night it refuses is v1.203.0's plan"));
-  assert.ok(DOC15_1.includes('Friday 10-30 rises from 79.1 to the long-gap fill to 90'));
+  assert.ok(DOC15_1.includes('the reserve write falls from 50 to 29–30% or none on every night but Friday 10-30, whose fill rises from 79.1 to the long-gap fill to 90'));
   assert.ok(!DOC15_1.includes('leaves every reserve write and every line as it is and only lowers the cost fill. On the resilience'));
 });
