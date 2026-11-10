@@ -28,22 +28,23 @@
  * its report is available, and keeps the previous served plan when it is not — never a fresh (c) inside a latched window. A latch with
  * no basis (written before v1.204.0, an evening that decided with no plan or no window, or an evening that reached its cutoff without a
  * decision) reads as the published basis to its window's close; its 'latched' words name the latch's own day, say no evening decision
- * was made where none was, and say a latch written before v1.204.0 (it carries no pvRecorded marker) records no panel basis. Where an
- * earlier evening's arm for the window still stands (a cutoff with no decision, an arm refused or not delivered), they name that
- * evening and say the plan shown is not that arm: they claim nothing about the write.
+ * was made where none was, and say a latch written before v1.204.0 (it carries no pvRecorded marker) records no panel basis. Where an arm
+ * for the window may still hold or write and may be on the panel's readings (armMayHold: an earlier evening's, after a cutoff with no
+ * decision or an arm refused or not delivered; or the window's own evening's on the planning band), every refusal's words speak of the
+ * plan shown only and claim nothing of that arm or of tonight's write.
  *
  * Slot keys ('<panelSn>#<n>') and serials are never printed: the words carry slot numbers and days only. PURE throughout.
  */
 import type { UcChecks, UcReason, UcVerdict, SlotSource, UncountedCause } from './panelPvBasis.js';
 import { addDaysYmd } from './siteTime.js';
-import { APPLY_LATE_MS, type NightActuationState } from './nightChargeActuator.js';
+import type { NightActuationState } from './nightChargeActuator.js';
 
 export type PvBasisKind = 'panel' | 'mixed';
 export type PvSource = SlotSource;
 
 /** One reason per clause of selection (b): the verdict's own, and the selection's. Figures only; the words are below. Any reason a
- *  recompute inside a latched window gives carries `armedDay` (G2) when an earlier evening's arm for that window still stands: that
- *  arm, which may be on the panel's readings, writes, not the plan shown — so the words are about the plan shown only. */
+ *  recompute inside a latched window gives carries `armedDay` (G2) when an arm for that window may still hold or write and may be on the
+ *  panel's readings (LatchedPv.armedDay): the words then speak of the plan shown only, and claim nothing of that arm. */
 export type PvBasisReason = PvBasisReasonCore & { armedDay?: string };
 type PvBasisReasonCore =
   | Exclude<UcReason, { code: 'night-reading' }>
@@ -82,7 +83,7 @@ export interface PvBasisDecoration {
   pvBasisSlots: Array<{ slot: number; source: PvSource }> | null;
   /** The verdict's figures; null with no verdict. */
   pvBasisChecks: UcChecks | null;
-  /** Why the panel basis is not used in the plan shown (figures only; naming an arm that still applies, G2); null when it is used, and on
+  /** Why the panel basis is not used (figures only; with `armedDay`, said of the plan shown only, G2); null when it is used, and on
    *  the transient class. */
   pvBasisRefusedBy: PvBasisReason | null;
   /** The transient class: no refusal is printed, and the evening job keeps the 22:30 deferral (eveningBasisDefers). */
@@ -104,7 +105,8 @@ export interface PvBasisLatch {
 
 /** The latch governing a recompute (latchedPvBasis): its basis, the evening day it was written for, and whether that evening reached a
  *  decision (false: the evening job did not decide before its cutoff, so the latch, written with no basis, reads as the published one;
- *  null: written before v1.204.0, it records neither); `armedDay`: an earlier evening whose arm for this window still stands. */
+ *  null: written before v1.204.0, it records neither); `armedDay`: the evening whose arm for this window may still hold or write and may
+ *  be on the panel's readings (an earlier evening's, or this latch's own on the planning band; armMayHold). */
 export interface LatchedPv {
   basis: 'published' | 'planning';
   asOfDay: string;
@@ -118,7 +120,7 @@ export interface LatchedPv {
  * no window, or one that reached its cutoff without a decision) owns the window its evening planned — the plan date owning the window
  * now, or the armed record's day for this window — and reads as the published basis; `decided` is false for the last only, and null
  * for a latch without v1.204.0's marker (G3: written before this release, it records no decision either way). The armed record's day
- * comes with it where an earlier evening's arm for this window still stands (G2). The evening job's own (arming) call never selects on
+ * comes with it where that arm may still hold or write and may be on the panel's readings (G2: armed.standing is armMayHold). The evening job's own (arming) call never selects on
  * it (index.ts passes no latch there, F1). PURE.
  */
 export function latchedPvBasis(o: {
@@ -133,13 +135,13 @@ export function latchedPvBasis(o: {
   nowMs: number;
   /** chargeWindows.planDateOwningCycle for this window now. */
   planDate: string;
-  /** The armed record: the plan date that armed it, its window, and whether its arm still applies (armStillApplies). */
+  /** The armed record: the plan date that armed it, its window, and whether its arm may still hold or write (armMayHold). */
   armed: { day: string | null; windowStartMs: number | null; standing: boolean };
 }): LatchedPv | null {
   if (o.lastNotifyDay == null || o.windowStartMs == null || o.windowEndMs == null || !(o.nowMs < o.windowEndMs)) return null;
-  // G2 — an arm for this window that still applies and may be on the panel's readings: an earlier evening's (whatever its basis), or
-  // this latch's own evening's on the planning band. It, not the plan shown, writes. This latch's own arm on the published basis is
-  // not on the panel's readings, so nothing is said of it.
+  // G2 — an arm for this window that may still hold or write and may be on the panel's readings: an earlier evening's (whatever its
+  // basis), or this latch's own evening's on the planning band. The refusal words then speak of the plan shown only. This latch's own
+  // arm on the published basis is not on the panel's readings: "not used tonight" is true of it.
   const mayBeOnPanel = o.armed.day !== o.lastNotifyDay || (o.pv?.basis === 'planning' && o.pv.asOfDay === o.armed.day);
   const armedDay = o.armed.standing && o.armed.day != null && o.armed.windowStartMs === o.windowStartMs && mayBeOnPanel
     ? { armedDay: o.armed.day } : {};
@@ -153,23 +155,18 @@ export function latchedPvBasis(o: {
 }
 
 /**
- * G2 — whether the armed record's arm still applies to its window now: it holds a raise (applied, or its reserve stood) that is neither
- * restored nor settled as someone else's reserve, or it can still write — a write mode, its apply window open (decideActuation writes
- * nothing after windowStart + APPLY_LATE_MS) and no missed-apply push gone. Never a cancelled, restored or grid-lost arm. Advisory mode
- * applies nothing, so an arm not yet written there does not apply; a raise already written holds to its restore in any mode. PURE.
+ * G2 — whether the armed record's arm may still hold a raise or still write: it has a target, is not cancelled, not settled as someone
+ * else's reserve, not grid-lost, and its restore has not read back. Deliberately broad: it only chooses the refusal words' opener, which
+ * then speaks of the plan shown and claims nothing of the arm, so counting an arm that will in fact do nothing costs nothing, while
+ * missing one that holds would leave "not used tonight" said of a night an arm on the panel's readings may hold. PURE.
  */
-export function armStillApplies(
-  a: Pick<NightActuationState, 'targetPct' | 'windowStartMs' | 'appliedAtMs' | 'revertedAtMs' | 'cancelled'>
-    & Partial<Pick<NightActuationState, 'reserveStandingAtMs' | 'foreignSettledAtMs' | 'gridLostAtMs'>>
-    & { missedApplyPushedAtMs?: number | null },
-  nowMs: number,
-  writeMode: boolean,
+export function armMayHold(
+  a: Pick<NightActuationState, 'targetPct' | 'cancelled' | 'revertedAtMs'>
+    & Partial<Pick<NightActuationState, 'revertVerifiedAtMs' | 'foreignSettledAtMs' | 'gridLostAtMs'>>,
 ): boolean {
-  if (a.targetPct == null || a.cancelled === true || a.revertedAtMs != null) return false;
+  if (a.targetPct == null || a.cancelled === true) return false;
   if (a.foreignSettledAtMs != null || a.gridLostAtMs != null) return false;
-  if (a.appliedAtMs != null || a.reserveStandingAtMs != null) return true;
-  if (!writeMode || a.missedApplyPushedAtMs != null || a.windowStartMs == null) return false;
-  return nowMs <= a.windowStartMs + APPLY_LATE_MS;
+  return !(a.revertedAtMs != null && a.revertVerifiedAtMs != null);
 }
 
 /** E for a recompute (M1): the evening job's own day; else the latch's; else the plan date that will own the window. PURE. */
@@ -262,7 +259,7 @@ export function bandCoverageRefusalText(uncoveredSlots: readonly number[]): stri
 }
 
 const armedDayOf = (l: LatchedPv): { armedDay?: string } => (l.armedDay != null ? { armedDay: l.armedDay } : {});
-/** G2: a refusal inside a latched window, whatever its clause, names the earlier evening's arm that still stands there. */
+/** G2: a refusal inside a latched window, whatever its clause, carries the latch's armedDay (its words then speak of the plan shown). */
 const withArmedDay = (b: BEval, l: LatchedPv): BEval =>
   (!b.ok && !b.transient && l.armedDay != null ? { ...b, reason: { ...b.reason, armedDay: l.armedDay } } : b);
 
@@ -357,22 +354,10 @@ export function uncountedCauseText(c: { day: string } & UncountedCause, lang: La
 
 /**
  * Why the panel's own solar readings are not used, in words, from the reason's figures only (M3: no cause is asserted). Every hold
- * names the evening it is held through; a reason with an earlier evening's arm standing (G2) names that arm and says the plan shown is
- * not it. PURE.
+ * names the evening it is held through. Nothing is said of an armed record: whether an arm holds or writes is the armed record's to
+ * show, and a sentence about it would go stale between recomputes. PURE.
  */
 export function pvBasisReasonText(r: PvBasisReason, lang: Lang = 'en'): string {
-  return reasonClauseText(r, lang) + standingArmText(r.armedDay, lang);
-}
-
-/** G2: '' with no earlier evening's arm standing for this window; else the clause naming it. PURE. */
-function standingArmText(armedDay: string | undefined, lang: Lang): string {
-  if (armedDay == null) return '';
-  return lang === 'es'
-    ? `; el armado hecho el ${armedDay} para esta ventana sigue vigente, y el plan que se muestra aquí no es ese armado`
-    : `; the arm made on ${armedDay} for this window still applies, and the plan shown here is not that arm`;
-}
-
-function reasonClauseText(r: PvBasisReason, lang: Lang): string {
   const es = lang === 'es';
   switch (r.code) {
     case 'no-membership-record': return es
@@ -475,9 +460,9 @@ export function pvBasisReasonCode(r: PvBasisReason | null | undefined): string |
   return r == null ? null : r.code;
 }
 
-/** The sentence a refused night's rationale closes with (the cushion-only plan's, after v1.203.0's disclosure). Where an earlier
- *  evening's arm for the window still stands (G2) it may be on the panel's readings and it writes: the sentence is about the plan
- *  shown only, never tonight's write. PURE. */
+/** The sentence a refused night's rationale closes with (the cushion-only plan's, after v1.203.0's disclosure). Where an arm for the
+ *  window may still hold or write and may be on the panel's readings (G2: `armedDay`), the sentence is about the plan shown only and
+ *  claims nothing of tonight's write. PURE. */
 export function pvBasisRefusedText(r: PvBasisReason, lang: Lang = 'en'): string {
   if (r.armedDay != null) {
     return lang === 'es'
@@ -536,7 +521,7 @@ export function pvBasisPushText(d: Pick<PvBasisDecoration, 'pvBasis' | 'pvBasisC
     return es ? ` Solar de las lecturas del panel${fig}.` : ` Solar from the panel's readings${fig}.`;
   }
   if (d.pvBasisRefusedBy != null) {
-    // G2: with an earlier evening's arm standing, about the plan shown only.
+    // G2: with an arm on the panel's readings that may hold or write (armedDay), about the plan shown only.
     const shown = d.pvBasisRefusedBy.armedDay != null;
     return es ? ` Solar del panel no usada${shown ? ' en el plan que se muestra' : ''}: ${pvBasisReasonText(d.pvBasisRefusedBy, 'es')}.` : ` Panel solar not used${shown ? ' in the plan shown' : ''}: ${pvBasisReasonText(d.pvBasisRefusedBy, 'en')}.`;
   }

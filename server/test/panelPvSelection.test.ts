@@ -20,11 +20,10 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { transformSync } from 'esbuild';
 import {
-  latchedPvBasis, armStillApplies, planAsOfDay, selectPvBasis, planningClauses, pvBasisDecoration, withPvBasis, pvBasisReasonText, pvBasisRefusedText,
+  latchedPvBasis, armMayHold, planAsOfDay, selectPvBasis, planningClauses, pvBasisDecoration, withPvBasis, pvBasisReasonText, pvBasisRefusedText,
   panelPvBasisText, pvBasisPushText, bandCoverageRefusalText, uncountedCauseText,
   type PvSelectionInput, type PvBasisReason, type PvBasisLatch,
 } from '../src/panelPvSelection.js';
-import { APPLY_LATE_MS } from '../src/nightChargeActuator.js';
 import type { UcVerdict, UcChecks, UncountedCause } from '../src/panelPvBasis.js';
 import {
   buildNightChargeInputs, computeNightChargePlan, eveningBasisDefers, solarBasisGate, cushionRatioKnown, nightChargeStateFields,
@@ -99,7 +98,7 @@ test('★★★ M1: E is the evening that owns the window — Saturday 10-31 jud
   const sun = siteDayStartMs('2026-11-01');
   for (const ms of [sat + 22.5 * H, sun + 0.5 * H, sun + 9.5 * H]) {
     const { l, E: e } = at(ms);
-    // Its own evening's arm on the planning band still applies (G2): it may be on the panel's readings, so the latch names it.
+    // Its own evening's arm on the planning band may still hold or write (G2): it may be on the panel's readings, so the latch names it.
     assert.deepEqual(l, { basis: 'planning', asOfDay: '2026-10-31', decided: true, armedDay: '2026-10-31' });
     assert.equal(e, '2026-10-31', 'never the window\'s start day (Monday)');
   }
@@ -308,7 +307,7 @@ test('★★★ F1 the \'latched\' words on every path that serves them: a decid
   assert.match(INDEX, /\n\s+\.\.\.\(raw\?\.noDecision === true \? \{ noDecision: true \} : \{\}\),\n/);
 });
 
-test('★★★ G2: after Sunday\'s cutoff with no decision, Saturday\'s arm for the shared window still standing — the words name Saturday\'s arm and say the plan shown is not it, never that the panel\'s readings are not used tonight (that arm may be on them, and it writes), en and es, the rationale and the push; with no earlier arm standing (none, restored or cancelled, another window\'s) the no-decision words; an evening that decided but delivered no arm of its own says the same of the arm that stands', () => {
+test('★★★ G2: after Sunday\'s cutoff with no decision, Saturday\'s arm for the shared window still standing — the words speak of the plan shown ("The plan shown is computed without the panel\'s own solar readings: …"), never that the panel\'s readings are not used tonight (that arm may be on them), and claim nothing of the arm, en and es, the rationale and the push; with no arm that may hold (none, restored or cancelled, another window\'s) the no-decision words as F1; an evening that decided but delivered no arm of its own the same', () => {
   const cut = (armed: LatchFile['armed']): LatchFile => ({ lastNotifyDay: SUN, pv: null, noDecision: true, pvRecorded: true, armed });
   const satArm = { day: SAT, windowStartMs: SAT_W.startMs, standing: true };
   for (const ms of [at(SUN, 23.5), at('2026-11-16', 0.5)]) {
@@ -318,8 +317,8 @@ test('★★★ G2: after Sunday\'s cutoff with no decision, Saturday\'s arm for
     assert.deepEqual(c.sel.reason, { code: 'latched', asOfDay: SUN, decided: false, armedDay: SAT });
     const en = pvBasisReasonText(c.sel.reason!);
     const es = pvBasisReasonText(c.sel.reason!, 'es');
-    assert.equal(en, `no evening decision was made for this window on ${SUN} (the evening job did not decide before its cutoff); the arm made on ${SAT} for this window still applies, and the plan shown here is not that arm`);
-    assert.equal(es, `el ${SUN} no se tomó ninguna decisión de la tarde para esta ventana (el trabajo de la tarde no decidió antes de su hora límite); el armado hecho el ${SAT} para esta ventana sigue vigente, y el plan que se muestra aquí no es ese armado`);
+    assert.equal(en, `no evening decision was made for this window on ${SUN} (the evening job did not decide before its cutoff)`);
+    assert.equal(es, `el ${SUN} no se tomó ninguna decisión de la tarde para esta ventana (el trabajo de la tarde no decidió antes de su hora límite)`);
     // The sentence the served cushion-only plan's rationale closes with (and the card shows), and the push's: the plan shown only.
     const d = pvBasisDecoration({ sel: c.sel, asOfDay: c.E, plan: { sized: true, cushionOnly: true }, calScoredDays: 0, admittedDays: null })!;
     assert.equal(d.pvBasisText, ` The plan shown is computed without the panel's own solar readings: ${en}.`);
@@ -341,20 +340,18 @@ test('★★★ G2: after Sunday\'s cutoff with no decision, Saturday\'s arm for
   };
   const dec = chainAt(at(SUN, 23.5), false, sunPub, reportAsOf(SUN));
   assert.deepEqual(dec.sel.reason, { code: 'latched', asOfDay: SUN, decided: true, armedDay: SAT });
-  assert.equal(pvBasisRefusedText(dec.sel.reason!), ` The plan shown is computed without the panel's own solar readings: this window's evening decision was made on ${SUN} without them; the arm made on ${SAT} for this window still applies, and the plan shown here is not that arm.`);
+  assert.equal(pvBasisRefusedText(dec.sel.reason!), ` The plan shown is computed without the panel's own solar readings: this window's evening decision was made on ${SUN} without them.`);
   // Saturday's own latch with its own arm: nothing earlier stands.
   assert.deepEqual(chainAt(at(SUN, 14), false, satLatch('published'), reportAsOf(SAT)).sel.reason, { code: 'latched', asOfDay: SAT, decided: true });
   // The wiring: index.ts hands latchedPvBasis whether the armed record's arm still stands (a target, not restored, not cancelled).
-  assert.match(INDEX, /\n\s+armed: \{\n\s+day: nightActuationMem\.day, windowStartMs: nightActuationMem\.windowStartMs,\n\s+standing: armStillApplies\(nightActuationMem, nowMs, NIGHT_CHARGE_MODE !== 'advisory'\),\n\s+\},\n/);
+  assert.match(INDEX, /\n\s+armed: \{\n\s+day: nightActuationMem\.day, windowStartMs: nightActuationMem\.windowStartMs,\n\s+standing: armMayHold\(nightActuationMem\),\n\s+\},\n/);
 });
 
-test('★★★ G2 (every clause): inside a latched window with an earlier evening\'s arm for it standing, a recompute whose own clauses REFUSE (the 7-day balance, a stale panel) names that arm and says the plan shown is not it — never that the panel\'s readings are not used tonight (that arm may be on them, and it writes); under a planning latch whose evening delivered no arm the same; with no earlier arm standing, the refusal\'s own words as before', () => {
+test('★★★ G2 (every clause): inside a latched window with an arm for it that may hold or write and may be on the panel\'s readings, a recompute whose own clauses REFUSE (the 7-day balance; the stale-panel clause through the pure selection only — a non-arming recompute on a stale panel returns panelStale first) speaks of the plan shown — never that the panel\'s readings are not used tonight; under a planning latch whose evening delivered no arm the same; with no such arm, the refusal\'s own words as before', () => {
   const satArm = { day: SAT, windowStartMs: SAT_W.startMs, standing: true };
   const refusing = reportAsOf(SUN, 'refused', BALANCE as UcVerdict['reason']);
   const balEn = pvBasisReasonText(BALANCE);
   const balEs = pvBasisReasonText(BALANCE, 'es');
-  const armEn = `; the arm made on ${SAT} for this window still applies, and the plan shown here is not that arm`;
-  const armEs = `; el armado hecho el ${SAT} para esta ventana sigue vigente, y el plan que se muestra aquí no es ese armado`;
   // Sunday's evening job missed its cutoff (a published latch, no decision) and Sunday's verdict refuses on the balance; Sunday's
   // evening decided on the published basis and delivered no arm, the same; Sunday decided on the planning band and delivered no arm.
   const latches: LatchFile[] = [
@@ -369,23 +366,23 @@ test('★★★ G2 (every clause): inside a latched window with an earlier eveni
       assert.equal(c.here?.armedDay, SAT, tag);
       assert.equal(c.sel.use, 'published', tag);
       assert.deepEqual(c.sel.reason, { ...BALANCE, armedDay: SAT }, tag);
-      assert.equal(pvBasisReasonText(c.sel.reason!), `${balEn}${armEn}`, tag);
-      assert.equal(pvBasisReasonText(c.sel.reason!, 'es'), `${balEs}${armEs}`, tag);
+      assert.equal(pvBasisReasonText(c.sel.reason!), `${balEn}`, tag);
+      assert.equal(pvBasisReasonText(c.sel.reason!, 'es'), `${balEs}`, tag);
       const d = pvBasisDecoration({ sel: c.sel, asOfDay: c.E, plan: { sized: true, cushionOnly: true }, calScoredDays: 0, admittedDays: null })!;
-      assert.equal(d.pvBasisText, ` The plan shown is computed without the panel's own solar readings: ${balEn}${armEn}.`, tag);
-      assert.equal(pvBasisRefusedText(c.sel.reason!, 'es'), ` El plan que se muestra se calcula sin las lecturas solares propias del panel: ${balEs}${armEs}.`, tag);
-      assert.equal(pvBasisPushText({ pvBasis: null, pvBasisChecks: null, pvBasisRefusedBy: c.sel.reason }), ` Panel solar not used in the plan shown: ${balEn}${armEn}.`, tag);
-      assert.equal(pvBasisPushText({ pvBasis: null, pvBasisChecks: null, pvBasisRefusedBy: c.sel.reason }, 'es'), ` Solar del panel no usada en el plan que se muestra: ${balEs}${armEs}.`, tag);
+      assert.equal(d.pvBasisText, ` The plan shown is computed without the panel's own solar readings: ${balEn}.`, tag);
+      assert.equal(pvBasisRefusedText(c.sel.reason!, 'es'), ` El plan que se muestra se calcula sin las lecturas solares propias del panel: ${balEs}.`, tag);
+      assert.equal(pvBasisPushText({ pvBasis: null, pvBasisChecks: null, pvBasisRefusedBy: c.sel.reason }), ` Panel solar not used in the plan shown: ${balEn}.`, tag);
+      assert.equal(pvBasisPushText({ pvBasis: null, pvBasisChecks: null, pvBasisRefusedBy: c.sel.reason }, 'es'), ` Solar del panel no usada en el plan que se muestra: ${balEs}.`, tag);
       for (const t of [d.pvBasisText, pvBasisRefusedText(c.sel.reason!, 'es')]) assert.doesNotMatch(t, /not used tonight|no se usan esta noche/, tag);
       // The clause is said once, never twice.
-      assert.equal(d.pvBasisText.split('still applies').length, 2, tag);
+      assert.doesNotMatch(d.pvBasisText, /still applies|the arm made on/, tag);
     }
   }
   // A stale panel at the recompute (the 22:30 last resort's own clause), the cutoff latch with Saturday's arm standing: the same.
   const stale = chainAt(at(SUN, 23.5), false, latches[0], { ...reportAsOf(SUN), eligible: { writeMode: true, panelFresh: false, cancelled: false } });
   assert.equal(stale.sel.reason?.armedDay, SAT);
   assert.notEqual(stale.sel.reason?.code, 'latched');
-  assert.match(pvBasisRefusedText(stale.sel.reason!), new RegExp(`^ The plan shown is computed without the panel's own solar readings: .+${armEn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.$`));
+  assert.match(pvBasisRefusedText(stale.sel.reason!), /^ The plan shown is computed without the panel's own solar readings: .+\.$/);
   // No earlier arm standing (none; Saturday's restored): the balance's own words, "not used tonight", as before G2.
   for (const armed of [{ day: null, windowStartMs: null }, { ...satArm, standing: false }]) {
     for (const latch of latches) {
@@ -398,44 +395,33 @@ test('★★★ G2 (every clause): inside a latched window with an earlier eveni
   assert.equal(chainAt(at(SUN, 21.5), true, latches[0], refusing).sel.reason?.armedDay, undefined);
 });
 
-test('★★★ G2 (applies): an arm is said to "still apply" only where it holds a raise or can still write — a write mode, its apply window open, no missed-apply push; never in advisory mode before a write, never past its apply window unwritten, never cancelled, restored, grid-lost or settled as someone else\'s; the window\'s own evening\'s arm on the planning band is named as an earlier one is (it may be on the panel\'s readings), its own arm on the published basis is not', () => {
+test('★★★ G2 (may hold): the refusal words speak of the plan shown wherever an arm for the window may still hold or write and may be on the panel\'s readings — armMayHold is deliberately broad (a target, not cancelled, not settled as someone else\'s, not grid-lost, its restore not read back), because the words then claim nothing of that arm; the window\'s own evening\'s arm on the planning band counts as an earlier one does, its own arm on the published basis does not; no text ever says an arm "still applies"', () => {
   const ws = SAT_W.startMs;
-  const arm = { targetPct: 50, windowStartMs: ws, appliedAtMs: null, revertedAtMs: null, cancelled: false };
-  // Pending in a write mode, before the open or within APPLY_LATE_MS of it: it can still write.
-  assert.equal(armStillApplies(arm, ws - H, true), true);
-  assert.equal(armStillApplies(arm, ws + APPLY_LATE_MS, true), true);
-  // Past its apply window unwritten, or its missed-apply push gone: it never writes.
-  assert.equal(armStillApplies(arm, ws + APPLY_LATE_MS + 1, true), false);
-  assert.equal(armStillApplies({ ...arm, missedApplyPushedAtMs: ws + 5 * 60_000 }, ws + 10 * 60_000, true), false);
-  // Advisory mode applies nothing: an arm not yet written does not apply; a raise already written holds to its restore.
-  assert.equal(armStillApplies(arm, ws - H, false), false);
-  assert.equal(armStillApplies({ ...arm, appliedAtMs: ws + 60_000 }, ws + 3 * H, false), true);
-  assert.equal(armStillApplies({ ...arm, reserveStandingAtMs: ws + 60_000 }, ws + 3 * H, true), true);
-  // Never: no target, cancelled, restored, grid-lost, settled as someone else's.
-  for (const x of [{ targetPct: null }, { cancelled: true }, { appliedAtMs: ws, revertedAtMs: ws + H }, { gridLostAtMs: ws + 60_000 }, { appliedAtMs: ws, foreignSettledAtMs: ws + H }]) {
-    assert.equal(armStillApplies({ ...arm, ...x }, ws + 10 * 60_000, true), false, JSON.stringify(x));
+  const arm = { targetPct: 50, cancelled: false, revertedAtMs: null };
+  // May hold or write: pending (any mode, any time — the words claim nothing of it), written, written but not read back, restored but
+  // the restore not read back.
+  for (const x of [{}, { revertVerifiedAtMs: null }, { revertedAtMs: ws + 6 * H }]) assert.equal(armMayHold({ ...arm, ...x }), true, JSON.stringify(x));
+  // Done: no target, cancelled, its restore read back, grid-lost, settled as someone else's.
+  for (const x of [{ targetPct: null }, { cancelled: true }, { revertedAtMs: ws + 6 * H, revertVerifiedAtMs: ws + 6 * H + 60_000 }, { gridLostAtMs: ws + 60_000 }, { foreignSettledAtMs: ws + H }]) {
+    assert.equal(armMayHold({ ...arm, ...x }), false, JSON.stringify(x));
   }
-  // The chain as index.ts runs it (standing = armStillApplies): Saturday's arm, Sunday's cutoff with no decision.
+  // The chain as index.ts runs it (standing = armMayHold): Saturday's arm, Sunday's cutoff with no decision.
   const cut = (standing: boolean): LatchFile => ({ lastNotifyDay: SUN, pv: null, noDecision: true, pvRecorded: true, armed: { day: SAT, windowStartMs: ws, standing } });
   const refusing = reportAsOf(SUN, 'refused', BALANCE as UcVerdict['reason']);
   const balEn = pvBasisReasonText(BALANCE);
-  // Advisory mode: Saturday's arm, never written, does not apply — the advisory refusal says nothing of it.
+  // Advisory mode with Saturday's arm unwritten, and a missed apply: the arm may do nothing, and the words claim nothing of it.
   const t = at(SUN, 23.5);
-  const adv = chainAt(t, false, cut(armStillApplies(arm, t, false)), { ...refusing, eligible: { writeMode: false, panelFresh: true, cancelled: false } });
-  assert.deepEqual(adv.sel.reason, { code: 'advisory' });
-  assert.equal(pvBasisRefusedText(adv.sel.reason!), " The panel's own solar readings are not used tonight: the add-on is in advisory mode (a plan on the panel's readings is made only in a write mode).");
-  // A missed apply (Monday 01:00, nothing written): Saturday's arm never writes — the balance's own words.
+  const adv = chainAt(t, false, cut(armMayHold(arm)), { ...refusing, eligible: { writeMode: false, panelFresh: true, cancelled: false } });
+  assert.deepEqual(adv.sel.reason, { code: 'advisory', armedDay: SAT });
+  assert.equal(pvBasisRefusedText(adv.sel.reason!), " The plan shown is computed without the panel's own solar readings: the add-on is in advisory mode (a plan on the panel's readings is made only in a write mode).");
   const t1 = at('2026-11-16', 1);
-  const missed = chainAt(t1, false, cut(armStillApplies({ ...arm, missedApplyPushedAtMs: ws + APPLY_LATE_MS + 60_000 }, t1, true)), refusing);
-  assert.deepEqual(missed.sel.reason, BALANCE);
-  assert.equal(pvBasisRefusedText(missed.sel.reason!), ` The panel's own solar readings are not used tonight: ${balEn}.`);
-  // Written at the open and holding (Monday 01:00, in either mode): it applies, and is named.
-  for (const writeMode of [true, false]) {
-    const held = chainAt(t1, false, cut(armStillApplies({ ...arm, appliedAtMs: ws + 45_000 }, t1, writeMode)), refusing);
-    assert.deepEqual(held.sel.reason, { ...BALANCE, armedDay: SAT }, `writeMode ${writeMode}`);
-  }
-  // The window's own evening's arm: on the planning band it may be on the panel's readings — named, and the plan shown is not it; on
-  // the published basis it is not on them — nothing is said of it.
+  const missed = chainAt(t1, false, cut(armMayHold(arm)), refusing);
+  assert.equal(pvBasisRefusedText(missed.sel.reason!), ` The plan shown is computed without the panel's own solar readings: ${balEn}.`);
+  // Saturday's arm done (its restore read back): "not used tonight" is true again.
+  const done = chainAt(t1, false, cut(armMayHold({ ...arm, revertedAtMs: ws + H, revertVerifiedAtMs: ws + H + 60_000 })), refusing);
+  assert.equal(pvBasisRefusedText(done.sel.reason!), ` The panel's own solar readings are not used tonight: ${balEn}.`);
+  // The window's own evening's arm: on the planning band it may be on the panel's readings — the plan shown; on the published basis it
+  // is not on them — "not used tonight", true of it.
   const own = (basis: 'planning' | 'published'): LatchFile => ({
     lastNotifyDay: SUN, pvRecorded: true, armed: { day: SUN, windowStartMs: ws, standing: true },
     pv: { basis, asOfDay: SUN, windowStartMs: ws, windowEndMs: SAT_W.endMs },
@@ -444,14 +430,24 @@ test('★★★ G2 (applies): an arm is said to "still apply" only where it hold
   const ownPlan = chainAt(t1, false, own('planning'), noRatio);
   assert.equal(ownPlan.sel.use, 'published');
   assert.deepEqual(ownPlan.sel.reason, { code: 'no-capacity-ratio', armedDay: SUN });
-  assert.equal(pvBasisRefusedText(ownPlan.sel.reason!), ` The plan shown is computed without the panel's own solar readings: no pack capacity ratio is known (a plan on the panel's readings needs one); the arm made on ${SUN} for this window still applies, and the plan shown here is not that arm.`);
+  assert.equal(pvBasisRefusedText(ownPlan.sel.reason!), " The plan shown is computed without the panel's own solar readings: no pack capacity ratio is known (a plan on the panel's readings needs one).");
   const ownPub = chainAt(t1, false, own('published'), noRatio);
   assert.equal(ownPub.sel.reason?.armedDay, undefined);
   assert.equal(ownPub.here?.armedDay, undefined);
-  // Its own arm no longer applying (restored, cancelled): nothing named, under either latch.
+  assert.equal(pvBasisRefusedText(ownPub.sel.reason!), " The panel's own solar readings are not used tonight: no pack capacity ratio is known (a plan on the panel's readings needs one).");
+  // Its own arm done: nothing named, under either latch.
   for (const basis of ['planning', 'published'] as const) {
     const l = own(basis);
     assert.equal(chainAt(t1, false, { ...l, armed: { ...l.armed, standing: false } }, noRatio).sel.reason?.armedDay, undefined, basis);
+  }
+  // No text of any reason, with or without armedDay, says an arm applies (en and es, the rationale and the push).
+  for (const r of ALL_REASONS) {
+    for (const rr of [r, { ...r, armedDay: SAT } as PvBasisReason]) {
+      for (const tx of [pvBasisReasonText(rr), pvBasisReasonText(rr, 'es'), pvBasisRefusedText(rr), pvBasisRefusedText(rr, 'es'),
+        pvBasisPushText({ pvBasis: null, pvBasisChecks: null, pvBasisRefusedBy: rr }), pvBasisPushText({ pvBasis: null, pvBasisChecks: null, pvBasisRefusedBy: rr }, 'es')]) {
+        assert.doesNotMatch(tx, /still applies|sigue vigente|the arm made on|el armado hecho/, `${rr.code}: ${tx}`);
+      }
+    }
   }
 });
 
@@ -666,8 +662,11 @@ test('★★★ L1: every reason has its words in English and in Spanish — fig
     const es = pvBasisReasonText(r, 'es');
     assert.ok(en.length > 20 && es.length > 20, r.code);
     assert.notEqual(en, es, `${r.code}: es is not en`);
-    assert.ok(!seen.has(en), `${r.code}: its own words`);
-    seen.add(en);
+    // A reason with armedDay has the same words as without it (G2 changes the opener only, below).
+    if (r.armedDay == null) {
+      assert.ok(!seen.has(en), `${r.code}: its own words`);
+      seen.add(en);
+    }
     for (const t of [en, es]) {
       assert.doesNotMatch(t, /#|undefined|null|NaN/, `${r.code}: ${t}`);
       assert.ok(!/refused$/.test(t), `${r.code}: not the fallback word`);

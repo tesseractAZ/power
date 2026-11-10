@@ -380,7 +380,7 @@ test('★★★ F1 (e), the evening job on the record: Sunday 11-01 with Saturda
     assert.equal(fmt(o.b.arm), '50/71.7', 'Sunday\'s own panel plan, as the unlatched replay arms it');
     assert.equal(o.b.plan.pvBasis, 'panel');
     assert.ok(supersedes(o));
-    assert.deepEqual(o.b.latchAt[2], { basis: 'planning', asOfDay: '2026-11-01', decided: true });
+    assert.deepEqual(o.b.latchAt[2], { basis: 'planning', asOfDay: '2026-11-01', decided: true, armedDay: '2026-11-01' });
   }
 });
 

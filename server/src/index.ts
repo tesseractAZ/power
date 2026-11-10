@@ -218,7 +218,7 @@ import * as haStateCache from './haStateCache.js';
 // ★★★ v1.204.0 — the night plan's solar basis, selected (panelPvSelection.ts): the published band, the panel-measured planning band,
 // or v1.203.0's cushion-only plan; E (the evening that owns the window) and the evening's latched basis.
 import {
-  latchedPvBasis, armStillApplies, planAsOfDay, selectPvBasis, pvBasisDecoration, withPvBasis, pvBasisReasonText, pvBasisReasonCode,
+  latchedPvBasis, armMayHold, planAsOfDay, selectPvBasis, pvBasisDecoration, withPvBasis, pvBasisReasonText, pvBasisReasonCode,
   type PvBasisLatch, type PvBasisReason, type PvSelection,
 } from './panelPvSelection.js';
 import type { UcVerdict } from './panelPvBasis.js';
@@ -4079,7 +4079,7 @@ async function recomputeNightChargePlan(
     planDate: planDateOwningCycle({ nowMs, firstLegStartMs: window.startMs, timezone: siteTimeZone(), notifyMinuteOfDay: nightSched.notify.fireMin }),
     armed: {
       day: nightActuationMem.day, windowStartMs: nightActuationMem.windowStartMs,
-      standing: armStillApplies(nightActuationMem, nowMs, NIGHT_CHARGE_MODE !== 'advisory'),
+      standing: armMayHold(nightActuationMem),
     },
   });
   const pvAsOfDay: string | null = shadowLeg ? null : planAsOfDay({
