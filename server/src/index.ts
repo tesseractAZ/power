@@ -3453,8 +3453,9 @@ interface NightChargeLatch {
   armRefused?: ArmRefusalRecord | null;
   /** v1.200.0 (Fix10 review 1) — the window whose no-write push went (chargeCycle.lineNotArmedPushDue), stamped before it goes. */
   lineNotArmedWindowStartMs?: number | null;
-  /** ★★★ v1.204.0 (M1, L2) — the solar basis this evening chose for its window, with E and the window: every recompute but the next
-   *  evening job's own call (F1) selects it until the window's close (panelPvSelection.latchedPvBasis). null/absent: no basis latched —
+  /** ★★★ v1.204.0 (M1, L2) — the solar basis this evening chose for its window, with E and the window: every live overnight recompute
+   *  but the next evening job's own call (F1) selects it until the window's close (panelPvSelection.latchedPvBasis); a shadow leg
+   *  never reads it. null/absent: no basis latched —
    *  a latch written before v1.204.0, or an evening that reached no decision — which reads as the published (or cushion-only) basis to
    *  the close. */
   pv?: PvBasisLatch | null;
@@ -5661,8 +5662,8 @@ async function runNightChargeEveningJobInner(): Promise<void> {
       lastNotifyDay: today,
       armRefused: notArmed && plan?.window
         ? { reason: notArmed, windowStartMs: plan.window.startMs, windowEndMs: plan.window.endMs } : null,
-      // ★★★ v1.204.0 (M1, L2) — the basis this evening chose for its window, with E: every recompute but the next evening job's own
-      // call (F1) selects it until the window's close.
+      // ★★★ v1.204.0 (M1, L2) — the basis this evening chose for its window, with E: every live overnight recompute but the next
+      // evening job's own call (F1) selects it until the window's close (a shadow leg never reads it).
       pv: pvLatchOf(fresh, today),
     }); // latch AFTER a successful send
     app.log.info(`night-charge: evening advisory sent (${shape}) and latched for ${today}.`);

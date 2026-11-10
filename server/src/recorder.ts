@@ -787,7 +787,7 @@ export interface NightLedgerRow {
   /** ★★★ v1.204.0 — THE SOLAR BASIS the plan was selected on (panelPvSelection.ts; index.ts NightPlanExtras.pvSelection), written
    *  unconditionally at plan time (NULL on every row written before v1.204.0):
    *  - pv_basis: 'cores' (the Cores' own band, covering every connected slot), 'panel' / 'mixed' (the panel's own per-slot readings,
-   *    judged by the 7-day energy balance), NULL (no solar basis: a cushion-only plan, or no plan);
+   *    judged by the 7-day energy balance), NULL (no solar basis: v1.203.0's plan, cushion-only or its long-gap fill, or no plan);
    *  - pv_basis_slots: each connected slot's source as of the plan's evening ('1:P,2:P,3:C'; slot numbers only), NULL where no
    *    verdict was read;
    *  - pv_basis_refused_by: why the panel's readings were not used ('code: words'), 'transient' on the transient class, NULL when

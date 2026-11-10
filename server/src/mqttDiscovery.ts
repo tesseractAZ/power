@@ -280,7 +280,7 @@ export const MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE = '{{ {"basis": value_json.midday
 export const MAINTENANCE_ATTRIBUTES_TEMPLATE = '{{ {"cores": value_json.maintenance_summary | default([])} | tojson }}';
 /** ★★★ v1.204.0 (L6) — ecoflow_night_charge_target_soc's two attributes, EXACTLY these (json_attributes is an allowlist): the solar
  *  basis tonight's plan was sized on ('cores' — the Cores' own band; 'panel' / 'mixed' — the panel's own per-slot readings; 'none' —
- *  no solar basis, the cushion-only plan) and why the panel's readings are not used (a reason code, null when they are, when none
+ *  no solar basis: v1.203.0's plan, cushion-only or its long-gap fill, or a refused plan) and why the panel's readings are not used (a reason code, null when they are, when none
  *  was judged, and on the transient class). Null under the night-charge entities' freshness rule (nightChargeStateFields). */
 export const NIGHT_CHARGE_ATTRIBUTES_TEMPLATE = '{{ {"pv_basis": value_json.night_charge_pv_basis | default(none), "pv_basis_refused_by": value_json.night_charge_pv_basis_refused_by | default(none)} | tojson }}';
 
