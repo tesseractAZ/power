@@ -1460,7 +1460,7 @@ function cushionOnlyPushText(plan: NightChargePlan | null, form: 'charge' | 'sho
     : costFill
       ? ` Before the gap (${gapAfterWindowText(co.gapAfterMs)}) the cost target is the long-gap fill: the ${round1(plan.costCeilingSocPct!)}% state-of-charge ceiling, with the solar headroom set aside.`
       : ` ${gapAfterWindowText(co.gapAfterMs).replace(/^./, (c) => c.toUpperCase())}; the cushion is sized for this window's close only.`;
-  // v1.204.0 — and why the panel's own solar readings are not used tonight ('' where none was judged, or the class is transient).
+  // v1.204.0 — and why the panel's own solar readings are not used in the plan shown ('' where none was judged, or the class is transient).
   const panel = panelRefusedPushText(plan);
   if (form === 'short') return ` ${basis} (${co.refusedBy}).${gap}${panel}`;
   const line = floorCushionLinePct(plan);

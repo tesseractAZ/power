@@ -872,7 +872,7 @@ export interface NightChargePlan {
   cushionOnly?: CushionOnlyBasis;
   /** ★★★ v1.204.0 — THE SOLAR BASIS SELECTED (panelPvSelection.ts, index.ts): set on every live overnight plan but one planned on
    *  the published band that covers every connected slot (that plan's JSON is v1.203.0's). `pvBasis` 'panel' | 'mixed': planned on
-   *  the panel-measured band; null: not (cushion-only, or no plan). The rest: E, each connected slot's source (slot numbers only),
+   *  the panel-measured band; null: not (v1.203.0's plan, cushion-only or its long-gap fill, or no plan). The rest: E, each connected slot's source (slot numbers only),
    *  the 7-day energy balance's figures, why the panel basis is not used (figures only), the transient class, and the sentence the
    *  rationale closes with (the card shows it word for word). */
   pvBasis?: PvBasisKind | null;
@@ -3284,9 +3284,9 @@ export function nightChargeStateFields(
     night_charge_window_end: win ? fmtSiteDayHm(win.endMs, nowMs) : null,
     charge_tonight: fresh ? plan!.chargeTonight === true : false,
     // ★★★ v1.204.0 (L6) — ecoflow_night_charge_target_soc's attributes (NIGHT_CHARGE_ATTRIBUTES_TEMPLATE), under the same freshness:
-    // the basis the plan was sized on — the panel's readings ('panel' | 'mixed'), none (a cushion-only plan), or the Cores' band (a
-    // plan the selection put nothing on) — and why the panel's readings are not used (a reason code; null where they are, where none
-    // was judged, and on the transient class).
+    // the basis the plan was sized on — the panel's readings ('panel' | 'mixed'), none (v1.203.0's plan, cushion-only or its long-gap
+    // fill, or a refused plan), or the Cores' band (a plan the selection put nothing on) — and why the panel's readings are not used (a
+    // reason code; null where they are, where none was judged, and on the transient class).
     night_charge_pv_basis: !fresh ? null
       : plan!.pvBasis != null ? plan!.pvBasis : plan!.cushionOnly != null ? 'none' : plan!.pvBasisAsOfDay != null ? 'none' : 'cores',
     night_charge_pv_basis_refused_by: fresh && plan!.pvBasis == null ? (plan!.pvBasisRefusedBy?.code ?? null) : null,
@@ -3460,7 +3460,7 @@ export interface NightChargeInputDeps {
    *  house panel (index.ts selectPvBasis): it is passed as REFUSED, with these words (basisComplete false, so the cushion-only plan
    *  where eligible, the gate's transience as computed). Absent or null ⇒ the gate alone, byte for byte. */
   bandCoverageRefusedBy?: string | null;
-  /** ★★★ v1.204.0 (L1) — why the panel's own solar readings are not used tonight (panelPvSelection.ts reason words): appended to a
+  /** ★★★ v1.204.0 (L1) — why the panel's own solar readings are not used in the plan shown (panelPvSelection.ts reason words): appended to a
    *  refused plan's basisBlockedBy, so the 21:30 "no plan tonight" push carries it. A cushion-only plan's refusal (refusedBy, the
    *  ledger's cushion_only_refused_by) keeps the gate's words: its rationale gains the panel's sentence instead. Absent or null ⇒ none. */
   panelBasisRefusal?: string | null;
@@ -4044,7 +4044,7 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     nowMs,
     // R2 — forwarded only when given, so a plan with no spec carries exactly the inputs it did.
     ...(windowSpec !== undefined ? { windowSpec } : {}),
-    // v1.204.0 (L1) — a refused plan's gate words, and why the panel's readings are not used tonight where that was judged.
+    // v1.204.0 (L1) — a refused plan's gate words, and why the panel's readings are not used in the plan shown where that was judged.
     basisBlockedBy: cushionOnly != null ? null
       : basisBlockedBy != null && panelBasisRefusal != null && panelBasisRefusal !== ''
         ? `${basisBlockedBy}; the panel's own solar readings are not used: ${panelBasisRefusal}` : basisBlockedBy,
