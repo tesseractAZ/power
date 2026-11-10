@@ -3869,7 +3869,7 @@ function logPvBasisOnChange(sel: PvSelection, reason: PvBasisReason | null, asOf
   } else if (sel.transient) {
     app.log.info(`night-charge: solar basis as of ${asOfDay} — the panel-basis report is not available yet (a start-up, or one built for another evening); ${plan.cushionOnly != null ? "v1.203.0's plan (cushion-only, or its long-gap fill) stands in, and the evening decision waits to its deferral end" : 'the published basis stands in'}`);
   } else {
-    app.log.info(`night-charge: solar basis as of ${asOfDay} — the panel's own readings are not used: ${reason != null ? pvBasisReasonText(reason) : 'refused'}${slots}${figs}`);
+    app.log.info(`night-charge: solar basis as of ${asOfDay} — the panel's own readings are not used${reason?.armedDay != null ? ' in the plan shown' : ''}: ${reason != null ? pvBasisReasonText(reason) : 'refused'}${slots}${figs}`);
   }
 }
 

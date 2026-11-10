@@ -8,7 +8,8 @@
  *  - L2  the latch: a missing report keeps the previous plan; a latch with no basis reads published to its close;
  *  - F1  the evening job's own call selects afresh as of its own day (Saturday's latch never decides Sunday's evening), and every
  *        'latched' refusal names the latch's own day and says no decision was made where the evening reached its cutoff without one;
- *  - G2  where an earlier evening's arm for the window still stands, the 'latched' words name it and speak of the plan shown only;
+ *  - G2  where an arm for the window may still hold or write and may be on the panel's readings (an earlier evening's, or the window's
+ *        own on the planning band), every refusal's words speak of the plan shown and claim nothing of that arm;
  *  - G3  every latch this release writes carries pvRecorded; one read without it (v1.203.0's) says it records no panel basis;
  *  - L5  the ledger's PV actual on a panel row, said; L6  Home Assistant's two attributes, exactly;
  *  and the readiness gate's panelApart. The replay on the recorded plant is panelPvReplay.test.ts.
@@ -343,7 +344,7 @@ test('★★★ G2: after Sunday\'s cutoff with no decision, Saturday\'s arm for
   assert.equal(pvBasisRefusedText(dec.sel.reason!), ` The plan shown is computed without the panel's own solar readings: this window's evening decision was made on ${SUN} without them.`);
   // Saturday's own latch with its own arm: nothing earlier stands.
   assert.deepEqual(chainAt(at(SUN, 14), false, satLatch('published'), reportAsOf(SAT)).sel.reason, { code: 'latched', asOfDay: SAT, decided: true });
-  // The wiring: index.ts hands latchedPvBasis whether the armed record's arm still stands (a target, not restored, not cancelled).
+  // The wiring: index.ts hands latchedPvBasis whether the armed record's arm may still hold or write (armMayHold).
   assert.match(INDEX, /\n\s+armed: \{\n\s+day: nightActuationMem\.day, windowStartMs: nightActuationMem\.windowStartMs,\n\s+standing: armMayHold\(nightActuationMem\),\n\s+\},\n/);
 });
 
@@ -397,12 +398,16 @@ test('★★★ G2 (every clause): inside a latched window with an arm for it th
 
 test('★★★ G2 (may hold): the refusal words speak of the plan shown wherever an arm for the window may still hold or write and may be on the panel\'s readings — armMayHold is deliberately broad (a target, not cancelled, not settled as someone else\'s, not grid-lost, its restore not read back), because the words then claim nothing of that arm; the window\'s own evening\'s arm on the planning band counts as an earlier one does, its own arm on the published basis does not; no text ever says an arm "still applies"', () => {
   const ws = SAT_W.startMs;
-  const arm = { targetPct: 50, cancelled: false, revertedAtMs: null };
-  // May hold or write: pending (any mode, any time — the words claim nothing of it), written, written but not read back, restored but
-  // the restore not read back.
-  for (const x of [{}, { revertVerifiedAtMs: null }, { revertedAtMs: ws + 6 * H }]) assert.equal(armMayHold({ ...arm, ...x }), true, JSON.stringify(x));
+  const arm = { targetPct: 50, cancelled: false, revertedAtMs: null, appliedAtMs: null };
+  // May hold or write: pending (any mode, any time — the words claim nothing of it), written, restored but the restore not read back,
+  // and a cancelled arm whose write was attempted or made (it holds its raise until the restore reads back).
+  for (const x of [{}, { appliedAtMs: ws + 45_000 }, { revertedAtMs: ws + 6 * H }, { cancelled: true, appliedAtMs: ws + 45_000 },
+    { cancelled: true, applyAttemptedAtMs: ws + 30_000 }, { cancelled: true, appliedAtMs: ws + 45_000, revertedAtMs: ws + H }]) {
+    assert.equal(armMayHold({ ...arm, ...x }), true, JSON.stringify(x));
+  }
   // Done: no target, cancelled, its restore read back, grid-lost, settled as someone else's.
-  for (const x of [{ targetPct: null }, { cancelled: true }, { revertedAtMs: ws + 6 * H, revertVerifiedAtMs: ws + 6 * H + 60_000 }, { gridLostAtMs: ws + 60_000 }, { foreignSettledAtMs: ws + H }]) {
+  for (const x of [{ targetPct: null }, { cancelled: true }, { revertedAtMs: ws + 6 * H, revertVerifiedAtMs: ws + 6 * H + 60_000 },
+    { cancelled: true, appliedAtMs: ws + 45_000, revertedAtMs: ws + H, revertVerifiedAtMs: ws + H + 60_000 }, { gridLostAtMs: ws + 60_000 }, { foreignSettledAtMs: ws + H }]) {
     assert.equal(armMayHold({ ...arm, ...x }), false, JSON.stringify(x));
   }
   // The chain as index.ts runs it (standing = armMayHold): Saturday's arm, Sunday's cutoff with no decision.
@@ -440,6 +445,8 @@ test('★★★ G2 (may hold): the refusal words speak of the plan shown whereve
     const l = own(basis);
     assert.equal(chainAt(t1, false, { ...l, armed: { ...l.armed, standing: false } }, noRatio).sel.reason?.armedDay, undefined, basis);
   }
+  // The operator log is scoped as the card is: "not used in the plan shown" where an arm may hold.
+  assert.ok(INDEX.includes("the panel's own readings are not used${reason?.armedDay != null ? ' in the plan shown' : ''}: "));
   // No text of any reason, with or without armedDay, says an arm applies (en and es, the rationale and the push).
   for (const r of ALL_REASONS) {
     for (const rr of [r, { ...r, armedDay: SAT } as PvBasisReason]) {

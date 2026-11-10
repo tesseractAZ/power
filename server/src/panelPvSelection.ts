@@ -155,16 +155,18 @@ export function latchedPvBasis(o: {
 }
 
 /**
- * G2 — whether the armed record's arm may still hold a raise or still write: it has a target, is not cancelled, not settled as someone
- * else's reserve, not grid-lost, and its restore has not read back. Deliberately broad: it only chooses the refusal words' opener, which
+ * G2 — whether the armed record's arm may still hold a raise or still write: it has a target, was not cancelled before anything was
+ * written (a cancelled write holds its raise until the restore reads back), is not settled as someone else's reserve, not grid-lost, and
+ * its restore has not read back. Deliberately broad: it only chooses the refusal words' opener, which
  * then speaks of the plan shown and claims nothing of the arm, so counting an arm that will in fact do nothing costs nothing, while
  * missing one that holds would leave "not used tonight" said of a night an arm on the panel's readings may hold. PURE.
  */
 export function armMayHold(
-  a: Pick<NightActuationState, 'targetPct' | 'cancelled' | 'revertedAtMs'>
-    & Partial<Pick<NightActuationState, 'revertVerifiedAtMs' | 'foreignSettledAtMs' | 'gridLostAtMs'>>,
+  a: Pick<NightActuationState, 'targetPct' | 'cancelled' | 'revertedAtMs' | 'appliedAtMs'>
+    & Partial<Pick<NightActuationState, 'applyAttemptedAtMs' | 'revertVerifiedAtMs' | 'foreignSettledAtMs' | 'gridLostAtMs'>>,
 ): boolean {
-  if (a.targetPct == null || a.cancelled === true) return false;
+  if (a.targetPct == null) return false;
+  if (a.cancelled === true && a.appliedAtMs == null && a.applyAttemptedAtMs == null) return false;
   if (a.foreignSettledAtMs != null || a.gridLostAtMs != null) return false;
   return !(a.revertedAtMs != null && a.revertVerifiedAtMs != null);
 }

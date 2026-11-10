@@ -608,14 +608,14 @@ const MUTANTS = [
     file: SEL, tests: [T_SEL],
     find: '  const armedDay = o.armed.standing && o.armed.day != null',
     to: '  const armedDay = (false as boolean) && o.armed.day != null /* MUTANT */',
-    why: 'After a Sunday cutoff the card says the panel\'s readings are not used tonight while Saturday\'s panel-sized arm writes.',
+    why: 'After a Sunday cutoff the card says the panel\'s readings are not used tonight while Saturday\'s panel-sized arm may hold or write.',
   },
   {
     id: 'PB-S-xxxiv. ★★ (G2) a restored or cancelled arm named as standing',
     file: SEL, tests: [T_SEL],
     find: '  const armedDay = o.armed.standing && o.armed.day != null',
     to: '  const armedDay = o.armed.day != null /* MUTANT */',
-    why: 'The words say an arm still applies that no longer writes.',
+    why: 'A restored or cancelled arm keeps the plan-shown opener instead of "not used tonight".',
   },
   {
     id: 'PB-S-xxxv. ★★ (G2) index.ts says every armed record stands',
@@ -623,6 +623,13 @@ const MUTANTS = [
     find: '      standing: armMayHold(nightActuationMem),',
     to: '      standing: true, /* MUTANT */',
     why: 'As PB-S-xxxiv, at the call site: an arm restored mid-window (a grid-loss abort) still selects the plan-shown opener.',
+  },
+  {
+    id: 'PB-S-xxxvi. ★ (G2) the operator log not scoped to the plan shown',
+    file: IDX, tests: [T_SEL],
+    find: "the panel's own readings are not used${reason?.armedDay != null ? ' in the plan shown' : ''}: ",
+    to: "the panel's own readings are not used: /* MUTANT */",
+    why: 'The journal says the panel\'s readings are not used while an arm on them may hold, unlike the card.',
   },
 
   /* ── T: the words ── */
@@ -676,14 +683,14 @@ const MUTANTS = [
     why: '"This window\'s evening decision was made on <day>" for a night that may not have decided.',
   },
   {
-    id: 'PB-T-xv. ★★★ (G2) "not used tonight" while an earlier evening\'s arm writes',
+    id: 'PB-T-xv. ★★★ (G2) "not used tonight" while an arm on the panel\'s readings may hold or write',
     file: SEL, tests: [T_SEL],
     find: "  if (r.armedDay != null) {",
     to: "  if ((false as boolean) && r.armedDay != null) { /* MUTANT */",
-    why: 'The card says the panel\'s readings are not used tonight while Saturday\'s panel-sized arm writes.',
+    why: 'The card says the panel\'s readings are not used tonight while Saturday\'s panel-sized arm may hold or write.',
   },
   {
-    id: 'PB-T-xvi. ★★ (G2) the push says panel solar not used while an earlier evening\'s arm writes',
+    id: 'PB-T-xvi. ★★ (G2) the push says panel solar not used while an arm on the panel\'s readings may hold or write',
     file: SEL, tests: [T_SEL],
     find: "    const shown = d.pvBasisRefusedBy.armedDay != null;",
     to: '    const shown = (false as boolean); /* MUTANT */',
@@ -694,14 +701,14 @@ const MUTANTS = [
     file: SEL, tests: [T_SEL],
     find: "  (!b.ok && !b.transient && l.armedDay != null ? { ...b, reason: { ...b.reason, armedDay: l.armedDay } } : b);",
     to: "  ((false as boolean) && !b.ok && !b.transient && l.armedDay != null ? { ...b, reason: { ...b.reason, armedDay: l.armedDay } } : b); /* MUTANT */",
-    why: 'A balance refusal after Sunday\'s cutoff says the panel\'s readings are not used tonight while Saturday\'s panel-sized arm writes.',
+    why: 'A balance refusal after Sunday\'s cutoff says the panel\'s readings are not used tonight while Saturday\'s panel-sized arm may hold or write.',
   },
   {
     id: 'PB-T-xviii. ★★ (G2, every clause) the planning latch\'s refusal drops the standing arm',
     file: SEL, tests: [T_SEL],
     find: "    return out('published', withArmedDay(b, i.latched));",
     to: "    return out('published', b); /* MUTANT */",
-    why: 'Sunday decided on the planning band and delivered no arm; its refusal at 23:30 says not used tonight while Saturday\'s arm writes.',
+    why: 'Sunday decided on the planning band and delivered no arm; its refusal at 23:30 says not used tonight while Saturday\'s arm may hold or write.',
   },
   {
     id: 'PB-T-xix. ★★★ (G2, every clause) the published latch\'s refusal drops the standing arm',
@@ -711,11 +718,18 @@ const MUTANTS = [
     why: 'As PB-T-xvii, on the published latch (a missed Sunday cutoff, or a Sunday that decided published and delivered no arm).',
   },
   {
-    id: 'PB-T-xx. ★★ (G2, may hold) a cancelled arm counted',
+    id: 'PB-T-xx. ★★ (G2, may hold) a cancel before any write does not end the arm',
     file: SEL, tests: [T_SEL],
-    find: "  if (a.targetPct == null || a.cancelled === true) return false;",
-    to: "  if (a.targetPct == null) return false; /* MUTANT */",
-    why: 'After a cancel nothing of ours holds, but the words keep the plan-shown opener instead of "not used tonight".',
+    find: "  if (a.cancelled === true && a.appliedAtMs == null && a.applyAttemptedAtMs == null) return false;",
+    to: "  /* MUTANT */",
+    why: 'After a cancel with nothing written nothing of ours holds, yet the words keep the plan-shown opener instead of "not used tonight".',
+  },
+  {
+    id: 'PB-T-xxiv. ★★★ (G2, may hold) a cancel ends an arm whose raise was written',
+    file: SEL, tests: [T_SEL],
+    find: "  if (a.cancelled === true && a.appliedAtMs == null && a.applyAttemptedAtMs == null) return false;",
+    to: "  if (a.cancelled === true) return false; /* MUTANT */",
+    why: 'A cancelled night whose raise has not been restored (or never restores: revertFailed) is said not to use the panel\'s readings tonight while the raise sized on them holds.',
   },
   {
     id: 'PB-T-xxi. ★★ (G2, may hold) a grid-lost or foreign-settled arm counted',
@@ -743,7 +757,7 @@ const MUTANTS = [
     file: SEL, tests: [T_SEL],
     find: "  const mayBeOnPanel = o.armed.day !== o.lastNotifyDay || (o.pv?.basis === 'planning' && o.pv.asOfDay === o.armed.day);",
     to: "  const mayBeOnPanel = o.armed.day !== o.lastNotifyDay; /* MUTANT */",
-    why: 'Sunday planned on the panel\'s readings and armed; a mid-window refusal says they are not used tonight while that arm writes.',
+    why: 'Sunday planned on the panel\'s readings and armed; a mid-window refusal says they are not used tonight while that arm may hold or write.',
   },
   {
     id: 'PB-T-xxvi. ★★ (G2, own arm) the window\'s own published arm named',
