@@ -1796,11 +1796,14 @@ test('★★★ T21 (H1) the stated close is what the window can reach: capped a
   assert.equal(dd.expectedWriteLevelPct, 50);
   assert.equal(dd.cushionEnvelopeReason, 'closeUnder');
   assert.equal(lineNotHeldOf(dd), 'closeUnder');
-  // (e) 2027-02-15 21:30, nameplate, 18 h: the walk's ~79.2% capped to ~69.7%, still at or over the 69.24% line: carried.
+  // (e) 2027-02-15 21:30, nameplate, 18 h: the walk's ~79.2% capped to ~69.7%, still at or over the 69.24% line on the median walk.
+  // v1.205.0 — no longer carried: counted from the end of the at-open allowance the window's reach does not hold it ('lateStart');
+  // the stated close is the median's, unchanged (lineAtOpenAllowance.test.ts AO-4).
   const e = yearPlanAt('2027-02-15 21:30', 18, 'np');
   assert.equal(e.expectedWriteLevelPct, 69.7);
-  assert.equal(e.cushionShortfallCause ?? null, null);
-  assert.equal(lineNotHeldOf(e), null);
+  assert.equal(e.cushionShortfallCause ?? null, 'envelope');
+  assert.equal(e.cushionEnvelopeReason, 'lateStart');
+  assert.equal(lineNotHeldOf(e), 'lateStart');
 });
 
 test('★★ T19 the worked nights on every surface: one level (title, clause, spoken, card = the expected close), the NOTE by what the walk cannot hold, never "no force-charge"', () => {
@@ -2775,8 +2778,9 @@ test('★★★ T24 (Fix9) a line night\'s force-charge "waits on" a reading of 
 // (49, 50], which the 50% reserve holds at 49, is the line force-charge's, each named beside the 49% (besideReserve). The six lines
 // stated at 50.00 and asked at 51 keep v1.202.0's rationale (keyed on the ask, which knows the side of 50 they lie on).
 // v1.205.0 — 135 plans more name the line: a cost-carried night's close past its stop, capped at the window's reach (H1), under the
-// line on nights already disclosed for their sizing (each NOTE beside the caps note).
-const PIN_T24_YEAR = { plans: 15591, armed: 6103, stated50: 6 };
+// line on nights already disclosed for their sizing (each NOTE beside the caps note); and 5 more: cost-carried nights disclosed
+// 'lateStart' (the at-open allowance), whose NOTE names the line where nothing did.
+const PIN_T24_YEAR = { plans: 15596, armed: 6108, stated50: 6 };
 
 test('★★★ T24 (Fix8) the year at the edges: the rationale, the push and the card of every line plan state each relation true — but the rationale of a line stated at 50.00, counted', () => {
   const got = { plans: 0, armed: 0, stated50: 0 };

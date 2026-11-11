@@ -334,7 +334,7 @@ written.
   { askPct: max(⌈L⌉, 51), linePct: L }`), unless the reserve reads above the write, or a mid-day leg's reads it. It is **carried** only where ⌈L⌉ + 10 ≤ 100 and, with the sizing met,
   its own walk closes at or above L − 0.05 (`lineWalkHolds`). Otherwise it **discloses**:
   `cushionShortfall`, cause `'envelope'` (`'envelope+caps'` with a sizing shortfall), reason `advisory`,
-  `backupLeg`, `reserveAtTarget`, `armedNoLine` or `startClosed` (nothing armed), `nearFull` (⌈L⌉ + 10 > 100) or `closeUnder`, the last two still armed. The flag is OR-ed in **after** the cost block, so the cost ceiling and its de-bias bound
+  `backupLeg`, `reserveAtTarget`, `armedNoLine` or `startClosed` (nothing armed), `nearFull` (⌈L⌉ + 10 > 100), `closeUnder` or (v1.205.0) `lateStart` (the median walk holds, the walk with the at-open allowance does not: 15-1, "The line claim"), the last three still armed. The flag is OR-ed in **after** the cost block, so the cost ceiling and its de-bias bound
   read the sized flag alone. `cushionTroughSocPct` stays the sized trough. The written reserve and every sizing figure
   equal v1.199.1's for the same inputs; with no eligibility input the plan is byte for byte.
 - **A standing reserve (v1.200.1).** The plan-time reading decides words only (`lineStanding`, `lineReserveStands`): the ask stays on the record, so a reserve lowered by the open gets its

@@ -315,6 +315,8 @@ export function buildMiddayPlanMessage(i: MiddayAnnounceInput): NotifyMessage {
     l.lineNotHeld === 'closeUnder' ? " NOTE: on the median load this leg's pool is expected to close under its outage line — residual risk remains."
       : l.lineNotHeld === 'aboveFull' ? " NOTE: this leg's outage line is above a full pool, so no charge can hold it — residual risk remains."
         : l.lineNotHeld === 'nearFull' ? " NOTE: this leg's outage line is within 10 points of a full pool, so the force-charge cannot hold it with its usual margin — residual risk remains."
+        // v1.205.0 — held on the median walk, not with the at-open allowance.
+        : l.lineNotHeld === 'lateStart' ? " NOTE: on the median load this leg's pool is expected to close too close to its outage line to allow for a late switch-on at the window open — residual risk remains."
           : l.cushionShortfallCause != null
             ? ` NOTE: this leg's outage line is above the ${RESERVE_WRITE_MAX_PCT}% the panel accepts as a reserve; its force-charge runs, but the plan does not claim the line — residual risk remains.`
             : '';

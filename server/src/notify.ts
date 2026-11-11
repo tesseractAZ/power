@@ -1507,6 +1507,14 @@ function envelopeShortfallNote(plan: Pick<NightChargePlan, 'cushionShortfallCaus
       return ` NOTE: on the median load the pool is expected to close at ${e != null && Number.isFinite(e) ? `~${round1(e)}%` : 'a level'}, under ${line} — residual risk remains.`;
     }
     if (kind === 'aboveFull') return ` NOTE: ${line} is above a full pool, so no charge can hold it — residual risk remains.`;
+    // ★★★ v1.205.0 — held on the median walk, not with the at-open allowance. In line mode the stated level is that close; a night
+    // the cost force-charge carries names no figure (its level is the stop, and the plan names its close past it only under the line).
+    if (kind === 'lateStart') {
+      const e = plan.expectedForceChargeMode === 'line' ? plan.expectedWriteLevelPct : null;
+      return e != null && Number.isFinite(e)
+        ? ` NOTE: on the median load the pool is expected to close at ~${round1(e)}%, too close to ${line} to allow for a late switch-on at the window open — residual risk remains.`
+        : ` NOTE: ${line} is too close to the expected close to allow for a late switch-on at the window open — residual risk remains.`;
+    }
     if (kind === 'nearFull') return ` NOTE: ${line} is within 10 points of a full pool, so the force-charge cannot hold it with its usual margin — residual risk remains.`;
     // Armed and disclosed with no walk that says why (a plan this build does not make): armed, not claimed.
     if (plan.cushionShortfallCause != null) {

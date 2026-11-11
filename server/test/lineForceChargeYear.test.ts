@@ -51,6 +51,12 @@ import { MEASURED_SCALE } from './fixtures/measuredCushionLineFigures.js';
  * ('m') groups move by design (the walks on the measured pool) and are v1.202.0's own, pinned. 4 h — the live shape, no line
  * above 50 on the year — must be guarded whole. The suite checks a fixed sample of hours; A5_IDENTITY_FULL=1 checks
  * every group (the gates run it), and A5_IDENTITY_WRITE=1 writes the fixture (run on the base only).
+ * v1.205.0 — RE-CUT: the fixture's `excluded` list names, per group, the plans v1.205.0 moves that the guard could hold, and no
+ * other — a night disclosed 'lateStart' (the at-open allowance), carried on the base (its cost cap moves only cost-carried
+ * nights, which are not guarded; so are not the cost-carried 'lateStart' nights listed beside the line-mode ones). The base cannot classify it, so it is enumerated: listed from a per-plan diff of every group against the base
+ * (225,216 plans; the 114 'lateStart' nights and 569 cost-carried bound nights naming their capped close are the only plans that
+ * moved), then the groups regenerated ON THE BASE (e2474798) with the list kept (A5_IDENTITY_WRITE=1 keeps the fixture's
+ * `excluded`). T17 checks that every listed plan is 'lateStart' on this build.
  */
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -85,6 +91,7 @@ const holds = (e: number | null | undefined, l: number): boolean => e == null ||
 const UNDER_NOTE = /NOTE: on the median load the pool is expected to close at ~[\d.]+%, under tonight's [\d.]+% outage line, so the cushion is not fully held — residual risk remains\./;
 const ABOVE_NOTE = /NOTE: tonight's [\d.]+% outage line is above a full pool, so no charge can hold it — residual risk remains\./;
 const MARGIN_NOTE = /NOTE: tonight's [\d.]+% outage line is within 10 points of a full pool, so the force-charge cannot hold it with its usual margin; the cushion is not assured — residual risk remains\./;
+const LATE_NOTE = /NOTE: on the median load the pool is expected to close at ~[\d.]+%, too close to tonight's [\d.]+% outage line to allow for a late switch-on at the window open, so the cushion is not assured — residual risk remains\./;
 
 interface Row {
   line: number | null; armed: boolean; cause: string | null; reason: string | null; sf: boolean; E: number | null; buy: number | null;
@@ -97,7 +104,7 @@ interface Sweep {
   reachOver: number; stopUnreached: number; underFloor: number; textMissing: number; noForceCharge: number;
   /** Pinned. */
   armed: number; carried: number; nearFull: number; closeUnder: number;
-  kinds: { closeUnder: number; aboveFull: number; nearFull: number };
+  kinds: { closeUnder: number; aboveFull: number; nearFull: number; lateStart: number };
   eFalls: number; eFallsNonBoundGt5: number; eFallMaxNonBound: number; buyFalls: number; closeUnderVanish: number;
   /** The largest step falls of the stated close (after any walk) and of the expected buy, and where (label basis h → h + 1). */
   eFallMax: { d: number; at: string }; buyFallMax: { d: number; at: string };
@@ -117,7 +124,7 @@ const endsShort = (nca as unknown as { chargeEndsShortOfLevel?: (p: unknown) => 
 function sweep(basis: Basis, depsOf: (d: Deps) => Deps): Sweep {
   const s: Sweep = {
     m1: 0, m2: 0, m3: 0, m4: 0, undisclosedUnder: 0, carrierRest: 0, reachOver: 0, stopUnreached: 0, underFloor: 0, textMissing: 0, noForceCharge: 0,
-    armed: 0, carried: 0, nearFull: 0, closeUnder: 0, kinds: { closeUnder: 0, aboveFull: 0, nearFull: 0 },
+    armed: 0, carried: 0, nearFull: 0, closeUnder: 0, kinds: { closeUnder: 0, aboveFull: 0, nearFull: 0, lateStart: 0 },
     eFalls: 0, eFallsNonBoundGt5: 0, eFallMaxNonBound: 0, buyFalls: 0, closeUnderVanish: 0, eFallMax: { d: 0, at: '' }, buyFallMax: { d: 0, at: '' },
     meanBuyQual: {}, parity: { checked: 0, mismatch: 0 },
     spoken: { boundLine: 0, endsShort: 0, mismatch: 0 }, ex: [],
@@ -146,9 +153,11 @@ function sweep(basis: Basis, depsOf: (d: Deps) => Deps): Sweep {
         target: p.chargeTonight ? nfc.armedWriteLevelPct(p as never, gates) : null,
         ceil: p.chargeTonight && mode != null ? mode.panelCeilingPct : null,
         qual: p.forceChargeLine != null || p.cushionShortfallCause != null,
+        // v1.205.0 — 'lateStart' (the median walk holds, the at-open allowance does not) on the plan's reason, never beside a close under.
         kind: L == null || p.forceChargeLine == null ? null
-          : !lineMode ? (closeAfter != null && !holds(closeAfter, L) ? 'closeUnder' : null)
-            : L > 100 ? 'aboveFull' : !holds(E, L) ? 'closeUnder' : p.cushionEnvelopeReason === 'nearFull' ? 'nearFull' : null,
+          : !lineMode ? (p.cushionEnvelopeReason === 'lateStart' ? 'lateStart' : closeAfter != null && !holds(closeAfter, L) ? 'closeUnder' : null)
+            : L > 100 ? 'aboveFull' : !holds(E, L) ? 'closeUnder' : p.cushionEnvelopeReason === 'lateStart' ? 'lateStart'
+              : p.cushionEnvelopeReason === 'nearFull' ? 'nearFull' : null,
       };
       const where = `${c.label} ${basis} ${h} h`;
       if (serverKind != null && cardKind != null) {
@@ -167,6 +176,7 @@ function sweep(basis: Basis, depsOf: (d: Deps) => Deps): Sweep {
       if (r.armed && !r.sf && L != null && !holds(closeE, L)) { s.undisclosedUnder += 1; note(`${where}: carried, ~${closeE}% under ${L}%, undisclosed`); }
       // v1.202.0 — a cost-carried night disclosed by its walk past the stop says so in the rationale.
       if (!lineMode && r.kind === 'closeUnder' && !UNDER_NOTE.test(p.rationale)) { s.textMissing += 1; note(`${where}: no under-line NOTE (cost-carried)`); }
+      if (!lineMode && r.kind === 'lateStart' && !LATE_NOTE.test(p.rationale)) { s.textMissing += 1; note(`${where}: no late-switch-on NOTE (cost-carried)`); }
       if (r.qual) { qualN[h] = (qualN[h] ?? 0) + 1; buySum[h] = (buySum[h] ?? 0) + (r.buy ?? 0); }
       if (L != null && p.chargeTonight && p.cushionBasis === 'islanded-outage' && Math.min(100, Math.ceil(L - 1e-9)) > 50
         && (p.requiredExtraKwh ?? 0) > 0 && !r.qual) { s.carrierRest += 1; note(`${where}: qualifying, neither armed nor disclosed`); }
@@ -174,7 +184,8 @@ function sweep(basis: Basis, depsOf: (d: Deps) => Deps): Sweep {
         if (r.kind === 'closeUnder' && !UNDER_NOTE.test(p.rationale)) { s.textMissing += 1; note(`${where}: no under-line NOTE`); }
         if (r.kind === 'aboveFull' && !ABOVE_NOTE.test(p.rationale)) { s.textMissing += 1; note(`${where}: no above-full NOTE`); }
         if (r.kind === 'nearFull' && !MARGIN_NOTE.test(p.rationale)) { s.textMissing += 1; note(`${where}: no margin NOTE`); }
-        if (r.kind == null && (UNDER_NOTE.test(p.rationale) || ABOVE_NOTE.test(p.rationale) || MARGIN_NOTE.test(p.rationale))) { s.textMissing += 1; note(`${where}: a NOTE on a held line`); }
+        if (r.kind === 'lateStart' && !LATE_NOTE.test(p.rationale)) { s.textMissing += 1; note(`${where}: no late-switch-on NOTE`); }
+        if (r.kind == null && (UNDER_NOTE.test(p.rationale) || ABOVE_NOTE.test(p.rationale) || MARGIN_NOTE.test(p.rationale) || LATE_NOTE.test(p.rationale))) { s.textMissing += 1; note(`${where}: a NOTE on a held line`); }
         // H1 — the window's reach on a deliverable-bound walk: the window-open pool plus what the window delivers
         // (expectedBuyKwh × legEff on a bound walk), no P50 sun in an overnight window; never under the reserve.
         if (r.bound && E != null && p.expectedStartSocPct != null && r.buy != null) {
@@ -264,16 +275,17 @@ const ALL_ZERO = { m1: 0, m2: 0, m3: 0, m4: 0, undisclosedUnder: 0, carrierRest:
  *  set it averages. Every zero above stays zero, and every other figure is v1.202.0's.
  *  v1.205.0 — a cost-carried night's close past its stop capped at the window's reach (H1, the line walk's own reach): 103 / 104
  *  nights already disclosed for their sizing now name a close under their line (kinds.closeUnder 859 → 962 / 931 → 1035); no carried
- *  night flips. */
+ *  night flips. And the at-open allowance: 28 / 29 carried nights are disclosed 'lateStart' (carried 5020 → 4992 / 5252 → 5223; the
+ *  walk-side kind and lineNotHeldOf read it on the plan's reason, the median walk holding: kinds.lateStart). */
 const PIN_A5: Record<Basis, ReturnType<typeof PINNED>> = {
   np: {
-    armed: 5480, carried: 5020, nearFull: 418, closeUnder: 42, kinds: { closeUnder: 962, aboveFull: 95, nearFull: 175 },
+    armed: 5480, carried: 4992, nearFull: 418, closeUnder: 42, kinds: { closeUnder: 962, aboveFull: 95, nearFull: 175, lateStart: 28 },
     eFalls: 389, eFallsNonBoundGt5: 29, eFallMaxNonBound: 18.9, buyFalls: 137, closeUnderVanish: 11,
     eFallMax: { d: 40, at: '2026-11-13 13:00 np 15 → 16 h' }, buyFallMax: { d: 9.25, at: '2026-10-13 13:00 np 10 → 11 h' },
     meanBuyQual: { 4: null, 5: 31.52, 6: 28.12, 7: 31.2, 8: 28.97, 9: 31.28, 10: 32.19, 11: 32.04, 12: 31.92, 13: 32.69, 14: 32.96, 15: 34.19, 16: 35.27, 17: 35.36, 18: 36.24, 19: 37.05, 20: 37.63 },
   },
   m: {
-    armed: 5916, carried: 5252, nearFull: 602, closeUnder: 62, kinds: { closeUnder: 1035, aboveFull: 194, nearFull: 210 },
+    armed: 5916, carried: 5223, nearFull: 602, closeUnder: 62, kinds: { closeUnder: 1035, aboveFull: 194, nearFull: 210, lateStart: 29 },
     eFalls: 487, eFallsNonBoundGt5: 29, eFallMaxNonBound: 19.6, buyFalls: 164, closeUnderVanish: 15,
     eFallMax: { d: 43.8, at: '2027-05-28 21:30 m 19 → 20 h' }, buyFallMax: { d: 8.26, at: '2027-01-27 21:30 m 16 → 17 h' },
     meanBuyQual: { 4: null, 5: 29.06, 6: 29.34, 7: 28.87, 8: 29.78, 9: 30.91, 10: 30.8, 11: 31.12, 12: 31.82, 13: 32.12, 14: 32.77, 15: 34.14, 16: 34.49, 17: 35.35, 18: 36.14, 19: 36.59, 20: 37.1 },
@@ -338,15 +350,22 @@ function guarded(p: Plan, elig: Elig): boolean {
   return holds(p.expectedWriteLevelPct, p.cushionLineSocPct!);
 }
 
-function group(h: number, basis: Basis, gate: Gate, elig: Elig): { n: number; sha: string } {
+type Fixture = { generatedOn: string; cases: number; plans: number; excluded?: Record<string, string[]>; groups: Record<string, { n: number; sha: string }> };
+/** v1.205.0 — the guarded plans v1.205.0's claim moves, per group (see the header): left out on both sides. */
+const EXCLUDED: Record<string, string[]> = (() => {
+  try { return (JSON.parse(readFileSync(FIXTURE, 'utf8')) as Fixture).excluded ?? {}; } catch { return {}; }
+})();
+const keyOf = (h: number, basis: Basis, gate: Gate, elig: Elig) => `${h}|${basis}|${gate}|${elig}`;
+function group(h: number, basis: Basis, gate: Gate, elig: Elig, excludedSeen?: Plan[]): { n: number; sha: string } {
+  const out = new Set(EXCLUDED[keyOf(h, basis, gate, elig)] ?? []);
   const lines: string[] = [];
   for (const c of CASES) {
     const p = planAt(GATES[gate](c.deps), basis, h, ELIG[elig]);
+    if (out.has(c.label)) { excludedSeen?.push(p); continue; }
     if (guarded(p, elig)) lines.push(`${c.label}\t${planDigest(p)}`);
   }
   return { n: lines.length, sha: createHash('sha256').update(lines.join('\n')).digest('hex').slice(0, 20) };
 }
-const keyOf = (h: number, basis: Basis, gate: Gate, elig: Elig) => `${h}|${basis}|${gate}|${elig}`;
 const groupsAt = (hours: number[]) => hours.flatMap((h) => (['np', 'm'] as const).flatMap((basis) => (['fixture', 'live'] as const)
   .flatMap((gate) => (['true', 'false', 'absent'] as const).map((elig) => [h, basis, gate, elig] as const))));
 const ALL_HOURS = Array.from({ length: HMAX - HMIN + 1 }, (_, i) => HMIN + i);
@@ -364,12 +383,13 @@ if (process.env.A5_IDENTITY_WRITE === '1') {
     }
     writeFileSync(FIXTURE, `${JSON.stringify({
       generatedOn: process.env.A5_IDENTITY_BASE ?? 'unknown', cases: CASES.length, plans,
-      guard: 'eligibility false or absent; at eligibility true: no line ask, the backup disclosure, carried in line mode not deliverable-bound with E >= L - 0.05 (v1.202.0: no cost-mode line night)',
+      guard: 'eligibility false or absent; at eligibility true: no line ask, the backup disclosure, carried in line mode not deliverable-bound with E >= L - 0.05 (v1.202.0: no cost-mode line night); v1.205.0: none listed in `excluded`',
+      excluded: EXCLUDED,
       groups,
     }, null, 1)}\n`);
   });
 } else {
-  const FX = JSON.parse(readFileSync(FIXTURE, 'utf8')) as { generatedOn: string; cases: number; plans: number; groups: Record<string, { n: number; sha: string }> };
+  const FX = JSON.parse(readFileSync(FIXTURE, 'utf8')) as Fixture;
   const full = process.env.A5_IDENTITY_FULL === '1';
   test(`★★★ T17 the identity: every plan A5 must not move is byte-identical to ${FX.generatedOn}; 4 h (the live shape) whole (${full ? 'every hour' : `sample: ${SAMPLE_HOURS.join(', ')} h`})`, () => {
     assert.equal(FX.cases, CASES.length);
@@ -377,8 +397,12 @@ if (process.env.A5_IDENTITY_WRITE === '1') {
     let plans = 0;
     for (const [h, basis, gate, elig] of groupsAt(full ? ALL_HOURS : SAMPLE_HOURS)) {
       const k = keyOf(h, basis, gate, elig);
-      const g = group(h, basis, gate, elig);
+      const seen: Plan[] = [];
+      const g = group(h, basis, gate, elig, seen);
       assert.deepEqual(g, FX.groups[k], k);
+      // v1.205.0 — every plan left out is one the claim moves, and no other: a night disclosed 'lateStart'.
+      assert.equal(seen.length, (FX.excluded?.[k] ?? []).length, `${k}: every listed plan is a case`);
+      for (const p of seen) assert.equal(p.cushionEnvelopeReason, 'lateStart', `${k}: a listed plan that is not 'lateStart'`);
       if (h === 4) assert.equal(g.n, CASES.length, `${k}: the live shape is guarded whole`);
       plans += g.n;
     }

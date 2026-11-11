@@ -1,8 +1,224 @@
 {
- "generatedOn": "v1.203.0 (np and m: v1.202.0 + the reserve hold's point)",
+ "generatedOn": "e2474798 (v1.204.0; v1.205.0 re-cut: the excluded plans left out)",
  "cases": 1104,
- "plans": 213840,
- "guard": "eligibility false or absent; at eligibility true: no line ask, the backup disclosure, carried in line mode not deliverable-bound with E >= L - 0.05 (v1.202.0: no cost-mode line night)",
+ "plans": 213776,
+ "guard": "eligibility false or absent; at eligibility true: no line ask, the backup disclosure, carried in line mode not deliverable-bound with E >= L - 0.05 (v1.202.0: no cost-mode line night); v1.205.0: none listed in `excluded`",
+ "excluded": {
+  "6|m|fixture|true": [
+   "2027-04-09 21:30"
+  ],
+  "6|m|live|true": [
+   "2027-04-09 21:30"
+  ],
+  "7|np|fixture|true": [
+   "2027-04-09 21:30"
+  ],
+  "7|np|live|true": [
+   "2027-04-09 21:30"
+  ],
+  "7|m|fixture|true": [
+   "2027-04-09 21:30"
+  ],
+  "7|m|live|true": [
+   "2027-04-09 21:30"
+  ],
+  "9|m|fixture|true": [
+   "2026-12-30 21:30"
+  ],
+  "9|m|live|true": [
+   "2026-12-30 21:30"
+  ],
+  "10|np|fixture|true": [
+   "2026-12-30 21:30",
+   "2027-02-19 21:30",
+   "2027-03-30 21:30"
+  ],
+  "10|np|live|true": [
+   "2026-12-30 21:30",
+   "2027-02-19 21:30",
+   "2027-03-30 21:30"
+  ],
+  "10|m|fixture|true": [
+   "2027-02-19 21:30",
+   "2027-03-30 21:30"
+  ],
+  "10|m|live|true": [
+   "2027-02-19 21:30",
+   "2027-03-30 21:30"
+  ],
+  "11|np|fixture|true": [
+   "2027-02-19 21:30",
+   "2027-06-04 21:30"
+  ],
+  "11|np|live|true": [
+   "2027-02-19 21:30",
+   "2027-06-04 21:30"
+  ],
+  "12|np|fixture|true": [
+   "2027-05-07 21:30"
+  ],
+  "12|np|live|true": [
+   "2027-05-07 21:30"
+  ],
+  "12|m|fixture|true": [
+   "2027-04-02 21:30",
+   "2027-05-07 21:30"
+  ],
+  "12|m|live|true": [
+   "2027-04-02 21:30",
+   "2027-05-07 21:30"
+  ],
+  "13|np|fixture|true": [
+   "2027-01-29 21:30",
+   "2027-04-02 21:30",
+   "2027-05-07 21:30"
+  ],
+  "13|np|live|true": [
+   "2027-01-29 21:30",
+   "2027-04-02 21:30",
+   "2027-05-07 21:30"
+  ],
+  "13|m|fixture|true": [
+   "2026-12-11 21:30",
+   "2027-01-29 21:30"
+  ],
+  "13|m|live|true": [
+   "2026-12-11 21:30",
+   "2027-01-29 21:30"
+  ],
+  "14|np|fixture|true": [
+   "2026-12-11 21:30",
+   "2027-01-29 21:30",
+   "2027-09-03 21:30"
+  ],
+  "14|np|live|true": [
+   "2026-12-11 21:30",
+   "2027-01-29 21:30",
+   "2027-09-03 21:30"
+  ],
+  "14|m|fixture|true": [
+   "2026-12-11 21:30",
+   "2027-09-03 21:30"
+  ],
+  "14|m|live|true": [
+   "2026-12-11 21:30",
+   "2027-09-03 21:30"
+  ],
+  "15|np|fixture|true": [
+   "2026-12-11 21:30",
+   "2027-09-03 21:30"
+  ],
+  "15|np|live|true": [
+   "2026-12-11 21:30",
+   "2027-09-03 21:30"
+  ],
+  "15|m|fixture|true": [
+   "2027-03-12 21:30"
+  ],
+  "15|m|live|true": [
+   "2027-03-12 21:30"
+  ],
+  "16|np|fixture|true": [
+   "2027-03-12 21:30",
+   "2027-05-21 21:30"
+  ],
+  "16|np|live|true": [
+   "2027-03-12 21:30",
+   "2027-05-21 21:30"
+  ],
+  "16|m|fixture|true": [
+   "2026-11-27 21:30",
+   "2027-01-15 21:30",
+   "2027-03-12 21:30",
+   "2027-05-21 21:30"
+  ],
+  "16|m|live|true": [
+   "2026-11-27 21:30",
+   "2027-01-15 21:30",
+   "2027-03-12 21:30",
+   "2027-05-21 21:30"
+  ],
+  "17|np|fixture|true": [
+   "2027-01-15 21:30",
+   "2027-03-12 21:30",
+   "2027-05-21 21:30"
+  ],
+  "17|np|live|true": [
+   "2027-01-15 21:30",
+   "2027-03-12 21:30",
+   "2027-05-21 21:30"
+  ],
+  "17|m|fixture|true": [
+   "2027-01-15 21:30",
+   "2027-02-15 21:30",
+   "2027-07-12 21:30",
+   "2027-07-23 21:30"
+  ],
+  "17|m|live|true": [
+   "2027-01-15 21:30",
+   "2027-02-15 21:30",
+   "2027-07-12 21:30",
+   "2027-07-23 21:30"
+  ],
+  "18|np|fixture|true": [
+   "2027-02-15 21:30",
+   "2027-07-12 21:30",
+   "2027-07-23 21:30"
+  ],
+  "18|np|live|true": [
+   "2027-02-15 21:30",
+   "2027-07-12 21:30",
+   "2027-07-23 21:30"
+  ],
+  "18|m|fixture|true": [
+   "2027-07-23 21:30"
+  ],
+  "18|m|live|true": [
+   "2027-07-23 21:30"
+  ],
+  "19|np|fixture|true": [
+   "2027-07-23 21:30"
+  ],
+  "19|np|live|true": [
+   "2027-07-23 21:30"
+  ],
+  "19|m|fixture|true": [
+   "2027-01-22 21:30",
+   "2027-02-05 21:30",
+   "2027-04-23 21:30",
+   "2027-09-17 21:30"
+  ],
+  "19|m|live|true": [
+   "2027-01-22 21:30",
+   "2027-02-05 21:30",
+   "2027-04-23 21:30",
+   "2027-09-17 21:30"
+  ],
+  "20|np|fixture|true": [
+   "2027-01-22 21:30",
+   "2027-02-05 21:30",
+   "2027-04-23 21:30",
+   "2027-09-17 21:30"
+  ],
+  "20|np|live|true": [
+   "2027-01-22 21:30",
+   "2027-02-05 21:30",
+   "2027-04-23 21:30",
+   "2027-09-17 21:30"
+  ],
+  "20|m|fixture|true": [
+   "2027-02-05 21:30",
+   "2027-04-23 21:30",
+   "2027-06-25 21:30",
+   "2027-09-17 21:30"
+  ],
+  "20|m|live|true": [
+   "2027-02-05 21:30",
+   "2027-04-23 21:30",
+   "2027-06-25 21:30",
+   "2027-09-17 21:30"
+  ]
+ },
  "groups": {
   "4|np|fixture|true": {
    "n": 1104,
@@ -125,8 +341,8 @@
    "sha": "8b03e41c0f44d37ee771"
   },
   "6|m|fixture|true": {
-   "n": 1086,
-   "sha": "69a351915669d8c0c593"
+   "n": 1085,
+   "sha": "957e4afa944764baa08c"
   },
   "6|m|fixture|false": {
    "n": 1104,
@@ -137,8 +353,8 @@
    "sha": "29f38f53b714aa92122a"
   },
   "6|m|live|true": {
-   "n": 1077,
-   "sha": "2d338841c2b6624708cd"
+   "n": 1076,
+   "sha": "b459c417c535963ea3ed"
   },
   "6|m|live|false": {
    "n": 1104,
@@ -149,8 +365,8 @@
    "sha": "b93df94b1f9157faed6a"
   },
   "7|np|fixture|true": {
-   "n": 1080,
-   "sha": "621c19baa952a8c675bb"
+   "n": 1079,
+   "sha": "738b2e7589e0963b5fb7"
   },
   "7|np|fixture|false": {
    "n": 1104,
@@ -161,8 +377,8 @@
    "sha": "6925b960e0f8b77c2aa6"
   },
   "7|np|live|true": {
-   "n": 1070,
-   "sha": "3e141b9a399bfdb3cf7b"
+   "n": 1069,
+   "sha": "94567b2aecf297393187"
   },
   "7|np|live|false": {
    "n": 1104,
@@ -173,8 +389,8 @@
    "sha": "13499249f28555fe6b0f"
   },
   "7|m|fixture|true": {
-   "n": 1067,
-   "sha": "6fe85ae0efda16c8d169"
+   "n": 1066,
+   "sha": "4023e051b22fb6b0f82f"
   },
   "7|m|fixture|false": {
    "n": 1104,
@@ -185,8 +401,8 @@
    "sha": "4c9cd18248393ba8da42"
   },
   "7|m|live|true": {
-   "n": 1058,
-   "sha": "f029991e5efe5b16b7d7"
+   "n": 1057,
+   "sha": "aaae12723c095fc79608"
   },
   "7|m|live|false": {
    "n": 1104,
@@ -269,8 +485,8 @@
    "sha": "0d5aad07acf56388d3fe"
   },
   "9|m|fixture|true": {
-   "n": 1006,
-   "sha": "ea0d780bcb089fa4fd69"
+   "n": 1005,
+   "sha": "a355d0fb4e81e9a204c4"
   },
   "9|m|fixture|false": {
    "n": 1104,
@@ -281,8 +497,8 @@
    "sha": "bd23f2b305c9926a88a9"
   },
   "9|m|live|true": {
-   "n": 991,
-   "sha": "b9560771992aa6d08501"
+   "n": 990,
+   "sha": "b9d4adc7369686b9f625"
   },
   "9|m|live|false": {
    "n": 1104,
@@ -293,8 +509,8 @@
    "sha": "985ba8114fb92c05d1ac"
   },
   "10|np|fixture|true": {
-   "n": 990,
-   "sha": "512c1f625951cbc1dcfd"
+   "n": 988,
+   "sha": "4d16c73078629861f0ce"
   },
   "10|np|fixture|false": {
    "n": 1104,
@@ -305,8 +521,8 @@
    "sha": "9c83544bb81d9610e588"
   },
   "10|np|live|true": {
-   "n": 975,
-   "sha": "303af1d9c2d3637f3f36"
+   "n": 973,
+   "sha": "e0b086cb63b52d37bb38"
   },
   "10|np|live|false": {
    "n": 1104,
@@ -317,8 +533,8 @@
    "sha": "2b0a6afb47e4bcefad6c"
   },
   "10|m|fixture|true": {
-   "n": 974,
-   "sha": "6c434126ea08ed47b14e"
+   "n": 973,
+   "sha": "27f2040aadf4a460052c"
   },
   "10|m|fixture|false": {
    "n": 1104,
@@ -329,8 +545,8 @@
    "sha": "851ae03f2cc5ce8b0815"
   },
   "10|m|live|true": {
-   "n": 959,
-   "sha": "0911dd8eeeee7bee1ac0"
+   "n": 958,
+   "sha": "9404c93d68b1a43f01e0"
   },
   "10|m|live|false": {
    "n": 1104,
@@ -413,8 +629,8 @@
    "sha": "e1006f62994555667b05"
   },
   "12|m|fixture|true": {
-   "n": 934,
-   "sha": "c197d2e1af7b624f30af"
+   "n": 933,
+   "sha": "377172b0b13ce331cd8b"
   },
   "12|m|fixture|false": {
    "n": 1104,
@@ -425,8 +641,8 @@
    "sha": "e93e5cfec6596a5695a9"
   },
   "12|m|live|true": {
-   "n": 912,
-   "sha": "0cf01ecd9b47031915c7"
+   "n": 911,
+   "sha": "5c14c4f52d3b08233574"
   },
   "12|m|live|false": {
    "n": 1104,
@@ -437,8 +653,8 @@
    "sha": "bcff719b331c32d1c057"
   },
   "13|np|fixture|true": {
-   "n": 913,
-   "sha": "a214e9f8424e0a2e7ab3"
+   "n": 912,
+   "sha": "1611ba8a1da8757e763f"
   },
   "13|np|fixture|false": {
    "n": 1104,
@@ -449,8 +665,8 @@
    "sha": "035c998b2dec8c28d42f"
   },
   "13|np|live|true": {
-   "n": 891,
-   "sha": "99b2b5876b69d47a00ab"
+   "n": 890,
+   "sha": "1a440e3a6283da3bb40d"
   },
   "13|np|live|false": {
    "n": 1104,
@@ -461,8 +677,8 @@
    "sha": "3d85c462badb2768948e"
   },
   "13|m|fixture|true": {
-   "n": 912,
-   "sha": "f0976df6e0e225fb2c0f"
+   "n": 911,
+   "sha": "526260a80e6679909c2b"
   },
   "13|m|fixture|false": {
    "n": 1104,
@@ -473,8 +689,8 @@
    "sha": "6a9da755a65eb6abebca"
   },
   "13|m|live|true": {
-   "n": 891,
-   "sha": "65c583096ef5ed279de7"
+   "n": 890,
+   "sha": "4590edc6866fa28454f6"
   },
   "13|m|live|false": {
    "n": 1104,
@@ -485,8 +701,8 @@
    "sha": "6c33b82f51dd8ac08011"
   },
   "14|np|fixture|true": {
-   "n": 911,
-   "sha": "9179e1fff6cedaf769ce"
+   "n": 910,
+   "sha": "09799b61455da4275d25"
   },
   "14|np|fixture|false": {
    "n": 1104,
@@ -497,8 +713,8 @@
    "sha": "aabdfd955dfd62407b71"
   },
   "14|np|live|true": {
-   "n": 890,
-   "sha": "130bb984443365d3019f"
+   "n": 889,
+   "sha": "0fcafc86e1bd825d37ba"
   },
   "14|np|live|false": {
    "n": 1104,
@@ -509,8 +725,8 @@
    "sha": "eff259dcb3da51d5717a"
   },
   "14|m|fixture|true": {
-   "n": 910,
-   "sha": "7429497ecdc1b8bb7e3a"
+   "n": 909,
+   "sha": "2f829381c80e4b47c6cc"
   },
   "14|m|fixture|false": {
    "n": 1104,
@@ -521,8 +737,8 @@
    "sha": "45cf732e5d48451a9e49"
   },
   "14|m|live|true": {
-   "n": 894,
-   "sha": "fc7ad8fd6bc1a777411f"
+   "n": 893,
+   "sha": "bf270de8e7755af1a6a7"
   },
   "14|m|live|false": {
    "n": 1104,
@@ -533,8 +749,8 @@
    "sha": "d4e10ce208ef837b65eb"
   },
   "15|np|fixture|true": {
-   "n": 901,
-   "sha": "1f681c38aca2591ce4e1"
+   "n": 900,
+   "sha": "d45bb6ab88dffbc8a6a4"
   },
   "15|np|fixture|false": {
    "n": 1104,
@@ -545,8 +761,8 @@
    "sha": "1d584421f8240b29b9bc"
   },
   "15|np|live|true": {
-   "n": 887,
-   "sha": "0faf1a397f0a19af6473"
+   "n": 886,
+   "sha": "69f144d4f01eb4c0f24c"
   },
   "15|np|live|false": {
    "n": 1104,
@@ -557,8 +773,8 @@
    "sha": "17d48432a09e9c469413"
   },
   "15|m|fixture|true": {
-   "n": 883,
-   "sha": "ff96f4b0852aaa8bdeee"
+   "n": 882,
+   "sha": "784e560c863d876559bd"
   },
   "15|m|fixture|false": {
    "n": 1104,
@@ -569,8 +785,8 @@
    "sha": "10ac5007cafcf9a6bd0e"
   },
   "15|m|live|true": {
-   "n": 868,
-   "sha": "9197570baf98548580f2"
+   "n": 867,
+   "sha": "d2b61aa834d275cba42b"
   },
   "15|m|live|false": {
    "n": 1104,
@@ -581,8 +797,8 @@
    "sha": "cdf3a9558a77e9c8325c"
   },
   "16|np|fixture|true": {
-   "n": 878,
-   "sha": "7101081b0b239a863a66"
+   "n": 876,
+   "sha": "00defe3d7dd1cd45874b"
   },
   "16|np|fixture|false": {
    "n": 1104,
@@ -593,8 +809,8 @@
    "sha": "f321012622fea02b581a"
   },
   "16|np|live|true": {
-   "n": 863,
-   "sha": "dbdb92e04b7b7b1fc499"
+   "n": 861,
+   "sha": "dcc8ba468cfe91c660c0"
   },
   "16|np|live|false": {
    "n": 1104,
@@ -605,8 +821,8 @@
    "sha": "e34c45f6c7499540a080"
   },
   "16|m|fixture|true": {
-   "n": 855,
-   "sha": "8b7ebb8954e92fa66af8"
+   "n": 852,
+   "sha": "1899db932079799e7fbb"
   },
   "16|m|fixture|false": {
    "n": 1104,
@@ -617,8 +833,8 @@
    "sha": "67f34391981c37f2305c"
   },
   "16|m|live|true": {
-   "n": 840,
-   "sha": "cd6fd3ec80edc5a477c4"
+   "n": 837,
+   "sha": "0d086ad319b6d65bb82a"
   },
   "16|m|live|false": {
    "n": 1104,
@@ -629,8 +845,8 @@
    "sha": "e5ab0dd3cb6163b46d96"
   },
   "17|np|fixture|true": {
-   "n": 854,
-   "sha": "13ab723f3e8a6ae6d847"
+   "n": 851,
+   "sha": "3cc0cbf4da4692e591d8"
   },
   "17|np|fixture|false": {
    "n": 1104,
@@ -641,8 +857,8 @@
    "sha": "0986cd61038a4baa3963"
   },
   "17|np|live|true": {
-   "n": 839,
-   "sha": "f89647e29a9363cc05b2"
+   "n": 836,
+   "sha": "82c332457df1d032b295"
   },
   "17|np|live|false": {
    "n": 1104,
@@ -653,8 +869,8 @@
    "sha": "15a2d2f0d726f68ed877"
   },
   "17|m|fixture|true": {
-   "n": 831,
-   "sha": "8c95d6a9c332b839534f"
+   "n": 829,
+   "sha": "4fb5a73aa23de86f9c1c"
   },
   "17|m|fixture|false": {
    "n": 1104,
@@ -665,8 +881,8 @@
    "sha": "894d6f2b41baffcabaa2"
   },
   "17|m|live|true": {
-   "n": 814,
-   "sha": "334d41ca06aa2f9b90ac"
+   "n": 812,
+   "sha": "fb1a72dd766b49717a17"
   },
   "17|m|live|false": {
    "n": 1104,
@@ -677,8 +893,8 @@
    "sha": "bf255f7b17b57ed2469f"
   },
   "18|np|fixture|true": {
-   "n": 826,
-   "sha": "8c15fa8475555f74686c"
+   "n": 825,
+   "sha": "5da074b85e2a0e3610e5"
   },
   "18|np|fixture|false": {
    "n": 1104,
@@ -689,8 +905,8 @@
    "sha": "6ecfa54972ef9b0504a1"
   },
   "18|np|live|true": {
-   "n": 809,
-   "sha": "97f99848bb5bf0b366c1"
+   "n": 808,
+   "sha": "bfb862dff33c6d92bc43"
   },
   "18|np|live|false": {
    "n": 1104,
@@ -701,8 +917,8 @@
    "sha": "1f94e45b3a48fe28e226"
   },
   "18|m|fixture|true": {
-   "n": 799,
-   "sha": "2de6defcd89ae598ac77"
+   "n": 798,
+   "sha": "9fb2d00b0a203ace44be"
   },
   "18|m|fixture|false": {
    "n": 1104,
@@ -713,8 +929,8 @@
    "sha": "6809330cbb42916d1239"
   },
   "18|m|live|true": {
-   "n": 782,
-   "sha": "ef1af7a7db6f1c7ad866"
+   "n": 781,
+   "sha": "b6cdd53cb44e520b0b3e"
   },
   "18|m|live|false": {
    "n": 1104,
@@ -725,8 +941,8 @@
    "sha": "4c0f0c699ea757d14939"
   },
   "19|np|fixture|true": {
-   "n": 787,
-   "sha": "f952b5c49da6d200d776"
+   "n": 786,
+   "sha": "5e6d177883c5c2681ac5"
   },
   "19|np|fixture|false": {
    "n": 1104,
@@ -737,8 +953,8 @@
    "sha": "bcf42bc0e14c77c17a5b"
   },
   "19|np|live|true": {
-   "n": 770,
-   "sha": "559967de9329ad95dd6e"
+   "n": 769,
+   "sha": "7a1d86b56cad1e747fb1"
   },
   "19|np|live|false": {
    "n": 1104,
@@ -749,8 +965,8 @@
    "sha": "56f8b905a92cce19649c"
   },
   "19|m|fixture|true": {
-   "n": 751,
-   "sha": "35629ec39a66c012e0e4"
+   "n": 749,
+   "sha": "9998edefa89c0ab8bf7c"
   },
   "19|m|fixture|false": {
    "n": 1104,
@@ -761,8 +977,8 @@
    "sha": "3209fe507a15f8fb7ba8"
   },
   "19|m|live|true": {
-   "n": 737,
-   "sha": "f2dad2b6f10b3c261aa0"
+   "n": 735,
+   "sha": "81660af4d3f9b6efb007"
   },
   "19|m|live|false": {
    "n": 1104,
@@ -773,8 +989,8 @@
    "sha": "167788d75dbd419b6c90"
   },
   "20|np|fixture|true": {
-   "n": 752,
-   "sha": "0786d46d7ae689f2bca1"
+   "n": 750,
+   "sha": "5001affea0f4052a8d9b"
   },
   "20|np|fixture|false": {
    "n": 1104,
@@ -785,8 +1001,8 @@
    "sha": "5177682c33a739e80852"
   },
   "20|np|live|true": {
-   "n": 737,
-   "sha": "8159471e676c6470020a"
+   "n": 735,
+   "sha": "11e192907c48f606c47f"
   },
   "20|np|live|false": {
    "n": 1104,
@@ -797,8 +1013,8 @@
    "sha": "e2ce58bf3c84bbfde358"
   },
   "20|m|fixture|true": {
-   "n": 717,
-   "sha": "206624262129da4c8198"
+   "n": 716,
+   "sha": "0d2d67b59997ef9d5827"
   },
   "20|m|fixture|false": {
    "n": 1104,
@@ -809,8 +1025,8 @@
    "sha": "12ef5f0b22f06351c714"
   },
   "20|m|live|true": {
-   "n": 706,
-   "sha": "cc26b2c1c63466a45feb"
+   "n": 705,
+   "sha": "2eb3025ccdb06e4761c5"
   },
   "20|m|live|false": {
    "n": 1104,

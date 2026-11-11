@@ -1766,14 +1766,16 @@ const MUTANTS = [
   {
     id: 'A5-xiv(b). ★ its restore drops it',
     file: MSH, tests: [T_LINE],
-    find: "    ...(o.lineNotHeld === 'closeUnder' || o.lineNotHeld === 'aboveFull' || o.lineNotHeld === 'nearFull' ? { lineNotHeld: o.lineNotHeld } : {}),",
+    // v1.205.0 — the allowlist with 'lateStart'.
+    find: "    ...(o.lineNotHeld === 'closeUnder' || o.lineNotHeld === 'aboveFull' || o.lineNotHeld === 'nearFull' || o.lineNotHeld === 'lateStart' ? { lineNotHeld: o.lineNotHeld } : {}),",
     to: '    /* MUTANT */',
     why: 'After a restart the kind is lost.',
   },
   {
     id: 'A5-xiv(c). ★ its restore keeps any value',
     file: MSH, tests: [T_LINE],
-    find: "    ...(o.lineNotHeld === 'closeUnder' || o.lineNotHeld === 'aboveFull' || o.lineNotHeld === 'nearFull' ? { lineNotHeld: o.lineNotHeld } : {}),",
+    // v1.205.0 — the allowlist with 'lateStart'.
+    find: "    ...(o.lineNotHeld === 'closeUnder' || o.lineNotHeld === 'aboveFull' || o.lineNotHeld === 'nearFull' || o.lineNotHeld === 'lateStart' ? { lineNotHeld: o.lineNotHeld } : {}),",
     to: "    ...(typeof o.lineNotHeld === 'string' ? { lineNotHeld: o.lineNotHeld as 'closeUnder' } : {}), /* MUTANT */",
     why: 'A value this build does not word is carried into the evening\'s notice.',
   },

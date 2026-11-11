@@ -255,8 +255,9 @@ export interface CushionNotePlan {
   /** The server's NightChargePlan.cushionShortfallCause: the 50% reserve envelope contributes. */
   cushionShortfallCause?: 'envelope' | 'envelope+caps';
   /** The server's NightChargePlan.cushionEnvelopeReason: why the plan does not claim the line (review; A5: armed
-   *  'nearFull' / 'closeUnder', or nothing armed 'advisory' / 'backupLeg' / 'reserveAtTarget' / 'armedNoLine' / 'startClosed'). */
-  cushionEnvelopeReason?: 'advisory' | 'backupLeg' | 'reserveAtTarget' | 'armedNoLine' | 'startClosed' | 'nearFull' | 'closeUnder';
+   *  'nearFull' / 'closeUnder', v1.205.0 'lateStart', or nothing armed 'advisory' / 'backupLeg' / 'reserveAtTarget' / 'armedNoLine' /
+   *  'startClosed'). */
+  cushionEnvelopeReason?: 'advisory' | 'backupLeg' | 'reserveAtTarget' | 'armedNoLine' | 'startClosed' | 'nearFull' | 'closeUnder' | 'lateStart';
   /** The server's words for 'startClosed' (NightChargePlan.cushionStartClosedWords). */
   cushionStartClosedWords?: string;
   /** No verified write stands behind 'startClosed', or a partial ON runs beside it (NightChargePlan.cushionStartClosedNoWrite): the card leads with the words. */
@@ -296,19 +297,22 @@ export function capsShortfallShown(plan: CushionNotePlan): boolean {
  *  lineForceChargeYear.test.ts holds the two equal on every plan of the year, and lineForceCharge.test.ts T20 at the
  *  edge: a close exactly at L − 0.05 holds (1e-9 of float slack, the server's LINE_CLOSE_EDGE_EPS: in binary 50.35 −
  *  0.05 is 50.300000000000004). v1.202.0 — and, on a night the cost force-charge carries, 'closeUnder' where its walk past
- *  the stop closes under the line (expectedCloseAfterStopPct). */
-export function lineNotHeldOfCard(plan: CushionNotePlan): 'closeUnder' | 'aboveFull' | 'nearFull' | null {
+ *  the stop closes under the line (expectedCloseAfterStopPct). v1.205.0 — 'lateStart' on the server's reason, on either walk mode:
+ *  held on the median walk, not with the at-open allowance (never beside a close under the line). */
+export function lineNotHeldOfCard(plan: CushionNotePlan): 'closeUnder' | 'aboveFull' | 'nearFull' | 'lateStart' | null {
   if (plan.forceChargeLine == null) return null;
   const l = plan.cushionLineSocPct;
   if (l == null || !Number.isFinite(l)) return null;
   // v1.202.0 — a night the cost force-charge carries: its close past the stop, where under the line.
   if (plan.expectedForceChargeMode !== 'line') {
     const c = plan.expectedCloseAfterStopPct;
+    if (plan.cushionEnvelopeReason === 'lateStart') return 'lateStart';
     return c != null && Number.isFinite(c) && c < l - 0.05 - 1e-9 ? 'closeUnder' : null;
   }
   if (l > 100) return 'aboveFull';
   const e = plan.expectedWriteLevelPct;
   if (e != null && e < l - 0.05 - 1e-9) return 'closeUnder';
+  if (plan.cushionEnvelopeReason === 'lateStart') return 'lateStart';
   return plan.cushionEnvelopeReason === 'nearFull' ? 'nearFull' : null;
 }
 
@@ -354,7 +358,9 @@ export function outageLineRow(plan: CushionNotePlan, maxPct: number | null = nul
   const kind = lineNotHeldOfCard(plan);
   const notHeld = kind === 'closeUnder' ? ' — under the line; residual risk remains'
     : kind === 'aboveFull' ? ' — the line is above a full pool; residual risk remains'
-      : kind === 'nearFull' ? ' — within 10 points of a full pool, not held with its usual margin; residual risk remains' : '';
+      : kind === 'nearFull' ? ' — within 10 points of a full pool, not held with its usual margin; residual risk remains'
+        // v1.205.0 — held on the median walk, not with the at-open allowance (a cost-carried night: the disclosed row below).
+        : kind === 'lateStart' ? ' — too close to the line to allow for a late switch-on at the window open; residual risk remains' : '';
   const row = outageLineArmedRow(plan, max, r1, lineText, over);
   if (row == null && armed && (plan.cushionShortfallCause != null || kind === 'closeUnder')) {
     // Never silent on a disclosed night, whatever the walk's mode. v1.202.0 — a night the cost force-charge carries whose walk

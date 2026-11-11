@@ -69,7 +69,7 @@ import {
   // v1.200.0 (Fix9) — a line night's force-charge "waits on" a reading of the target only while a start can still come.
   forceChargeStartClosed, lineStartClosedWords,
   // v1.200.0 (Fix9 review 2) — a recompute of a window whose armed record carries no line claims no ON the record cannot make.
-  armedNoLineStartMs, armedLineStartClosed, armedLineNoReOn, armedLineRunOn, lineCloseReadingLate, lineGridOffPushDue, type LineClosure,
+  armedNoLineStartMs, armedLineStartClosed, armedLineNoReOn, armedLineRunOn, armedLineRunOnSinceMs, lineCloseReadingLate, lineGridOffPushDue, type LineClosure,
   // v1.200.0 (review 4) — what a line re-ON's readback check stamps, the re-ON that took effect included.
   lineReOnCheckedStamp,
   // v1.200.0 (review 6) — the force-charge tick's cadence, which the line-at-risk push's hand-back hold counts.
@@ -4377,6 +4377,9 @@ async function recomputeNightChargePlan(
     // v1.200.0 (Fix9 review 2) — the armed record with no line ask: a recompute of its window claims no ON the record cannot make. Not
     // the plan the evening job arms from: a Saturday record sharing Sunday's window must not stop Sunday's arm carrying its ask.
     armedNoLineStartMs: shadowLeg == null && opts.arming !== true ? armedNoLineStartMs(nightActuationMem) : null,
+    // ★★★ v1.205.0 — a line run's verified ON, which ends the at-open allowance only where the plan judges it inside its window and in
+    // its pool reading (nowMs and socNowPct, read above before the first await; this record is read after them). As armedNoLineStartMs.
+    armedLineOnVerifiedAtMs: shadowLeg == null && opts.arming !== true ? armedLineRunOnSinceMs(nightActuationMem) : null,
     // ★★★ v1.203.0 — the cushion-only fallback (nightChargeAdvisor.ts buildNightChargeInputs): with the solar basis refused, the live
     // overnight plan in a write mode on a fresh panel is sized on the outage cushion alone. Never a shadow leg (mid-day, backup,
     // morning refresh), never advisory mode (lineForceChargeOn is a write mode's gate), never the 22:30 last resort on a stale panel.
@@ -6575,8 +6578,10 @@ function forceChargeArmNote(armed: NightActuationState, plan: NightChargePlan | 
   // v1.202.0 — a line night this force-charge carries, whose walk past the stop closes under the line (lineNotHeldOf): said
   // as the line-mode sentence says it.
   const closeAfter = lineNotHeldOf(plan) === 'closeUnder' ? plan?.expectedCloseAfterStopPct : null;
-  return `Force-charge: ELIGIBLE — just in time to reach ~${c}% by the window close (from the open, if the pack needs the whole window); OFF when it gets there (software stop; panel ceiling ${desiredForceChargeCeilingPct(c)}% as backstop).`
+  const eligible = `Force-charge: ELIGIBLE — just in time to reach ~${c}% by the window close (from the open, if the pack needs the whole window); OFF when it gets there (software stop; panel ceiling ${desiredForceChargeCeilingPct(c)}% as backstop).`
     + (closeAfter != null ? ` Line NOT held: ~${round1(closeAfter)}% expected at the close.` : '');
+  // ★★★ v1.205.0 — held on the median walk past the stop, not with the at-open allowance: never "NOT held".
+  return eligible + (lineNotHeldOf(plan) === 'lateStart' ? ' Line NOT assured: too close to the line to allow for a late switch-on at the window open.' : '');
 }
 
 /**

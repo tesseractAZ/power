@@ -126,7 +126,10 @@ if (process.env.STANDING_WALK_WRITE === '1') {
   };
   // v1.202.0 — re-measured (v1.201.0: full A 3854 / 188, W 3978 / 184; sample A 1005 / 45, W 1026 / 40): the walks on the measured pool, and the
   // cost-carried nights the walk past the stop discloses no longer claimed.
-  const PIN_STANDING_CLAIMED = FULL ? { A: { claimed: 3904, under: 189 }, W: { claimed: 4025, under: 183 } } : { A: { claimed: 1009, under: 40 }, W: { claimed: 1028, under: 37 } };
+  // v1.205.0 — the at-open allowance: the nights whose walk holds the line on the median but not with nothing charging before the
+  // allowance's end are no longer claimed ('lateStart'; full A 3904 / 189 → 3864 / 169, W 4025 / 183 → 3985 / 168; sample A 1009 / 40,
+  // W 1028 / 37): 40 claimed nights fewer on each side, and 20 / 15 fewer claimed nights closing under (6 / 3 in the sample).
+  const PIN_STANDING_CLAIMED = FULL ? { A: { claimed: 3864, under: 169 }, W: { claimed: 3985, under: 168 } } : { A: { claimed: 992, under: 34 }, W: { claimed: 1012, under: 34 } };
 
   test('★★★ W5 PIN_STANDING_CLAIMED: the nights a standing 50 claims and closes under, beside the written control: the same order, and each short by what its line is higher', () => {
     assert.deepEqual({ A: claimed('A'), W: claimed('W') }, PIN_STANDING_CLAIMED);

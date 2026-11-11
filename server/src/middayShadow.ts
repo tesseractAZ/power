@@ -1039,7 +1039,7 @@ const coerceLeg = (raw: unknown): ShadowLegSummary | null => {
     ...(typeof o.cushionShortfall === 'boolean' ? { cushionShortfall: o.cushionShortfall } : {}),
     ...(o.cushionShortfallCause === 'envelope' || o.cushionShortfallCause === 'envelope+caps' ? { cushionShortfallCause: o.cushionShortfallCause } : {}),
     ...(fin(o.lineAskPct) != null ? { lineAskPct: fin(o.lineAskPct)! } : {}),
-    ...(o.lineNotHeld === 'closeUnder' || o.lineNotHeld === 'aboveFull' || o.lineNotHeld === 'nearFull' ? { lineNotHeld: o.lineNotHeld } : {}),
+    ...(o.lineNotHeld === 'closeUnder' || o.lineNotHeld === 'aboveFull' || o.lineNotHeld === 'nearFull' || o.lineNotHeld === 'lateStart' ? { lineNotHeld: o.lineNotHeld } : {}),
     ...(typeof o.basisBlockedBy === 'string' && o.basisBlockedBy !== '' ? { basisBlockedBy: o.basisBlockedBy } : {}),
     ...('heldImport' in o ? { heldImport: coerceHeldImport(o.heldImport) } : {}),
   };

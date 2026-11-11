@@ -180,6 +180,18 @@
  *    with a 20 kWh EV predicted and with a 7 kW one all window (6 / 34 / 43 floored), and 30 of 30 at 70% of the rate;
  *    they fall inside the last 20 minutes or are still rising, and the push reaches none of them. The plan discloses
  *    every near-full night at 21:30; the morning account names the close. Not changed in A5 (a residual, stated).
+ *    ★★★ (v1.205.0) A LATE SWITCH-ON AT THE WINDOW OPEN. A start the plan times inside the window carries its own slack (⌈L⌉ + 5,
+ *    timed to the close less FORCE_CHARGE_MIN_RUN_MS); a start AT the open carries none, and the ON cannot come at the open: the
+ *    reserve write applies on the first tick at or after it (APPLY_LEAD_MS 0), the ON waits for that write's readback and the
+ *    panel ceiling's (reserveRideReady, the ceiling sync), and a Core that does not take it is re-issued only after its readback
+ *    grace (FORCE_CHARGE_ON_VERIFY_AFTER_MS). 2026-11-10: the open 23:00:00, the ON 23:02:47, the re-issue 23:18:47, every Core
+ *    reading ON 23:19:47. So the plan CLAIMS a line night only where its walk holds the line both on the median and with nothing
+ *    charging before each whole ON minute up to the open + FORCE_CHARGE_OPEN_ALLOWANCE_MS, its reach counted from that minute
+ *    (nightChargeAdvisor.ts expectedBuyFromPlan assuredClosePct); otherwise it discloses it ('lateStart') and the force-charge runs
+ *    as before. Nothing here reads the claim: no write, timing or start moves. WHAT IT STILL DOES NOT CARRY (unpushed, as a
+ *    mid-window flip of the served plan is not pushed): a shape worse than every Core switching on at the allowance's end — a
+ *    ceiling re-sync beside a late Core, a re-ON that takes late — and an unpredicted load. A Core that never takes the ON is
+ *    pushed (the ON-failure push), and a refused ceiling is (the declined start).
  * The measured capacity scale never reaches this module: the record carries one whole percent (⌈L⌉), a
  * plan output like the setpoint (runwayBasisContracts.test.ts pin 6).
  *
@@ -893,10 +905,12 @@ export function forceChargeLineArmNote(o: {
   ceilingStop?: boolean;
   /** v1.200.0 (A5) — what the plan's own walk cannot hold (nightChargeAdvisor.lineNotHeldOf), and its expected close:
    *  the force-charge still runs as above, and the line says the outage line is not held. null/omitted ⇒ held. */
-  notHeld?: { kind: 'closeUnder' | 'aboveFull' | 'nearFull'; closePct: number | null } | null;
+  notHeld?: { kind: 'closeUnder' | 'aboveFull' | 'nearFull' | 'lateStart'; closePct: number | null } | null;
 }): string {
   const tail = o.notHeld == null ? ''
     : o.notHeld.kind === 'aboveFull' ? ' Line NOT held: above a full pool.'
+    // v1.205.0 — held on the median walk, not with the at-open allowance: never "NOT held".
+    : o.notHeld.kind === 'lateStart' ? ` Line NOT assured: ${o.notHeld.closePct != null ? `~${round1(o.notHeld.closePct)}%` : 'a level near the line'} expected at the close, too close to the line to allow for a late switch-on at the window open.`
       : o.notHeld.kind === 'nearFull' ? ` Line NOT held: within ${2 * FORCE_CHARGE_LINE_HEADROOM_PCT} points of a full pool.`
         : ` Line NOT held: ${o.notHeld.closePct != null ? `~${round1(o.notHeld.closePct)}%` : 'under the line'} expected at the close.`;
   const from = o.expectedStartText != null ? `on from ~${o.expectedStartText}` : 'on just in time';
@@ -1760,6 +1774,13 @@ export function armedLineRunOn(
   return on && forceChargeLineNightPct(s) != null ? s.windowStartMs : null;
 }
 
+/** ★★★ v1.205.0 — PURE. When a line run on record (armedLineRunOn) was verified ON on every slot of ours (forceChargeOnVerifiedAtMs),
+ *  for the plan's at-open allowance (NightChargeInputs.armedLineOnVerifiedAtMs): the plan judges the stamp against its own window
+ *  open and pool reading. null with no such run. armedLineRunOn is unchanged. */
+export function armedLineRunOnSinceMs(s: Parameters<typeof armedLineRunOn>[0]): number | null {
+  return armedLineRunOn(s) != null ? s.forceChargeOnVerifiedAtMs : null;
+}
+
 /** v1.200.0 (Fix10 review 2) — a run on record that no re-ON can bring back, for the plan that names one (LineNoReOn.words stands in for
  *  the re-ON's clause, a sentence of its own only where the plan's walk reaches the panel's stop). */
 export interface LineNoReOn { windowStartMs: number; words: string }
@@ -1827,6 +1848,19 @@ export const FORCE_CHARGE_LINE_AT_RISK_LEAD_MS = FORCE_CHARGE_MIN_RUN_MS;
  *  (lineAtRiskPushDue's hand-back hold) and (review 8) keeps one of them as its margin: a later tick reads about a whole
  *  number of these after this one — later by setInterval's drift and its own read lateness, sooner by this tick's. */
 export const FORCE_CHARGE_TICK_MS = 60_000;
+
+/** ★★★ v1.205.0 — the at-open allowance: the window open to an at-open force-charge running on every Core, as the ticks decide it
+ *  (the plan's claim reads it: nightChargeAdvisor.ts assuredClosePct). Five ticks and the ON's readback grace:
+ *   1. the reserve write's tick, at or after the open (nightChargeActuator.ts APPLY_LEAD_MS 0): up to a tick of phase;
+ *   2. its readback, which the ON rides (reserveRideReady), writing the panel ceiling (the ceiling sync);
+ *   3. the ceiling's readback, which sends the ON;
+ *   4. the re-issue of a Core that did not take it, FORCE_CHARGE_ON_VERIFY_AFTER_MS on, plus a tick of stamp jitter
+ *      (verifyForceChargeOn);
+ *   5. a tick for the re-issue to read ON.
+ *  2026-11-10: the open 23:00:00, the apply 23:00:47, the ON 23:02:47, the re-issue 23:18:47, every Core ON 23:19:47. Modelled as no
+ *  charge on any Core, whatever their number (with one or two connected, one late Core is all of it). Built from code constants
+ *  only. Here, after FORCE_CHARGE_TICK_MS, so the module initialises it. */
+export const FORCE_CHARGE_OPEN_ALLOWANCE_MS = FORCE_CHARGE_ON_VERIFY_AFTER_MS + 5 * FORCE_CHARGE_TICK_MS;
 
 /** v1.200.0 (review 2) — one pool reading of a line night's trail (forceChargeLinePoolSamples). */
 export interface LinePoolSample { pct: number; atMs: number }

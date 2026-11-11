@@ -6,6 +6,11 @@
  * (C) H1 ON THE COST-CARRIED WALK: a line night the cost force-charge carries closes where its walk past the stop ends, never
  * above what the window can reach (the one reach expression a bound line walk's close is capped at); the stated close floored at
  * the reserve, the claim's close (rawClosePct) not. AOA-7, AOA-7b.
+ * (A) THE AT-OPEN ALLOWANCE (nightForceCharge.ts FORCE_CHARGE_OPEN_ALLOWANCE_MS, armedLineRunOnSinceMs; nightChargeAdvisor.ts
+ * expectedLineForceChargeWalk onNotBeforeMs, expectedBuyFromPlan assureUntilMs, withAssuredClose, the plan's claim; index.ts; the
+ * texts): a line night is carried only where its walk holds the line on the median and with nothing charging before each whole
+ * ON minute up to the window open + 20 min, its reach counted from that minute, the lowest close of them; else 'lateStart',
+ * still armed. Anchored at the window open; a verified ON in the pool reading ends it. AOA-1..AOA-23 (with b/c variants).
  *
  *   node scripts/mutate-line-at-open.mjs [--only <id prefix>]
  *
@@ -18,10 +23,22 @@ import { fileURLToPath } from 'node:url';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const NCA = resolve(REPO, 'server/src/nightChargeAdvisor.ts');
+const NFC = resolve(REPO, 'server/src/nightForceCharge.ts');
+const IDX = resolve(REPO, 'server/src/index.ts');
+const NTF = resolve(REPO, 'server/src/notify.ts');
+const CTX = resolve(REPO, 'server/src/chargeText.ts');
+const MSH = resolve(REPO, 'server/src/middayShadow.ts');
+const CARD = resolve(REPO, 'web/src/cards/nightChargeText.ts');
 
 const T_AO = 'test/lineAtOpenAllowance.test.ts';
+const T_REPLAY = 'test/lineAtOpenReplay.test.ts';
 const T_MPW = 'test/measuredPlannerWalks.test.ts';
 const T_YEAR = 'test/lineForceChargeYear.test.ts';
+const T_LINE = 'test/lineForceCharge.test.ts';
+
+const LATE = "  const lineLateStart = lineArmed && chargeTonight && !lineNearFull && !cushionShortfall && !lineCloseUnder\n    && expected.assuredClosePct !== undefined && !lineWalkHolds(expected.assuredClosePct, cushionLineSocPct);";
+const VERIFIED = '  const lineOnVerifiedBy = inputs.armedLineOnVerifiedAtMs != null && Number.isFinite(inputs.armedLineOnVerifiedAtMs)\n    && inputs.armedLineOnVerifiedAtMs >= windowStart && inputs.armedLineOnVerifiedAtMs <= nowMs;';
+const SWEEP = '    const close = expectedBuyFromPlan({ ...o, onNotBeforeMs: m, deliverableKwh }).rawClosePct;';
 
 const MUTANTS = [
   /* ── C: H1 on the cost-carried walk ── */
@@ -38,6 +55,225 @@ const MUTANTS = [
     find: '      out.rawClosePct = round1(Math.min(100, reachPct));\n',
     to: '      /* MUTANT */\n',
     why: 'The claim reads a close the window cannot reach: a cost-carried night out of reach is judged on its uncapped walk.',
+  },
+
+  /* ── A: the at-open allowance ── */
+  {
+    id: 'AOA-1. ★★★ no allowance (0 min)',
+    file: NFC, tests: [T_AO, T_REPLAY],
+    find: 'export const FORCE_CHARGE_OPEN_ALLOWANCE_MS = FORCE_CHARGE_ON_VERIFY_AFTER_MS + 5 * FORCE_CHARGE_TICK_MS;',
+    to: 'export const FORCE_CHARGE_OPEN_ALLOWANCE_MS = 0; /* MUTANT */',
+    why: 'A Friday one-hour night is claimed on a walk that charges from the open, which no ON does: 7 of 168 close under on the replay.',
+  },
+  {
+    id: 'AOA-2. ★★ the allowance three ticks (the ON\'s lead only, no re-issue)',
+    file: NFC, tests: [T_AO, T_REPLAY],
+    find: 'export const FORCE_CHARGE_OPEN_ALLOWANCE_MS = FORCE_CHARGE_ON_VERIFY_AFTER_MS + 5 * FORCE_CHARGE_TICK_MS;',
+    to: 'export const FORCE_CHARGE_OPEN_ALLOWANCE_MS = 3 * FORCE_CHARGE_TICK_MS; /* MUTANT */',
+    why: 'A Core that misses the ON is re-issued only after its readback grace: two late Cores close claimed nights under.',
+  },
+  {
+    id: 'AOA-3. ★★★ the claim never reads the assured walk (lineLateStart false)',
+    file: NCA, tests: [T_AO, T_REPLAY],
+    find: LATE,
+    to: '  const lineLateStart = (false as boolean); /* MUTANT */',
+    why: 'Every night the median walk holds is carried, whatever a late switch-on at the open does.',
+  },
+  {
+    id: 'AOA-4. ★★★ the walk ignores onNotBeforeMs (charges from its start)',
+    file: NCA, tests: [T_AO],
+    find: '    const charging = startMs != null && (o.onNotBeforeMs == null || t >= o.onNotBeforeMs);',
+    to: '    const charging = startMs != null; /* MUTANT */',
+    why: 'The assured walk charges from the open: only the reach moves, and an unbound night (2027-08-09 13:00) is never deferred.',
+  },
+  {
+    id: 'AOA-4b. ★★ only the rising branch deferred (the wait read as the panel\'s latch)',
+    file: NCA, tests: [T_AO],
+    find: '    } else if (charging) {\n      reached = true;',
+    to: '    } else if (startMs != null) { /* MUTANT */\n      reached = true;',
+    why: 'A deferred walk reads as latched at the ceiling: it states the panel\'s stop and re-ONs during the wait.',
+  },
+  {
+    id: 'AOA-5. ★★★ the reach not shifted (the assured walk keeps the median\'s deliverable)',
+    file: NCA, tests: [T_AO],
+    find: SWEEP,
+    to: '    const close = expectedBuyFromPlan({ ...o, onNotBeforeMs: m }).rawClosePct; /* MUTANT */',
+    why: 'A bound night whose walk starts past the allowance (2027-02-15 on nameplate, 18 h) is judged on a reach counted from the open.',
+  },
+  {
+    id: 'AOA-5b. ★★ the line walk not told the allowance (expectedLineBuy)',
+    file: NCA, tests: [T_AO],
+    find: "    acceptKw: o.window.acceptKw ?? null, noReOn: o.noReOn, runOn: o.runOn, standbyW: o.window.standbyW,\n    ...(o.onNotBeforeMs != null ? { onNotBeforeMs: o.onNotBeforeMs } : {}),",
+    to: '    acceptKw: o.window.acceptKw ?? null, noReOn: o.noReOn, runOn: o.runOn, standbyW: o.window.standbyW, /* MUTANT */',
+    why: 'A line walk deferred nowhere: only its reach moves (2027-08-09 13:00 closes ~77.8%, not ~69.1%).',
+  },
+  {
+    id: 'AOA-5c. ★★ the cost walk past the stop not told the allowance',
+    file: NCA, tests: [T_AO],
+    find: "        acceptKw: o.window.acceptKw ?? null, noReOn: true, runOn: jit.startMs != null, standbyW: o.window.standbyW,\n        ...(o.onNotBeforeMs != null ? { onNotBeforeMs: o.onNotBeforeMs } : {}),",
+    to: '        acceptKw: o.window.acceptKw ?? null, noReOn: true, runOn: jit.startMs != null, standbyW: o.window.standbyW, /* MUTANT */',
+    why: 'A cost-carried night that is not window-bound is judged on a walk past its stop that charges from the open.',
+  },
+  {
+    id: 'AOA-6. ★★★ the claim reads the floored (stated) close, not rawClosePct',
+    file: NCA, tests: [T_AO],
+    find: SWEEP,
+    to: "    const r = expectedBuyFromPlan({ ...o, onNotBeforeMs: m, deliverableKwh }); const close = r.mode === 'line' ? r.levelPct : r.closePct; /* MUTANT */",
+    why: 'A 49.99% line the window reaches ~49.9% of reads as held on the 50% floor (2026-11-27 at ×0.944, 16 h).',
+  },
+  {
+    id: 'AOA-8. ★★★ the allowance anchored at the plan\'s own start, not the window open',
+    file: NCA, tests: [T_AO],
+    find: '  const lineOpenAllowanceEndMs = windowStart + FORCE_CHARGE_OPEN_ALLOWANCE_MS;',
+    to: '  const lineOpenAllowanceEndMs = effChargeStartMs + FORCE_CHARGE_OPEN_ALLOWANCE_MS; /* MUTANT */',
+    why: 'Every recompute takes 20 more minutes off a run that may have been on since the open: it never lapses.',
+  },
+  {
+    id: 'AOA-9. ★★★ a verify after the pool reading accepted (<= nowMs dropped)',
+    file: NCA, tests: [T_AO],
+    find: VERIFIED,
+    to: '  const lineOnVerifiedBy = inputs.armedLineOnVerifiedAtMs != null && Number.isFinite(inputs.armedLineOnVerifiedAtMs)\n    && inputs.armedLineOnVerifiedAtMs >= windowStart; /* MUTANT */',
+    why: 'The walk credits a full-rate charge from a pool read before the ON took (a verify landing across the awaits).',
+  },
+  {
+    id: 'AOA-10. ★★ a verify before the window open accepted (>= windowStart dropped)',
+    file: NCA, tests: [T_AO],
+    find: VERIFIED,
+    to: '  const lineOnVerifiedBy = inputs.armedLineOnVerifiedAtMs != null && Number.isFinite(inputs.armedLineOnVerifiedAtMs)\n    && inputs.armedLineOnVerifiedAtMs <= nowMs; /* MUTANT */',
+    why: 'An earlier night\'s ON ends tonight\'s allowance.',
+  },
+  {
+    id: 'AOA-11. ★★ the verify ignored (the allowance always runs to +20)',
+    file: NCA, tests: [T_AO],
+    find: '  const lineOnVerifiedBy = inputs.armedLineOnVerifiedAtMs != null && Number.isFinite(inputs.armedLineOnVerifiedAtMs)\n',
+    to: '  const lineOnVerifiedBy = (false as boolean) && inputs.armedLineOnVerifiedAtMs != null && Number.isFinite(inputs.armedLineOnVerifiedAtMs) /* MUTANT */\n',
+    why: 'A run verified on every Core is still told the line is not assured for a switch-on that has happened.',
+  },
+  {
+    id: 'AOA-12. ★★ every closeUnder worded lateStart',
+    file: NCA, tests: [T_AO],
+    find: "  const cushionEnvelopeReason: CushionEnvelopeReason | null = envelopeReasonOfChain === 'closeUnder' && lineLateStart ? 'lateStart' : envelopeReasonOfChain;",
+    to: "  const cushionEnvelopeReason: CushionEnvelopeReason | null = envelopeReasonOfChain === 'closeUnder' ? 'lateStart' : envelopeReasonOfChain; /* MUTANT */",
+    why: 'A night whose median walk closes under its line (2027-08-09 at ×0.944, 13 h) is told it is merely too close to it.',
+  },
+  {
+    id: 'AOA-13. ★★★ lineNotHeldOf drops lateStart in line mode',
+    file: NCA, tests: [T_AO, T_YEAR],
+    find: "  if (!lineWalkHolds(p.expectedWriteLevelPct ?? null, l)) return 'closeUnder';\n  if (p.cushionEnvelopeReason === 'lateStart') return 'lateStart';\n",
+    to: "  if (!lineWalkHolds(p.expectedWriteLevelPct ?? null, l)) return 'closeUnder';\n  /* MUTANT */\n",
+    why: 'Every surface words a disclosed line night as held: the rationale, the push and the ARMED line say nothing.',
+  },
+  {
+    id: 'AOA-13b. ★★★ lineNotHeldOf drops lateStart on a cost-carried night',
+    file: NCA, tests: [T_AO, T_YEAR],
+    find: "    // v1.205.0 — held on the median walk, not with the at-open allowance.\n    if (p.cushionEnvelopeReason === 'lateStart') return 'lateStart';\n",
+    to: '    /* MUTANT */\n',
+    why: 'A cost-carried night disclosed by the allowance is worded by nothing on the server.',
+  },
+  {
+    id: 'AOA-14. ★★ the card\'s line-mode mirror drops lateStart',
+    file: CARD, tests: [T_AO, T_YEAR],
+    find: "  if (e != null && e < l - 0.05 - 1e-9) return 'closeUnder';\n  if (plan.cushionEnvelopeReason === 'lateStart') return 'lateStart';\n",
+    to: "  if (e != null && e < l - 0.05 - 1e-9) return 'closeUnder';\n  /* MUTANT */\n",
+    why: 'The card shows a disclosed line night as held.',
+  },
+  {
+    id: 'AOA-14b. ★★ the card\'s cost mirror drops lateStart',
+    file: CARD, tests: [T_AO, T_YEAR],
+    find: "    const c = plan.expectedCloseAfterStopPct;\n    if (plan.cushionEnvelopeReason === 'lateStart') return 'lateStart';\n",
+    to: '    const c = plan.expectedCloseAfterStopPct;\n    /* MUTANT */\n',
+    why: 'The server and the card disagree on a cost-carried night.',
+  },
+  {
+    id: 'AOA-14c. ★★ the card row\'s lateStart tail removed',
+    file: CARD, tests: [T_AO],
+    find: "        : kind === 'lateStart' ? ' — too close to the line to allow for a late switch-on at the window open; residual risk remains' : '';",
+    to: "        : ''; /* MUTANT */",
+    why: 'A line-mode lateStart row reads as the force-charge\'s plain row: no disclosure on the card.',
+  },
+  {
+    id: 'AOA-15. ★★★ the 21:30 push\'s lateStart branch removed',
+    file: NTF, tests: [T_AO],
+    find: "    if (kind === 'lateStart') {\n",
+    to: "    if ((false as boolean)) { /* MUTANT */\n",
+    why: 'The push falls back to "its force-charge runs, but the plan does not claim the line" with no reason.',
+  },
+  {
+    id: 'AOA-15b. ★★ the push names a cost-carried night\'s stop as its close',
+    file: NTF, tests: [T_AO],
+    find: "      const e = plan.expectedForceChargeMode === 'line' ? plan.expectedWriteLevelPct : null;",
+    to: '      const e = plan.expectedCloseAfterStopPct ?? plan.expectedWriteLevelPct; /* MUTANT */',
+    why: '"expected to close at ~87%": the cost force-charge\'s stop, not the ~59.9% close past it.',
+  },
+  {
+    id: 'AOA-16. ★★ the mid-day shadow restore drops lateStart',
+    file: MSH, tests: [T_AO, T_LINE],
+    find: " || o.lineNotHeld === 'nearFull' || o.lineNotHeld === 'lateStart' ? { lineNotHeld: o.lineNotHeld } : {}),",
+    to: " || o.lineNotHeld === 'nearFull' ? { lineNotHeld: o.lineNotHeld } : {}), /* MUTANT */",
+    why: 'After a restart the mid-day push loses its NOTE, silently.',
+  },
+  {
+    id: 'AOA-16b. ★★ the mid-day push\'s lateStart NOTE removed',
+    file: CTX, tests: [T_AO],
+    find: "        : l.lineNotHeld === 'lateStart' ? \" NOTE: on the median load this leg's pool is expected to close too close to its outage line to allow for a late switch-on at the window open — residual risk remains.\"\n",
+    to: '        /* MUTANT */\n',
+    why: 'The mid-day leg says its force-charge runs and the line is not claimed, with no reason.',
+  },
+  {
+    id: 'AOA-17. ★★ the line-mode ARMED tail removed',
+    file: NFC, tests: [T_AO],
+    find: "    : o.notHeld.kind === 'lateStart' ? ` Line NOT assured:",
+    to: "    : (false as boolean) ? ` Line NOT assured: /* MUTANT */",
+    why: 'The 21:30 ARMED line says "Line NOT held" of a line the median walk holds.',
+  },
+  {
+    id: 'AOA-17b. ★★ the cost ARMED tail removed',
+    file: IDX, tests: [T_AO],
+    find: "  return eligible + (lineNotHeldOf(plan) === 'lateStart' ? ' Line NOT assured: too close to the line to allow for a late switch-on at the window open.' : '');",
+    to: '  return eligible; /* MUTANT */',
+    why: 'The cost-carried ARMED line says nothing of a disclosed line.',
+  },
+  {
+    id: 'AOA-18. ★★★ the assured walk skips cost-carried nights',
+    file: NCA, tests: [T_AO],
+    find: "  if (!(untilMs > fromMs) || (out.mode !== 'line' && out.rawClosePct == null)) return out;",
+    to: "  if (!(untilMs > fromMs) || out.mode !== 'line') return out; /* MUTANT */",
+    why: 'A cost-carried night at the open (2027-02-05 at ×0.944, 20 h) is claimed on its median walk alone.',
+  },
+  {
+    id: 'AOA-19. ★★★ the allowance\'s end alone walked (no minute inside it)',
+    file: NCA, tests: [T_AO],
+    find: '  if (startMs != null && startMs <= untilMs) for (let m = fromMs + EXPECTED_JIT_STEP_MS; m <= untilMs; m += EXPECTED_JIT_STEP_MS) minutes.push(m);',
+    to: '  if ((false as boolean)) for (let m = fromMs + EXPECTED_JIT_STEP_MS; m <= untilMs; m += EXPECTED_JIT_STEP_MS) minutes.push(m); /* MUTANT */',
+    why: 'The latching walk is not monotone: 2027-08-09 13:00 closes ~76.2% at +20 and ~69.1% at +5.',
+  },
+  {
+    id: 'AOA-20. ★★ index.ts never passes the verified ON',
+    file: IDX, tests: [T_AO],
+    find: '    armedLineOnVerifiedAtMs: shadowLeg == null && opts.arming !== true ? armedLineRunOnSinceMs(nightActuationMem) : null,',
+    to: '    armedLineOnVerifiedAtMs: null, /* MUTANT */',
+    why: 'A run on every Core is disclosed as not assured until the allowance lapses.',
+  },
+  {
+    id: 'AOA-21. ★★ the rationale\'s lateStart NOTE missing',
+    file: NCA, tests: [T_AO, T_YEAR],
+    find: "      : lineNotHeld === 'lateStart'\n        ? ` NOTE: on the median load",
+    to: "      : (false as boolean) /* MUTANT */\n        ? ` NOTE: on the median load",
+    why: 'A disclosed night\'s rationale says nothing of why.',
+  },
+  {
+    id: 'AOA-22. ★★★ the allowance judged from the walk\'s own start (a reserve leg past it: none)',
+    file: NCA, tests: [T_AO],
+    find: '  if (minutes[minutes.length - 1] !== untilMs) minutes.push(untilMs);',
+    to: '  if (minutes.length === 0) return out; /* MUTANT */',
+    why: 'A walk that starts after the allowance (a reserve leg done past it, 2027-02-15 on nameplate) is taken as unaffected: its reach counted from the open.',
+  },
+  {
+    id: 'AOA-23. ★★ the tolerance dropped from the assured check',
+    file: NCA, tests: [T_AO],
+    find: LATE,
+    to: "  const lineLateStart = lineArmed && chargeTonight && !lineNearFull && !cushionShortfall && !lineCloseUnder\n    && expected.assuredClosePct !== undefined && expected.assuredClosePct != null && expected.assuredClosePct < cushionLineSocPct - 1e-9; /* MUTANT */",
+    why: 'An assured close exactly at the line less 0.05 is disclosed: the claim\'s edge is not the scorer\'s.',
   },
 ];
 
