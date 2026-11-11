@@ -39,9 +39,10 @@ import {
   // v1.205.1 — the floor+cushion line a leg's cushion asked for, as the overnight push names it.
   floorCushionLinePct,
 } from './nightChargeAdvisor.js';
-import { APPLY_LEAD_MS, clampReserveTarget, MAX_SPOKEN_ADVISORY_CHARS, RESERVE_WRITE_MAX_PCT, revertDueMs, type NightChargeMode } from './nightChargeActuator.js';
+import { APPLY_LEAD_MS, clampReserveTarget, MAX_SPOKEN_ADVISORY_CHARS, revertDueMs, type NightChargeMode } from './nightChargeActuator.js';
 import { eveningAnnouncement } from './chargeAnnounce.js';
-import { buildMiddayRefreshMessage, type MiddayAnnounceInput } from './chargeText.js';
+// v1.205.1 — the level a leg's outage line is above, in the overnight words (nightForceCharge.lineOverReserveText, through chargeText).
+import { buildMiddayRefreshMessage, lineOverReserveText, type MiddayAnnounceInput } from './chargeText.js';
 import type { NotifyMessage } from './notify.js';
 import { rateAt, type TariffModel } from './tariff.js';
 import type { NightLedgerRow } from './recorder.js';
@@ -898,7 +899,8 @@ export function middayShadowLogLines(rec: MiddayShadowRecord): string[] {
     out.push(`${t} ${rec.day} backup ${at(b.windowStartMs)}→${at(b.windowEndMs)} — ${b.disposition}: reserve ${pct(b.reservePct)}, `
       + `expected ${kwh(b.expectedBuyKwh)} (worst-case sizing ${kwh(b.buyKwh)}); troughs at ${pct(b.cushionTroughSocPct)} against the ${pct(b.cushionLineSocPct)} line (the islanded walk it is sized on, to the next overnight open)`
       // v1.200.0 — the envelope, where it contributes: the line is above what a reserve write can hold.
-      + `${b.cushionShortfallCause != null ? `; the line is above the ${RESERVE_WRITE_MAX_PCT}% the panel accepts as a reserve, and the backup leg writes the reserve only — residual risk remains` : ''}.`
+      // v1.205.1 — keyed on the leg's line: a line in (49, 50] is above the 49% the panel holds (lineOverReserveText).
+      + `${b.cushionShortfallCause != null ? `; the line is above ${lineOverReserveText(b.cushionLineSocPct ?? Infinity, 'accepts')}, and the backup leg writes the reserve only — residual risk remains` : ''}.`
       + `${heldImportText(b.heldImport)} Shadow only: nothing is armed, written or announced for it.`);
   }
   const bb = rec.backupB;
@@ -957,6 +959,8 @@ export function middayShadowAnnounceInput(rec: MiddayShadowRecord, model: Tariff
       ...(c.lateStartAtOpen === true ? { lateStartAtOpen: true as const } : {}),
       // (Fix7 review 1) The line beside its ask: the plan's forceChargeLine.linePct is its cushionLineSocPct.
       ...(c.lineAskPct != null && c.cushionLineSocPct != null ? { linePct: c.cushionLineSocPct } : {}),
+      // ★★ v1.205.1 — and, with no ask, beside an envelope cause: the line its "no force-charge carries it" note is worded by.
+      ...(c.lineAskPct == null && c.cushionShortfallCause != null && c.cushionLineSocPct != null ? { linePct: c.cushionLineSocPct } : {}),
       // ★★★ v1.205.1 — the floor+cushion line its cushion asked for: a refused cycle's push says nothing is armed to hold it.
       ...(c.cushionAskedLinePct != null ? { cushionAskedLinePct: c.cushionAskedLinePct } : {}),
     },
@@ -966,6 +970,8 @@ export function middayShadowAnnounceInput(rec: MiddayShadowRecord, model: Tariff
       ...(b.cushionShortfallCause != null ? { cushionShortfallCause: b.cushionShortfallCause } : {}),
       ...(b.lineAskPct != null ? { lineAskPct: b.lineAskPct } : {}),
       ...(b.lineNotHeld != null ? { lineNotHeld: b.lineNotHeld } : {}),
+      // ★★ v1.205.1 — beside an envelope cause, the backup leg's line: its note is worded by it (chargeText notCarried).
+      ...(b.cushionShortfallCause != null && b.cushionLineSocPct != null ? { linePct: b.cushionLineSocPct } : {}),
     } : null,
     onPeak,
     refreshAtMs: c.windowStartMs - REFRESH_LEAD_MS,

@@ -1993,7 +1993,11 @@ test('★★ T19 the mid-day push and its shadow record: a leg with a line ask i
   assert.equal(fcOf({ ...back.cost, levelPct: 57.3, reservePct: 50 }), true);
   assert.equal(fcOf({ ...noAsk, levelPct: 50, reservePct: 50 }), false, 'no ask, at the reserve: no Charge Now');
   assert.equal(fcOf({ ...noAsk, levelPct: 57.3, reservePct: 50 }), true, 'no ask, above the reserve: Charge Now');
-  assert.equal('linePct' in ms.middayShadowAnnounceInput({ ...back, cost: noAsk as never }, buildApsREvModel())!.cost, false, 'no ask: no line');
+  // v1.205.1 — with no ask, the line only beside an envelope cause: the "no force-charge carries it on this leg" note is worded by it
+  // (refusedNotes.test.ts RN-6); with no cause, none.
+  assert.equal(back.cost!.cushionShortfallCause, 'envelope');
+  assert.equal('linePct' in ms.middayShadowAnnounceInput({ ...back, cost: { ...noAsk, cushionShortfallCause: undefined } as never }, buildApsREvModel())!.cost, false, 'no ask, no cause: no line');
+  assert.equal(ms.middayShadowAnnounceInput({ ...back, cost: noAsk as never }, buildApsREvModel())!.cost.linePct, 68.85, 'no ask, an envelope cause: its line');
   const at50 = buildMiddayPlanMessage(ms.middayShadowAnnounceInput({ ...back, cost: { ...back.cost!, levelPct: 50, reservePct: 50 } }, buildApsREvModel())!).body;
   assert.ok(at50.includes(' SUPERVISED: at 10:00 AM the backup reserve is held at 50% and Charge Now switches on just in time; both are restored at 3:00 PM'), at50);
   // (Fix7, A5 final 2) …and a leg that expects to draw nothing (the reserve-hold shape): the line force-charge is armed on it all

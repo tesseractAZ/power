@@ -29,6 +29,10 @@
  * summariseLeg, middayShadowAnnounceInput); never on an armed render. AOA-29 (b, d..j, l, m). Already held by v1.205.0's tests,
  * so not listed: the envelope note beside or replaced by this one (AO-15b pins the lead and the envelope note end to end), and
  * the restore dropping the line (middayShadow.test.ts's round-trip of a sized evening).
+ * (H) v1.205.1: the mid-day push's "no force-charge carries it on <leg>" note is worded by the named leg's own line (chargeText.ts
+ * notCarried, lineOverReserveText; MiddayBackupText.linePct and a no-ask MiddayCostText.linePct from the record through
+ * middayShadowAnnounceInput), as the overnight envelope note is: a line in (49, 50] is above the 49% the panel holds; so too the
+ * shadow's backup log line. AOA-30 (a..e).
  *
  *   node scripts/mutate-line-at-open.mjs [--only <id prefix>]
  *
@@ -619,6 +623,42 @@ const MUTANTS = [
     find: '    return refusedCushionLineNote("tonight\'s", floorCushionLinePct(plan));',
     to: '    return refusedCushionLineNote("this leg\'s", floorCushionLinePct(plan)); /* MUTANT */',
     why: 'The overnight push names a leg it does not have.',
+  },
+  /* ── H: v1.205.1 — the mid-day note worded by the named leg's line ── */
+  {
+    id: 'AOA-30. ★★★ the mid-day "no force-charge carries it" note in the 50% form whatever the leg\'s line',
+    file: CTX, tests: [T_RN],
+    find: "lineOverReserveText((which === 'this leg' ? c.linePct : i.backup?.linePct) ?? Infinity, 'accepts')",
+    to: "lineOverReserveText(Infinity /* MUTANT */, 'accepts')",
+    why: 'A backup leg sized on a 49.99% line (2026-11-27 21:30 at ×0.944, 16 h): "above the 50% the panel accepts as a reserve" in a push whose cost leg, and whose overnight push, name the 49% the panel holds.',
+  },
+  {
+    id: 'AOA-30b. ★★ the backup leg\'s note worded by the cost leg\'s line',
+    file: CTX, tests: [T_RN],
+    find: "lineOverReserveText((which === 'this leg' ? c.linePct : i.backup?.linePct) ?? Infinity, 'accepts')",
+    to: "lineOverReserveText(c.linePct /* MUTANT */ ?? Infinity, 'accepts')",
+    why: 'Two legs, two lines: the backup leg\'s 49.99% line worded by a cost leg that carries none (the 50% form), or the reverse.',
+  },
+  {
+    id: 'AOA-30c. ★★ the evening input drops the backup leg\'s line',
+    file: MSH, tests: [T_RN],
+    find: '      ...(b.cushionShortfallCause != null && b.cushionLineSocPct != null ? { linePct: b.cushionLineSocPct } : {}),',
+    to: '      /* MUTANT */',
+    why: 'The record carries the backup leg\'s 49.99% line and the shadow\'s preview names the 50% form.',
+  },
+  {
+    id: 'AOA-30d. ★★ the evening input drops a no-ask cost leg\'s line',
+    file: MSH, tests: [T_RN],
+    find: '      ...(c.lineAskPct == null && c.cushionShortfallCause != null && c.cushionLineSocPct != null ? { linePct: c.cushionLineSocPct } : {}),',
+    to: '      /* MUTANT */',
+    why: 'A cost leg on a 49.99% line no force-charge carries (advisory) is pushed "above the 50% the panel accepts as a reserve".',
+  },
+  {
+    id: 'AOA-30e. ★★ the shadow\'s backup log line names a (49, 50] line above the 50%',
+    file: MSH, tests: [T_RN],
+    find: "lineOverReserveText(b.cushionLineSocPct ?? Infinity, 'accepts')",
+    to: "lineOverReserveText(Infinity /* MUTANT */, 'accepts')",
+    why: 'The evening log says the 49.99% line is above the 50% the panel accepts, beside a preview push that names the 49% it holds.',
   },
   {
     id: 'AOA-28. ★★★ the card names the reserve set under a refused arm',
