@@ -905,12 +905,16 @@ export function forceChargeLineArmNote(o: {
   ceilingStop?: boolean;
   /** v1.200.0 (A5) — what the plan's own walk cannot hold (nightChargeAdvisor.lineNotHeldOf), and its expected close:
    *  the force-charge still runs as above, and the line says the outage line is not held. null/omitted ⇒ held. */
-  notHeld?: { kind: 'closeUnder' | 'aboveFull' | 'nearFull' | 'lateStart'; closePct: number | null } | null;
+  notHeld?: {
+    kind: 'closeUnder' | 'aboveFull' | 'nearFull' | 'lateStart'; closePct: number | null;
+    /** v1.205.0 (review) — beside 'lateStart': the plan's NightChargePlan.cushionLateStartAtOpen (lateStartAllowanceWords). */
+    atOpen?: boolean;
+  } | null;
 }): string {
   const tail = o.notHeld == null ? ''
     : o.notHeld.kind === 'aboveFull' ? ' Line NOT held: above a full pool.'
     // v1.205.0 — held on the median walk, not with the at-open allowance: never "NOT held".
-    : o.notHeld.kind === 'lateStart' ? ` Line NOT assured: ${o.notHeld.closePct != null ? `~${round1(o.notHeld.closePct)}%` : 'a level near the line'} expected at the close, too close to the line to allow for a late switch-on at the window open.`
+    : o.notHeld.kind === 'lateStart' ? ` Line NOT assured: ${o.notHeld.closePct != null ? `~${round1(o.notHeld.closePct)}%` : 'a level near the line'} expected at the close, too close to the line to allow for ${lateStartAllowanceWords(o.notHeld.atOpen)}.`
       : o.notHeld.kind === 'nearFull' ? ` Line NOT held: within ${2 * FORCE_CHARGE_LINE_HEADROOM_PCT} points of a full pool.`
         : ` Line NOT held: ${o.notHeld.closePct != null ? `~${round1(o.notHeld.closePct)}%` : 'under the line'} expected at the close.`;
   const from = o.expectedStartText != null ? `on from ~${o.expectedStartText}` : 'on just in time';
@@ -1861,6 +1865,16 @@ export const FORCE_CHARGE_TICK_MS = 60_000;
  *  charge on any Core, whatever their number (with one or two connected, one late Core is all of it). Built from code constants
  *  only. Here, after FORCE_CHARGE_TICK_MS, so the module initialises it. */
 export const FORCE_CHARGE_OPEN_ALLOWANCE_MS = FORCE_CHARGE_ON_VERIFY_AFTER_MS + 5 * FORCE_CHARGE_TICK_MS;
+
+/** ★★ v1.205.0 (review) — PURE. What a 'lateStart' night's line is too close to its expected close to allow for, by what the at-open
+ *  allowance defers (NightChargePlan.cushionLateStartAtOpen): the plan's own force-charge switch-on, where its start is inside the
+ *  allowance; otherwise — a start past the allowance, or none expected, where the reach counted from the allowance's end decides —
+ *  the window's charge, never a switch-on at the window open the plan does not make (2027-02-15 21:30 on nameplate at 18 h: the
+ *  force-charge from ~00:58). The rationale, the 21:30 push, the ARMED lines and the mid-day push word it by this; the card mirrors it
+ *  word for word (web nightChargeText.ts outageLineRow). */
+export function lateStartAllowanceWords(atOpen: boolean | undefined): string {
+  return atOpen === true ? 'a late switch-on at the window open' : "a late start of the window's charge";
+}
 
 /** v1.200.0 (review 2) — one pool reading of a line night's trail (forceChargeLinePoolSamples). */
 export interface LinePoolSample { pct: number; atMs: number }

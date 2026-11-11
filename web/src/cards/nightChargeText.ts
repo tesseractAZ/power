@@ -260,6 +260,9 @@ export interface CushionNotePlan {
   cushionEnvelopeReason?: 'advisory' | 'backupLeg' | 'reserveAtTarget' | 'armedNoLine' | 'startClosed' | 'nearFull' | 'closeUnder' | 'lateStart';
   /** The server's words for 'startClosed' (NightChargePlan.cushionStartClosedWords). */
   cushionStartClosedWords?: string;
+  /** v1.205.0 (review) — beside 'lateStart': the plan's own start is inside the at-open allowance (NightChargePlan.cushionLateStartAtOpen),
+   *  so the row names a late switch-on at the window open; absent, the window's charge. */
+  cushionLateStartAtOpen?: boolean;
   /** No verified write stands behind 'startClosed', or a partial ON runs beside it (NightChargePlan.cushionStartClosedNoWrite): the card leads with the words. */
   cushionStartClosedNoWrite?: boolean;
   /** The reserve the plan read: what 'reserveAtTarget' names. */
@@ -359,8 +362,10 @@ export function outageLineRow(plan: CushionNotePlan, maxPct: number | null = nul
   const notHeld = kind === 'closeUnder' ? ' — under the line; residual risk remains'
     : kind === 'aboveFull' ? ' — the line is above a full pool; residual risk remains'
       : kind === 'nearFull' ? ' — within 10 points of a full pool, not held with its usual margin; residual risk remains'
-        // v1.205.0 — held on the median walk, not with the at-open allowance (a cost-carried night: the disclosed row below).
-        : kind === 'lateStart' ? ' — too close to the line to allow for a late switch-on at the window open; residual risk remains' : '';
+        // v1.205.0 — held on the median walk, not with the at-open allowance (a cost-carried night: the disclosed row below). (review) The
+        // server's nightForceCharge.lateStartAllowanceWords, mirrored: a switch-on at the window open only where the plan's own start is
+        // inside the allowance (cushionLateStartAtOpen), else the window's charge.
+        : kind === 'lateStart' ? ` — too close to the line to allow for ${plan.cushionLateStartAtOpen === true ? 'a late switch-on at the window open' : "a late start of the window's charge"}; residual risk remains` : '';
   const row = outageLineArmedRow(plan, max, r1, lineText, over);
   if (row == null && armed && (plan.cushionShortfallCause != null || kind === 'closeUnder')) {
     // Never silent on a disclosed night, whatever the walk's mode. v1.202.0 — a night the cost force-charge carries whose walk

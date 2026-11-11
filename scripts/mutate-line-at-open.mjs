@@ -11,6 +11,9 @@
  * texts): a line night is carried only where its walk holds the line on the median and with nothing charging before each whole
  * ON minute up to the window open + 20 min, its reach counted from that minute, the lowest close of them; else 'lateStart',
  * still armed. Anchored at the window open; a verified ON in the pool reading ends it. AOA-1..AOA-23 (with b/c variants).
+ * (W) THE WORDS BY ONE PREDICATE (review): a 'lateStart' night names a late switch-on at the window open only where the plan's own
+ * start is inside the allowance (NightChargePlan.cushionLateStartAtOpen, nightForceCharge.lateStartAllowanceWords), else a late
+ * start of the window's charge — on the rationale, the push, the card, both ARMED lines and the mid-day push. AOA-24 (a..k).
  *
  *   node scripts/mutate-line-at-open.mjs [--only <id prefix>]
  *
@@ -187,7 +190,7 @@ const MUTANTS = [
   {
     id: 'AOA-14c. ★★ the card row\'s lateStart tail removed',
     file: CARD, tests: [T_AO],
-    find: "        : kind === 'lateStart' ? ' — too close to the line to allow for a late switch-on at the window open; residual risk remains' : '';",
+    find: "        : kind === 'lateStart' ? ` — too close to the line to allow for ${plan.cushionLateStartAtOpen === true ? 'a late switch-on at the window open' : \"a late start of the window's charge\"}; residual risk remains` : '';",
     to: "        : ''; /* MUTANT */",
     why: 'A line-mode lateStart row reads as the force-charge\'s plain row: no disclosure on the card.',
   },
@@ -215,7 +218,7 @@ const MUTANTS = [
   {
     id: 'AOA-16b. ★★ the mid-day push\'s lateStart NOTE removed',
     file: CTX, tests: [T_AO],
-    find: "        : l.lineNotHeld === 'lateStart' ? \" NOTE: on the median load this leg's pool is expected to close too close to its outage line to allow for a late switch-on at the window open — residual risk remains.\"\n",
+    find: "        : l.lineNotHeld === 'lateStart' ? ` NOTE: on the median load this leg's pool is expected to close too close to its outage line to allow for ${lateStartAllowanceWords(l.lateStartAtOpen)} — residual risk remains.`\n",
     to: '        /* MUTANT */\n',
     why: 'The mid-day leg says its force-charge runs and the line is not claimed, with no reason.',
   },
@@ -229,7 +232,7 @@ const MUTANTS = [
   {
     id: 'AOA-17b. ★★ the cost ARMED tail removed',
     file: IDX, tests: [T_AO],
-    find: "  return eligible + (lineNotHeldOf(plan) === 'lateStart' ? ' Line NOT assured: too close to the line to allow for a late switch-on at the window open.' : '');",
+    find: "  return eligible + (lineNotHeldOf(plan) === 'lateStart' ? ` Line NOT assured: too close to the line to allow for ${lateStartAllowanceWords(plan?.cushionLateStartAtOpen)}.` : '');",
     to: '  return eligible; /* MUTANT */',
     why: 'The cost-carried ARMED line says nothing of a disclosed line.',
   },
@@ -255,6 +258,13 @@ const MUTANTS = [
     why: 'A run on every Core is disclosed as not assured until the allowance lapses.',
   },
   {
+    id: 'AOA-20b. ★★★ buildNightChargeInputs drops the verified ON (index.ts hands it over; the plan never sees it)',
+    file: NCA, tests: [T_AO],
+    find: '    ...(armedLineOnVerifiedAtMs !== undefined ? { armedLineOnVerifiedAtMs } : {}),\n',
+    to: '    /* MUTANT */\n',
+    why: 'The production path: a run verified ON on every Core stays disclosed until the allowance lapses (the served path alone was tested).',
+  },
+  {
     id: 'AOA-21. ★★ the rationale\'s lateStart NOTE missing',
     file: NCA, tests: [T_AO, T_YEAR],
     find: "      : lineNotHeld === 'lateStart'\n        ? ` NOTE: on the median load",
@@ -274,6 +284,92 @@ const MUTANTS = [
     find: LATE,
     to: "  const lineLateStart = lineArmed && chargeTonight && !lineNearFull && !cushionShortfall && !lineCloseUnder\n    && expected.assuredClosePct !== undefined && expected.assuredClosePct != null && expected.assuredClosePct < cushionLineSocPct - 1e-9; /* MUTANT */",
     why: 'An assured close exactly at the line less 0.05 is disclosed: the claim\'s edge is not the scorer\'s.',
+  },
+
+  /* ── W: the words by one predicate (review) ── */
+  {
+    id: 'AOA-24. ★★★ every lateStart night worded as a switch-on at the window open (the start past the allowance ignored)',
+    file: NCA, tests: [T_AO],
+    find: '  const lineLateStartAtOpen = cushionEnvelopeReason === \'lateStart\' && lineAssureUntilMs != null\n    && expected.forceChargeStartMs != null && expected.forceChargeStartMs <= lineAssureUntilMs;',
+    to: '  const lineLateStartAtOpen = cushionEnvelopeReason === \'lateStart\' && lineAssureUntilMs != null; /* MUTANT */',
+    why: '2027-02-15 21:30 on nameplate, 18 h: "switches on at ~00:58" beside "a late switch-on at the window open".',
+  },
+  {
+    id: 'AOA-24b. ★★ no lateStart night worded as a switch-on at the window open',
+    file: NCA, tests: [T_AO],
+    find: '  const lineLateStartAtOpen = cushionEnvelopeReason === \'lateStart\' && lineAssureUntilMs != null\n',
+    to: '  const lineLateStartAtOpen = (false as boolean) && cushionEnvelopeReason === \'lateStart\' && lineAssureUntilMs != null /* MUTANT */\n',
+    why: 'An at-open night (2027-04-09 at ×0.944, 7 h) loses the switch-on it is disclosed for.',
+  },
+  {
+    id: 'AOA-24c. ★★ the rationale words ignore the predicate',
+    file: NCA, tests: [T_AO],
+    find: 'outage line to allow for ${lateStartAllowanceWords(lineLateStartAtOpen)}, so the cushion is not assured',
+    to: 'outage line to allow for ${lateStartAllowanceWords(true)}, so the cushion is not assured /* MUTANT */',
+    why: 'The rationale names a switch-on at the open its own Expected sentence puts at ~00:58.',
+  },
+  {
+    id: 'AOA-24d. ★★ the 21:30 push words ignore the predicate',
+    file: NTF, tests: [T_AO],
+    find: '      const what = lateStartAllowanceWords(plan.cushionLateStartAtOpen);',
+    to: '      const what = lateStartAllowanceWords(true); /* MUTANT */',
+    why: 'The push names a switch-on at the window open on a night whose own force-charge start is past the allowance (2027-02-15, ~00:58).',
+  },
+  {
+    id: 'AOA-24e. ★★ the card row ignores the predicate',
+    file: CARD, tests: [T_AO],
+    find: "allow for ${plan.cushionLateStartAtOpen === true ? 'a late switch-on at the window open' : \"a late start of the window's charge\"}; residual",
+    to: "allow for ${'a late switch-on at the window open'}; residual /* MUTANT */",
+    why: 'The card disagrees with the server on a night whose start is past the allowance.',
+  },
+  {
+    id: 'AOA-24f. ★★ the mid-day summary drops the predicate',
+    file: MSH, tests: [T_AO],
+    find: "    ...(p?.cushionLateStartAtOpen === true && lineNotHeldOf(p) === 'lateStart' ? { lateStartAtOpen: true as const } : {}),\n",
+    to: '    /* MUTANT */\n',
+    why: 'An at-open mid-day leg is worded as a late start of the window\'s charge.',
+  },
+  {
+    id: 'AOA-24g. ★★ the mid-day restore drops the predicate',
+    file: MSH, tests: [T_AO],
+    find: "    ...(o.lineNotHeld === 'lateStart' && o.lateStartAtOpen === true ? { lateStartAtOpen: true as const } : {}),\n",
+    to: '    /* MUTANT */\n',
+    why: 'After a restart the mid-day push words an at-open leg differently from the evening record.',
+  },
+  {
+    id: 'AOA-24g2. ★ the mid-day restore keeps the predicate beside any kind',
+    file: MSH, tests: [T_AO],
+    find: "    ...(o.lineNotHeld === 'lateStart' && o.lateStartAtOpen === true ? { lateStartAtOpen: true as const } : {}),\n",
+    to: "    ...(o.lateStartAtOpen === true ? { lateStartAtOpen: true as const } : {}), /* MUTANT */\n",
+    why: 'A restored record carries a field its kind never has.',
+  },
+  {
+    id: 'AOA-24h. ★★ the mid-day announce input drops the predicate',
+    file: MSH, tests: [T_AO],
+    find: '      ...(c.lateStartAtOpen === true ? { lateStartAtOpen: true as const } : {}),\n',
+    to: '      /* MUTANT */\n',
+    why: 'The mid-day push never names the switch-on at the open its leg is disclosed for.',
+  },
+  {
+    id: 'AOA-24i. ★★ the mid-day push words ignore the predicate',
+    file: CTX, tests: [T_AO],
+    find: 'its outage line to allow for ${lateStartAllowanceWords(l.lateStartAtOpen)} — residual risk remains.`',
+    to: 'its outage line to allow for ${lateStartAllowanceWords(true)} — residual risk remains.` /* MUTANT */',
+    why: 'A leg whose start is past the allowance is told of a switch-on at the window open.',
+  },
+  {
+    id: 'AOA-24j. ★★ the line-mode ARMED line is not told the predicate',
+    file: IDX, tests: [T_AO],
+    find: 'closePct: plan?.expectedWriteLevelPct ?? null, atOpen: plan?.cushionLateStartAtOpen === true } : null,',
+    to: 'closePct: plan?.expectedWriteLevelPct ?? null } : null, /* MUTANT */',
+    why: 'Every line-mode ARMED line names a late start of the window\'s charge, an at-open night included.',
+  },
+  {
+    id: 'AOA-24k. ★★ the words helper ignores what the allowance defers',
+    file: NFC, tests: [T_AO],
+    find: "  return atOpen === true ? 'a late switch-on at the window open' : \"a late start of the window's charge\";",
+    to: "  return 'a late switch-on at the window open'; /* MUTANT */",
+    why: 'Every surface names a switch-on at the open, whatever the plan\'s own start.',
   },
 ];
 

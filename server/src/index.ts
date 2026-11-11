@@ -70,6 +70,8 @@ import {
   forceChargeStartClosed, lineStartClosedWords,
   // v1.200.0 (Fix9 review 2) — a recompute of a window whose armed record carries no line claims no ON the record cannot make.
   armedNoLineStartMs, armedLineStartClosed, armedLineNoReOn, armedLineRunOn, armedLineRunOnSinceMs, lineCloseReadingLate, lineGridOffPushDue, type LineClosure,
+  // v1.205.0 (review) — what a 'lateStart' night's line is too close to allow for (the switch-on at the open, or the window's charge).
+  lateStartAllowanceWords,
   // v1.200.0 (review 4) — what a line re-ON's readback check stamps, the re-ON that took effect included.
   lineReOnCheckedStamp,
   // v1.200.0 (review 6) — the force-charge tick's cadence, which the line-at-risk push's hand-back hold counts.
@@ -6566,7 +6568,7 @@ function forceChargeArmNote(armed: NightActuationState, plan: NightChargePlan | 
       timedByText: fmtSiteClock(endMs - FORCE_CHARGE_MIN_RUN_MS),
       // v1.200.0 (review 2) — a walk that reaches the panel ceiling: no "as backstop", the re-ON named.
       ceilingStop: plan?.expectedLineCeilingStop != null,
-      notHeld: notHeld != null ? { kind: notHeld, closePct: plan?.expectedWriteLevelPct ?? null } : null,
+      notHeld: notHeld != null ? { kind: notHeld, closePct: plan?.expectedWriteLevelPct ?? null, atOpen: plan?.cushionLateStartAtOpen === true } : null,
     });
   }
   if (!forceChargeOn()) return 'Force-charge: off (disabled by options).';
@@ -6581,7 +6583,7 @@ function forceChargeArmNote(armed: NightActuationState, plan: NightChargePlan | 
   const eligible = `Force-charge: ELIGIBLE — just in time to reach ~${c}% by the window close (from the open, if the pack needs the whole window); OFF when it gets there (software stop; panel ceiling ${desiredForceChargeCeilingPct(c)}% as backstop).`
     + (closeAfter != null ? ` Line NOT held: ~${round1(closeAfter)}% expected at the close.` : '');
   // ★★★ v1.205.0 — held on the median walk past the stop, not with the at-open allowance: never "NOT held".
-  return eligible + (lineNotHeldOf(plan) === 'lateStart' ? ' Line NOT assured: too close to the line to allow for a late switch-on at the window open.' : '');
+  return eligible + (lineNotHeldOf(plan) === 'lateStart' ? ` Line NOT assured: too close to the line to allow for ${lateStartAllowanceWords(plan?.cushionLateStartAtOpen)}.` : '');
 }
 
 /**

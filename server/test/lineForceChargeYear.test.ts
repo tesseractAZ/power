@@ -91,7 +91,8 @@ const holds = (e: number | null | undefined, l: number): boolean => e == null ||
 const UNDER_NOTE = /NOTE: on the median load the pool is expected to close at ~[\d.]+%, under tonight's [\d.]+% outage line, so the cushion is not fully held — residual risk remains\./;
 const ABOVE_NOTE = /NOTE: tonight's [\d.]+% outage line is above a full pool, so no charge can hold it — residual risk remains\./;
 const MARGIN_NOTE = /NOTE: tonight's [\d.]+% outage line is within 10 points of a full pool, so the force-charge cannot hold it with its usual margin; the cushion is not assured — residual risk remains\./;
-const LATE_NOTE = /NOTE: on the median load the pool is expected to close at ~[\d.]+%, too close to tonight's [\d.]+% outage line to allow for a late switch-on at the window open, so the cushion is not assured — residual risk remains\./;
+// v1.205.0 (review) — a late switch-on at the window open where the plan's own start is inside the allowance, else the window's charge.
+const LATE_NOTE = /NOTE: on the median load the pool is expected to close at ~[\d.]+%, too close to tonight's [\d.]+% outage line to allow for (?:a late switch-on at the window open|a late start of the window's charge), so the cushion is not assured — residual risk remains\./;
 
 interface Row {
   line: number | null; armed: boolean; cause: string | null; reason: string | null; sf: boolean; E: number | null; buy: number | null;

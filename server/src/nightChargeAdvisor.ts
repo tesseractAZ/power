@@ -109,8 +109,9 @@ import {
   lineStartClosedWords, type LineClosure, type LineNoReOn,
   // v1.203.0 — the level a line in (49, 50] is above: the 49% the panel holds under a 50% reserve.
   lineOverReserveText,
-  // v1.205.0 — the at-open allowance: the window open to an at-open force-charge running on every Core, as the tick decides it.
-  FORCE_CHARGE_OPEN_ALLOWANCE_MS,
+  // v1.205.0 — the at-open allowance: the window open to an at-open force-charge running on every Core, as the tick decides it;
+  // (review) and what a 'lateStart' night's words say it allows for (the switch-on at the open, or the window's charge).
+  FORCE_CHARGE_OPEN_ALLOWANCE_MS, lateStartAllowanceWords,
 } from './nightForceCharge.js';
 // R2 — the window resolver and the per-leg rules live with the cycle chooser; the taper ceiling
 // with the curtailment engine's taper band. (chargeWindows.ts imports only tariff.ts;
@@ -420,7 +421,8 @@ export interface ForceChargeLine { askPct: number; linePct: number }
  *  ★★★ v1.205.0 — THE CLAIM IS TWO WALKS. A line night is carried only where BOTH hold the line by this rule: its median walk
  *  (the close every surface states), and the same walk with nothing charging before each whole ON minute up to the window open
  *  + FORCE_CHARGE_OPEN_ALLOWANCE_MS (the at-open allowance), its reach counted from that minute, taking the LOWEST close
- *  (expectedBuyFromPlan assuredClosePct; capped at the reach, never floored at the reserve). The second walk runs only while
+ *  (expectedBuyFromPlan assuredClosePct; capped at the reach, not floored at the reserve as the stated level is — the walk itself
+ *  still holds a pool it draws down at the written reserve, rawClosePct). The second walk runs only while
  *  the plan's own start is inside the allowance and no verified ON is in the pool reading it walks from. A night whose median
  *  walk holds but whose assured walk does not is disclosed 'lateStart'; its stated figures stay the median walk's. */
 export const LINE_CARRY_CLOSE_TOLERANCE_PCT = 0.05;
@@ -739,6 +741,12 @@ export interface NightChargePlan {
   /** v1.200.0 (Fix10) — beside the reason 'startClosed', and only there: why no force-charge for the line starts, in words
    *  (nightForceCharge.lineStartClosedWords, the pushes' own), for the card's row. */
   cushionStartClosedWords?: string;
+  /** ★★ v1.205.0 (review) — beside the reason 'lateStart', and only there: the plan's own force-charge start
+   *  (expectedForceChargeStartMs) is inside the at-open allowance, so what the assured walk defers is its switch-on at the
+   *  window open. Absent on a 'lateStart' night whose start is past the allowance, or none (its reach, counted from the
+   *  allowance's end, decides): its words name a late start of the window's charge, never a switch-on at the open the plan
+   *  does not make (nightForceCharge.lateStartAllowanceWords; every surface words it by this one field). */
+  cushionLateStartAtOpen?: true;
   /** v1.200.0 (A5) — the outage line above the 50% reserve, ARMED with the night force-charge: ⌈L⌉ (askOf, the
    *  reserve path's own ask) and L. Present on every charge plan whose islanded-outage line asks above the
    *  envelope, not economic-only, with the line force-charge eligible (a write mode, never the backup leg),
@@ -1373,9 +1381,12 @@ export interface ExpectedBuy {
    *  walk past its stop reaches, % (`levelPct` is the stop). Absent otherwise, and with no P50 basis. */
   closePct?: number;
   /** v1.205.0 — the close the line claim reads, %: the line walk's close (line mode) or the walk past a cost stop (beside
-   *  closePct), capped at the window's reach where the window binds (lineWindowReachKwh), and NOT floored at the reserve — a
-   *  line in (49, 50] is judged on what the window reaches, never on the 50% the stated level is floored at. Absent with no
-   *  P50 basis. Nothing bought, levelled, started or stated reads it. */
+   *  closePct), capped at the window's reach where the window binds (lineWindowReachKwh), and NOT floored at the reserve as the
+   *  stated level is (round1(max(reserve, …))) — a line in (49, 50] the window cannot reach is judged on that reach, never on the
+   *  50% the stated level is floored at. (review) The walk itself holds a pool it draws down at the WRITTEN reserve
+   *  (expectedLineForceChargeWalk's floor), so a close the walk ends on the reserve reads at it, not at the point under it the
+   *  panel holds a pool it charged up to (PANEL_RESERVE_HOLD_UNDERSHOOT_PCT, measured on charge-ups only): a residual, stated in
+   *  docs 15-1 (2026-10-19 21:30 on nameplate at 13 h). Absent with no P50 basis. Nothing bought, levelled, started or stated reads it. */
   rawClosePct?: number;
   /** ★★★ v1.205.0 — with expectedBuyFromPlan's `assureUntilMs`, on a line-mode night or one whose cost walk carries rawClosePct:
    *  the LOWEST rawClosePct of the same walk with nothing charging before each whole ON minute up to it, its reach counted
@@ -1724,7 +1735,7 @@ function expectedLineBuy(
     buyKwh: null, levelPct: round1(Math.max(reservePct, (walk.closeKwh / o.fullKwh) * 100)), mode: 'line', panelCeilingPct,
     startTargetPct, forceChargeStartMs: walk.startMs, forceChargeFromPct: round1((walk.startPackKwh / o.fullKwh) * 100),
     ...(walk.ceilingReached ? { ceilingStop: true as const } : {}),
-    // v1.205.0 — the close the claim reads: unfloored (a line in (49, 50] is judged on it, never on the reserve floor).
+    // v1.205.0 — the close the claim reads: not floored at the reserve as the level is (the walk's own floor, the written reserve, stands).
     rawClosePct: round1((walk.closeKwh / o.fullKwh) * 100),
   };
   liftKwh += walk.gridKwh;
@@ -1735,7 +1746,7 @@ function expectedLineBuy(
     const reachKwh = lineWindowReachKwh(o, deliverable);
     // The stated close is never above it (floored at the reserve, the level convention of every bound night).
     if (walk.closeKwh > reachKwh + 1e-9) out.levelPct = round1(Math.max(reservePct, Math.min(100, (reachKwh / o.fullKwh) * 100)));
-    // v1.205.0 — the claim's close too, capped alike and never floored.
+    // v1.205.0 — the claim's close too, capped alike and not floored at the reserve.
     if (walk.closeKwh > reachKwh + 1e-9) out.rawClosePct = round1(Math.min(100, (reachKwh / o.fullKwh) * 100));
     // The panel's stop is stated only where the window can reach the panel ceiling at all.
     if (reachKwh < (Math.min(100, panelCeilingPct) / 100) * o.fullKwh - 1e-9) delete out.ceilingStop;
@@ -2962,6 +2973,10 @@ function sizeNightChargePlan(inputs: NightChargeInputs, holdUndershootPct: numbe
     : backupLeg ? 'backupLeg' : lineEligible !== true ? 'advisory' : lineNoWrite ? 'reserveAtTarget' : lineNotOnRecord ? 'armedNoLine' : lineStartClosed != null ? 'startClosed' : lineNearFull ? 'nearFull' : 'closeUnder';
   // v1.205.0 — the chain's last arm, where the median walk held: the at-open allowance is what the night cannot hold.
   const cushionEnvelopeReason: CushionEnvelopeReason | null = envelopeReasonOfChain === 'closeUnder' && lineLateStart ? 'lateStart' : envelopeReasonOfChain;
+  // ★★ v1.205.0 (review) — what the allowance defers on it: the plan's own switch-on where its start is inside the allowance (the
+  // sweep walks every minute, withAssuredClose), else the window's charge (only the reach from the allowance's end moved).
+  const lineLateStartAtOpen = cushionEnvelopeReason === 'lateStart' && lineAssureUntilMs != null
+    && expected.forceChargeStartMs != null && expected.forceChargeStartMs <= lineAssureUntilMs;
   // v1.200.0 (review 2) — the line walk starts and reaches the panel ceiling (NightChargePlan.expectedLineCeilingStop).
   const lineCeilingStop = expected.mode === 'line' && expected.ceilingStop === true && expected.forceChargeStartMs != null
     && expected.levelPct != null && expected.panelCeilingPct != null && expected.startTargetPct != null
@@ -3136,7 +3151,7 @@ function sizeNightChargePlan(inputs: NightChargeInputs, holdUndershootPct: numbe
       ? ` NOTE: tonight's ${cushionLineSocPct}% outage line is above a full pool, so no charge can hold it — residual risk remains.`
       // ★★★ v1.205.0 — the median close (the one every surface states), and the at-open allowance it cannot hold.
       : lineNotHeld === 'lateStart'
-        ? ` NOTE: on the median load the pool is expected to close at ~${lineCloseAfterStopPct ?? expected.levelPct}%, too close to tonight's ${cushionLineSocPct}% outage line to allow for a late switch-on at the window open, so the cushion is not assured — residual risk remains.`
+        ? ` NOTE: on the median load the pool is expected to close at ~${lineCloseAfterStopPct ?? expected.levelPct}%, too close to tonight's ${cushionLineSocPct}% outage line to allow for ${lateStartAllowanceWords(lineLateStartAtOpen)}, so the cushion is not assured — residual risk remains.`
       : lineNotHeld === 'nearFull'
         ? ` NOTE: tonight's ${cushionLineSocPct}% outage line is within ${2 * FORCE_CHARGE_LINE_HEADROOM_PCT} points of a full pool, so the force-charge cannot hold it with its usual margin; the cushion is not assured — residual risk remains.`
         : '';
@@ -3205,6 +3220,8 @@ function sizeNightChargePlan(inputs: NightChargeInputs, holdUndershootPct: numbe
     ...(cushionEnvelopeReason != null ? { cushionEnvelopeReason } : {}),
     ...(cushionStartClosedWords != null ? { cushionStartClosedWords } : {}),
     ...(lineStartClosed != null && inputs.armedLineStartClosed?.writeStands !== true ? { cushionStartClosedNoWrite: true as const } : {}),
+    // v1.205.0 (review) — only beside 'lateStart' whose own start is inside the allowance.
+    ...(lineLateStartAtOpen ? { cushionLateStartAtOpen: true as const } : {}),
     ...(forceChargeLine != null ? { forceChargeLine } : {}),
     // v1.200.1 — only where true, so no other plan's digest moves: the panel reads the write and the night carries its ask (the texts read it).
     ...(lineStanding && forceChargeLine != null ? { lineReserveStands: true as const } : {}),

@@ -2061,7 +2061,8 @@ test('★ T19 the source: the line-mode ON log names the panel\'s own stop and t
   assert.match(tick, /— stops at the target, with the panel's \$\{desiredForceChargeCeilingPct\(state\.forceChargeCeilingPct!\)\}% ceiling as the backstop\./, 'the cost ON log is today\'s');
   const arm = INDEX.slice(INDEX.indexOf('function forceChargeArmNote('), INDEX.indexOf('async function runForceChargeTick('));
   assert.ok(arm.includes('    const notHeld = lineNotHeldOf(plan);\n'), arm);
-  assert.ok(arm.includes('      notHeld: notHeld != null ? { kind: notHeld, closePct: plan?.expectedWriteLevelPct ?? null } : null,\n'), arm);
+  // v1.205.0 (review) — and, beside 'lateStart', whether its own start is inside the at-open allowance (the words: lateStartAllowanceWords).
+  assert.ok(arm.includes('      notHeld: notHeld != null ? { kind: notHeld, closePct: plan?.expectedWriteLevelPct ?? null, atOpen: plan?.cushionLateStartAtOpen === true } : null,\n'), arm);
 });
 
 /* ══ T23 — the mid-day re-entry hold never holds a leg the line force-charge is armed on ══════════════════════ */

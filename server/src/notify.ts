@@ -22,6 +22,8 @@ import {
   lineStartClosedWords, type ForceChargeStartClosed,
   // v1.203.0 — the level a line in (49, 50] is above: the 49% the panel holds under a 50% reserve.
   lineOverReserveText,
+  // v1.205.0 (review) — what a 'lateStart' night's line is too close to allow for (the switch-on at the open, or the window's charge).
+  lateStartAllowanceWords,
 } from './nightForceCharge.js';
 import { isNoChargeKwh, revertRetryText, RESERVE_WRITE_MAX_PCT, PANEL_RESERVE_HOLD_UNDERSHOOT_PCT, type NightChargeMode, type RevertResendOnReport, type RestoreSummaryKind } from './nightChargeActuator.js';
 // R5 — the day-aware formatter's clocks (chargeText.ts), shared with the mid-day texts.
@@ -1494,7 +1496,8 @@ function sizingShortfall(plan: Pick<NightChargePlan, 'cushionShortfall' | 'cushi
  *  whatever the reason or cause; above a full pool; held without its usual margin), on a carried night whose sizing
  *  fell short too (cause null, beside the caps note). Never "no force-charge" on an armed night. '' otherwise. PURE. */
 function envelopeShortfallNote(plan: Pick<NightChargePlan, 'cushionShortfallCause' | 'cushionLineSocPct' | 'cushionEnvelopeReason'
-  | 'expectedWriteLevelPct' | 'forceChargeLine' | 'expectedForceChargeMode' | 'reserveFloorPct' | 'expectedCloseAfterStopPct'>): string {
+  | 'expectedWriteLevelPct' | 'forceChargeLine' | 'expectedForceChargeMode' | 'reserveFloorPct' | 'expectedCloseAfterStopPct'
+  | 'cushionLateStartAtOpen'>): string {
   // (Fix8) Beside the 50% reserve and a full pool as lineBesidePct names it (a 100.03% line is "100.03%" above a full pool, a 50.03%
   // one "50.03%" above the reserve); a line stated at the reserve unnumbered.
   const line = plan.cushionLineSocPct != null && Number.isFinite(plan.cushionLineSocPct)
@@ -1511,9 +1514,11 @@ function envelopeShortfallNote(plan: Pick<NightChargePlan, 'cushionShortfallCaus
     // the cost force-charge carries names no figure (its level is the stop, and the plan names its close past it only under the line).
     if (kind === 'lateStart') {
       const e = plan.expectedForceChargeMode === 'line' ? plan.expectedWriteLevelPct : null;
+      // (review) A switch-on at the window open only where the plan's own start is inside the allowance (cushionLateStartAtOpen).
+      const what = lateStartAllowanceWords(plan.cushionLateStartAtOpen);
       return e != null && Number.isFinite(e)
-        ? ` NOTE: on the median load the pool is expected to close at ~${round1(e)}%, too close to ${line} to allow for a late switch-on at the window open — residual risk remains.`
-        : ` NOTE: ${line} is too close to the expected close to allow for a late switch-on at the window open — residual risk remains.`;
+        ? ` NOTE: on the median load the pool is expected to close at ~${round1(e)}%, too close to ${line} to allow for ${what} — residual risk remains.`
+        : ` NOTE: ${line} is too close to the expected close to allow for ${what} — residual risk remains.`;
     }
     if (kind === 'nearFull') return ` NOTE: ${line} is within 10 points of a full pool, so the force-charge cannot hold it with its usual margin — residual risk remains.`;
     // Armed and disclosed with no walk that says why (a plan this build does not make): armed, not claimed.

@@ -1745,7 +1745,7 @@ const MUTANTS = [
   {
     id: 'A5-xii(b). ★ index.ts never passes what the walk cannot hold to the 21:30 line',
     file: IDX, tests: [T_LINE],
-    find: '      notHeld: notHeld != null ? { kind: notHeld, closePct: plan?.expectedWriteLevelPct ?? null } : null,',
+    find: '      notHeld: notHeld != null ? { kind: notHeld, closePct: plan?.expectedWriteLevelPct ?? null, atOpen: plan?.cushionLateStartAtOpen === true } : null,',
     to: '      notHeld: null, /* MUTANT */',
     why: 'The same, at the call.',
   },

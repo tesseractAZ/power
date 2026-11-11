@@ -62,6 +62,8 @@ interface NightChargePlan {
   cushionEnvelopeReason?: 'advisory' | 'backupLeg' | 'reserveAtTarget' | 'armedNoLine' | 'startClosed' | 'nearFull' | 'closeUnder' | 'lateStart';
   cushionStartClosedWords?: string;
   cushionStartClosedNoWrite?: boolean;
+  /** v1.205.0 (review) — beside 'lateStart': the plan's own start inside the at-open allowance (nightChargeText.outageLineRow). */
+  cushionLateStartAtOpen?: boolean;
   /** v1.200.1 — the plan read the reserve already at its write: no write is due while it does. */
   lineReserveStands?: boolean;
   forceChargeLine?: { askPct: number; linePct: number } | null;
