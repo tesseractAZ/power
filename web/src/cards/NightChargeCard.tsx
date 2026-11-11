@@ -59,9 +59,11 @@ interface NightChargePlan {
    *  whether the expected walk ran it (nightChargeText.outageLineRow). Absent on older plans. */
   cushionShortfallCause?: 'envelope' | 'envelope+caps';
   /** v1.200.0 (A5) — why the plan does not claim the line (nightChargeText.CushionNotePlan). */
-  cushionEnvelopeReason?: 'advisory' | 'backupLeg' | 'reserveAtTarget' | 'armedNoLine' | 'startClosed' | 'nearFull' | 'closeUnder';
+  cushionEnvelopeReason?: 'advisory' | 'backupLeg' | 'reserveAtTarget' | 'armedNoLine' | 'startClosed' | 'nearFull' | 'closeUnder' | 'lateStart';
   cushionStartClosedWords?: string;
   cushionStartClosedNoWrite?: boolean;
+  /** v1.205.0 (review) — beside 'lateStart': the plan's own start inside the at-open allowance (nightChargeText.outageLineRow). */
+  cushionLateStartAtOpen?: boolean;
   /** v1.200.1 — the plan read the reserve already at its write: no write is due while it does. */
   lineReserveStands?: boolean;
   forceChargeLine?: { askPct: number; linePct: number } | null;
@@ -92,7 +94,7 @@ interface NightChargePlan {
   cushionStandby?: { w: number; kwh: number; basis: 'runway-overhead' | 'implausible' };
   /** v1.202.0 — the pool and the Cores' standby the plan's walks counted (planPool: the sizing line names the standby), and
    *  on a line night the cost force-charge carries whose walk past its stop closes under the line, that close
-   *  (expectedCloseAfterStopPct: the outage-line row names it). */
+   *  (expectedCloseAfterStopPct: the outage-line row names it; v1.205.0 — also beside 'lateStart', read by lineNotHeldOfCard). */
   planPool?: { kwh: number; standbyW: number } | null;
   expectedCloseAfterStopPct?: number;
   /** v1.203.0 — a cushion-only plan (the server's NightChargePlan.cushionOnly): its basis instead of a confidence tier. */
@@ -436,7 +438,8 @@ export const NightChargeCard = memo(function NightChargeCard() {
               'sizing basis',
               // v1.182.0 — what will actually be WRITTEN (clamped to the panel's maximum).
               // v1.200.0 (Fix10 review 1) — and on a closed start no write stands behind, nothing: the stat names no reserve set.
-              closedLead != null ? null : reserveWriteLabel(plan.setpointSocPct, plan.targetSocPct, status.reserveWriteMaxPct ?? null, plan.lineReserveStands === true),
+              // v1.205.0 (review 3) — nor under a refused arm: no write is armed to set it.
+              closedLead != null || refused != null ? null : reserveWriteLabel(plan.setpointSocPct, plan.targetSocPct, status.reserveWriteMaxPct ?? null, plan.lineReserveStands === true),
               plan.bindingCap ? `cap: ${BINDING_CAP_LABEL[plan.bindingCap] ?? plan.bindingCap}` : null,
             ]
               .filter(Boolean)

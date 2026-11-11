@@ -114,6 +114,32 @@ for (const h of harnesses) {
     console.log(`  DEAD   ${h} — ${interpolated.length} interpolated backtick anchor(s) cannot be checked statically`);
   }
   const finds = lits.filter((l) => !interpolated.includes(l)).map((l) => unescape(l.slice(1, -1)));
+  // v1.205.0 (review) — IDENTIFIER ANCHORS. A harness may name an anchor by a same-file constant (`find: LATE,` beside
+  // `const LATE = '…';`), usually one line two mutants change two ways, or a concatenation of such constants (`find: A + B,`).
+  // The regex above reads quoted literals only, so every one of them went unchecked: 32 anchors in six harnesses, while this
+  // checker reported every anchor resolving. Each is resolved through a top-level `const IDENT = <quoted or backtick literal>;`
+  // in the same file — or a `+` concatenation of such literals, as mutate-v1191-review3.mjs's RUN_TAIL is written — none a
+  // backtick with ${}, and then checked exactly as a literal is. One that cannot be resolved that way FAILS the run, as an
+  // interpolated backtick does: an anchor this checker cannot see is not an anchor it may count as fine.
+  const LIT = /'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`/;
+  const consts = new Map(
+    [...src.matchAll(new RegExp(`\\nconst\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*((?:${LIT.source})(?:\\s*\\+\\s*(?:${LIT.source}))*)\\s*;`, 'g'))]
+      .map((m) => [m[1], [...m[2].matchAll(new RegExp(LIT.source, 'g'))].map((x) => x[0])]),
+  );
+  const idents = [...src.matchAll(/\n\s*find:\s*([A-Za-z_$][\w$]*(?:\s*\+\s*[A-Za-z_$][\w$]*)*)\s*,/g)].map((m) => m[1]);
+  const unresolved = [];
+  for (const expr of idents) {
+    const parts = expr.split('+').map((x) => x.trim()).map((name) => ({ name, lits: consts.get(name) }));
+    const missing = parts.filter((x) => x.lits == null || x.lits.some((l) => l[0] === '`' && l.includes('${')));
+    if (missing.length) { unresolved.push(`${expr} (${missing.map((x) => x.name).join(', ')}: no top-level literal const)`); continue; }
+    finds.push(parts.flatMap((x) => x.lits).map((l) => unescape(l.slice(1, -1))).join(''));
+  }
+  if (unresolved.length) {
+    checked += unresolved.length;
+    bad += unresolved.length;
+    console.log(`  DEAD   ${h} — ${unresolved.length} identifier anchor(s) cannot be resolved statically:`);
+    for (const u of unresolved) console.log(`           ${u}`);
+  }
   if (finds.length === 0) { console.log(`  skip   ${h} (no literal find: anchors)`); continue; }
 
   const misses = [];

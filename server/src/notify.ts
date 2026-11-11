@@ -22,6 +22,8 @@ import {
   lineStartClosedWords, type ForceChargeStartClosed,
   // v1.203.0 — the level a line in (49, 50] is above: the 49% the panel holds under a 50% reserve.
   lineOverReserveText,
+  // v1.205.0 (review) — what a 'lateStart' night's line is too close to allow for (the switch-on at the open, or the window's charge).
+  lateStartAllowanceWords,
 } from './nightForceCharge.js';
 import { isNoChargeKwh, revertRetryText, RESERVE_WRITE_MAX_PCT, PANEL_RESERVE_HOLD_UNDERSHOOT_PCT, type NightChargeMode, type RevertResendOnReport, type RestoreSummaryKind } from './nightChargeActuator.js';
 // R5 — the day-aware formatter's clocks (chargeText.ts), shared with the mid-day texts.
@@ -476,9 +478,8 @@ export function buildNightChargeMessage(
   // v1.200.0 — keyed on the cause: the caps note only where the SIZING fell short; the envelope note
   // where the line is above the 50% the panel accepts as a reserve and the plan does not claim it — (A5) on an armed
   // night, what its own walk cannot hold (lineNotHeldOf), a carried night whose sizing fell short included.
-  const shortfallNote = (sizingShortfall(plan)
-    ? ' NOTE: charge/pool limits prevent fully meeting the cushion — residual risk remains.'
-    : '') + envelopeShortfallNote(plan);
+  const capsNote = sizingShortfall(plan) ? ' NOTE: charge/pool limits prevent fully meeting the cushion — residual risk remains.' : '';
+  const shortfallNote = capsNote + envelopeShortfallNote(plan);
 
   if (shape === 'hold') {
     // v1.187.22 — SAY WHICH HOLD THIS IS, on the figure it was decided on. The body said "the
@@ -545,22 +546,25 @@ export function buildNightChargeMessage(
   // contract writes the reserve alone, and the add-on arms nothing. Say so, and why — for the
   // night the plan is: a charge, or the reserve held as a floor with no charge expected. In auto
   // mode it is "the write": nothing about it is supervised.
+  // ★★★ v1.205.0 (review) — nothing is armed, so the line note is the refused one (refusedEnvelopeNote): never an armed
+  // night's (lineNotHeldOf), which states the close of a charge the refusal does not arm.
   if (!supervised && armRefused) {
     const write = mode === 'auto' ? 'the write' : 'the supervised write';
+    const refusedNote = capsNote + refusedEnvelopeNote(plan);
     return held
       ? {
         ...base,
         title: 'Night-charge: planned reserve hold NOT armed tonight',
         body:
           `Tonight's plan holds the backup reserve at ${reserveText} overnight as a floor, with no charge expected, but ${write} `
-          + `was not armed — ${armRefused}. The add-on will not raise the reserve tonight.${shortfallNote}${cushionOnlyPushText(plan, 'short')}`,
+          + `was not armed — ${armRefused}. The add-on will not raise the reserve tonight.${refusedNote}${cushionOnlyPushText(plan, 'short')}`,
       }
       : {
         ...base,
         title: 'Night-charge: planned charge NOT armed tonight',
         body:
           `Tonight's plan calls for a charge, but ${write} was not armed — ${armRefused}. `
-          + `The add-on will not charge tonight.${shortfallNote}${cushionOnlyPushText(plan, 'short')}`,
+          + `The add-on will not charge tonight.${refusedNote}${cushionOnlyPushText(plan, 'short')}`,
       };
   }
   const overBuyNote = plan.bindingCap === 'overBuy'
@@ -1494,7 +1498,8 @@ function sizingShortfall(plan: Pick<NightChargePlan, 'cushionShortfall' | 'cushi
  *  whatever the reason or cause; above a full pool; held without its usual margin), on a carried night whose sizing
  *  fell short too (cause null, beside the caps note). Never "no force-charge" on an armed night. '' otherwise. PURE. */
 function envelopeShortfallNote(plan: Pick<NightChargePlan, 'cushionShortfallCause' | 'cushionLineSocPct' | 'cushionEnvelopeReason'
-  | 'expectedWriteLevelPct' | 'forceChargeLine' | 'expectedForceChargeMode' | 'reserveFloorPct' | 'expectedCloseAfterStopPct'>): string {
+  | 'expectedWriteLevelPct' | 'forceChargeLine' | 'expectedForceChargeMode' | 'reserveFloorPct' | 'expectedCloseAfterStopPct'
+  | 'cushionLateStartAtOpen'>): string {
   // (Fix8) Beside the 50% reserve and a full pool as lineBesidePct names it (a 100.03% line is "100.03%" above a full pool, a 50.03%
   // one "50.03%" above the reserve); a line stated at the reserve unnumbered.
   const line = plan.cushionLineSocPct != null && Number.isFinite(plan.cushionLineSocPct)
@@ -1507,6 +1512,17 @@ function envelopeShortfallNote(plan: Pick<NightChargePlan, 'cushionShortfallCaus
       return ` NOTE: on the median load the pool is expected to close at ${e != null && Number.isFinite(e) ? `~${round1(e)}%` : 'a level'}, under ${line} — residual risk remains.`;
     }
     if (kind === 'aboveFull') return ` NOTE: ${line} is above a full pool, so no charge can hold it — residual risk remains.`;
+    // ★★★ v1.205.0 — held on the median walk, not with the at-open allowance. In line mode the stated level is that close; on a night
+    // the cost force-charge carries its level is the stop, so (review) the close past it (expectedCloseAfterStopPct, which the plan
+    // carries beside 'lateStart'), as the rationale names it. A plan without it names no figure.
+    if (kind === 'lateStart') {
+      const e = plan.expectedForceChargeMode === 'line' ? plan.expectedWriteLevelPct : plan.expectedCloseAfterStopPct ?? null;
+      // (review) A switch-on at the window open only where the plan's own start is inside the allowance (cushionLateStartAtOpen).
+      const what = lateStartAllowanceWords(plan.cushionLateStartAtOpen);
+      return e != null && Number.isFinite(e)
+        ? ` NOTE: on the median load the pool is expected to close at ~${round1(e)}%, too close to ${line} to allow for ${what} — residual risk remains.`
+        : ` NOTE: ${line} is too close to the expected close to allow for ${what} — residual risk remains.`;
+    }
     if (kind === 'nearFull') return ` NOTE: ${line} is within 10 points of a full pool, so the force-charge cannot hold it with its usual margin — residual risk remains.`;
     // Armed and disclosed with no walk that says why (a plan this build does not make): armed, not claimed.
     if (plan.cushionShortfallCause != null) {
@@ -1520,6 +1536,16 @@ function envelopeShortfallNote(plan: Pick<NightChargePlan, 'cushionShortfallCaus
       : plan.cushionEnvelopeReason === 'reserveAtTarget' ? `and the reserve reads ${round1(plan.reserveFloorPct)}%: no write is due while it does, and no force-charge runs without one`
         : 'and no force-charge carries it to the window close';
   return ` NOTE: ${line} is above ${lineOverReserveText(plan.cushionLineSocPct ?? Infinity, 'accepts')}, ${why} — residual risk remains.`;
+}
+
+/** ★★★ v1.205.0 (review) — the envelope note of a REFUSED arm (buildNightChargeMessage's refused shapes). Nothing is armed, so a
+ *  plan with a line force-charge (plan.forceChargeLine) says once that nothing is armed to carry its line, whatever its kind — never
+ *  an armed night's note (lineNotHeldOf), which states the close of a charge the refusal does not arm, or a force-charge's margin.
+ *  The card drops its line row under a refused arm (NightChargeCard). Every other plan: envelopeShortfallNote, as before. PURE. */
+function refusedEnvelopeNote(plan: Parameters<typeof envelopeShortfallNote>[0]): string {
+  if (plan.forceChargeLine == null) return envelopeShortfallNote(plan);
+  const l = plan.cushionLineSocPct != null && Number.isFinite(plan.cushionLineSocPct) ? plan.cushionLineSocPct : plan.forceChargeLine.linePct;
+  return ` NOTE: ${lineAboveReserveWords(l, "tonight's ", ' outage line')} is above ${lineOverReserveText(l, 'accepts')}, and nothing is armed to carry it — residual risk remains.`;
 }
 
 /** One-decimal rounding for the human-facing advisory strings. */

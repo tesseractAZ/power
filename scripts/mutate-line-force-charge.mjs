@@ -1745,7 +1745,7 @@ const MUTANTS = [
   {
     id: 'A5-xii(b). ★ index.ts never passes what the walk cannot hold to the 21:30 line',
     file: IDX, tests: [T_LINE],
-    find: '      notHeld: notHeld != null ? { kind: notHeld, closePct: plan?.expectedWriteLevelPct ?? null } : null,',
+    find: '      notHeld: notHeld != null ? { kind: notHeld, closePct: plan?.expectedWriteLevelPct ?? null, atOpen: plan?.cushionLateStartAtOpen === true } : null,',
     to: '      notHeld: null, /* MUTANT */',
     why: 'The same, at the call.',
   },
@@ -1766,14 +1766,16 @@ const MUTANTS = [
   {
     id: 'A5-xiv(b). ★ its restore drops it',
     file: MSH, tests: [T_LINE],
-    find: "    ...(o.lineNotHeld === 'closeUnder' || o.lineNotHeld === 'aboveFull' || o.lineNotHeld === 'nearFull' ? { lineNotHeld: o.lineNotHeld } : {}),",
+    // v1.205.0 — the allowlist with 'lateStart'.
+    find: "    ...(o.lineNotHeld === 'closeUnder' || o.lineNotHeld === 'aboveFull' || o.lineNotHeld === 'nearFull' || o.lineNotHeld === 'lateStart' ? { lineNotHeld: o.lineNotHeld } : {}),",
     to: '    /* MUTANT */',
     why: 'After a restart the kind is lost.',
   },
   {
     id: 'A5-xiv(c). ★ its restore keeps any value',
     file: MSH, tests: [T_LINE],
-    find: "    ...(o.lineNotHeld === 'closeUnder' || o.lineNotHeld === 'aboveFull' || o.lineNotHeld === 'nearFull' ? { lineNotHeld: o.lineNotHeld } : {}),",
+    // v1.205.0 — the allowlist with 'lateStart'.
+    find: "    ...(o.lineNotHeld === 'closeUnder' || o.lineNotHeld === 'aboveFull' || o.lineNotHeld === 'nearFull' || o.lineNotHeld === 'lateStart' ? { lineNotHeld: o.lineNotHeld } : {}),",
     to: "    ...(typeof o.lineNotHeld === 'string' ? { lineNotHeld: o.lineNotHeld as 'closeUnder' } : {}), /* MUTANT */",
     why: 'A value this build does not word is carried into the evening\'s notice.',
   },
@@ -1801,15 +1803,17 @@ const MUTANTS = [
   {
     id: 'A5-xvii. ★★★ the H1 cap removed (the walk\'s close stated whatever the window can deliver)',
     file: NCA, tests: [T_LINE, T_YEAR],
-    find: '    const reachKwh = o.startKwh + deliverable + expectedWindowPvKwh(o.window.hours, o.window.fromMs, o.window.windowEndMs, o.legEff);',
+    // v1.205.0 — the reach is one helper (lineWindowReachKwh) the cost-carried close shares: the line walk's call site.
+    find: '    const reachKwh = lineWindowReachKwh(o, deliverable);',
     to: '    const reachKwh = Infinity; /* MUTANT */',
     why: '2026-10-29 at 14 h states ~98.4% and the panel\'s 100% stop from a pool the window can lift to ~92.8% at most.',
   },
   {
     id: 'A5-xviii. ★★ the cap without the P50 PV in the window',
     file: NCA, tests: [T_LINE],
-    find: '    const reachKwh = o.startKwh + deliverable + expectedWindowPvKwh(o.window.hours, o.window.fromMs, o.window.windowEndMs, o.legEff);',
-    to: '    const reachKwh = o.startKwh + deliverable; /* MUTANT */',
+    // v1.205.0 — in the one reach helper (lineWindowReachKwh).
+    find: '  return (o.startKwh ?? 0) + deliverableKwh + expectedWindowPvKwh(o.window.hours, o.window.fromMs, o.window.windowEndMs, o.legEff);',
+    to: '  return (o.startKwh ?? 0) + deliverableKwh; /* MUTANT */',
     why: 'A sunny mid-day leg\'s close is capped under what its own sun delivers (no year plan: T21c).',
   },
   {
@@ -3987,7 +3991,7 @@ const MUTANTS = [
   {
     id: 'F10r1-b(v). ★★★ the stat names the reserve set',
     file: CARDX, tests: [T_UNHELD],
-    find: '              closedLead != null ? null : reserveWriteLabel(plan.setpointSocPct, plan.targetSocPct, status.reserveWriteMaxPct ?? null, plan.lineReserveStands === true),\n',
+    find: '              closedLead != null || refused != null ? null : reserveWriteLabel(plan.setpointSocPct, plan.targetSocPct, status.reserveWriteMaxPct ?? null, plan.lineReserveStands === true),\n',
     to: '              reserveWriteLabel(plan.setpointSocPct, plan.targetSocPct, status.reserveWriteMaxPct ?? null, plan.lineReserveStands === true), /* MUTANT */\n',
     why: '"reserve set to 50%" on a night nothing set it.',
   },

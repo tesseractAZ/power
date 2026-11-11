@@ -727,7 +727,13 @@ const PIN_T14_MAIN = [
  *  270 W, a write mode, 4-20 h (the plan's own close, expectedCloseAfterStopPct): `disclosed`, those whose sizing held the
  *  line (cushionEnvelopeReason 'closeUnder'); `capped`, those whose sizing fell short, whose caps note stands and which name
  *  the close beside it, as a line-mode night does (lineNotHeldOf). */
-const PIN_T14_C = { disclosed: { m: 28, np: 25 }, capped: { m: 57, np: 70 } };
+// v1.205.0 — the close past the stop capped at the window's reach (H1, the line walk's own reach): 128 more nights sized short name a
+// close under their line on each pool, and one night held before is disclosed at ×0.944 (2027-02-19 21:30 at 10 h: its walk past the
+// stop held the 60.55% line, but the window reaches ~59.8%).
+const PIN_T14_C = { disclosed: { m: 29, np: 25 }, capped: { m: 185, np: 198 } };
+/** v1.205.0 (review) — the cost-carried nights disclosed 'lateStart' (their close past the stop holds the line on the median walk, not
+ *  with the at-open allowance), which carry the field too, at or above the line: measured on the landed change. */
+const PIN_T14_LATE = { m: 7, np: 7 };
 const CLOSE_NOTE = (p: NightChargePlan): string => ` NOTE: on the median load the pool is expected to close at ~${p.expectedCloseAfterStopPct}%, under tonight's ${p.cushionLineSocPct}% outage line, so the cushion is not fully held — residual risk remains.`;
 const CAPS_NOTE = ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.';
 const r1 = (n: number): number => Math.round(n * 10) / 10;
@@ -749,19 +755,21 @@ test('★★★ T14 A LINE NIGHT THE COST FORCE-CHARGE CARRIES walks its drawbac
   // force-charge to its 90% stop, 7.2 kWh expected), and the rest of its rationale names no line, as any cost-dominant night's.
   const sh = yearPlan(caseOf('2026-11-13 13:00').deps, { w: 270, st: 'write', h: 14 });
   assert.deepEqual([sh.cushionShortfall, sh.cushionShortfallCause ?? null, sh.cushionEnvelopeReason ?? null, lineNotHeldOf(sh)], [true, null, null, 'closeUnder']);
-  assert.deepEqual([sh.cushionLineSocPct, sh.expectedCloseAfterStopPct, sh.expectedWriteLevelPct, written(sh), forceChargeStopPct(sh.costCeilingSocPct!)], [79.56, 57.2, 90, 50, 90]);
+  // v1.205.0 — the close past the stop is capped at the window's reach (H1, as a line walk's) and floored at the 50% reserve: ~50%
+  // (the walk's own ~57.2% is out of the window's reach).
+  assert.deepEqual([sh.cushionLineSocPct, sh.expectedCloseAfterStopPct, sh.expectedWriteLevelPct, written(sh), forceChargeStopPct(sh.costCeilingSocPct!)], [79.56, 50, 90, 50, 90]);
   assert.deepEqual([sh.expectedBuyKwh, sh.buyKwh, sh.bindingCap, sh.expectedForceChargeMode ?? null], [7.2, 1.41, 'evContention', null]);
   assert.equal(sh.forceChargeLine?.askPct, 80);
   assert.ok(sh.rationale.includes(CLOSE_NOTE(sh)) && sh.rationale.includes(CAPS_NOTE), sh.rationale);
   assert.equal(sh.rationale.split(' NOTE: on the median load').length, 2, 'the close named once');
   assert.doesNotMatch(sh.rationale.replace(CLOSE_NOTE(sh), ''), /outage line/, sh.rationale);
   const push = buildNightChargeMessage(sh, 'charge', null).body;
-  assert.ok(push.includes("NOTE: on the median load the pool is expected to close at ~57.2%, under tonight's 79.6% outage line — residual risk remains."), push);
+  assert.ok(push.includes("NOTE: on the median load the pool is expected to close at ~50%, under tonight's 79.6% outage line — residual risk remains."), push);
   assert.ok(push.includes('NOTE: charge/pool limits prevent fully meeting the cushion — residual risk remains.'), push);
   assert.equal(cardText.lineNotHeldOfCard(sh as never), 'closeUnder');
   assert.equal(cardText.outageLineRow(sh as never, 50), closeRow(sh));
-  assert.equal(closeRow(sh), "outage line 79.6% is above the 50% the panel accepts as a reserve — ~57.2% expected at the close, under the line (the cost force-charge's stop is ~90%); residual risk remains");
-  // The ARMED line reads the same predicate and field (index.ts forceChargeArmNote): "Line NOT held: ~57.2% expected at the close."
+  assert.equal(closeRow(sh), "outage line 79.6% is above the 50% the panel accepts as a reserve — ~50% expected at the close, under the line (the cost force-charge's stop is ~90%); residual risk remains");
+  // The ARMED line reads the same predicate and field (index.ts forceChargeArmNote): "Line NOT held: ~50% expected at the close."
   const idx = readFileSync(resolve(HERE, '../src/index.ts'), 'utf8');
   assert.ok(idx.includes("  const closeAfter = lineNotHeldOf(plan) === 'closeUnder' ? plan?.expectedCloseAfterStopPct : null;\n"));
   assert.ok(idx.includes("    + (closeAfter != null ? ` Line NOT held: ~${round1(closeAfter)}% expected at the close.` : '');\n"));
@@ -772,6 +780,7 @@ test('★★★ T14 A LINE NIGHT THE COST FORCE-CHARGE CARRIES walks its drawbac
   // The year: every plan with the field is a cost-carried night under its line, disclosed or capped, on every surface; and
   // every armed cost-carried night whose own walk past the stop closes under its line carries the field.
   const count = { disclosed: { m: 0, np: 0 }, capped: { m: 0, np: 0 } };
+  const late = { m: 0, np: 0 };
   for (const [b, sc] of [['m', S944], ['np', undefined]] as const) for (const h of HOURS) for (const c of CASES) {
     const deps = { ...stateDeps(c.deps, 'write'), outageCushionHours: h, cushionStandbyW: 270, ...(sc ? { cushionPoolScale: sc } : {}) } as NightChargeInputDeps;
     const p = computeNightChargePlan(buildNightChargeInputs(deps), HOLD0);
@@ -781,6 +790,15 @@ test('★★★ T14 A LINE NIGHT THE COST FORCE-CHARGE CARRIES walks its drawbac
       assert.ok(close == null || r1(close) >= p.cushionLineSocPct! - LINE_CARRY_CLOSE_TOLERANCE_PCT - 1e-9, `${at}: sized short, closes ~${close?.toFixed(2)}% under ${p.cushionLineSocPct}%, the close not named`);
     }
     if (p.expectedCloseAfterStopPct == null) continue;
+    // v1.205.0 (review) — beside 'lateStart' the plan carries its close too: held on the median walk (the at-open allowance is what it
+    // cannot hold), and read by lineNotHeldOf on every surface, never as under the line.
+    if (p.cushionEnvelopeReason === 'lateStart') {
+      late[b] += 1;
+      assert.ok(p.expectedCloseAfterStopPct >= p.cushionLineSocPct! - LINE_CARRY_CLOSE_TOLERANCE_PCT - 1e-9, `${at}: 'lateStart' beside a close under the line`);
+      assert.equal(lineNotHeldOf(p), 'lateStart', at);
+      assert.doesNotMatch(`${p.rationale}${buildNightChargeMessage(p, 'charge', null).body}${cardText.outageLineRow(p as never, 50) ?? ''}`, /under tonight's|under the line/, at);
+      continue;
+    }
     const kind = p.cushionEnvelopeReason === 'closeUnder' ? 'disclosed' : 'capped';
     count[kind][b] += 1;
     if (kind === 'disclosed') assert.deepEqual([p.cushionShortfall, p.cushionShortfallCause], [true, 'envelope'], at);
@@ -796,6 +814,7 @@ test('★★★ T14 A LINE NIGHT THE COST FORCE-CHARGE CARRIES walks its drawbac
     assert.ok(forceChargeStopPct(p.costCeilingSocPct!) >= p.forceChargeLine!.askPct + 10, `${at}: cost-dominant`);
   }
   assert.deepEqual(count, PIN_T14_C);
+  assert.deepEqual(late, PIN_T14_LATE);
 });
 
 /* ══ T15 — the ledger ═══════════════════════════════════════════════════════════════════════════════════ */

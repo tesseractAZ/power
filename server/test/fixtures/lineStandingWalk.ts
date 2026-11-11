@@ -9,7 +9,7 @@
  * says otherwise, and the plant does not stop charging with it (a walk with the grid lost counts decisions, never the pool). A walk can read
  * it from a panel's last quota instead (panelGridAt), a sample that may predate the tick.
  */
-import { computeNightChargePlan, buildNightChargeInputs, type NightChargePlan } from '../../src/nightChargeAdvisor.js';
+import { computeNightChargePlan, buildNightChargeInputs, setExpectedBuyObserverForTesting, type NightChargePlan, type ExpectedBuy } from '../../src/nightChargeAdvisor.js';
 import { armFromPlan, emptyActuationState, decideActuation, writeWindowEndMs, type NightActuationState } from '../../src/nightChargeActuator.js';
 import * as nfc from '../../src/nightForceCharge.js';
 import { decideForceCharge, forceChargeRateKw, evDisplacedPackKwh } from '../../src/nightForceCharge.js';
@@ -66,12 +66,26 @@ export interface WalkNight {
 export interface WalkRow extends WalkNight {
   label: string; b: Basis; h: number; cs: WalkCase; own: number; L: number | null; reason: string | null; armedAsk: number | null;
   shortfall?: boolean; stands?: boolean; rationale?: string;
+  /** v1.205.0 (review) — the plan is a line night the COST force-charge carries whose close past the stop the window's reach
+   *  CAPPED (H1: ExpectedBuy.closeReachCapped, through the planner's test seam; no plan field carries it), not merely one on a
+   *  deliverable-bound window: what W1's excluded list may hold beside a 'lateStart' night. Never digested. */
+  capped?: boolean;
 }
 
 const live = (d: Deps): Deps => ({ ...d, forceChargeEligible: d.objectiveMode === 'cost' && (d.costMaxSocPct ?? 90) > 50 });
-const planOf = (d: Deps, b: Basis, h: number, floor: number | null): NightChargePlan & Record<string, any> => computeNightChargePlan(buildNightChargeInputs({
-  ...live(d), outageCushionHours: h, ...(b === 'm' ? { cushionPoolScale: MEASURED_SCALE } : {}), lineForceChargeEligible: true, ...(floor != null ? { reserveFloorPct: floor } : {}),
-} as never)!) as never;
+/** v1.205.0 (review) — the plans whose median walk (ExpectedBuy) capped a cost-carried close past the stop at the window's reach. */
+const reachCapped = new WeakSet<object>();
+const planOf = (d: Deps, b: Basis, h: number, floor: number | null): NightChargePlan & Record<string, any> => {
+  const seen: { e: ExpectedBuy | null } = { e: null };
+  setExpectedBuyObserverForTesting((e) => { seen.e = e; });
+  try {
+    const p = computeNightChargePlan(buildNightChargeInputs({
+      ...live(d), outageCushionHours: h, ...(b === 'm' ? { cushionPoolScale: MEASURED_SCALE } : {}), lineForceChargeEligible: true, ...(floor != null ? { reserveFloorPct: floor } : {}),
+    } as never)!) as NightChargePlan & Record<string, any>;
+    if (seen.e?.closeReachCapped === true) reachCapped.add(p);
+    return p;
+  } finally { setExpectedBuyObserverForTesting(null); }
+};
 
 function loadKwAt(d: Deps, t: number): number {
   const he = Math.floor(t / H) * H;
@@ -179,6 +193,8 @@ export function walkYear(hours: readonly number[], cases: ReadonlySet<WalkCase>,
     const lineA = p50.chargeTonight && Math.ceil((p50.cushionLineSocPct ?? 0) - 1e-9) > 50;
     const row = (cs: WalkCase, p: Record<string, any>, rec: NightActuationState, reserveOpen: number, p0: number, extra: Partial<WalkRow> = {}) => rows.push({
       ...base, cs, L: p.cushionLineSocPct ?? null, reason: p.cushionEnvelopeReason ?? null, armedAsk: p.forceChargeLine?.askPct ?? null, shortfall: p.cushionShortfall === true,
+      // review — a cost-carried close the reach capped: never a line-mode walk, whatever closeReachCapped says.
+      capped: reachCapped.has(p) && p.forceChargeLine != null && p.expectedForceChargeMode !== 'line',
       ...extra, ...walkNight(p, d0, rec, { reserveOpen, p0, grid }),
     });
     if (rA && lineA && cases.has('A')) row('A', p50, rA, 50, Math.max(50, p50.expectedStartSocPct ?? 50), { stands: p50.lineReserveStands === true });

@@ -318,6 +318,10 @@ export interface ShadowLegSummary {
   /** v1.200.0 (A5) — beside `lineAskPct`: what the leg's own walk cannot hold (nightChargeAdvisor.lineNotHeldOf), the
    *  kind the evening's words are chosen by. Absent where it holds, and on a record from before it. */
   lineNotHeld?: LineNotHeld;
+  /** v1.205.0 (review) — beside `lineNotHeld` 'lateStart': the plan's cushionLateStartAtOpen (its own start inside the at-open
+   *  allowance), which the mid-day push's words read. Absent otherwise, and on a record from before it (the words then name the
+   *  window's charge, never a switch-on at the window open). */
+  lateStartAtOpen?: true;
   /** v1.196.0 — the gate that refused the leg's plan (plan.basisBlockedBy): on a refused plan that
    *  names one only. Absent on a complete leg, an unsized one and a record from before v1.196.0. */
   basisBlockedBy?: string;
@@ -431,6 +435,7 @@ export function summariseLeg(
     ...(p?.cushionShortfallCause != null ? { cushionShortfallCause: p.cushionShortfallCause } : {}),
     ...(p?.forceChargeLine != null ? { lineAskPct: p.forceChargeLine.askPct } : {}),
     ...(p != null && lineNotHeldOf(p) != null ? { lineNotHeld: lineNotHeldOf(p)! } : {}),
+    ...(p?.cushionLateStartAtOpen === true && lineNotHeldOf(p) === 'lateStart' ? { lateStartAtOpen: true as const } : {}),
     ...(p != null && !p.basisComplete && typeof p.basisBlockedBy === 'string' && p.basisBlockedBy !== ''
       ? { basisBlockedBy: p.basisBlockedBy } : {}),
     heldImport: sized?.heldImport ?? null,
@@ -941,6 +946,7 @@ export function middayShadowAnnounceInput(rec: MiddayShadowRecord, model: Tariff
       ...(c.cushionShortfallCause != null ? { cushionShortfallCause: c.cushionShortfallCause } : {}),
       ...(c.lineAskPct != null ? { lineAskPct: c.lineAskPct } : {}),
       ...(c.lineNotHeld != null ? { lineNotHeld: c.lineNotHeld } : {}),
+      ...(c.lateStartAtOpen === true ? { lateStartAtOpen: true as const } : {}),
       // (Fix7 review 1) The line beside its ask: the plan's forceChargeLine.linePct is its cushionLineSocPct.
       ...(c.lineAskPct != null && c.cushionLineSocPct != null ? { linePct: c.cushionLineSocPct } : {}),
     },
@@ -1039,7 +1045,8 @@ const coerceLeg = (raw: unknown): ShadowLegSummary | null => {
     ...(typeof o.cushionShortfall === 'boolean' ? { cushionShortfall: o.cushionShortfall } : {}),
     ...(o.cushionShortfallCause === 'envelope' || o.cushionShortfallCause === 'envelope+caps' ? { cushionShortfallCause: o.cushionShortfallCause } : {}),
     ...(fin(o.lineAskPct) != null ? { lineAskPct: fin(o.lineAskPct)! } : {}),
-    ...(o.lineNotHeld === 'closeUnder' || o.lineNotHeld === 'aboveFull' || o.lineNotHeld === 'nearFull' ? { lineNotHeld: o.lineNotHeld } : {}),
+    ...(o.lineNotHeld === 'closeUnder' || o.lineNotHeld === 'aboveFull' || o.lineNotHeld === 'nearFull' || o.lineNotHeld === 'lateStart' ? { lineNotHeld: o.lineNotHeld } : {}),
+    ...(o.lineNotHeld === 'lateStart' && o.lateStartAtOpen === true ? { lateStartAtOpen: true as const } : {}),
     ...(typeof o.basisBlockedBy === 'string' && o.basisBlockedBy !== '' ? { basisBlockedBy: o.basisBlockedBy } : {}),
     ...('heldImport' in o ? { heldImport: coerceHeldImport(o.heldImport) } : {}),
   };

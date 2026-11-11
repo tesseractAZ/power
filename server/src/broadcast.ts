@@ -621,9 +621,10 @@ export function isRestartContinuation(
  *   • a heard baseline exists (conditionBootBaseline returns a level only when it was heard; with
  *     none, isRestartContinuation suppresses nothing anyway);
  *   • the alert set is SETTLED, and has been since `alertSetSettledSinceMs` (the alert monitor's
- *     stamp, alertMonitor.alertSetTrusted): the store hydrated, every worker/NWS feed's delivery
- *     in the published set, the boot onset debounces run, no in-memory onset clock withholding a
- *     fault. A green read from an unpopulated store, before a feed's alerts are in the set, or
+ *     stamp, alertMonitor.alertSetTrusted): the store hydrated, every worker/NWS feed's value in
+ *     the published set a hydrated delivery (PROVENANCE, not freshness — a warm feed's newer
+ *     delivery joins at the next publish, ≤ one evaluation pass later, as for any all-clear), the
+ *     boot onset debounces run, no in-memory onset clock withholding a fault. A green read from an unpopulated store, before a feed's alerts are in the set, or
  *     while a critical that stood before the restart is still inside its restarted debounce
  *     (dpu-err, shp2-src-err: 3 min) is not an all-clear — the boot false-green;
  *   • v1.187.3 (review) — the green has stood the de-escalation dwell (CONDITION_CLEAR_DWELL_MS)

@@ -69,7 +69,9 @@ import {
   // v1.200.0 (Fix9) — a line night's force-charge "waits on" a reading of the target only while a start can still come.
   forceChargeStartClosed, lineStartClosedWords,
   // v1.200.0 (Fix9 review 2) — a recompute of a window whose armed record carries no line claims no ON the record cannot make.
-  armedNoLineStartMs, armedLineStartClosed, armedLineNoReOn, armedLineRunOn, lineCloseReadingLate, lineGridOffPushDue, type LineClosure,
+  armedNoLineStartMs, armedLineStartClosed, armedLineNoReOn, armedLineRunOn, armedLineRunOnSinceMs, lineCloseReadingLate, lineGridOffPushDue, type LineClosure,
+  // v1.205.0 (review) — a 'lateStart' night's ARMED tail: its close, and what the line is too close to it to allow for.
+  lateStartArmTail,
   // v1.200.0 (review 4) — what a line re-ON's readback check stamps, the re-ON that took effect included.
   lineReOnCheckedStamp,
   // v1.200.0 (review 6) — the force-charge tick's cadence, which the line-at-risk push's hand-back hold counts.
@@ -2702,8 +2704,9 @@ const broadcast = startBroadcastMonitor(store, (m) => app.log.info(m), {
   cacheUrlPath: '/audio-render',
   // v1.187.3 — a green inside the post-restart warm-up is announced as a recovery only once it has
   // stood its dwell on a SETTLED alert set (broadcast.isRestartRecovery), measured from the alert
-  // monitor's stamp (alertMonitor.alertSetTrusted): the store hydrated, every feed's delivery in the
-  // published set, the boot onset debounces run, no onset clock withholding a fault.
+  // monitor's stamp (alertMonitor.alertSetTrusted): the store hydrated, every feed's value in the
+  // published set a hydrated delivery (provenance, not freshness: a warm feed's newer delivery joins at
+  // the next publish), the boot onset debounces run, no onset clock withholding a fault.
   alertSetSettledSince: () => monitor.alertSetSettledSince(),
 });
 
@@ -4377,6 +4380,9 @@ async function recomputeNightChargePlan(
     // v1.200.0 (Fix9 review 2) — the armed record with no line ask: a recompute of its window claims no ON the record cannot make. Not
     // the plan the evening job arms from: a Saturday record sharing Sunday's window must not stop Sunday's arm carrying its ask.
     armedNoLineStartMs: shadowLeg == null && opts.arming !== true ? armedNoLineStartMs(nightActuationMem) : null,
+    // ★★★ v1.205.0 — a line run's verified ON, which ends the at-open allowance only where the plan judges it inside its window and in
+    // its pool reading (nowMs and socNowPct, read above before the first await; this record is read after them). As armedNoLineStartMs.
+    armedLineOnVerifiedAtMs: shadowLeg == null && opts.arming !== true ? armedLineRunOnSinceMs(nightActuationMem) : null,
     // ★★★ v1.203.0 — the cushion-only fallback (nightChargeAdvisor.ts buildNightChargeInputs): with the solar basis refused, the live
     // overnight plan in a write mode on a fresh panel is sized on the outage cushion alone. Never a shadow leg (mid-day, backup,
     // morning refresh), never advisory mode (lineForceChargeOn is a write mode's gate), never the 22:30 last resort on a stale panel.
@@ -6563,7 +6569,7 @@ function forceChargeArmNote(armed: NightActuationState, plan: NightChargePlan | 
       timedByText: fmtSiteClock(endMs - FORCE_CHARGE_MIN_RUN_MS),
       // v1.200.0 (review 2) — a walk that reaches the panel ceiling: no "as backstop", the re-ON named.
       ceilingStop: plan?.expectedLineCeilingStop != null,
-      notHeld: notHeld != null ? { kind: notHeld, closePct: plan?.expectedWriteLevelPct ?? null } : null,
+      notHeld: notHeld != null ? { kind: notHeld, closePct: plan?.expectedWriteLevelPct ?? null, atOpen: plan?.cushionLateStartAtOpen === true } : null,
     });
   }
   if (!forceChargeOn()) return 'Force-charge: off (disabled by options).';
@@ -6575,8 +6581,11 @@ function forceChargeArmNote(armed: NightActuationState, plan: NightChargePlan | 
   // v1.202.0 — a line night this force-charge carries, whose walk past the stop closes under the line (lineNotHeldOf): said
   // as the line-mode sentence says it.
   const closeAfter = lineNotHeldOf(plan) === 'closeUnder' ? plan?.expectedCloseAfterStopPct : null;
-  return `Force-charge: ELIGIBLE — just in time to reach ~${c}% by the window close (from the open, if the pack needs the whole window); OFF when it gets there (software stop; panel ceiling ${desiredForceChargeCeilingPct(c)}% as backstop).`
+  const eligible = `Force-charge: ELIGIBLE — just in time to reach ~${c}% by the window close (from the open, if the pack needs the whole window); OFF when it gets there (software stop; panel ceiling ${desiredForceChargeCeilingPct(c)}% as backstop).`
     + (closeAfter != null ? ` Line NOT held: ~${round1(closeAfter)}% expected at the close.` : '');
+  // ★★★ v1.205.0 — held on the median walk past the stop, not with the at-open allowance: never "NOT held". (review) Its close past the
+  // stop (expectedCloseAfterStopPct, carried beside 'lateStart'), as the rationale and the 21:30 notice name it; never the stop.
+  return eligible + (lineNotHeldOf(plan) === 'lateStart' ? lateStartArmTail(plan?.expectedCloseAfterStopPct, plan?.cushionLateStartAtOpen) : '');
 }
 
 /**

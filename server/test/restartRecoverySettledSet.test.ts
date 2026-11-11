@@ -330,7 +330,18 @@ test('★★★ a feed that lands after the green began: its warning reaches the
   await heard([HEARD_WARN], 'yellow');
   hold('curtailmentAlerts'); // a worker feed that has not delivered since boot
   const store = bootStore({ spread: true });
+  // Every publish, with the stamp and the set as the broadcast can first read them: at the end of the
+  // synchronous run that published (a microtask), so the order of publish and stamp INSIDE that run
+  // does not matter, and before any later timer (the next pass, a broadcast tick) can run.
+  const seen: Array<{ stamp: number | null; ids: string[] }> = [];
+  let mon: { alertSetSettledSince(): number | null } | null = null;
+  const setAlerts = store.setAlerts.bind(store);
+  store.setAlerts = (set: Alert[]) => {
+    setAlerts(set);
+    queueMicrotask(() => seen.push({ stamp: mon?.alertSetSettledSince() ?? null, ids: ((store.get().alerts ?? []) as Alert[]).map((a) => a.id) }));
+  };
   const p = plant(store);
+  mon = p.mon;
   await until(() => p.has(CONTINUATION), 'the continuation', p.logs);
   (store.get().devices as Record<string, DeviceSnapshot>)[CORE] = core();
   await until(() => p.has('yellow → green held'), 'the dwell', p.logs);
@@ -344,6 +355,9 @@ test('★★★ a feed that lands after the green began: its warning reaches the
   const asked = calls.get('baselineAlerts') ?? 0;
   await until(() => (calls.get('baselineAlerts') ?? 0) > asked, 'a pass waiting on both feeds', p.logs);
   const WARN_FEED: Alert = { id: 'soc-curtailment-pool', severity: 'warning', category: 'Solar', device: 'Fleet', title: 'Solar curtailed at full charge', detail: 'x' } as Alert;
+  // The curtailment stands: every later recompute returns it too (a one-shot answer followed by []
+  // let the next pass replace it before the poll below read the set).
+  values.set('curtailmentAlerts', [WARN_FEED]);
   release('curtailmentAlerts', [WARN_FEED]);
   await until(() => p.mon.stats().alertFeeds.every((f) => f.warm), 'every feed warm', p.logs);
   await sleep(300);
@@ -351,10 +365,32 @@ test('★★★ a feed that lands after the green began: its warning reaches the
   assert.equal(p.mon.alertSetSettledSince(), null, '★ warm is not settled: the set does not carry the feed yet');
   assert.equal(p.count(GREEN_SPOKEN), 0, '★ no all-clear');
   release('baselineAlerts', []);
+  await until(() => p.mon.alertSetSettledSince() != null, 'the settled stamp', p.logs);
   await until(() => p.ids().includes(WARN_FEED.id), 'the warning in the set', p.logs);
+  const stamped = seen.filter((x) => x.stamp != null);
+  assert.ok(stamped.length > 0, 'the stamp was read beside a published set');
+  assert.ok(stamped.every((x) => x.ids.includes(WARN_FEED.id)),
+    '★ the first delivery is in the set the stamp is first readable beside (the stamp vouches for each feed\'s value IN the set)');
+  // The warning clears at a later recompute. The green that follows must stand its own dwell: the
+  // stamp (set while the warning stood) does not count for it, and the recovery is still announced.
+  await until(() => p.has('abandoned') || p.count(CONTINUATION) >= 2, 'the held green ended by the warning', p.logs);
+  offset += DWELL; // the warning stands longer than a dwell: the green before it and the stamp are both that old
+  fresh(store);
   await sleep(100);
-  assert.equal(p.count(GREEN_SPOKEN), 0);
+  values.set('curtailmentAlerts', []);
+  await until(() => !p.ids().includes(WARN_FEED.id), 'the warning cleared from the set', p.logs);
+  await until(() => p.count('yellow → green held') >= 2 || p.count(GREEN_SPOKEN) > 0, 'the new green held', p.logs);
+  assert.equal(p.count(GREEN_SPOKEN), 0, '★ the green after the warning is held: neither the green before it nor the stamp counts for its dwell');
+  offset += DWELL - 20 * SEC;
+  fresh(store);
+  await sleep(300);
+  assert.equal(p.count(GREEN_SPOKEN), 0, '★ no all-clear before the green that followed the warning has stood its dwell');
   assert.ok(!p.has(RECOVERY));
+  offset += 25 * SEC;
+  fresh(store);
+  await until(() => p.count(GREEN_SPOKEN) === 1, 'the recovery all-clear', p.logs);
+  assert.ok(p.has(`${RECOVERY} yellow`), 'announced as the recovery from the heard yellow');
+  await until(() => p.has('broadcast: green → ok in'), 'the all-clear played', p.logs);
 });
 
 test('★★★ a fault that starts while the green stands on a settled set clears the stamp before its first publish', { timeout: 60_000 }, async () => {

@@ -180,6 +180,18 @@
  *    with a 20 kWh EV predicted and with a 7 kW one all window (6 / 34 / 43 floored), and 30 of 30 at 70% of the rate;
  *    they fall inside the last 20 minutes or are still rising, and the push reaches none of them. The plan discloses
  *    every near-full night at 21:30; the morning account names the close. Not changed in A5 (a residual, stated).
+ *    ★★★ (v1.205.0) A LATE SWITCH-ON AT THE WINDOW OPEN. A start the plan times inside the window carries its own slack (⌈L⌉ + 5,
+ *    timed to the close less FORCE_CHARGE_MIN_RUN_MS); a start AT the open carries none, and the ON cannot come at the open: the
+ *    reserve write applies on the first tick at or after it (APPLY_LEAD_MS 0), the ON waits for that write's readback and the
+ *    panel ceiling's (reserveRideReady, the ceiling sync), and a Core that does not take it is re-issued only after its readback
+ *    grace (FORCE_CHARGE_ON_VERIFY_AFTER_MS). 2026-11-10: the open 23:00:00, the ON 23:02:47, the re-issue 23:18:47, every Core
+ *    reading ON 23:19:47. So the plan CLAIMS a line night only where its walk holds the line both on the median and with nothing
+ *    charging before each whole ON minute up to the open + FORCE_CHARGE_OPEN_ALLOWANCE_MS, its reach counted from that minute
+ *    (nightChargeAdvisor.ts expectedBuyFromPlan assuredClosePct); otherwise it discloses it ('lateStart') and the force-charge runs
+ *    as before. Nothing here reads the claim: no write, timing or start moves. WHAT IT STILL DOES NOT CARRY (unpushed, as a
+ *    mid-window flip of the served plan is not pushed): a shape worse than every Core switching on at the allowance's end — a
+ *    ceiling re-sync beside a late Core, a re-ON that takes late — and an unpredicted load. A Core that never takes the ON is
+ *    pushed (the ON-failure push), and a refused ceiling is (the declined start).
  * The measured capacity scale never reaches this module: the record carries one whole percent (⌈L⌉), a
  * plan output like the setpoint (runwayBasisContracts.test.ts pin 6).
  *
@@ -274,10 +286,12 @@ export const FORCE_CHARGE_PLAN_RATE_KW = 10;
 export const FORCE_CHARGE_MIN_RATE_KW = 1;
 /** v1.170.0 — the least each connected Core has been SEEN to take into its pack: on
  *  2026-09-18 three took ~17.8 kW at the grid (≈ 5.5 kW each after the charge leg) while
- *  the grid cap, not the Cores, was the limit. So a Core's own input limit is at least
- *  this — never measured higher. With fewer Cores connected (one out for a pack swap) the
- *  live rate is bounded by slots × this, so the start comes earlier rather than the night
- *  ending short. With all three it never binds (17 × 0.927 = 15.8 < 16.5). */
+ *  the grid cap, not the Cores, was the limit. A Core's own input limit is higher: one
+ *  charging while another had not taken its ON took its full 7.2 kW rating
+ *  (chargeWattPower; 2026-10-05, 10-06, 10-14, 10-16, 11-10). This lower figure is kept on
+ *  purpose: with fewer Cores connected (one out for a pack swap) the live rate is bounded
+ *  by slots × this, so the start comes earlier rather than the night ending short. With
+ *  all three it never binds (17 × 0.927 = 15.8 < 16.5). */
 export const FORCE_CHARGE_PROVEN_KW_PER_SLOT = 5.5;
 /** v1.191.0 (H1) — the per-Core rate in use: FORCE_CHARGE_KW_PER_CORE when it is set above 0, else
  *  the proven FORCE_CHARGE_PROVEN_KW_PER_SLOT. Read per call (limits.ts). */
@@ -340,12 +354,15 @@ export const FORCE_CHARGE_OFF_MAX_RETRIES = 2;
  *  not-taken. It MUST exceed the 5-min per-slot cooldown, or the one re-issue comes back
  *  rate-limited and is spent on a write that never reached the panel. (2026-09-23: the drift
  *  watch saw OFF→ON ~3 min after the ON.)
- *  v1.187.12 — 15 min (was 6). A slot's ON can take longer than 6 min to read back: on
- *  2026-10-05 and 10-06 a slot was re-issued at +7 min and given up at +14 min, yet on 10-06
- *  the pool reached the night's target 19 min AHEAD of a plan sized for all three slots, so
- *  that slot was charging and only its readback lagged. The give-up comes at +30 min now. It
- *  is the longest grace the window-end cutoff allows (FORCE_CHARGE_ON_RETRY_CUTOFF_MS ≥
- *  cooldown + this, pinned in edges.test.ts). */
+ *  v1.187.12 — 15 min (was 6). On 2026-10-05 and 10-06 a slot was re-issued at +7 min and
+ *  given up at +14 min. That was read then as a charging slot whose readback lagged; the
+ *  recorder (re-read 2026-11-11) shows the 10-06 slot at 0 W and flat at 52% throughout, the
+ *  other two at their 7.2 kW rating — its ON had not taken. Every force-charge since 10-05
+ *  has had a Core at 0 W after its first ON; on 10-14, 10-16 and 11-10 this re-issue at
+ *  +15 min recovered it. The give-up comes at +30 min. It is the longest grace the
+ *  window-end cutoff allows (FORCE_CHARGE_ON_RETRY_CUTOFF_MS ≥ cooldown + this, pinned in
+ *  edges.test.ts). A start at the window open counts this lead in its claim
+ *  (FORCE_CHARGE_OPEN_ALLOWANCE_MS). */
 export const FORCE_CHARGE_ON_VERIFY_AFTER_MS = 15 * 60_000;
 /** v1.186.0 — ON is re-issued ONCE; still not applied after that ⇒ the warning. */
 export const FORCE_CHARGE_ON_MAX_RETRIES = 1;
@@ -893,10 +910,16 @@ export function forceChargeLineArmNote(o: {
   ceilingStop?: boolean;
   /** v1.200.0 (A5) — what the plan's own walk cannot hold (nightChargeAdvisor.lineNotHeldOf), and its expected close:
    *  the force-charge still runs as above, and the line says the outage line is not held. null/omitted ⇒ held. */
-  notHeld?: { kind: 'closeUnder' | 'aboveFull' | 'nearFull'; closePct: number | null } | null;
+  notHeld?: {
+    kind: 'closeUnder' | 'aboveFull' | 'nearFull' | 'lateStart'; closePct: number | null;
+    /** v1.205.0 (review) — beside 'lateStart': the plan's NightChargePlan.cushionLateStartAtOpen (lateStartAllowanceWords). */
+    atOpen?: boolean;
+  } | null;
 }): string {
   const tail = o.notHeld == null ? ''
     : o.notHeld.kind === 'aboveFull' ? ' Line NOT held: above a full pool.'
+    // v1.205.0 — held on the median walk, not with the at-open allowance: never "NOT held".
+    : o.notHeld.kind === 'lateStart' ? lateStartArmTail(o.notHeld.closePct, o.notHeld.atOpen)
       : o.notHeld.kind === 'nearFull' ? ` Line NOT held: within ${2 * FORCE_CHARGE_LINE_HEADROOM_PCT} points of a full pool.`
         : ` Line NOT held: ${o.notHeld.closePct != null ? `~${round1(o.notHeld.closePct)}%` : 'under the line'} expected at the close.`;
   const from = o.expectedStartText != null ? `on from ~${o.expectedStartText}` : 'on just in time';
@@ -1760,6 +1783,13 @@ export function armedLineRunOn(
   return on && forceChargeLineNightPct(s) != null ? s.windowStartMs : null;
 }
 
+/** ★★★ v1.205.0 — PURE. When a line run on record (armedLineRunOn) was verified ON on every slot of ours (forceChargeOnVerifiedAtMs),
+ *  for the plan's at-open allowance (NightChargeInputs.armedLineOnVerifiedAtMs): the plan judges the stamp against its own window
+ *  open and pool reading. null with no such run. armedLineRunOn is unchanged. */
+export function armedLineRunOnSinceMs(s: Parameters<typeof armedLineRunOn>[0]): number | null {
+  return armedLineRunOn(s) != null ? s.forceChargeOnVerifiedAtMs : null;
+}
+
 /** v1.200.0 (Fix10 review 2) — a run on record that no re-ON can bring back, for the plan that names one (LineNoReOn.words stands in for
  *  the re-ON's clause, a sentence of its own only where the plan's walk reaches the panel's stop). */
 export interface LineNoReOn { windowStartMs: number; words: string }
@@ -1827,6 +1857,39 @@ export const FORCE_CHARGE_LINE_AT_RISK_LEAD_MS = FORCE_CHARGE_MIN_RUN_MS;
  *  (lineAtRiskPushDue's hand-back hold) and (review 8) keeps one of them as its margin: a later tick reads about a whole
  *  number of these after this one — later by setInterval's drift and its own read lateness, sooner by this tick's. */
 export const FORCE_CHARGE_TICK_MS = 60_000;
+
+/** ★★★ v1.205.0 — the at-open allowance: the window open to an at-open force-charge running on every Core, as the ticks decide it
+ *  (the plan's claim reads it: nightChargeAdvisor.ts assuredClosePct). Five ticks and the ON's readback grace:
+ *   1. the reserve write's tick, at or after the open (nightChargeActuator.ts APPLY_LEAD_MS 0): up to a tick of phase;
+ *   2. its readback, which the ON rides (reserveRideReady), writing the panel ceiling (the ceiling sync);
+ *   3. the ceiling's readback, which sends the ON;
+ *   4. the re-issue of a Core that did not take it, FORCE_CHARGE_ON_VERIFY_AFTER_MS on, plus a tick of stamp jitter
+ *      (verifyForceChargeOn);
+ *   5. a tick for the re-issue to read ON.
+ *  2026-11-10: the open 23:00:00, the apply 23:00:47, the ON 23:02:47, the re-issue 23:18:47, every Core ON 23:19:47. Modelled as no
+ *  charge on any Core, whatever their number (with one or two connected, one late Core is all of it). Built from code constants
+ *  only. Here, after FORCE_CHARGE_TICK_MS, so the module initialises it. */
+export const FORCE_CHARGE_OPEN_ALLOWANCE_MS = FORCE_CHARGE_ON_VERIFY_AFTER_MS + 5 * FORCE_CHARGE_TICK_MS;
+
+/** ★★ v1.205.0 (review) — PURE. What a 'lateStart' night's line is too close to its expected close to allow for, by what the at-open
+ *  allowance defers (NightChargePlan.cushionLateStartAtOpen): the plan's own force-charge switch-on, where its start is inside the
+ *  allowance; otherwise — a start past the allowance, or none expected, where the reach counted from the allowance's end decides —
+ *  the window's charge, never a switch-on at the window open the plan does not make (2027-02-15 21:30 on nameplate at 18 h: the
+ *  force-charge from ~00:58). The rationale, the 21:30 push, the ARMED lines and the mid-day push word it by this; the card mirrors it
+ *  word for word on a line-mode night (web nightChargeText.ts outageLineRow) — on a cost-carried night its row says the force-charge
+ *  runs and the line is not claimed. */
+export function lateStartAllowanceWords(atOpen: boolean | undefined): string {
+  return atOpen === true ? 'a late switch-on at the window open' : "a late start of the window's charge";
+}
+
+/** ★★ v1.205.0 (review) — PURE. The ARMED line's tail on a 'lateStart' night, in line mode (forceChargeLineArmNote) and on a night
+ *  the cost force-charge carries (index.ts forceChargeArmNote) alike: the median walk's close — the line walk's (the stated level),
+ *  or the walk past the cost stop (NightChargePlan.expectedCloseAfterStopPct), never the stop — as the rationale and the 21:30
+ *  notice name it, and what the line is too close to it to allow for (lateStartAllowanceWords). Never "NOT held". */
+export function lateStartArmTail(closePct: number | null | undefined, atOpen: boolean | undefined): string {
+  const close = closePct != null && Number.isFinite(closePct) ? `~${round1(closePct)}%` : 'a level near the line';
+  return ` Line NOT assured: ${close} expected at the close, too close to the line to allow for ${lateStartAllowanceWords(atOpen)}.`;
+}
 
 /** v1.200.0 (review 2) — one pool reading of a line night's trail (forceChargeLinePoolSamples). */
 export interface LinePoolSample { pct: number; atMs: number }
@@ -2361,8 +2424,11 @@ export function decideForceCharge(s: NightActuationState, nowMs: number, o: Forc
     if (s.forceChargeCeilingSyncRetries < FORCE_CHARGE_CEILING_SYNC_RETRIES) return { kind: 'syncCeiling', pct: desired, prior };
     return { kind: 'none', why: `${W.ceilingRefused}${desired}% ceiling (still reads ${o.ceilingReadbackPct}%) — reserve-only tonight rather than overfill` };
   }
-  // v1.167.0 — JUST IN TIME. The ceiling above is synced the moment the night is live,
-  // hours before this, so its readback never delays the start.
+  // v1.167.0 — JUST IN TIME. The ceiling above is synced once the reserve reads back. On a timed
+  // start that is long before this, so its readback does not delay the start; on a start at the
+  // window open the ON waits for it (2026-11-10: ceiling written 23:01:47 on the reserve's
+  // readback tick, ON 23:02:47), up to FORCE_CHARGE_CEILING_VERIFY_AFTER_MS per attempt — the
+  // claim's FORCE_CHARGE_OPEN_ALLOWANCE_MS counts that lead.
   if (o.poolSocPct == null || o.fullKwh == null || !(o.fullKwh > 0)) {
     return { kind: 'none', why: 'no live pool reading to time the start from' };
   }

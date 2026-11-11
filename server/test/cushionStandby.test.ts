@@ -880,19 +880,23 @@ test('★★★ S8 THE YEAR in a write mode and in advisory mode (eligibility tr
  *  close past the stop ('cost closeUnder', disclosed: v1.202.0's walk of the drawback). In a write mode the walks' drain
  *  lowers 3 closes on nameplate and 5 at 0.944 (2 expected buys), every one a disclosure; no line night is under its line
  *  undisclosed in any state. `under` reads a cost-carried night's close past the stop wherever the plan names it (whether
- *  or not its sizing fell short: a '+caps' night is under by that close too, beside its caps note). */
+ *  or not its sizing fell short: a '+caps' night is under by that close too, beside its caps note).
+ *  v1.205.0 — that close capped at the window's reach (H1, as a line walk's): more nights sized short are under by it, on both
+ *  sides of the standby (write [2, 6] → [6, 9] and [3, 7] → [8, 10]; standing [74, 83] → [85, 94] and [73, 86] → [84, 94]), so
+ *  fewer are newly under at 270 W; no night's mode or reason moves. And the at-open allowance: on a standing 50, 3 line-mode nights
+ *  on each pool are disclosed 'lateStart' without the standby and 1 with it (their median walk holds the line). */
 const PIN_S8_MODES = {
   write: {
-    np: { nights: [22, 40], crossed: 18, before: { cost: 3, 'cost+caps': 7, line: 10, 'line+caps': 2 }, after: { cost: 8, 'cost+caps': 9, line: 16, 'line+caps': 7 }, under: [2, 6], undisclosed: [0, 0], newUnder: ['2026-10-29 +1 01:30', '2026-11-13 21:30', '2026-11-13 13:00', '2027-05-16 +1 01:30'], closeFell: 3, buyFell: 0 },
-    m: { nights: [37, 53], crossed: 16, before: { cost: 6, 'cost+caps': 9, line: 16, 'line+caps': 6 }, after: { cost: 11, 'cost closeUnder': 1, 'cost+caps': 11, line: 22, 'line+caps': 8 }, under: [3, 7], undisclosed: [0, 0], newUnder: ['2026-10-13 13:00', '2026-10-29 +1 01:30', '2026-11-13 21:30', '2026-11-13 13:00'], closeFell: 5, buyFell: 2 },
+    np: { nights: [22, 40], crossed: 18, before: { cost: 3, 'cost+caps': 7, line: 10, 'line+caps': 2 }, after: { cost: 8, 'cost+caps': 9, line: 16, 'line+caps': 7 }, under: [6, 9], undisclosed: [0, 0], newUnder: ['2026-10-29 +1 01:30', '2026-11-13 21:30', '2027-05-16 +1 01:30'], closeFell: 3, buyFell: 0 },
+    m: { nights: [37, 53], crossed: 16, before: { cost: 6, 'cost+caps': 9, line: 16, 'line+caps': 6 }, after: { cost: 11, 'cost closeUnder': 1, 'cost+caps': 11, line: 22, 'line+caps': 8 }, under: [8, 10], undisclosed: [0, 0], newUnder: ['2026-10-13 13:00', '2026-10-29 +1 01:30'], closeFell: 5, buyFell: 2 },
   },
   advisory: {
     np: { nights: [22, 40], crossed: 18, before: { advisory: 22 }, after: { advisory: 40 }, under: [22, 37], undisclosed: [0, 0], newUnder: 15, closeFell: 0, buyFell: 0 },
     m: { nights: [37, 53], crossed: 16, before: { advisory: 37 }, after: { advisory: 53 }, under: [37, 53], undisclosed: [0, 0], newUnder: 16, closeFell: 0, buyFell: 0 },
   },
   stand: {
-    np: { nights: [659, 669], crossed: 10, before: { 'stand cost': 149, 'stand cost closeUnder': 4, 'stand cost+caps': 52, 'stand line': 302, 'stand line closeUnder': 1, 'stand line+caps': 151 }, after: { 'stand cost': 132, 'stand cost closeUnder': 3, 'stand cost+caps': 54, 'stand line': 316, 'stand line closeUnder': 4, 'stand line+caps': 160 }, under: [74, 83], undisclosed: [0, 0], newUnder: 12, closeFell: 146, buyFell: 26 },
-    m: { nights: [665, 674], crossed: 9, before: { 'stand cost': 144, 'stand cost closeUnder': 4, 'stand cost+caps': 50, 'stand line': 314, 'stand line closeUnder': 2, 'stand line+caps': 151 }, after: { 'stand cost': 126, 'stand cost closeUnder': 6, 'stand cost+caps': 46, 'stand line': 332, 'stand line closeUnder': 2, 'stand line+caps': 162 }, under: [73, 86], undisclosed: [0, 0], newUnder: 16, closeFell: 181, buyFell: 31 },
+    np: { nights: [659, 669], crossed: 10, before: { 'stand cost': 149, 'stand cost closeUnder': 4, 'stand cost+caps': 52, 'stand line': 299, 'stand line closeUnder': 1, 'stand line lateStart': 3, 'stand line+caps': 151 }, after: { 'stand cost': 132, 'stand cost closeUnder': 3, 'stand cost+caps': 54, 'stand line': 315, 'stand line closeUnder': 4, 'stand line lateStart': 1, 'stand line+caps': 160 }, under: [85, 94], undisclosed: [0, 0], newUnder: 12, closeFell: 146, buyFell: 26 },
+    m: { nights: [665, 674], crossed: 9, before: { 'stand cost': 144, 'stand cost closeUnder': 4, 'stand cost+caps': 50, 'stand line': 311, 'stand line closeUnder': 2, 'stand line lateStart': 3, 'stand line+caps': 151 }, after: { 'stand cost': 126, 'stand cost closeUnder': 6, 'stand cost+caps': 46, 'stand line': 331, 'stand line closeUnder': 2, 'stand line lateStart': 1, 'stand line+caps': 162 }, under: [84, 94], undisclosed: [0, 0], newUnder: 13, closeFell: 181, buyFell: 31 },
   },
 };
 

@@ -13,6 +13,12 @@ import { walkYear, closeUnder, panelGridAt, WALK_HOURS_ALL, WALK_HOURS_SAMPLE, t
  * v1.202.0 — re-written on v1.202.0: its nameplate groups equal a3588d96's (regenerated on c692f30e) with the walk past a cost stop disabled, and move only
  * where the plan names a cost-carried night's close under its line, disclosed where its sizing held the line and beside the caps note where it fell short
  * (O at 7-20 h, W at 4-9 h); the 0.944 groups move with the walks on the measured pool.
+ * v1.205.0 — RE-CUT: the fixture's `excluded` list names, per group, the walks the claim side of v1.205.0 moves and no other: a
+ * cost-carried night on a bound window whose close past the stop is now capped at the window's reach (H1; the rationale names that
+ * close), and a night disclosed 'lateStart' (the at-open allowance). The base cannot classify either, so they are enumerated: listed
+ * from a per-walk diff against the base, where every other walk was byte-identical, then the groups regenerated ON THE BASE
+ * (e2474798) with the list kept (STANDING_WALK_WRITE=1 keeps the fixture's `excluded`). W1 checks that every listed walk is one of
+ * the two on this build; nothing written or walked moves on any of them (the diff found only the plan's words).
  */
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -26,15 +32,24 @@ const FIELDS = ['label', 'L', 'reason', 'armedAsk', 'shortfall', 'rationale', 'c
 const digest = (rows: WalkRow[]): { n: number; sha: string } => ({
   n: rows.length, sha: createHash('sha256').update(rows.map((r) => JSON.stringify(FIELDS.map((k) => r[k] ?? null))).join('\n')).digest('hex').slice(0, 24),
 });
-const group = (cs: 'O' | 'W', b: Basis, h: number) => digest(ROWS.filter((r) => r.cs === cs && r.b === b && r.h === h));
+type Fixture = { generatedOn: string; walks: number; excluded?: Record<string, string[]>; groups: Record<string, { n: number; sha: string }> };
+/** v1.205.0 — the walks v1.205.0's claim moves, per group (see the header): left out of the digest on both sides. */
+const EXCLUDED: Record<string, string[]> = (() => {
+  try { return (JSON.parse(readFileSync(FIXTURE, 'utf8')) as Fixture).excluded ?? {}; } catch { return {}; }
+})();
+const groupRows = (cs: 'O' | 'W', b: Basis, h: number) => ROWS.filter((r) => r.cs === cs && r.b === b && r.h === h);
+const group = (cs: 'O' | 'W', b: Basis, h: number) => {
+  const out = new Set(EXCLUDED[`${cs}|${b}|${h}`] ?? []);
+  return digest(groupRows(cs, b, h).filter((r) => !out.has(r.label)));
+};
 
 if (process.env.STANDING_WALK_WRITE === '1') {
   const groups: Record<string, { n: number; sha: string }> = {};
   for (const cs of ['O', 'W'] as const) for (const b of ['np', 'm'] as const) for (const h of WALK_HOURS_ALL) groups[`${cs}|${b}|${h}`] = group(cs, b, h);
-  writeFileSync(FIXTURE, `${JSON.stringify({ generatedOn: process.env.STANDING_WALK_BASE ?? 'a3588d96', walks: Object.values(groups).reduce((n, g) => n + g.n, 0), groups }, null, 1)}\n`);
+  writeFileSync(FIXTURE, `${JSON.stringify({ generatedOn: process.env.STANDING_WALK_BASE ?? 'a3588d96', walks: Object.values(groups).reduce((n, g) => n + g.n, 0), excluded: EXCLUDED, groups }, null, 1)}\n`);
   test('wrote the walk identity fixture', () => { assert.ok(true); });
 } else {
-  const FX = JSON.parse(readFileSync(FIXTURE, 'utf8')) as { generatedOn: string; walks: number; groups: Record<string, { n: number; sha: string }> };
+  const FX = JSON.parse(readFileSync(FIXTURE, 'utf8')) as Fixture;
 
   test(`★★★ W1 the identity: every walk with no move of the reserve writes and does what ${FX.generatedOn} did, to the rationale (${FULL ? 'every hour' : `sample: ${WALK_HOURS_SAMPLE.join(', ')} h`})`, () => {
     let walks = 0;
@@ -42,6 +57,13 @@ if (process.env.STANDING_WALK_WRITE === '1') {
       const g = group(cs, b, h);
       assert.deepEqual(g, FX.groups[`${cs}|${b}|${h}`], `${cs} ${b} ${h}`);
       walks += g.n;
+      // v1.205.0 — every walk left out is one the claim moves, and no other: 'lateStart', or (review) a cost-carried night whose close
+      // past the stop the window's reach actually capped (H1) — not merely one on a bound window.
+      const rows = groupRows(cs, b, h);
+      for (const label of EXCLUDED[`${cs}|${b}|${h}`] ?? []) {
+        const r = rows.find((x) => x.label === label);
+        assert.ok(r != null && (r.reason === 'lateStart' || r.capped === true), `${cs} ${b} ${h} ${label}: excluded, yet neither 'lateStart' nor a cost-carried close the reach capped`);
+      }
     }
     if (FULL) assert.equal(walks, FX.walks);
     assert.equal(ROWS.filter((r) => (r.cs === 'O' || r.cs === 'W') && r.standing).length, 0, 'no stamp on a no-move walk');
@@ -105,7 +127,10 @@ if (process.env.STANDING_WALK_WRITE === '1') {
   };
   // v1.202.0 — re-measured (v1.201.0: full A 3854 / 188, W 3978 / 184; sample A 1005 / 45, W 1026 / 40): the walks on the measured pool, and the
   // cost-carried nights the walk past the stop discloses no longer claimed.
-  const PIN_STANDING_CLAIMED = FULL ? { A: { claimed: 3904, under: 189 }, W: { claimed: 4025, under: 183 } } : { A: { claimed: 1009, under: 40 }, W: { claimed: 1028, under: 37 } };
+  // v1.205.0 — the at-open allowance: the nights whose walk holds the line on the median but not with nothing charging before the
+  // allowance's end are no longer claimed ('lateStart'; full A 3904 / 189 → 3864 / 169, W 4025 / 183 → 3985 / 168; sample A 1009 / 40,
+  // W 1028 / 37): 40 claimed nights fewer on each side, and 20 / 15 fewer claimed nights closing under (6 / 3 in the sample).
+  const PIN_STANDING_CLAIMED = FULL ? { A: { claimed: 3864, under: 169 }, W: { claimed: 3985, under: 168 } } : { A: { claimed: 992, under: 34 }, W: { claimed: 1012, under: 34 } };
 
   test('★★★ W5 PIN_STANDING_CLAIMED: the nights a standing 50 claims and closes under, beside the written control: the same order, and each short by what its line is higher', () => {
     assert.deepEqual({ A: claimed('A'), W: claimed('W') }, PIN_STANDING_CLAIMED);
