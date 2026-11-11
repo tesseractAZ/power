@@ -19,7 +19,7 @@
 | `ecoflow_midday_charge_target_soc` / `_reserve_hold` | sensor (%) | The mid-day cost leg's level (`chargeLevelPct`) and its reserve, T_mid — the refreshed figures once the morning refresh ran, null after a cancel |
 | `ecoflow_midday_charge_expected_buy_kwh` / `_buy_kwh` | sensor (kWh) | Its expected draw, and the worst case it is sized on |
 | `ecoflow_midday_charge_window_start_at` / `_end_at` | sensor (timestamp) | The mid-day window: `device_class: timestamp` instants (ISO 8601, UTC), shown as times. The payload is null whenever no shadow record is served (weekends, weekdays after 15:00, all summer) and renders as `None`, which HA's MQTT sensor maps to unknown for every sensor type, ahead of any parsing and without a warning (core `mqtt/sensor.py`, `PAYLOAD_NONE`). v1.189.0 published them as text on the premise that a timestamp sensor logs a warning for that payload; it does not (restored in v1.190.1) |
-| `ecoflow_midday_charge_refresh` | sensor (string) | `pending`, then the refresh's disposition: `unchanged`, `lowered`, `capped`, `cancelled`, `stood` or `not-comparable` |
+| `ecoflow_midday_charge_refresh` | sensor (string) | `pending`, then the refresh's disposition: `unchanged`, `lowered`, `capped`, `cancelled`, `stood`, `not-comparable` or (v1.205.1) `not-armed` — the evening cycle would not arm, so nothing was re-sized |
 
 The text entities of v1.189.0 (`night_charge_role`, the refresh) render a null as `unknown` (`{{ "unknown" if value_json.x is none else value_json.x }}`, the null pattern `ecoflow_backup_reserve_enabled` set). The window bounds render it as `None` (the row above): a timestamp sensor would log a warning for `unknown`, which is no datetime.
 

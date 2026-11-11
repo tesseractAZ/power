@@ -15,11 +15,13 @@ import {
 import { decideActuation, nightChargeSpokenNotice, APPLY_LATE_MS, type NightActuationState } from '../src/nightChargeActuator.js';
 import { decideForceCharge } from '../src/nightForceCharge.js';
 import { buildNightChargeMessage } from '../src/notify.js';
+import { middayShadowView } from '../../web/src/cards/nightChargeText.js';
 import {
   runMiddayShadowEvening, shadowCycleConfig, backupLegSizing, costLegSizing, refreshLeg, shadowRefreshDue, standingRefresh,
   refreshFromSized, refreshSizing, middayChargeStateFields, middayShadowLedgerColumns, middayShadowRefreshLedgerColumns,
   middayShadowLogLines, middayShadowRefreshLogLine, coerceMiddayShadowRecord, windowP50Kwh, shadowServed,
   liveOvernightWrote, notComparableRefresh, refreshResized, middayShadowRefreshPreview, NOT_COMPARABLE_REASON, MIDDAY_CHARGE_BASIS,
+  notArmedRefresh, shadowCycleRefusal, middayShadowRefreshPreviewLogLine,
   MIDDAY_SHADOW_LOG_TAG, MIDDAY_SHADOW_FRESH_MS, REFRESH_LEAD_MS, REFRESH_DEADLINE_MS,
   heldImportEstimate, heldSpan, OPTION_B_DISPOSITION,
   type MiddayShadowRecord, type ShadowLegSizing, type ShadowSized, type ShadowArmCandidate, type ShadowArmVerdict,
@@ -831,8 +833,9 @@ test('★★★ index.ts: the shadow block writes nothing — no panel writer, n
   assert.match(blk, /if \(readNightChargeLatch\(\)\.lastNotifyDay === today && cur\?\.day !== today && nowMin >= fireMin && nowMin < sched\.eveningCutoffMin\) \{/);
   // The refresh needs a fresh panel, is re-read after the await, and is persisted before it is logged.
   assert.match(blk, /const sized = await sizeShadowLeg\(sizing, false\);/);
-  // A night the live overnight leg wrote is not re-sized (liveOvernightWrote), before any sizing.
-  assert.match(blk, /let refresh = liveOvernightWrote\(cur, nightActuationMem\) \? notComparableRefresh\(nowMs\)\n\s+: due === 'stand' \? standingRefresh\(cur, nowMs\) : null;/);
+  // A night the live overnight leg wrote is not re-sized (liveOvernightWrote), before any sizing. v1.205.1 — nor a cycle the evening
+  // would not arm (shadowRefreshDue 'notArmed'), first, whatever the live leg did.
+  assert.match(blk, /let refresh = due === 'notArmed' \? notArmedRefresh\(cur, nowMs\)\n\s+: liveOvernightWrote\(cur, nightActuationMem\) \? notComparableRefresh\(nowMs\)\n\s+: due === 'stand' \? standingRefresh\(cur, nowMs\) : null;/);
   assert.match(blk, /if \(live == null \|\| live\.day !== cur\.day \|\| live\.computedAtMs !== cur\.computedAtMs \|\| live\.refresh != null\) return;/);
   assert.ok(blk.indexOf('persistMiddayShadow(next);') < blk.indexOf('app.log.info(middayShadowRefreshLogLine(next, refresh));'));
   // The tick is registered beside the actuator tick, on its own single-flight.
@@ -884,4 +887,121 @@ test('★★ nightChargeRoleFields: cost on a fresh plan with a window; null oth
   assert.deepEqual(nightChargeRoleFields(p, NOW + 13 * H), { night_charge_role: null }, 'stale after 12 h');
   assert.deepEqual(nightChargeRoleFields({ ...p, basisComplete: false }, NOW), { night_charge_role: null });
   assert.ok(APPLY_LATE_MS > 0);
+});
+
+/* ══ v1.205.1 — the morning refresh of a cycle the evening would not arm ═══════════════════════════════════ */
+
+const WHY_REFUSED = "a prior night's reserve write is unresolved";
+/** The evening's record of a cycle the arm probe would not arm: its cost leg charges, in a write mode, and "would not arm — <why>". */
+const refusedRecord = (o: Partial<MiddayShadowRecord> = {}): MiddayShadowRecord => {
+  const r = record(o);
+  return { ...r, cost: { ...r.cost!, wouldArm: false, disposition: `would not arm — ${WHY_REFUSED}` } };
+};
+const NOT_ARMED_REASON = `the evening cycle would not arm (${WHY_REFUSED}), so there is nothing to refresh; the evening's figures stand`;
+/** v1.205.0's shadowRefreshDue, for the armed records it must still answer exactly. */
+const dueBefore = (rec: MiddayShadowRecord | null, nowMs: number): 'run' | 'stand' | null => {
+  const c = rec?.cost;
+  if (rec == null || c == null || rec.refresh != null || !c.basisComplete || !c.chargeTonight) return null;
+  if (nowMs >= c.windowEndMs) return null;
+  if (nowMs >= c.windowStartMs - REFRESH_DEADLINE_MS) return 'stand';
+  return nowMs >= c.windowStartMs - REFRESH_LEAD_MS ? 'run' : null;
+};
+
+test('★★★ RF-1 a refused cycle (the probe would not arm its cost leg, in a write mode) is never re-sized: from 30 minutes before the open to the close the refresh is due as "notArmed", never "run" or "stand"; an armed or advisory cycle is due exactly as before', () => {
+  const open = phx(10, 15, 10);
+  const close = phx(10, 15, 15);
+  for (const mode of ['supervised', 'auto'] as const) {
+    const r = refusedRecord({ mode });
+    assert.equal(shadowCycleRefusal(r), WHY_REFUSED, mode);
+    assert.equal(shadowRefreshDue(r, open - 31 * M), null, mode);
+    for (const t of [open - 30 * M, open - 20 * M, open - 5 * M - 1, open - 5 * M, open, open + 4 * H, close - 1]) {
+      assert.equal(shadowRefreshDue(r, t), 'notArmed', `${mode} ${new Date(t).toISOString()}`);
+    }
+    assert.equal(shadowRefreshDue(r, close), null, `${mode}: the window closed`);
+    assert.equal(shadowRefreshDue({ ...r, refresh: notArmedRefresh(r, open - 30 * M) }, open - 20 * M), null, `${mode}: once`);
+    // A hold, or an incomplete basis: nothing to refresh, as before.
+    assert.equal(shadowRefreshDue({ ...r, cost: { ...r.cost!, chargeTonight: false } }, open - 20 * M), null);
+    assert.equal(shadowRefreshDue({ ...r, cost: { ...r.cost!, basisComplete: false } }, open - 20 * M), null);
+  }
+  // Not refused: an armed cycle in either write mode, an advisory one (it arms nothing, and is not refused: its 21:30 words are
+  // "recommended"), a record with no refresh and one with — due exactly as v1.205.0 did, minute by minute.
+  const armed = [record(), record({ mode: 'auto' }), record({ mode: 'advisory', cost: { ...record().cost!, wouldArm: false, disposition: 'not armed — the night-charge mode is advisory' } }),
+    { ...record(), refresh: standingRefresh(record(), open - 5 * M) }, record({ cost: { ...record().cost!, chargeTonight: false } })];
+  for (const r of armed) {
+    assert.equal(shadowCycleRefusal(r), null);
+    for (let t = open - 40 * M; t <= close + 10 * M; t += M) assert.equal(shadowRefreshDue(r, t), dueBefore(r, t), `${r.mode} ${new Date(t).toISOString()}`);
+  }
+  assert.equal(shadowCycleRefusal({ ...record(), cost: null }), null);
+});
+
+test('★★★ RF-2 the refused cycle\'s refresh is recorded, not silent: disposition "not-armed", the evening\'s figures, no push — the ledger, the entities, the log and the preview say so; never "a live refresh would push this" nor "Lowered to"', async () => {
+  const r = refusedRecord();
+  const at = phx(10, 15, 9, 30);
+  const na = notArmedRefresh(r, at);
+  assert.deepEqual(na, {
+    atMs: at, disposition: 'not-armed', levelPct: 89.5, reservePct: 50, buyKwh: 47.8, expectedBuyKwh: 34, wouldPush: false, reason: NOT_ARMED_REASON,
+  });
+  assert.equal(refreshResized(na), false);
+  const rec = { ...r, refresh: na };
+  // The ledger columns.
+  assert.deepEqual(middayShadowRefreshLedgerColumns(na), {
+    shadow_refresh_weather_age_s: null, shadow_refreshed_at_ms: at, shadow_refresh_disposition: 'not-armed',
+    shadow_refreshed_level_pct: 89.5, shadow_refreshed_reserve_pct: 50, shadow_refreshed_buy_kwh: 47.8, shadow_refreshed_expected_buy_kwh: 34,
+  });
+  // The entities: the evening's figures, and what the refresh was.
+  const f = middayChargeStateFields(rec, at + M);
+  assert.deepEqual([f.midday_charge_refresh, f.midday_charge_target_soc_percent, f.midday_charge_expected_buy_kwh, f.midday_charge_recommended], ['not-armed', 89.5, 34, false]);
+  // The log line, word for word; no preview push.
+  assert.equal(middayShadowRefreshLogLine(rec, na), `${MIDDAY_SHADOW_LOG_TAG} ${DAY} refresh — not-armed: ${NOT_ARMED_REASON}; level ~89.5%, reserve 50%, `
+    + 'expected 34 kWh. Shadow only: nothing is written or pushed.');
+  assert.equal(middayShadowRefreshPreview(rec, na), null);
+  assert.equal(middayShadowRefreshPreviewLogLine(rec, na), null);
+  // The defect it replaces: the same record re-sized on the 09:30 pool would say a live refresh pushes "Lowered to …" about a
+  // cycle whose 21:30 words said the add-on will not charge tomorrow.
+  const sz = refreshSizing(MODEL, r, CFG, [100])!;
+  const resized = refreshFromSized(r, await engineSizer([], { nowMs: at, socNowPct: 60 })(sz), at);
+  const wouldHave = [middayShadowRefreshLogLine({ ...r, refresh: resized }, resized), middayShadowRefreshPreviewLogLine({ ...r, refresh: resized }, resized) ?? ''].join(' ');
+  assert.equal(resized.wouldPush, true, wouldHave);
+  assert.match(wouldHave, /a live refresh would push this|Lowered to/);
+  for (const t of [middayShadowRefreshLogLine(rec, na), middayShadowRefreshPreviewLogLine(rec, na) ?? '']) {
+    assert.doesNotMatch(t, /would push|Lowered to|Cancel from the charge card/, t);
+  }
+});
+
+test('★★★ RF-3 the record across a restart: a refused cycle\'s "not-armed" refresh reads back (and is not made again); a v1.205.0 record — legs with no cushionAskedLinePct, a refresh of every disposition it knew, or none — still coerces; an unknown disposition is no refresh', () => {
+  const r = refusedRecord();
+  const at = phx(10, 15, 9, 30);
+  const withNa = { ...r, refresh: notArmedRefresh(r, at) };
+  const back = coerceMiddayShadowRecord(JSON.parse(JSON.stringify(withNa)))!;
+  assert.deepEqual(back, withNa);
+  assert.equal(shadowRefreshDue(back, at + M), null, 'restored: not made again');
+  // A v1.205.0 record: refused, before 09:30 (no refresh): restored, it is recorded "not-armed" at 09:30.
+  const v1205 = JSON.parse(JSON.stringify(r));
+  assert.equal('cushionAskedLinePct' in v1205.cost, false);
+  const old = coerceMiddayShadowRecord(v1205)!;
+  assert.deepEqual(old, r);
+  assert.equal(shadowRefreshDue(old, at), 'notArmed');
+  for (const d of ['unchanged', 'lowered', 'capped', 'cancelled', 'stood', 'not-comparable', 'not-armed'] as const) {
+    const x = coerceMiddayShadowRecord(JSON.parse(JSON.stringify({ ...record(), refresh: { ...standingRefresh(record(), at), disposition: d } })))!;
+    assert.equal(x.refresh?.disposition, d, d);
+  }
+  assert.equal(coerceMiddayShadowRecord(JSON.parse(JSON.stringify({ ...record(), refresh: { ...standingRefresh(record(), at), disposition: 'not-sure' } })))!.refresh, null);
+});
+
+test('★★ RF-4 the card\'s "Morning refresh" row: a refused cycle is not "due" a refresh, and once recorded reads "not armed" with the reason; an armed or advisory cycle reads as before', () => {
+  const hhmm = (ms: number): string => {
+    const d = new Date(ms - 7 * H);
+    return `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`;
+  };
+  const view = (rec: MiddayShadowRecord) => middayShadowView(JSON.parse(JSON.stringify(rec)), hhmm)!.lines;
+  const r = refusedRecord();
+  assert.equal(view(r)[2], 'Morning refresh: none — the evening cycle would not arm, so there is nothing to refresh');
+  assert.equal(view({ ...r, refresh: notArmedRefresh(r, phx(10, 15, 9, 30)) })[2], `Morning refresh 09:30: not armed — ${NOT_ARMED_REASON}`);
+  assert.equal(view(record())[2], 'Morning refresh: due 30 minutes before 10:00');
+  assert.equal(view(record({ mode: 'advisory', cost: { ...record().cost!, wouldArm: false, disposition: 'not armed — the night-charge mode is advisory' } }))[2],
+    'Morning refresh: due 30 minutes before 10:00');
+  // A status with no mode (a server before v1.205.1): as before.
+  const noMode = JSON.parse(JSON.stringify(r));
+  delete noMode.mode;
+  assert.equal(middayShadowView(noMode, hhmm)!.lines[2], 'Morning refresh: due 30 minutes before 10:00');
 });

@@ -30,6 +30,9 @@
  *                             refresh: a reserve above the announced one is a cap, and is said so)
  *   Fix 3      R-xxix (a cap keeps the announced worst case: the entity, the shadow ledger and the live
  *                             refreshed_buy_kwh hold the figure the leg runs on)
+ *   Not armed  N-i..N-viii    (v1.205.1: a cycle the evening would not arm, shadowCycleRefusal, is never re-sized at 09:30 —
+ *                             shadowRefreshDue 'notArmed', index.ts records notArmedRefresh first — and the record says so: no
+ *                             push, the evening's figures, read back across a restart, the card's row not "due")
  *
  *   node scripts/mutate-midday-refresh.mjs [--only <id prefix>]
  */
@@ -46,6 +49,7 @@ const TXT = resolve(REPO, 'server/src/chargeText.ts');
 const RT = resolve(REPO, 'server/src/chargeAnnounce.ts');
 const MS = resolve(REPO, 'server/src/middayShadow.ts');
 const NTF = resolve(REPO, 'server/src/notify.ts');
+const CARD = resolve(REPO, 'web/src/cards/nightChargeText.ts');
 const SUBSET = [
   'test/morningRefresh.test.ts',
   'test/middayAnnounce.test.ts',
@@ -625,8 +629,8 @@ const MUTANTS = [
   {
     id: 'Q-i. ★★★ the shadow refresh is re-sized after the live overnight charge wrote',
     file: IDX,
-    find: '  let refresh = liveOvernightWrote(cur, nightActuationMem) ? notComparableRefresh(nowMs)',
-    to: '  let refresh = (false as boolean) ? notComparableRefresh(nowMs) /* MUTANT */',
+    find: '    : liveOvernightWrote(cur, nightActuationMem) ? notComparableRefresh(nowMs)',
+    to: '    : (false as boolean) ? notComparableRefresh(nowMs) /* MUTANT */',
     why: 'The refresh sizes on a pool the live overnight leg filled and reads the mid-day leg as nearly done.',
   },
   {
@@ -649,6 +653,63 @@ const MUTANTS = [
     find: "  return r != null && r.disposition !== 'stood' && r.disposition !== 'not-comparable';",
     to: "  return r != null && r.disposition !== 'stood'; /* MUTANT */",
     why: 'The mid-day entities go unknown on every write night instead of keeping the evening plan.',
+  },
+  /* ── v1.205.1: the morning refresh of a cycle the evening would not arm ── */
+  {
+    id: 'N-i. ★★★ a refused cycle is re-sized at 09:30',
+    file: MS,
+    find: "  if (shadowCycleRefusal(rec) != null) return nowMs >= c.windowStartMs - REFRESH_LEAD_MS ? 'notArmed' : null;",
+    to: '  /* MUTANT */',
+    why: 'A cycle whose 21:30 words said "The add-on will not charge tomorrow" logs "a live refresh would push this" and previews "still ~89.5% … Cancel from the charge card before 10:00 AM".',
+  },
+  {
+    id: 'N-ii. ★★ a refused cycle is re-sized until the deadline, recorded only at it',
+    file: MS,
+    find: "  if (shadowCycleRefusal(rec) != null) return nowMs >= c.windowStartMs - REFRESH_LEAD_MS ? 'notArmed' : null;",
+    to: "  if (shadowCycleRefusal(rec) != null && nowMs >= c.windowStartMs - REFRESH_DEADLINE_MS) return 'notArmed'; /* MUTANT */",
+    why: 'From 09:30 to 09:55 the refused cycle is sized and previewed as a refresh would be; the record comes 25 minutes late, if a refresh did not land first.',
+  },
+  {
+    id: 'N-iii. ★★★ index.ts does not record the not-armed refresh (it falls through to the sizing)',
+    file: IDX,
+    find: "  let refresh = due === 'notArmed' ? notArmedRefresh(cur, nowMs)",
+    to: "  let refresh = (false as boolean) ? notArmedRefresh(cur, nowMs) /* MUTANT */",
+    why: 'shadowRefreshDue says nothing is to be refreshed and the tick re-sizes the cycle anyway.',
+  },
+  {
+    id: 'N-iv. ★★ the not-armed refresh says a live refresh would push',
+    file: MS,
+    find: "    expectedBuyKwh: c.expectedBuyKwh, wouldPush: false,\n    reason: `the evening cycle would not arm",
+    to: "    expectedBuyKwh: c.expectedBuyKwh, wouldPush: true, /* MUTANT */\n    reason: `the evening cycle would not arm",
+    why: 'The log reads "a live refresh would push this" about a cycle nothing armed.',
+  },
+  {
+    id: 'N-v. ★★ the not-armed refresh read as re-sized figures',
+    file: MS,
+    find: "  if (r?.disposition === 'not-armed') return false;",
+    to: '  /* MUTANT */',
+    why: 'The entities and the card read the evening\'s figures as a morning re-plan that was never made.',
+  },
+  {
+    id: 'N-vi. ★★ the restore drops a not-armed refresh',
+    file: MS,
+    find: 'const DISPOSITIONS = Object.keys(DISPOSITION_SET) as ShadowRefreshDisposition[];',
+    to: "const DISPOSITIONS = Object.keys(DISPOSITION_SET).filter((d) => d !== 'not-armed') as ShadowRefreshDisposition[]; /* MUTANT */",
+    why: 'After a restart the refused cycle\'s record loses its refresh and is recorded again, its ledger stamp twice.',
+  },
+  {
+    id: 'N-vii. ★★ the card says a refused cycle\'s morning refresh is due',
+    file: CARD,
+    find: "  } else if (c.basisComplete && c.chargeTonight && s.mode != null && s.mode !== 'advisory' && !c.wouldArm) {",
+    to: "  } else if ((false as boolean) && c.basisComplete && c.chargeTonight && s.mode != null && s.mode !== 'advisory' && !c.wouldArm) { /* MUTANT */",
+    why: '"Morning refresh: due 30 minutes before 10:00" for a cycle that will get none.',
+  },
+  {
+    id: 'N-viii. ★★ the card shows a not-armed refresh as figures',
+    file: CARD,
+    find: "        : r.disposition === 'not-armed' ? 'not armed'\n",
+    to: '        /* MUTANT */\n',
+    why: 'The card reads "not-armed, ~89.5%, ~34 kWh expected" as if a refresh had sized the leg.',
   },
   {
     id: 'T-xxi. ★★★ a reserve cap is pushed as "calls for more" than a level it did not ask above',
