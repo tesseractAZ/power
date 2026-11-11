@@ -478,9 +478,8 @@ export function buildNightChargeMessage(
   // v1.200.0 — keyed on the cause: the caps note only where the SIZING fell short; the envelope note
   // where the line is above the 50% the panel accepts as a reserve and the plan does not claim it — (A5) on an armed
   // night, what its own walk cannot hold (lineNotHeldOf), a carried night whose sizing fell short included.
-  const shortfallNote = (sizingShortfall(plan)
-    ? ' NOTE: charge/pool limits prevent fully meeting the cushion — residual risk remains.'
-    : '') + envelopeShortfallNote(plan);
+  const capsNote = sizingShortfall(plan) ? ' NOTE: charge/pool limits prevent fully meeting the cushion — residual risk remains.' : '';
+  const shortfallNote = capsNote + envelopeShortfallNote(plan);
 
   if (shape === 'hold') {
     // v1.187.22 — SAY WHICH HOLD THIS IS, on the figure it was decided on. The body said "the
@@ -547,22 +546,25 @@ export function buildNightChargeMessage(
   // contract writes the reserve alone, and the add-on arms nothing. Say so, and why — for the
   // night the plan is: a charge, or the reserve held as a floor with no charge expected. In auto
   // mode it is "the write": nothing about it is supervised.
+  // ★★★ v1.205.0 (review) — nothing is armed, so the line note is the refused one (refusedEnvelopeNote): never an armed
+  // night's (lineNotHeldOf), which states the close of a charge the refusal does not arm.
   if (!supervised && armRefused) {
     const write = mode === 'auto' ? 'the write' : 'the supervised write';
+    const refusedNote = capsNote + refusedEnvelopeNote(plan);
     return held
       ? {
         ...base,
         title: 'Night-charge: planned reserve hold NOT armed tonight',
         body:
           `Tonight's plan holds the backup reserve at ${reserveText} overnight as a floor, with no charge expected, but ${write} `
-          + `was not armed — ${armRefused}. The add-on will not raise the reserve tonight.${shortfallNote}${cushionOnlyPushText(plan, 'short')}`,
+          + `was not armed — ${armRefused}. The add-on will not raise the reserve tonight.${refusedNote}${cushionOnlyPushText(plan, 'short')}`,
       }
       : {
         ...base,
         title: 'Night-charge: planned charge NOT armed tonight',
         body:
           `Tonight's plan calls for a charge, but ${write} was not armed — ${armRefused}. `
-          + `The add-on will not charge tonight.${shortfallNote}${cushionOnlyPushText(plan, 'short')}`,
+          + `The add-on will not charge tonight.${refusedNote}${cushionOnlyPushText(plan, 'short')}`,
       };
   }
   const overBuyNote = plan.bindingCap === 'overBuy'
@@ -1534,6 +1536,16 @@ function envelopeShortfallNote(plan: Pick<NightChargePlan, 'cushionShortfallCaus
       : plan.cushionEnvelopeReason === 'reserveAtTarget' ? `and the reserve reads ${round1(plan.reserveFloorPct)}%: no write is due while it does, and no force-charge runs without one`
         : 'and no force-charge carries it to the window close';
   return ` NOTE: ${line} is above ${lineOverReserveText(plan.cushionLineSocPct ?? Infinity, 'accepts')}, ${why} — residual risk remains.`;
+}
+
+/** ★★★ v1.205.0 (review) — the envelope note of a REFUSED arm (buildNightChargeMessage's refused shapes). Nothing is armed, so a
+ *  plan with a line force-charge (plan.forceChargeLine) says once that nothing is armed to carry its line, whatever its kind — never
+ *  an armed night's note (lineNotHeldOf), which states the close of a charge the refusal does not arm, or a force-charge's margin.
+ *  The card drops its line row under a refused arm (NightChargeCard). Every other plan: envelopeShortfallNote, as before. PURE. */
+function refusedEnvelopeNote(plan: Parameters<typeof envelopeShortfallNote>[0]): string {
+  if (plan.forceChargeLine == null) return envelopeShortfallNote(plan);
+  const l = plan.cushionLineSocPct != null && Number.isFinite(plan.cushionLineSocPct) ? plan.cushionLineSocPct : plan.forceChargeLine.linePct;
+  return ` NOTE: ${lineAboveReserveWords(l, "tonight's ", ' outage line')} is above ${lineOverReserveText(l, 'accepts')}, and nothing is armed to carry it — residual risk remains.`;
 }
 
 /** One-decimal rounding for the human-facing advisory strings. */

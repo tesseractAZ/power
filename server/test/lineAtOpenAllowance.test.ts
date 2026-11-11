@@ -508,3 +508,99 @@ test('★★★ AO-14 the year at 21:30, 4-20 h, both pools: every \'lateStart\'
   assert.deepEqual(pastOpen, PIN_AO14_PAST_OPEN);
   assert.deepEqual(closeNamed, PIN_AO14_COST_CLOSE_NAMED);
 });
+
+/** AO-15 — a REFUSED arm arms nothing (index.ts: armCycle's refusal, the plan announced unchanged). The 21:30 push's note on a night
+ *  whose plan carries a line force-charge (forceChargeLine) is then this one, once — never an armed night's line note
+ *  (lineNotHeldOf), which states the close of a charge the refusal does not arm. Measured on the landed change: the year's 21:30
+ *  plans at 4-20 h on both pools with a line force-charge, by kind. */
+const REFUSED_NOTE = /NOTE: tonight's (?:[\d.]+% )?outage line is above the (?:50% the panel accepts as a reserve|49% the panel holds the pool at under the 50% it accepts as a reserve), and nothing is armed to carry it — residual risk remains\./g;
+const PIN_AO15 = { none: 3075, closeUnder: 716, nearFull: 142, aboveFull: 104, lateStart: 57 };
+/** What only an armed night's line note says: a close, a margin, a force-charge that runs. */
+const ARMED_WORDS = /expected to close|too close to|within 10 points of a full pool|above a full pool|its force-charge runs|cannot hold it with/;
+
+test('★★★ AO-15 a refused arm arms nothing: the 21:30 and mid-day pushes say once that nothing is armed to carry the line, never an armed night\'s note (the ~59.5% close of a 7.2 kWh charge the refusal does not arm), on every kind; the year counted', async () => {
+  const WHY = 'the panel reports the grid is not connected';
+  const refusedOf = (p: P, mode: 'supervised' | 'auto' = 'supervised') => buildNightChargeMessage(p, 'charge', null, WHY, mode);
+  const lead = `Tonight's plan calls for a charge, but the supervised write was not armed — ${WHY}. The add-on will not charge tonight.`;
+  const note = (l: string, over = 'the 50% the panel accepts as a reserve'): string => ` NOTE: tonight's ${l}% outage line is above ${over}, and nothing is armed to carry it — residual risk remains.`;
+  // The finding: 2027-04-09 21:30 at ×0.944, 7 h — open ~51.8%; the ~59.5% median close is the 7.2 kWh charge's.
+  const late = planAt('2027-04-09 21:30', 'm', 7);
+  assert.deepEqual([lineNotHeldOf(late), late.expectedStartSocPct, late.expectedWriteLevelPct, late.expectedBuyKwh], ['lateStart', 51.8, 59.5, 7.2]);
+  assert.equal(refusedOf(late).title, 'Night-charge: planned charge NOT armed tonight');
+  assert.equal(refusedOf(late).body, lead + note('59.4'));
+  assert.equal(refusedOf(late, 'auto').body, lead.replace('the supervised write', 'the write') + note('59.4'));
+  // The armed push is unchanged: its 'lateStart' note.
+  assert.deepEqual(PUSH_LINE.exec(pushOf(late))?.slice(1), ['59.5', OPEN]);
+  // The cost-carried 'lateStart' night (2027-02-05 21:30 at ×0.944, 20 h; open ~44.1%), a 'closeUnder' (2027-08-09 21:30 at ×0.944,
+  // 13 h), a 'nearFull' and an 'aboveFull' (2026-10-26 21:30 on nameplate, 17 and 20 h), a carried line (2027-08-09 21:30 at ×0.944,
+  // 12 h) and a line in (49, 50] (2026-11-27 21:30 at ×0.944, 16 h): the one note, beside the 49% the panel holds for the last.
+  for (const [p, kind, l, over] of [
+    [planAt('2027-02-05 21:30', 'm', 20), 'lateStart', '58.9'], [planAt('2027-08-09 21:30', 'm', 13), 'closeUnder', '68.9'],
+    [planAt('2026-10-26 21:30', 'np', 17), 'nearFull', null], [planAt('2026-10-26 21:30', 'np', 20), 'aboveFull', null],
+    [planAt('2027-08-09 21:30', 'm', 12), null, null],
+    [planAt('2026-11-27 21:30', 'm', 16), 'lateStart', '49.99', 'the 49% the panel holds the pool at under the 50% it accepts as a reserve'],
+  ] as Array<[P, string | null, string | null, string?]>) {
+    const where = `${p.window?.startMs} ${kind}`;
+    assert.equal(lineNotHeldOf(p), kind, where);
+    const b = refusedOf(p).body;
+    assert.ok(b.startsWith(lead), `${where}: ${b}`);
+    if (l != null) assert.ok(b.endsWith(note(l, over)), `${where}: ${b}`);
+    assert.equal(b.match(REFUSED_NOTE)?.length, 1, `${where}: ${b}`);
+    assert.doesNotMatch(b, ARMED_WORDS, where);
+    assert.doesNotMatch(b, LATE_WORDS, where);
+  }
+  // A night expected to charge nothing: the reserve-hold shape, the same note.
+  const heldShape = refusedOf({ ...late, expectedBuyKwh: 0 } as P);
+  assert.equal(heldShape.title, 'Night-charge: planned reserve hold NOT armed tonight');
+  assert.ok(heldShape.body.endsWith(`The add-on will not raise the reserve tonight.${note('59.4')}`), heldShape.body);
+  // The year: every plan with a line force-charge, refused, in both write modes.
+  const count: Record<string, number> = {};
+  const errs: string[] = [];
+  for (const c of CASES.filter((x) => / 21:30$/.test(x.label))) for (const b of ['np', 'm'] as const) for (let h = 4; h <= 20; h++) {
+    const p = planAt(c.label, b, h);
+    if (p.forceChargeLine == null) continue;
+    const kind = lineNotHeldOf(p) ?? 'none';
+    count[kind] = (count[kind] ?? 0) + 1;
+    for (const mode of ['supervised', 'auto'] as const) {
+      const t = refusedOf(p, mode).body;
+      if (t.match(REFUSED_NOTE)?.length !== 1) errs.push(`${c.label} ${b} ${h} h ${mode}: not one refused note: ${t}`);
+      if (ARMED_WORDS.test(t) || LATE_WORDS.test(t) || UNDER.test(t)) errs.push(`${c.label} ${b} ${h} h ${mode}: an armed night's note: ${t}`);
+    }
+  }
+  assert.deepEqual(errs.slice(0, 5), [], `${errs.length} errors`);
+  assert.deepEqual(count, PIN_AO15);
+  // The mid-day push alike: the leg's record across a restore, refused (a prior night's reserve write is unresolved).
+  const ms = await import('../src/middayShadow.js');
+  const { buildApsREvModel } = await import('../src/tariff.js');
+  const phx = (mo: number, d: number, h: number, mi = 0): number => Date.UTC(2026, mo - 1, d, h + 7, mi);
+  const leg = { role: 'cost', kind: 'super_off_peak', startMs: phx(10, 15, 10), endMs: phx(10, 15, 15) };
+  const R = "a prior night's reserve write is unresolved";
+  const MIDDAY = " NOTE: this leg's outage line is above the 50% the panel accepts as a reserve, and nothing is armed to carry it — residual risk remains.";
+  const inputOf = (p: P) => {
+    const sum = (ms as unknown as { summariseLeg: (l: unknown, s: unknown, a: unknown) => Record<string, unknown> }).summariseLeg(leg, { plan: p, windowPvP50Kwh: null, windowLoadP50Kwh: null }, { wouldArm: true, disposition: 'would arm' });
+    const rec = { version: 1, day: '2026-10-14', computedAtMs: phx(10, 14, 21, 30), why: 'midday', mode: 'supervised', backup: null, cost: sum, refresh: null, note: null };
+    return ms.middayShadowAnnounceInput(ms.coerceMiddayShadowRecord(JSON.parse(JSON.stringify(rec)))!, buildApsREvModel())!;
+  };
+  for (const [p, kind] of [
+    [late, 'lateStart'], [planAt('2027-02-15 21:30', 'np', 18), 'lateStart'], [planAt('2027-08-09 21:30', 'm', 13), 'closeUnder'],
+    [planAt('2026-10-26 21:30', 'np', 17), 'nearFull'], [planAt('2026-10-26 21:30', 'np', 20), 'aboveFull'], [planAt('2027-08-09 21:30', 'm', 12), undefined],
+  ] as Array<[P, string | undefined]>) {
+    const i = inputOf(p);
+    assert.equal(i.cost.lineNotHeld, kind);
+    const m = buildMiddayPlanMessage({ ...i, refused: R });
+    assert.equal(m.title, "Charge plan: tomorrow's 10am–3pm charge NOT armed");
+    assert.ok(m.body.includes(`The add-on will not charge tomorrow.`) && m.body.endsWith(MIDDAY), `${kind}: ${m.body}`);
+    assert.equal(m.body.split('outage line').length - 1, 1, `${kind}: one line note: ${m.body}`);
+    assert.doesNotMatch(m.body, ARMED_WORDS, String(kind));
+    assert.doesNotMatch(m.body, LATE_WORDS, String(kind));
+    // Armed (not refused): the leg's own note, as before.
+    if (kind != null) assert.match(buildMiddayPlanMessage(i).body, kind === 'closeUnder' || kind === 'lateStart' ? /expected to close/ : /full pool/, String(kind));
+  }
+  // A line in (49, 50] (2026-11-27 21:30 at ×0.944, 16 h): beside the 49% the panel holds, as the overnight note names it.
+  assert.ok(buildMiddayPlanMessage({ ...inputOf(planAt('2026-11-27 21:30', 'm', 16)), refused: R }).body.endsWith(" NOTE: this leg's outage line is above "
+    + 'the 49% the panel holds the pool at under the 50% it accepts as a reserve, and nothing is armed to carry it — residual risk remains.'));
+  // …and beside it a backup leg that discloses its own line: its sentence kept, after the leg's.
+  const withBackup = buildMiddayPlanMessage({ ...inputOf(late), refused: R, backup: { windowStartMs: phx(10, 14, 23), windowEndMs: phx(10, 15, 5),
+    reservePct: 50, expectedKwh: 12.4, buyKwh: 20.1, cushionShortfall: true, cushionShortfallCause: 'envelope' } });
+  assert.ok(withBackup.body.endsWith(`${MIDDAY} NOTE: the outage line is above the 50% the panel accepts as a reserve and no force-charge carries it on the backup leg — residual risk remains.`), withBackup.body);
+});

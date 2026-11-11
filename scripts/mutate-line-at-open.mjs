@@ -17,6 +17,8 @@
  * (R) ROUND 2 (review): a cost-carried 'lateStart' night carries its close past the stop (expectedCloseAfterStopPct) and the 21:30
  * push and the ARMED line name it as the rationale does, never the stop (AOA-15b/c, AOA-17d, AOA-25/25b); the sweep's grid and its
  * start (AOA-19b/c); the deferral's anchor (AOA-22b); the H1 cap the walk identity's guard reads (AOA-26).
+ * (F) ROUND 3 (review): a refused arm arms nothing, so the 21:30 and mid-day pushes say once that nothing is armed to carry a line
+ * night's line, never an armed night's note (notify.ts refusedEnvelopeNote, chargeText.ts armedNote). AOA-27 (a..e).
  *
  *   node scripts/mutate-line-at-open.mjs [--only <id prefix>]
  *
@@ -443,6 +445,43 @@ const MUTANTS = [
     find: '    const reachPct = (lineWindowReachKwh(o, deliverableKwh) / o.fullKwh) * 100;\n    if (out.rawClosePct > reachPct + 1e-9) {',
     to: '    const reachPct = (lineWindowReachKwh(o, deliverableKwh) / o.fullKwh) * 100;\n    out.closeReachCapped = true; /* MUTANT */\n    if (out.rawClosePct > reachPct + 1e-9) {',
     why: 'A bound night whose close past the stop is under the reach reads as capped: W1\'s guard admits a walk the cap never moved.',
+  },
+
+  /* ── F: round 3 (review) — a refused arm arms nothing ── */
+  {
+    id: 'AOA-27. ★★★ the refused 21:30 push states the armed night\'s line note',
+    file: NTF, tests: [T_AO],
+    find: '    const refusedNote = capsNote + refusedEnvelopeNote(plan);',
+    to: '    const refusedNote = capsNote + envelopeShortfallNote(plan); /* MUTANT */',
+    why: '2027-04-09 21:30 at ×0.944, 7 h, refused: "the add-on will not charge tonight", then the ~59.5% close of the 7.2 kWh charge it did not arm.',
+  },
+  {
+    id: 'AOA-27b. ★★ the refused 21:30 push says nothing of a line night\'s line',
+    file: NTF, tests: [T_AO],
+    find: '  if (plan.forceChargeLine == null) return envelopeShortfallNote(plan);',
+    to: "  if (plan.forceChargeLine == null) return envelopeShortfallNote(plan);\n  if ((true as boolean)) return ''; /* MUTANT */",
+    why: 'A refused line night\'s push is silent on a line the 50% reserve cannot hold and nothing armed carries.',
+  },
+  {
+    id: 'AOA-27c. ★★ the refused note names a line in (49, 50] above the 50% reserve',
+    file: NTF, tests: [T_AO],
+    find: "is above ${lineOverReserveText(l, 'accepts')}, and nothing is armed to carry it",
+    to: "is above ${lineOverReserveText(Infinity /* MUTANT */, 'accepts')}, and nothing is armed to carry it",
+    why: '2026-11-27 21:30 at ×0.944, 16 h: "the 49.99% outage line is above the 50% the panel accepts as a reserve".',
+  },
+  {
+    id: 'AOA-27d. ★★★ the refused mid-day push states the armed leg\'s line note',
+    file: CTX, tests: [T_AO],
+    find: "    i.refused != null ? ` NOTE: this leg's outage line is above",
+    to: "    /* MUTANT */ (false as boolean) ? ` NOTE: this leg's outage line is above",
+    why: '"The add-on will not charge tomorrow", then the leg\'s close too close to its line to allow for a switch-on it did not arm.',
+  },
+  {
+    id: 'AOA-27e. ★★ the refused mid-day note names a line in (49, 50] above the 50% reserve',
+    file: CTX, tests: [T_AO],
+    find: "lineOverReserveText(l.linePct ?? Infinity, 'accepts')",
+    to: "lineOverReserveText(Infinity, 'accepts') /* MUTANT */",
+    why: 'The overnight and mid-day refused notes disagree on a 49.99% line.',
   },
 ];
 

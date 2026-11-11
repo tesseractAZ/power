@@ -26,7 +26,7 @@
 import type { NotifyMessage } from './notify.js';
 import type { ForceChargeNightOutcome } from './nightForceCharge.js';
 // v1.205.0 (review) — what a 'lateStart' leg's line is too close to allow for (the switch-on at the open, or the window's charge).
-import { lateStartAllowanceWords } from './nightForceCharge.js';
+import { lateStartAllowanceWords, lineOverReserveText } from './nightForceCharge.js';
 import type { LineNotHeld } from './nightChargeAdvisor.js';
 import { MAX_SPOKEN_ADVISORY_CHARS, NO_CHARGE_EXPECTED_KWH, RESERVE_WRITE_MAX_PCT, revertRetryText, type RevertResendOnReport, type RestoreSummaryKind } from './nightChargeActuator.js';
 
@@ -316,8 +316,12 @@ export function buildMiddayPlanMessage(i: MiddayAnnounceInput): NotifyMessage {
     l != null && l.cushionShortfall && l.cushionShortfallCause !== 'envelope';
   const notCarried = (which: string): string =>
     ` NOTE: the outage line is above the ${RESERVE_WRITE_MAX_PCT}% the panel accepts as a reserve and no force-charge carries it on ${which} — residual risk remains.`;
-  const armedNote = (l: { cushionShortfallCause?: string; lineNotHeld?: LineNotHeld; lateStartAtOpen?: true }): string =>
-    l.lineNotHeld === 'closeUnder' ? " NOTE: on the median load this leg's pool is expected to close under its outage line — residual risk remains."
+  // ★★★ v1.205.0 (review) — a REFUSED cycle arms nothing: a leg with a line ask then says once that nothing is armed to carry its
+  // line (beside the 49% the panel holds for a line in (49, 50], as the overnight refusedEnvelopeNote names it) — never what an armed
+  // leg's walk cannot hold, which states a close its unarmed charge does not make.
+  const armedNote = (l: { cushionShortfallCause?: string; lineNotHeld?: LineNotHeld; lateStartAtOpen?: true; linePct?: number }): string =>
+    i.refused != null ? ` NOTE: this leg's outage line is above ${lineOverReserveText(l.linePct ?? Infinity, 'accepts')}, and nothing is armed to carry it — residual risk remains.`
+    : l.lineNotHeld === 'closeUnder' ? " NOTE: on the median load this leg's pool is expected to close under its outage line — residual risk remains."
       : l.lineNotHeld === 'aboveFull' ? " NOTE: this leg's outage line is above a full pool, so no charge can hold it — residual risk remains."
         : l.lineNotHeld === 'nearFull' ? " NOTE: this leg's outage line is within 10 points of a full pool, so the force-charge cannot hold it with its usual margin — residual risk remains."
         // v1.205.0 — held on the median walk, not with the at-open allowance.
