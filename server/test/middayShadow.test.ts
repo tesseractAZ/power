@@ -951,6 +951,22 @@ test('★★★ RF-2 the refused cycle\'s refresh is recorded, not silent: dispo
   // The entities: the evening's figures, and what the refresh was.
   const f = middayChargeStateFields(rec, at + M);
   assert.deepEqual([f.midday_charge_refresh, f.midday_charge_target_soc_percent, f.midday_charge_expected_buy_kwh, f.midday_charge_recommended], ['not-armed', 89.5, 34, false]);
+  // (review, T6) Before the refresh is recorded the entity agrees with the card's "none": a refused cycle reads 'not-armed' from the
+  // evening (22:00, 09:00, 09:29), in either write mode, with the evening's figures — never 'pending' for a re-check that is not
+  // made. An armed or advisory cycle still reads 'pending' until its refresh.
+  for (const mode of ['supervised', 'auto'] as const) {
+    for (const t of [phx(10, 14, 22), phx(10, 15, 9), at - M]) {
+      const g = middayChargeStateFields(refusedRecord({ mode }), t);
+      assert.deepEqual([g.midday_charge_refresh, g.midday_charge_target_soc_percent, g.midday_charge_reserve_hold_percent, g.midday_charge_expected_buy_kwh],
+        ['not-armed', 89.5, 50, 34], `${mode} ${new Date(t).toISOString()}`);
+    }
+  }
+  const advisoryRec = record({ mode: 'advisory', cost: { ...record().cost!, wouldArm: false, disposition: 'not armed — the night-charge mode is advisory' } });
+  for (const armedRec of [record(), record({ mode: 'auto' }), advisoryRec]) {
+    assert.equal(middayChargeStateFields(armedRec, phx(10, 14, 22)).midday_charge_refresh, 'pending', armedRec.mode);
+  }
+  // A hold (nothing charges): no refresh to name, refused or not.
+  assert.equal(middayChargeStateFields({ ...r, cost: { ...r.cost!, chargeTonight: false } }, phx(10, 14, 22)).midday_charge_refresh, null);
   // The log line, word for word; no preview push.
   assert.equal(middayShadowRefreshLogLine(rec, na), `${MIDDAY_SHADOW_LOG_TAG} ${DAY} refresh — not-armed: ${NOT_ARMED_REASON}; level ~89.5%, reserve 50%, `
     + 'expected 34 kWh. Shadow only: nothing is written or pushed.');
@@ -994,9 +1010,15 @@ test('★★ RF-4 the card\'s "Morning refresh" row: a refused cycle is not "due
     return `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`;
   };
   const view = (rec: MiddayShadowRecord) => middayShadowView(JSON.parse(JSON.stringify(rec)), hhmm)!.lines;
+  // (review, T3) In either write mode — the server's test (shadowCycleRefusal: not advisory), not supervised alone: an auto cycle the
+  // evening would not arm reads "none" as its refresh is recorded 'not-armed', never "due".
+  for (const mode of ['supervised', 'auto'] as const) {
+    const r = refusedRecord({ mode });
+    assert.equal(shadowRefreshDue(r, phx(10, 15, 9, 30)), 'notArmed', mode);
+    assert.equal(view(r)[2], 'Morning refresh: none — the evening cycle would not arm, so there is nothing to refresh', mode);
+    assert.equal(view({ ...r, refresh: notArmedRefresh(r, phx(10, 15, 9, 30)) })[2], `Morning refresh 09:30: not armed — ${NOT_ARMED_REASON}`, mode);
+  }
   const r = refusedRecord();
-  assert.equal(view(r)[2], 'Morning refresh: none — the evening cycle would not arm, so there is nothing to refresh');
-  assert.equal(view({ ...r, refresh: notArmedRefresh(r, phx(10, 15, 9, 30)) })[2], `Morning refresh 09:30: not armed — ${NOT_ARMED_REASON}`);
   assert.equal(view(record())[2], 'Morning refresh: due 30 minutes before 10:00');
   assert.equal(view(record({ mode: 'advisory', cost: { ...record().cost!, wouldArm: false, disposition: 'not armed — the night-charge mode is advisory' } }))[2],
     'Morning refresh: due 30 minutes before 10:00');

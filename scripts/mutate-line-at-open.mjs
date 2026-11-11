@@ -33,6 +33,11 @@
  * notCarried, lineOverReserveText; MiddayBackupText.linePct and a no-ask MiddayCostText.linePct from the record through
  * middayShadowAnnounceInput), as the overnight envelope note is: a line in (49, 50] is above the 49% the panel holds; so too the
  * shadow's backup log line. AOA-30 (a..e).
+ * (I) v1.205.1 (review): each leg's note by its OWN line — a cost leg's "on this leg" never by the backup leg's line (AOA-30f), a
+ * backup leg with no figure (a v1.205.0 record) never by the cost leg's (AOA-30g); a line of exactly 49.00 in the 49% form, as
+ * lineOverReserveText words every line at or below 50 (AOA-30j); the armed mid-day renders the year over, line gate off and with
+ * the night's backup leg, byte-identical to v1.205.0 but for that correction (refusedNotesArmedYear.test.ts: AOA-30h, AOA-30i,
+ * AOA-30k); and every envelope cause of a refused cost leg, 'envelope+caps' too, keeps the unheld-line note off it (AOA-29n).
  *
  *   node scripts/mutate-line-at-open.mjs [--only <id prefix>]
  *
@@ -60,6 +65,7 @@ const T_YEAR = 'test/lineForceChargeYear.test.ts';
 const T_LINE = 'test/lineForceCharge.test.ts';
 const T_WALK = 'test/lineStandingWalk.test.ts';
 const T_RN = 'test/refusedNotes.test.ts';
+const T_RNY = 'test/refusedNotesArmedYear.test.ts';
 
 const LATE = "  const lineLateStart = lineArmed && chargeTonight && !lineNearFull && !cushionShortfall && !lineCloseUnder\n    && expected.assuredClosePct !== undefined && !lineWalkHolds(expected.assuredClosePct, cushionLineSocPct);";
 const VERIFIED = '  const lineOnVerifiedBy = inputs.armedLineOnVerifiedAtMs != null && Number.isFinite(inputs.armedLineOnVerifiedAtMs)\n    && inputs.armedLineOnVerifiedAtMs >= windowStart && inputs.armedLineOnVerifiedAtMs <= nowMs;';
@@ -659,6 +665,56 @@ const MUTANTS = [
     find: "lineOverReserveText(b.cushionLineSocPct ?? Infinity, 'accepts')",
     to: "lineOverReserveText(Infinity /* MUTANT */, 'accepts')",
     why: 'The evening log says the 49.99% line is above the 50% the panel accepts, beside a preview push that names the 49% it holds.',
+  },
+  /* ── I: v1.205.1 (review) — each leg by its own line; the armed renders the year over ── */
+  {
+    id: 'AOA-29n. ★★ the mid-day unheld-line note beside a leg\'s own \'envelope+caps\' note',
+    file: CTX, tests: [T_RN],
+    find: RN_MID,
+    to: RN_MID.replace('c.cushionShortfallCause == null', "c.cushionShortfallCause !== 'envelope' /* MUTANT */"),
+    why: 'A refused leg whose envelope comes with the caps reads the caps note, "nothing is armed to hold this leg\'s …% floor+cushion line" and "no force-charge carries it on this leg": two line notes for one leg.',
+  },
+  {
+    id: 'AOA-30f. ★★ the cost leg\'s "on this leg" note worded by the backup leg\'s line',
+    file: CTX, tests: [T_RN],
+    find: "lineOverReserveText((which === 'this leg' ? c.linePct : i.backup?.linePct) ?? Infinity, 'accepts')",
+    to: "lineOverReserveText((which === 'this leg' ? i.backup?.linePct ?? c.linePct /* MUTANT */ : i.backup?.linePct) ?? Infinity, 'accepts')",
+    why: 'A cost leg on a 59.43% line (2027-04-09 21:30 at ×0.944, 7 h, advisory) beside a 49.99% backup leg is pushed "above the 49% the panel holds the pool at": a level its line is not under.',
+  },
+  {
+    id: 'AOA-30g. ★★ a backup leg with no line figure worded by the cost leg\'s line',
+    file: CTX, tests: [T_RN],
+    find: "lineOverReserveText((which === 'this leg' ? c.linePct : i.backup?.linePct) ?? Infinity, 'accepts')",
+    to: "lineOverReserveText((which === 'this leg' ? c.linePct : i.backup?.linePct ?? c.linePct /* MUTANT */) ?? Infinity, 'accepts')",
+    why: 'A v1.205.0 record (no backup figure) beside the 49.99% line ask of 2026-11-27 21:30 at ×0.944, 16 h no longer renders as it did: the backup leg takes the cost leg\'s 49% form.',
+  },
+  {
+    id: 'AOA-30j. ★★ a line of exactly 49.00 named above the 50% the panel accepts',
+    file: CTX, tests: [T_RN, T_RNY],
+    find: "lineOverReserveText((which === 'this leg' ? c.linePct : i.backup?.linePct) ?? Infinity, 'accepts')",
+    to: "lineOverReserveText(((l: number | undefined): number => (l != null && l > 49 ? l : Infinity))(which === 'this leg' ? c.linePct : i.backup?.linePct) /* MUTANT */, 'accepts')",
+    why: '2027-08-31 21:30 at ×0.944, 7 h, line gate off: the mid-day push names its 49.00% line above the 50% the panel accepts, where that night\'s overnight push names the 49% the panel holds.',
+  },
+  {
+    id: 'AOA-30h. ★★ the backup log line words a line in (50, 51) as one at or below 50',
+    file: MSH, tests: [T_RNY],
+    find: "lineOverReserveText(b.cushionLineSocPct ?? Infinity, 'accepts')",
+    to: "lineOverReserveText(Math.floor(b.cushionLineSocPct ?? Infinity) /* MUTANT */, 'accepts')",
+    why: 'The backup leg of 2026-10-13 21:30 on nameplate, 9 h (a 50.42% line, armed) is logged "above the 49% the panel holds the pool at": an armed render v1.205.0 rendered in the 50% form, outside the corrected set (828 records the year over).',
+  },
+  {
+    id: 'AOA-30i. ★★ the backup leg\'s note dropped beside a line ask when its envelope comes with the caps',
+    file: CTX, tests: [T_RNY],
+    find: "      ? armedNote(c) + (i.backup?.cushionShortfallCause != null ? notCarried('the backup leg') : '')",
+    to: "      ? armedNote(c) + (i.backup?.cushionShortfallCause === 'envelope' /* MUTANT */ ? notCarried('the backup leg') : '')",
+    why: '2026-10-13 21:30 on nameplate, 13 h: the armed line-ask push beside the night\'s \'envelope+caps\' backup leg (a 65.71% line) is silent that no force-charge carries the backup leg\'s line.',
+  },
+  {
+    id: 'AOA-30k. ★★ the backup log line silent on an \'envelope+caps\' backup leg',
+    file: MSH, tests: [T_RNY],
+    find: "      + `${b.cushionShortfallCause != null ? `; the line is above",
+    to: "      + `${b.cushionShortfallCause === 'envelope' /* MUTANT */ ? `; the line is above",
+    why: 'The evening log of a backup leg whose envelope comes with the caps (2026-11-25 21:30 on nameplate, 11 h) no longer says its line is above what the reserve write holds.',
   },
   {
     id: 'AOA-28. ★★★ the card names the reserve set under a refused arm',

@@ -236,7 +236,7 @@ export interface MiddayCostText {
   /** v1.200.0 (Fix7 review 1) — beside `lineAskPct`: the outage line itself (the plan's forceChargeLine.linePct, its
    *  cushionLineSocPct), the number the words give the line, round1 as the overnight clause gives it — never the ask ⌈L⌉.
    *  v1.205.1 — and, on a leg with no ask, beside an envelope cause: the line its "no force-charge carries it on this leg" note is
-   *  worded by (lineOverReserveText: a line in (49, 50] is above the 49% the panel holds). Absent ⇒ the 50% form, as before. */
+   *  worded by (lineOverReserveText: a line at or below 50 is above the 49% the panel holds). Absent ⇒ the 50% form, as before. */
   linePct?: number;
   /** ★★★ v1.205.1 — the leg's floor+cushion line where its cushion asked for energy (the record's ShadowLegSummary
    *  cushionAskedLinePct): what a refused cycle's push says nothing is armed to hold (refusedCushionLineNote). Absent ⇒ none said. */
@@ -257,7 +257,7 @@ export interface MiddayBackupText {
   lineAskPct?: number;
   lineNotHeld?: LineNotHeld;
   /** ★★ v1.205.1 — beside an envelope cause: the backup leg's outage line (the record's cushionLineSocPct), which its "no force-charge
-   *  carries it on the backup leg" note is worded by, as the overnight envelope note is (lineOverReserveText: a line in (49, 50] is above
+   *  carries it on the backup leg" note is worded by, as the overnight envelope note is (lineOverReserveText: a line at or below 50 is above
    *  the 49% the panel holds, not the 50% it accepts). Absent ⇒ the 50% form, as before. */
   linePct?: number;
 }
@@ -337,8 +337,9 @@ export function buildMiddayPlanMessage(i: MiddayAnnounceInput): NotifyMessage {
   // reason, L4). A leg with no ask reads as before, byte for byte.
   const capsShort = (l: { cushionShortfall: boolean; cushionShortfallCause?: string } | null | undefined): boolean =>
     l != null && l.cushionShortfall && l.cushionShortfallCause !== 'envelope';
-  // ★★ v1.205.1 — worded by the named leg's own line (lineOverReserveText), as the overnight envelope note is: a line in (49, 50] is above
-  // the 49% the panel holds the pool at, never the 50% it accepts; above 50, or with no figure (a record from before it), word for word.
+  // ★★ v1.205.1 — worded by the named leg's own line (lineOverReserveText), as the overnight envelope note is: a line at or below 50 is
+  // above the 49% the panel holds the pool at, never the 50% it accepts (49.00-50.00 on the fixture year: refusedNotesArmedYear.test.ts);
+  // above 50, or with no figure (a record from before it), word for word. Each leg by its OWN line, never the other leg's.
   const notCarried = (which: 'this leg' | 'the backup leg'): string =>
     ` NOTE: the outage line is above ${lineOverReserveText((which === 'this leg' ? c.linePct : i.backup?.linePct) ?? Infinity, 'accepts')} and no force-charge carries it on ${which} — residual risk remains.`;
   // ★★★ v1.205.0 (review) — a REFUSED cycle arms nothing: a leg with a line ask then says once that nothing is armed to carry its

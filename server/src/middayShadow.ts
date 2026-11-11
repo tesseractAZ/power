@@ -795,7 +795,9 @@ export const MIDDAY_CHARGE_BASIS: MiddayChargeBasis = 'shadow';
  *  - `midday_charge_basis`: MIDDAY_CHARGE_BASIS, with or without a current record.
  *  - the figures are the mid-day leg as computed — the refreshed figures once the morning refresh
  *    ran (a cancelled refresh nulls them) — null when there is no current record (shadowServed).
- *  - `midday_charge_refresh`: 'pending' before the refresh, then its disposition.
+ *  - `midday_charge_refresh`: 'pending' before the refresh, then its disposition. ★★ v1.205.1 — a cycle the evening would not
+ *    arm (shadowCycleRefusal) gets no re-check, so it reads 'not-armed' from the evening, as the card's row reads "none" and as
+ *    the refresh recorded at open − REFRESH_LEAD_MS reads (notArmedRefresh); never 'pending' for a re-check that is not made.
  */
 export function middayChargeStateFields(rec: MiddayShadowRecord | null, nowMs: number = Date.now()): {
   midday_charge_recommended: boolean;
@@ -833,7 +835,7 @@ export function middayChargeStateFields(rec: MiddayShadowRecord | null, nowMs: n
     midday_charge_buy_kwh: pick('buyKwh'),
     midday_charge_window_start_at: iso(c.windowStartMs),
     midday_charge_window_end_at: iso(c.windowEndMs),
-    midday_charge_refresh: r?.disposition ?? (charges ? 'pending' : null),
+    midday_charge_refresh: r?.disposition ?? (charges ? (shadowCycleRefusal(rec!) != null ? 'not-armed' : 'pending') : null),
     midday_charge_basis: MIDDAY_CHARGE_BASIS,
   };
 }
@@ -932,7 +934,7 @@ export function middayShadowLogLines(rec: MiddayShadowRecord): string[] {
     out.push(`${t} ${rec.day} backup ${at(b.windowStartMs)}→${at(b.windowEndMs)} — ${b.disposition}: reserve ${pct(b.reservePct)}, `
       + `expected ${kwh(b.expectedBuyKwh)} (worst-case sizing ${kwh(b.buyKwh)}); troughs at ${pct(b.cushionTroughSocPct)} against the ${pct(b.cushionLineSocPct)} line (the islanded walk it is sized on, to the next overnight open)`
       // v1.200.0 — the envelope, where it contributes: the line is above what a reserve write can hold.
-      // v1.205.1 — keyed on the leg's line: a line in (49, 50] is above the 49% the panel holds (lineOverReserveText).
+      // v1.205.1 — keyed on the leg's line: a line at or below 50 is above the 49% the panel holds (lineOverReserveText).
       + `${b.cushionShortfallCause != null ? `; the line is above ${lineOverReserveText(b.cushionLineSocPct ?? Infinity, 'accepts')}, and the backup leg writes the reserve only — residual risk remains` : ''}.`
       + `${heldImportText(b.heldImport)} Shadow only: nothing is armed, written or announced for it.`);
   }

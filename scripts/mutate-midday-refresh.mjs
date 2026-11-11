@@ -30,9 +30,10 @@
  *                             refresh: a reserve above the announced one is a cap, and is said so)
  *   Fix 3      R-xxix (a cap keeps the announced worst case: the entity, the shadow ledger and the live
  *                             refreshed_buy_kwh hold the figure the leg runs on)
- *   Not armed  N-i..N-viii    (v1.205.1: a cycle the evening would not arm, shadowCycleRefusal, is never re-sized at 09:30 —
+ *   Not armed  N-i..N-x      (v1.205.1: a cycle the evening would not arm, shadowCycleRefusal, is never re-sized at 09:30 —
  *                             shadowRefreshDue 'notArmed', index.ts records notArmedRefresh first — and the record says so: no
- *                             push, the evening's figures, read back across a restart, the card's row not "due")
+ *                             push, the evening's figures, read back across a restart, the card's row not "due" in either write
+ *                             mode (N-ix), the entity 'not-armed' from the evening, never 'pending' (N-x))
  *
  *   node scripts/mutate-midday-refresh.mjs [--only <id prefix>]
  */
@@ -710,6 +711,20 @@ const MUTANTS = [
     find: "        : r.disposition === 'not-armed' ? 'not armed'\n",
     to: '        /* MUTANT */\n',
     why: 'The card reads "not-armed, ~89.5%, ~34 kWh expected" as if a refresh had sized the leg.',
+  },
+  {
+    id: 'N-ix. ★★ the card says an auto-mode refused cycle\'s morning refresh is due',
+    file: CARD,
+    find: "  } else if (c.basisComplete && c.chargeTonight && s.mode != null && s.mode !== 'advisory' && !c.wouldArm) {",
+    to: "  } else if (c.basisComplete && c.chargeTonight && s.mode === 'supervised' /* MUTANT */ && !c.wouldArm) {",
+    why: 'An auto cycle the evening would not arm reads "Morning refresh: due 30 minutes before 10:00" while the server records its refresh \'not-armed\'.',
+  },
+  {
+    id: 'N-x. ★★ the entity reads \'pending\' for a refused cycle until 09:30',
+    file: MS,
+    find: "(charges ? (shadowCycleRefusal(rec!) != null ? 'not-armed' : 'pending') : null)",
+    to: "(charges ? 'pending' /* MUTANT */ : null)",
+    why: 'From 21:30 to 09:30 midday_charge_refresh says a re-check is coming while the card says none will be made.',
   },
   {
     id: 'T-xxi. ★★★ a reserve cap is pushed as "calls for more" than a level it did not ask above',

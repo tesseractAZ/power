@@ -197,6 +197,12 @@ test('★★★ RN-3 only where the cushion asked for energy and no other line n
   const disclosing = buildMiddayPlanMessage({ ...inputOf(p, 'supervised', true), cost: { ...inputOf(p, 'supervised', true).cost, cushionShortfallCause: 'envelope' } }).body;
   assert.ok(disclosing.endsWith('NOTE: the outage line is above the 50% the panel accepts as a reserve and no force-charge carries it on this leg — residual risk remains.'), disclosing);
   assert.equal(disclosing.match(ANY_UNHELD), null, disclosing);
+  // (review, T2) …and so does one whose envelope comes with the caps ('envelope+caps'): the caps note, then the leg's own envelope
+  // note, and nothing else — every cause excludes the unheld-line note, not 'envelope' alone.
+  const i = inputOf(p, 'supervised', true);
+  const both = buildMiddayPlanMessage({ ...i, cost: { ...i.cost, cushionShortfall: true, cushionShortfallCause: 'envelope+caps' } }).body;
+  assert.ok(both.endsWith(`The add-on will not charge tomorrow.${CAPS_NOTE} NOTE: the outage line is above the 50% the panel accepts as a reserve and no force-charge carries it on this leg — residual risk remains.`), both);
+  assert.equal(both.match(ANY_UNHELD), null, both);
 });
 
 test('★★ RN-4 mid-day: the leg\'s note comes before the backup leg\'s (as an armed leg\'s does), after the caps note; never on a cycle that arms, advisory included', () => {
@@ -254,14 +260,28 @@ const withBackup = (linePct: number | undefined, mode: 'supervised' | 'auto' | '
   }).body;
 };
 
-test('★★★ RN-6 the backup leg\'s note is worded by its own line, as the overnight envelope note is: a line in (49, 50] is above the 49% the panel holds the pool at (49.99%, 50.00%), never the 50% it accepts; above 50 (50.01%, 59.4%) and with no figure (a record from before it), v1.205.0\'s words byte for byte', () => {
+/** The supervised mid-day push of 2026-11-27 21:30 at ×0.944, 16 h (the armed line ask, a 49.99% line) beside a backup leg with an
+ *  envelope cause and no line figure, as v1.205.0 (8e8c13f4) renders it. */
+const V1205_EDGE_BACKUP_BODY = 'Tomorrow (Thu) 10am–3pm, APS super off-peak: charging the backup pool toward ~50%, as far as the window can deliver, about '
+  + '7 kWh of grid energy expected. The plan is refreshed with the morning solar forecast at 9:30 AM; it can only lower or cancel this charge. '
+  + 'SUPERVISED: at 10:00 AM the backup reserve is held at 50% and Charge Now switches on just in time; both are restored at 3:00 PM, before '
+  + 'the 4–7pm on-peak. Cancel from the charge card before 10:00 AM tomorrow. Tonight 11pm–5am, outage backup: reserve held at 50%, about '
+  + "12 kWh expected. NOTE: on the median load this leg's pool is expected to close too close to its outage line to allow for a late "
+  + 'switch-on at the window open — residual risk remains. NOTE: the outage line is above the 50% the panel accepts as a reserve and no '
+  + 'force-charge carries it on the backup leg — residual risk remains. Sizing basis (the islanded worst case the plan is sized on, not the '
+  + 'expected charge): ~7 kWh for the daytime charge, ~20.1 kWh for the outage backup.';
+
+test('★★★ RN-6 the backup leg\'s note is worded by its own line, as the overnight envelope note is: a line at or below 50 is above the 49% the panel holds the pool at (49.00%, 49.99%, 50.00%), never the 50% it accepts; above 50 (50.01%, 59.4%) and with no figure (a record from before it), v1.205.0\'s words byte for byte — beside a cost leg that carries a line of its own too', () => {
   for (const mode of ['supervised', 'auto', 'advisory'] as const) {
     const old = withBackup(undefined, mode);
     assert.ok(old.includes(notCarried('the backup leg', OVER_RESERVE)), `${mode}: ${old}`);
     for (const l of [50.01, 59.43, 92.34]) assert.equal(withBackup(l, mode), old, `${mode} ${l}: byte for byte`);
-    for (const l of [49.01, 49.5, 49.99, 50]) {
+    // (review, T5) 49.00 too: lineOverReserveText words every line at or below 50 so, as the overnight push of 2027-08-31 21:30 at
+    // ×0.944, 7 h (a 49.00% line, no line force-charge) does.
+    for (const l of [49, 49.01, 49.5, 49.99, 50]) {
       const b = withBackup(l, mode);
-      // The only armed renders that change: a backup line in (49, 50], and only by the level it is above.
+      // The only armed renders that change: a backup line at or below 50 (49.00-50.00 on the fixture year: refusedNotesArmedYear RN-8),
+      // and only by the level it is above.
       assert.equal(b, old.replace(notCarried('the backup leg', OVER_RESERVE), notCarried('the backup leg', OVER_HELD)), `${mode} ${l}`);
     }
   }
@@ -274,6 +294,19 @@ test('★★★ RN-6 the backup leg\'s note is worded by its own line, as the ov
   const backup = { windowStartMs: phx(10, 14, 23), windowEndMs: phx(10, 15, 5), reservePct: 50, expectedKwh: 12.4, buyKwh: 20.1, cushionShortfall: true, cushionShortfallCause: 'envelope' as const };
   assert.ok(buildMiddayPlanMessage({ ...armedLine, backup: { ...backup, linePct: 49.99 } }).body.includes(notCarried('the backup leg', OVER_HELD)));
   assert.ok(buildMiddayPlanMessage({ ...armedLine, backup: { ...backup, linePct: 65.71 } }).body.includes(notCarried('the backup leg', OVER_RESERVE)));
+  // (review, T4) A backup leg with no line figure (a record written by v1.205.0) beside a cost leg that carries one — the armed line
+  // ask of 2026-11-27 21:30 at ×0.944, 16 h, a 49.99% line — keeps v1.205.0's words byte for byte: the backup leg's note is worded by
+  // the backup leg's own line, or by none, never by the cost leg's.
+  const edgeLine = planAt('2026-11-27 21:30', 'm', 16);
+  for (const mode of ['supervised', 'auto', 'advisory'] as const) {
+    const e = inputOf(edgeLine, mode);
+    assert.deepEqual([e.cost.lineAskPct, e.cost.linePct], [51, 49.99], mode);
+    const body = buildMiddayPlanMessage({ ...e, backup }).body;
+    assert.ok(body.includes(notCarried('the backup leg', OVER_RESERVE)) && !body.includes(OVER_HELD), `${mode}: ${body}`);
+    if (mode === 'supervised') assert.equal(body, V1205_EDGE_BACKUP_BODY, 'byte for byte with v1.205.0 (captured at 8e8c13f4)');
+    // …and with the backup leg's own figure, its own words: a 59.43% line beside the cost leg's 49.99%.
+    assert.ok(buildMiddayPlanMessage({ ...e, backup: { ...backup, linePct: 59.43 } }).body.includes(notCarried('the backup leg', OVER_RESERVE)), mode);
+  }
 });
 
 test('★★★ RN-7 through the record: a backup leg sized on a 49.99% line (2026-11-27 21:30 at ×0.944, 16 h) carries it to the evening\'s words, and the shadow\'s log names it beside the 49% too; a cost leg with no line ask is worded by its own line', async () => {
@@ -311,5 +344,24 @@ test('★★★ RN-7 through the record: a backup leg sized on a 49.99% line (20
     // Above 50: v1.205.0's words.
     const advHigh = planAt('2027-04-09 21:30', 'm', 7, { lineForceChargeEligible: false });
     assert.ok(buildMiddayPlanMessage(inputOf(advHigh, mode)).body.includes(notCarried('this leg', OVER_RESERVE)), mode);
+  }
+  // (review, T1) Both legs on an envelope, on different lines: the cost leg's "on this leg" note is worded by the cost leg's own line,
+  // never the backup leg's — a 59.43% cost line (2027-04-09 21:30 at ×0.944, 7 h) beside a 49.99% backup line (2026-11-27 21:30 at
+  // ×0.944, 16 h) is above the 50% the panel accepts; the reverse is above the 49% the panel holds. Through the record, both modes.
+  const noAsk = (label: string, h: number): P => planAt(label, 'm', h, { lineForceChargeEligible: false });
+  const cross = (cp: P, bp: P, mode: 'supervised' | 'advisory'): string => {
+    const arm = mode === 'advisory' ? { wouldArm: false, disposition: 'not armed — the night-charge mode is advisory' } : { wouldArm: true, disposition: 'would arm' };
+    const rec: MiddayShadowRecord = {
+      ...recordOf(cp, mode, false), backup: summariseLeg(BACKUP_LEG, { plan: bp, windowPvP50Kwh: null, windowLoadP50Kwh: null }, arm),
+    };
+    const i = middayShadowAnnounceInput(restored(rec), MODEL)!;
+    assert.deepEqual([i.cost.lineAskPct ?? null, i.cost.cushionShortfallCause, i.backup?.cushionShortfallCause], [null, 'envelope', 'envelope'], mode);
+    return middayShadowPreview(restored(rec), MODEL)!.push.body;
+  };
+  for (const mode of ['supervised', 'advisory'] as const) {
+    const hiCost = cross(noAsk('2027-04-09 21:30', 7), noAsk('2026-11-27 21:30', 16), mode);
+    assert.ok(hiCost.includes(notCarried('this leg', OVER_RESERVE)) && !hiCost.includes(OVER_HELD), `${mode}: ${hiCost}`);
+    const edgeCost = cross(noAsk('2026-11-27 21:30', 16), noAsk('2027-04-09 21:30', 7), mode);
+    assert.ok(edgeCost.includes(notCarried('this leg', OVER_HELD)), `${mode}: ${edgeCost}`);
   }
 });
