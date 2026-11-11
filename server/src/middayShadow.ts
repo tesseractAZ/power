@@ -36,6 +36,8 @@ import { saturationThresholdPct, meanChargeCeilingPct, surplusSpanEndMs } from '
 import {
   chargeIsWindowBound, chargeLevelPct, statedBuyKwh, lineNotHeldOf, type NightChargePlan, type WindowSpec, type MiddayReserveBasis,
   type LineNotHeld,
+  // v1.205.1 — the floor+cushion line a leg's cushion asked for, as the overnight push names it.
+  floorCushionLinePct,
 } from './nightChargeAdvisor.js';
 import { APPLY_LEAD_MS, clampReserveTarget, MAX_SPOKEN_ADVISORY_CHARS, RESERVE_WRITE_MAX_PCT, revertDueMs, type NightChargeMode } from './nightChargeActuator.js';
 import { eveningAnnouncement } from './chargeAnnounce.js';
@@ -328,6 +330,10 @@ export interface ShadowLegSummary {
   /** v1.192.0 — the house energy its hold sends to the grid, and the bill effect (heldImportEstimate);
    *  null when it writes nothing or the band does not cover the hold. Absent on an older record. */
   heldImport?: HeldImport | null;
+  /** ★★★ v1.205.1 — the leg's floor+cushion line (floorCushionLinePct, the line the overnight push names) where its cushion asked
+   *  for energy (plan.requiredExtraKwh above 0): the line a refused cycle's push says nothing is armed to hold. Absent where the
+   *  cushion asked for none, and on a record from before v1.205.1 (whose push then reads as before). */
+  cushionAskedLinePct?: number;
 }
 
 /** What the morning refresh decided (refreshLeg). */
@@ -439,6 +445,8 @@ export function summariseLeg(
     ...(p != null && !p.basisComplete && typeof p.basisBlockedBy === 'string' && p.basisBlockedBy !== ''
       ? { basisBlockedBy: p.basisBlockedBy } : {}),
     heldImport: sized?.heldImport ?? null,
+    ...(p != null && p.requiredExtraKwh != null && p.requiredExtraKwh > 0 && fin(floorCushionLinePct(p)) != null
+      ? { cushionAskedLinePct: floorCushionLinePct(p)! } : {}),
   };
 }
 
@@ -949,6 +957,8 @@ export function middayShadowAnnounceInput(rec: MiddayShadowRecord, model: Tariff
       ...(c.lateStartAtOpen === true ? { lateStartAtOpen: true as const } : {}),
       // (Fix7 review 1) The line beside its ask: the plan's forceChargeLine.linePct is its cushionLineSocPct.
       ...(c.lineAskPct != null && c.cushionLineSocPct != null ? { linePct: c.cushionLineSocPct } : {}),
+      // ★★★ v1.205.1 — the floor+cushion line its cushion asked for: a refused cycle's push says nothing is armed to hold it.
+      ...(c.cushionAskedLinePct != null ? { cushionAskedLinePct: c.cushionAskedLinePct } : {}),
     },
     backup: backupNamed && b != null ? {
       windowStartMs: b.windowStartMs, windowEndMs: b.windowEndMs, reservePct: b.reservePct,
@@ -1049,6 +1059,7 @@ const coerceLeg = (raw: unknown): ShadowLegSummary | null => {
     ...(o.lineNotHeld === 'lateStart' && o.lateStartAtOpen === true ? { lateStartAtOpen: true as const } : {}),
     ...(typeof o.basisBlockedBy === 'string' && o.basisBlockedBy !== '' ? { basisBlockedBy: o.basisBlockedBy } : {}),
     ...('heldImport' in o ? { heldImport: coerceHeldImport(o.heldImport) } : {}),
+    ...(fin(o.cushionAskedLinePct) != null ? { cushionAskedLinePct: fin(o.cushionAskedLinePct)! } : {}),
   };
 };
 

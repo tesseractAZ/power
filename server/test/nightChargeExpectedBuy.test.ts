@@ -939,8 +939,10 @@ test('★★★ no spoken or pushed text calls the worst-case arrival (targetSoc
       assert.doesNotMatch(t, /expected to reach|not a forecast/, `${name} / ${where}: ${t}`);
       // The floor+cushion line is a labelled line, not an outcome. In resilience mode the sizing
       // drives the worst-case arrival to exactly that line (31.13%), so its labelled statement is
-      // set aside — and only it: the line must be stated in exactly that clause.
-      const unlabelled = t.replace(`the floor+cushion line is ${fmtLinePct(floorCushionLinePct(p))}.`, '');
+      // set aside — and only it: the line must be stated in exactly that clause. v1.205.1 — or, on a refused arm, in the note that
+      // nothing is armed to hold it ("tonight's 31.1% floor+cushion line", refusedNotes.test.ts): labelled, never an outcome.
+      const unlabelled = t.replace(`the floor+cushion line is ${fmtLinePct(floorCushionLinePct(p))}.`, '')
+        .replace(`tonight's ${fmtLinePct(floorCushionLinePct(p))} floor+cushion line`, '');
       if (differs) assert.ok(!statesPct(unlabelled, p.targetSocPct!), `${name} / ${where} states the worst-case arrival ${p.targetSocPct}%: ${t}`);
     }
   }
@@ -1097,8 +1099,10 @@ test('★★ a write mode that refused to arm pushes no level and no draw: it sa
   assert.equal(why, 'the 2026-10-11 force-charge was switched ON and its OFF has not verified');
   const m = buildNightChargeMessage(p, 'charge', null, why);
   assert.equal(m.title, 'Night-charge: planned charge NOT armed tonight');
+  // v1.205.1 — the plan's cushion asked for energy and nothing is armed to hold its line: said once (refusedNotes.test.ts).
   assert.equal(m.body, "Tonight's plan calls for a charge, but the supervised write was not armed — "
-    + 'the 2026-10-11 force-charge was switched ON and its OFF has not verified. The add-on will not charge tonight.');
+    + 'the 2026-10-11 force-charge was switched ON and its OFF has not verified. The add-on will not charge tonight.'
+    + " NOTE: nothing is armed to hold tonight's 31.1% floor+cushion line — residual risk remains.");
   assert.doesNotMatch(`${m.title} ${m.body}`, /kWh|~\d+(\.\d)?%|Recommended/);
   // The cushion shortfall stays disclosed.
   assert.match(buildNightChargeMessage({ ...p, cushionShortfall: true }, 'charge', null, why).body, /residual risk remains/);
@@ -1789,18 +1793,20 @@ test('★★ a write no announcement delivered is recorded like a refusal; a mis
 test('★★ a refused arm on a night expected to charge nothing is pushed and shown as the reserve hold it was; "the write" in auto mode', () => {
   const p = heldReserveOnly();
   const why = 'the 2026-10-11 reserve write is still applied and not yet restored';
+  // v1.205.1 — each plan's cushion asked for energy, and nothing is armed to hold its line: said once (refusedNotes.test.ts).
+  const unheld = " NOTE: nothing is armed to hold tonight's 31.1% floor+cushion line — residual risk remains.";
   const m = buildNightChargeMessage(p, 'charge', null, why);
   assert.equal(m.title, 'Night-charge: planned reserve hold NOT armed tonight');
   assert.equal(m.body, "Tonight's plan holds the backup reserve at 50% overnight as a floor, with no charge expected, but the supervised write "
-    + `was not armed — ${why}. The add-on will not raise the reserve tonight.`);
+    + `was not armed — ${why}. The add-on will not raise the reserve tonight.${unheld}`);
   const auto = buildNightChargeMessage(p, 'charge', null, why, 'auto');
   assert.equal(auto.title, m.title);
   assert.equal(auto.body, "Tonight's plan holds the backup reserve at 50% overnight as a floor, with no charge expected, but the write "
-    + `was not armed — ${why}. The add-on will not raise the reserve tonight.`);
+    + `was not armed — ${why}. The add-on will not raise the reserve tonight.${unheld}`);
   // A charge night: "calls for a charge", and the write named for the mode.
   const c = buildNightChargeMessage(plan(), 'charge', null, why, 'auto');
   assert.equal(c.title, 'Night-charge: planned charge NOT armed tonight');
-  assert.equal(c.body, `Tonight's plan calls for a charge, but the write was not armed — ${why}. The add-on will not charge tonight.`);
+  assert.equal(c.body, `Tonight's plan calls for a charge, but the write was not armed — ${why}. The add-on will not charge tonight.${unheld}`);
   assert.match(buildNightChargeMessage(plan(), 'charge', null, why, 'supervised').body, /, but the supervised write was not armed — /);
   for (const t of [m.title, m.body, auto.title, auto.body]) assert.doesNotMatch(t, /calls for a charge|planned charge|will not charge|kWh|~\d/, t);
   // The shortfall stays disclosed.

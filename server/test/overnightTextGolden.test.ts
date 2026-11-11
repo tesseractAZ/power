@@ -34,6 +34,10 @@ import { emptyLegState, LEGACY_LEG_FIELDS, type ChargeLegState } from '../src/ch
  * v1.203.0 — amended again (the golden's `_amended`), only in the six evening entries whose resilience night writes its line:
  * the panel holds the pool one point under a reserve it charged up to, so the 31.1% line is written at 33%, not 32%, and the
  * expected draw rises by the point (legacyIdentity.test.ts accounts the +1 night by night). No other word moved.
+ *
+ * v1.205.1 — amended again (the golden's `_amended`), only in the three REFUSED evening entries: a refused night with no line
+ * force-charge whose cushion asked for energy says once that nothing is armed to hold its floor+cushion line (refusedNotes.test.ts);
+ * the note is appended to each, and every armed entry is as before.
  */
 
 const GOLDEN = JSON.parse(readFileSync(new URL('./fixtures/overnightTextGolden.json', import.meta.url), 'utf8')) as {
