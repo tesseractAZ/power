@@ -604,3 +604,38 @@ test('★★★ AO-15 a refused arm arms nothing: the 21:30 and mid-day pushes s
     reservePct: 50, expectedKwh: 12.4, buyKwh: 20.1, cushionShortfall: true, cushionShortfallCause: 'envelope' } });
   assert.ok(withBackup.body.endsWith(`${MIDDAY} NOTE: the outage line is above the 50% the panel accepts as a reserve and no force-charge carries it on the backup leg — residual risk remains.`), withBackup.body);
 });
+
+test('★★★ AO-16 a refused arm sets no reserve: the card\'s "Worst-case arrival" names no reserve set (or read) beside "The add-on will not charge tonight" — 2026-10-13 21:30 at ×0.944, 5 h ("reserve set to 38%" while the reserve stays at its floor) and on nameplate, 9 h (a line night: "reserve set to 50%"); an armed night keeps it', () => {
+  const CARD = readFileSync(resolve(HERE, '../../web/src/cards/NightChargeCard.tsx'), 'utf8');
+  // The stat's sub, evaluated as the card evaluates it (its expression is plain JS).
+  const from = CARD.indexOf('sub={', CARD.indexOf('label="Worst-case arrival"')) + 'sub={'.length;
+  let depth = 1;
+  let to = from;
+  for (; depth > 0 && to < CARD.length; to++) depth += CARD[to] === '{' ? 1 : CARD[to] === '}' ? -1 : 0;
+  const expr = CARD.slice(from, to - 1);
+  assert.match(expr, /reserveWriteLabel\(/, expr);
+  const subOf = new Function('closedLead', 'refused', 'reserveWriteLabel', 'plan', 'status', 'BINDING_CAP_LABEL', `return (${expr});`) as (
+    closedLead: unknown, refused: unknown, rwl: unknown, plan: unknown, status: unknown, labels: unknown) => string | undefined;
+  const t = cardText as unknown as {
+    refusedArmLead: (r: string, o: unknown) => { headline: string; detail: string }; startClosedLead: (p: unknown) => unknown;
+    reserveWriteLabel: unknown; noChargeExpected: (p: unknown) => boolean; writtenReservePct: (p: unknown, m: number | null) => number | null;
+  };
+  const WHY = 'the panel reports the grid is not connected';
+  assert.equal(t.refusedArmLead(WHY, { mode: 'supervised' }).detail, "Tonight's plan calls for a charge, but the supervised write was not armed. The add-on will not charge tonight.");
+  const status = { reserveWriteMaxPct: 50 };
+  const shown = (p: P, refused: boolean) => subOf(t.startClosedLead(p), refused
+    ? t.refusedArmLead(WHY, { mode: 'supervised', held: t.noChargeExpected(p), reservePct: t.writtenReservePct(p, 50) }) : null,
+  t.reserveWriteLabel, p, status, {}) ?? '';
+  for (const [p, armedLabel, line] of [
+    [planAt('2026-10-13 21:30', 'm', 5), 'reserve set to 38%', null],
+    [planAt('2026-10-13 21:30', 'np', 9), "reserve set to 50% (the panel's maximum; 51% needed)", 50.42],
+  ] as Array<[P, string, number | null]>) {
+    assert.deepEqual([p.chargeTonight, t.startClosedLead(p), p.forceChargeLine?.linePct ?? null], [true, null, line]);
+    assert.ok(shown(p, false).includes(armedLabel), `armed: ${shown(p, false)}`);
+    assert.doesNotMatch(shown(p, true), /reserve/, `refused: ${shown(p, true)}`);
+    // The reserve-hold shape ("The add-on will not raise the reserve tonight.") and a reserve that already reads the write: alike.
+    assert.doesNotMatch(shown({ ...p, expectedBuyKwh: 0 } as P, true), /reserve/);
+    assert.match(shown({ ...p, lineReserveStands: true } as P, false), /reserve reads /);
+    assert.doesNotMatch(shown({ ...p, lineReserveStands: true } as P, true), /reserve/);
+  }
+});

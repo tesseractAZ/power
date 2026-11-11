@@ -18,7 +18,8 @@
  * push and the ARMED line name it as the rationale does, never the stop (AOA-15b/c, AOA-17d, AOA-25/25b); the sweep's grid and its
  * start (AOA-19b/c); the deferral's anchor (AOA-22b); the H1 cap the walk identity's guard reads (AOA-26).
  * (F) ROUND 3 (review): a refused arm arms nothing, so the 21:30 and mid-day pushes say once that nothing is armed to carry a line
- * night's line, never an armed night's note (notify.ts refusedEnvelopeNote, chargeText.ts armedNote). AOA-27 (a..e).
+ * night's line, never an armed night's note (notify.ts refusedEnvelopeNote, chargeText.ts armedNote). AOA-27 (a..e). The card's
+ * "Worst-case arrival" names no reserve set under a refused arm (NightChargeCard.tsx). AOA-28.
  *
  *   node scripts/mutate-line-at-open.mjs [--only <id prefix>]
  *
@@ -37,6 +38,7 @@ const NTF = resolve(REPO, 'server/src/notify.ts');
 const CTX = resolve(REPO, 'server/src/chargeText.ts');
 const MSH = resolve(REPO, 'server/src/middayShadow.ts');
 const CARD = resolve(REPO, 'web/src/cards/nightChargeText.ts');
+const CARDX = resolve(REPO, 'web/src/cards/NightChargeCard.tsx');
 
 const T_AO = 'test/lineAtOpenAllowance.test.ts';
 const T_REPLAY = 'test/lineAtOpenReplay.test.ts';
@@ -482,6 +484,13 @@ const MUTANTS = [
     find: "lineOverReserveText(l.linePct ?? Infinity, 'accepts')",
     to: "lineOverReserveText(Infinity, 'accepts') /* MUTANT */",
     why: 'The overnight and mid-day refused notes disagree on a 49.99% line.',
+  },
+  {
+    id: 'AOA-28. ★★★ the card names the reserve set under a refused arm',
+    file: CARDX, tests: [T_AO],
+    find: '              closedLead != null || refused != null ? null : reserveWriteLabel(',
+    to: '              closedLead != null /* MUTANT */ ? null : reserveWriteLabel(',
+    why: '2026-10-13 21:30 at ×0.944, 5 h, refused: "The add-on will not charge tonight" beside "reserve set to 38%", a write it does not make.',
   },
 ];
 

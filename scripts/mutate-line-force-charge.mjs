@@ -3991,7 +3991,7 @@ const MUTANTS = [
   {
     id: 'F10r1-b(v). ★★★ the stat names the reserve set',
     file: CARDX, tests: [T_UNHELD],
-    find: '              closedLead != null ? null : reserveWriteLabel(plan.setpointSocPct, plan.targetSocPct, status.reserveWriteMaxPct ?? null, plan.lineReserveStands === true),\n',
+    find: '              closedLead != null || refused != null ? null : reserveWriteLabel(plan.setpointSocPct, plan.targetSocPct, status.reserveWriteMaxPct ?? null, plan.lineReserveStands === true),\n',
     to: '              reserveWriteLabel(plan.setpointSocPct, plan.targetSocPct, status.reserveWriteMaxPct ?? null, plan.lineReserveStands === true), /* MUTANT */\n',
     why: '"reserve set to 50%" on a night nothing set it.',
   },

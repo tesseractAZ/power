@@ -438,7 +438,8 @@ export const NightChargeCard = memo(function NightChargeCard() {
               'sizing basis',
               // v1.182.0 — what will actually be WRITTEN (clamped to the panel's maximum).
               // v1.200.0 (Fix10 review 1) — and on a closed start no write stands behind, nothing: the stat names no reserve set.
-              closedLead != null ? null : reserveWriteLabel(plan.setpointSocPct, plan.targetSocPct, status.reserveWriteMaxPct ?? null, plan.lineReserveStands === true),
+              // v1.205.0 (review 3) — nor under a refused arm: no write is armed to set it.
+              closedLead != null || refused != null ? null : reserveWriteLabel(plan.setpointSocPct, plan.targetSocPct, status.reserveWriteMaxPct ?? null, plan.lineReserveStands === true),
               plan.bindingCap ? `cap: ${BINDING_CAP_LABEL[plan.bindingCap] ?? plan.bindingCap}` : null,
             ]
               .filter(Boolean)
