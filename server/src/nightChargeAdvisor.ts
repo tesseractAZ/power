@@ -1351,6 +1351,11 @@ export interface ExpectedBuy {
   /** v1.202.0 — on a line night the COST force-charge carries (forceChargeModeOf 'cost' with the line gate): the close the
    *  walk past its stop reaches, % (`levelPct` is the stop). Absent otherwise, and with no P50 basis. */
   closePct?: number;
+  /** v1.205.0 — the close the line claim reads, %: the line walk's close (line mode) or the walk past a cost stop (beside
+   *  closePct), capped at the window's reach where the window binds (lineWindowReachKwh), and NOT floored at the reserve — a
+   *  line in (49, 50] is judged on what the window reaches, never on the 50% the stated level is floored at. Absent with no
+   *  P50 basis. Nothing bought, levelled, started or stated reads it. */
+  rawClosePct?: number;
 }
 
 /**
@@ -1572,10 +1577,22 @@ export function expectedBuyFromPlan(o: {
         acceptKw: o.window.acceptKw ?? null, noReOn: true, runOn: jit.startMs != null, standbyW: o.window.standbyW,
       });
       if (after != null) out.closePct = round1(Math.max(reservePct, (after.closeKwh / o.fullKwh) * 100));
+      if (after != null) out.rawClosePct = round1((after.closeKwh / o.fullKwh) * 100);
     }
   }
   const deliverableKwh = Math.max(0, o.deliverableKwh);
   if (liftKwh > deliverableKwh + 1e-9) out.deliverableBound = true;
+  // ★★ v1.205.0 (H1 on the cost-carried walk) — its close past the stop is never above what the window can reach, as a line
+  // walk's is (expectedLineBuy): the same reach (lineWindowReachKwh), the stated close floored at the reserve, the claim's not.
+  // 2027-02-05 21:30 at ×0.944 and 20 h walked past its stop to ~65.8% from a pool the window can take to ~59.9%. Disclosure
+  // only: the buy, the stop (levelPct) and every write are above and unchanged.
+  if (out.deliverableBound === true && out.rawClosePct != null) {
+    const reachPct = (lineWindowReachKwh(o, deliverableKwh) / o.fullKwh) * 100;
+    if (out.rawClosePct > reachPct + 1e-9) {
+      out.rawClosePct = round1(Math.min(100, reachPct));
+      out.closePct = round1(Math.max(reservePct, Math.min(100, reachPct)));
+    }
+  }
   out.buyKwh = round2(Math.min(liftKwh, deliverableKwh) / o.legEff);
   return out;
 }
@@ -1629,20 +1646,31 @@ function expectedLineBuy(
     buyKwh: null, levelPct: round1(Math.max(reservePct, (walk.closeKwh / o.fullKwh) * 100)), mode: 'line', panelCeilingPct,
     startTargetPct, forceChargeStartMs: walk.startMs, forceChargeFromPct: round1((walk.startPackKwh / o.fullKwh) * 100),
     ...(walk.ceilingReached ? { ceilingStop: true as const } : {}),
+    // v1.205.0 — the close the claim reads: unfloored (a line in (49, 50] is judged on it, never on the reserve floor).
+    rawClosePct: round1((walk.closeKwh / o.fullKwh) * 100),
   };
   liftKwh += walk.gridKwh;
   const deliverable = Math.max(0, o.deliverableKwh);
   if (liftKwh > deliverable + 1e-9) {
     out.deliverableBound = true;
     // A5 (H1) — the reach: the window-open pack, what the window can deliver on the median load, and the window's P50 PV.
-    const reachKwh = o.startKwh + deliverable + expectedWindowPvKwh(o.window.hours, o.window.fromMs, o.window.windowEndMs, o.legEff);
+    const reachKwh = lineWindowReachKwh(o, deliverable);
     // The stated close is never above it (floored at the reserve, the level convention of every bound night).
     if (walk.closeKwh > reachKwh + 1e-9) out.levelPct = round1(Math.max(reservePct, Math.min(100, (reachKwh / o.fullKwh) * 100)));
+    // v1.205.0 — the claim's close too, capped alike and never floored.
+    if (walk.closeKwh > reachKwh + 1e-9) out.rawClosePct = round1(Math.min(100, (reachKwh / o.fullKwh) * 100));
     // The panel's stop is stated only where the window can reach the panel ceiling at all.
     if (reachKwh < (Math.min(100, panelCeilingPct) / 100) * o.fullKwh - 1e-9) delete out.ceilingStop;
   }
   out.buyKwh = round2(Math.min(liftKwh, deliverable) / o.legEff);
   return out;
+}
+
+/** v1.205.0 (A5, H1) — PURE. The window's reach, kWh: the window-open pack, what the window can deliver on the median load
+ *  (`deliverableKwh`, expectedWindowLiftKwh) and the window's P50 PV. The ONE expression a bound line walk's close
+ *  (expectedLineBuy) and a cost-carried night's close past its stop (expectedBuyFromPlan) are capped at, so the two cannot drift. */
+function lineWindowReachKwh(o: { startKwh: number | null; legEff: number; window: ExpectedBuyWindow }, deliverableKwh: number): number {
+  return (o.startKwh ?? 0) + deliverableKwh + expectedWindowPvKwh(o.window.hours, o.window.fromMs, o.window.windowEndMs, o.legEff);
 }
 
 /** v1.200.0 (A5, H1) — PURE. The window's P50 PV into the pack (at legEff), kWh, from `fromMs` to the close: the PV term of a

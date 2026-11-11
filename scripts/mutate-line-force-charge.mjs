@@ -1801,15 +1801,17 @@ const MUTANTS = [
   {
     id: 'A5-xvii. ★★★ the H1 cap removed (the walk\'s close stated whatever the window can deliver)',
     file: NCA, tests: [T_LINE, T_YEAR],
-    find: '    const reachKwh = o.startKwh + deliverable + expectedWindowPvKwh(o.window.hours, o.window.fromMs, o.window.windowEndMs, o.legEff);',
+    // v1.205.0 — the reach is one helper (lineWindowReachKwh) the cost-carried close shares: the line walk's call site.
+    find: '    const reachKwh = lineWindowReachKwh(o, deliverable);',
     to: '    const reachKwh = Infinity; /* MUTANT */',
     why: '2026-10-29 at 14 h states ~98.4% and the panel\'s 100% stop from a pool the window can lift to ~92.8% at most.',
   },
   {
     id: 'A5-xviii. ★★ the cap without the P50 PV in the window',
     file: NCA, tests: [T_LINE],
-    find: '    const reachKwh = o.startKwh + deliverable + expectedWindowPvKwh(o.window.hours, o.window.fromMs, o.window.windowEndMs, o.legEff);',
-    to: '    const reachKwh = o.startKwh + deliverable; /* MUTANT */',
+    // v1.205.0 — in the one reach helper (lineWindowReachKwh).
+    find: '  return (o.startKwh ?? 0) + deliverableKwh + expectedWindowPvKwh(o.window.hours, o.window.fromMs, o.window.windowEndMs, o.legEff);',
+    to: '  return (o.startKwh ?? 0) + deliverableKwh; /* MUTANT */',
     why: 'A sunny mid-day leg\'s close is capped under what its own sun delivers (no year plan: T21c).',
   },
   {

@@ -80,7 +80,9 @@ const PIN_T2_CLOSE = 79.7;
  *  caps note stands) and naming that close in one NOTE. */
 // v1.203.0 — and the lines in (49, 50] (8 on nameplate, 7 at 0.944), which the 50% reserve holds at 49: each carried, in line mode
 // (lineMode +5 / +5), its expected buy above v1.202.0's (expectedRose +9).
-const PIN_T4 = { carried: [30, 44], disclosedOn: [0, 0], lineMode: [19, 29], costCloseUnder: [2, 2], expectedRose: 44 };
+// v1.205.0 — a cost-carried night's close past its stop is capped at the window's reach (H1, as a line walk's): three more of the
+// nights sized short on each pool name a close under their line (costCloseUnder 2 → 5); none held flips.
+const PIN_T4 = { carried: [30, 44], disclosedOn: [0, 0], lineMode: [19, 29], costCloseUnder: [5, 5], expectedRose: 44 };
 /** Measured (v1.200.0 review) on the same year: carried plans whose setpoint is the force-charge's own ask; and of
  *  the line-mode plans with an expected figure, those whose expected buy exceeds the worst case (and the de-biased
  *  one), with and without a predicted window EV. */
@@ -2154,11 +2156,13 @@ test('★★★ T23 the mid-day re-entry hold never holds a leg the line force-c
 const PIN_T23: Record<'np' | 'm', { plans: number; armed: number; carried: number; nearFull: number; lineMode: number; reentryNotes: number; kinds: Record<string, number>; eFalls: number; buyFalls: number; armedPushes: number }> = {
   // v1.202.0 — `kinds` counts lineNotHeldOf, a cost-carried leg's close past its stop included wherever it is under the line,
   // whether or not the sizing fell short (60 legs more here and 55 at ×0.944 than when only a disclosed leg named it).
-  np: { plans: 3400, armed: 2808, carried: 1836, nearFull: 972, lineMode: 2412, reentryNotes: 830, kinds: { closeUnder: 1658, aboveFull: 468 }, eFalls: 131, buyFalls: 71, armedPushes: 2808 },
+  // v1.205.0 — a cost-carried leg's close past its stop capped at the window's reach (H1): 27 more legs here and 21 at ×0.944 name a
+  // close under their line, every one already disclosed (carried unchanged).
+  np: { plans: 3400, armed: 2808, carried: 1836, nearFull: 972, lineMode: 2412, reentryNotes: 830, kinds: { closeUnder: 1685, aboveFull: 468 }, eFalls: 131, buyFalls: 71, armedPushes: 2808 },
   // v1.202.0 — re-measured with the walks on the measured pool (v1.201.0: reentryNotes 847, closeUnder 1495, no held
   // 'nearFull', eFalls 131, buyFalls 71): the same lift is more points of it, so fewer closes are under the line or the
   // re-entry line.
-  m: { plans: 3400, armed: 2916, carried: 1764, nearFull: 1152, lineMode: 2460, reentryNotes: 559, kinds: { closeUnder: 1475, aboveFull: 648, nearFull: 4 }, eFalls: 127, buyFalls: 68, armedPushes: 2916 },
+  m: { plans: 3400, armed: 2916, carried: 1764, nearFull: 1152, lineMode: 2460, reentryNotes: 559, kinds: { closeUnder: 1496, aboveFull: 648, nearFull: 4 }, eFalls: 127, buyFalls: 68, armedPushes: 2916 },
 };
 
 for (const basis of ['np', 'm'] as const) {
@@ -2770,7 +2774,9 @@ test('★★★ T24 (Fix9) a line night\'s force-charge "waits on" a reading of 
 // (one point above the line's whole percent, the panel holding a point under a reserve it charged up to). 108 more are armed: a line in
 // (49, 50], which the 50% reserve holds at 49, is the line force-charge's, each named beside the 49% (besideReserve). The six lines
 // stated at 50.00 and asked at 51 keep v1.202.0's rationale (keyed on the ask, which knows the side of 50 they lie on).
-const PIN_T24_YEAR = { plans: 15456, armed: 5968, stated50: 6 };
+// v1.205.0 — 135 plans more name the line: a cost-carried night's close past its stop, capped at the window's reach (H1), under the
+// line on nights already disclosed for their sizing (each NOTE beside the caps note).
+const PIN_T24_YEAR = { plans: 15591, armed: 6103, stated50: 6 };
 
 test('★★★ T24 (Fix8) the year at the edges: the rationale, the push and the card of every line plan state each relation true — but the rationale of a line stated at 50.00, counted', () => {
   const got = { plans: 0, armed: 0, stated50: 0 };

@@ -66,6 +66,9 @@ export interface WalkNight {
 export interface WalkRow extends WalkNight {
   label: string; b: Basis; h: number; cs: WalkCase; own: number; L: number | null; reason: string | null; armedAsk: number | null;
   shortfall?: boolean; stands?: boolean; rationale?: string;
+  /** v1.205.0 — the plan is a line night the COST force-charge carries on a deliverable-bound window (its close past the stop is
+   *  capped at the window's reach): what W1's excluded list may hold beside a 'lateStart' night. Never digested. */
+  costBound?: boolean;
 }
 
 const live = (d: Deps): Deps => ({ ...d, forceChargeEligible: d.objectiveMode === 'cost' && (d.costMaxSocPct ?? 90) > 50 });
@@ -179,6 +182,7 @@ export function walkYear(hours: readonly number[], cases: ReadonlySet<WalkCase>,
     const lineA = p50.chargeTonight && Math.ceil((p50.cushionLineSocPct ?? 0) - 1e-9) > 50;
     const row = (cs: WalkCase, p: Record<string, any>, rec: NightActuationState, reserveOpen: number, p0: number, extra: Partial<WalkRow> = {}) => rows.push({
       ...base, cs, L: p.cushionLineSocPct ?? null, reason: p.cushionEnvelopeReason ?? null, armedAsk: p.forceChargeLine?.askPct ?? null, shortfall: p.cushionShortfall === true,
+      costBound: p.forceChargeLine != null && p.expectedForceChargeMode !== 'line' && p.expectedDeliverableBound === true,
       ...extra, ...walkNight(p, d0, rec, { reserveOpen, p0, grid }),
     });
     if (rA && lineA && cases.has('A')) row('A', p50, rA, 50, Math.max(50, p50.expectedStartSocPct ?? 50), { stands: p50.lineReserveStands === true });

@@ -261,16 +261,19 @@ const ALL_ZERO = { m1: 0, m2: 0, m3: 0, m4: 0, undisclosedUnder: 0, carrierRest:
  *  v1.203.0 — re-measured with the panel's point (the 50% reserve holds the pool at 49, so a line in (49, 50] is the line
  *  force-charge's): 218 / 229 more plans armed and every one carried (v1.202.0: armed 5262 / 5687, carried 4802 / 5023); eFalls
  *  384 → 389 / 484 → 487 and buyFalls 136 → 137 / 163 → 164 as the newly armed lines join the h steps; meanBuyQual moves with the
- *  set it averages. Every zero above stays zero, and every other figure is v1.202.0's. */
+ *  set it averages. Every zero above stays zero, and every other figure is v1.202.0's.
+ *  v1.205.0 — a cost-carried night's close past its stop capped at the window's reach (H1, the line walk's own reach): 103 / 104
+ *  nights already disclosed for their sizing now name a close under their line (kinds.closeUnder 859 → 962 / 931 → 1035); no carried
+ *  night flips. */
 const PIN_A5: Record<Basis, ReturnType<typeof PINNED>> = {
   np: {
-    armed: 5480, carried: 5020, nearFull: 418, closeUnder: 42, kinds: { closeUnder: 859, aboveFull: 95, nearFull: 175 },
+    armed: 5480, carried: 5020, nearFull: 418, closeUnder: 42, kinds: { closeUnder: 962, aboveFull: 95, nearFull: 175 },
     eFalls: 389, eFallsNonBoundGt5: 29, eFallMaxNonBound: 18.9, buyFalls: 137, closeUnderVanish: 11,
     eFallMax: { d: 40, at: '2026-11-13 13:00 np 15 → 16 h' }, buyFallMax: { d: 9.25, at: '2026-10-13 13:00 np 10 → 11 h' },
     meanBuyQual: { 4: null, 5: 31.52, 6: 28.12, 7: 31.2, 8: 28.97, 9: 31.28, 10: 32.19, 11: 32.04, 12: 31.92, 13: 32.69, 14: 32.96, 15: 34.19, 16: 35.27, 17: 35.36, 18: 36.24, 19: 37.05, 20: 37.63 },
   },
   m: {
-    armed: 5916, carried: 5252, nearFull: 602, closeUnder: 62, kinds: { closeUnder: 931, aboveFull: 194, nearFull: 210 },
+    armed: 5916, carried: 5252, nearFull: 602, closeUnder: 62, kinds: { closeUnder: 1035, aboveFull: 194, nearFull: 210 },
     eFalls: 487, eFallsNonBoundGt5: 29, eFallMaxNonBound: 19.6, buyFalls: 164, closeUnderVanish: 15,
     eFallMax: { d: 43.8, at: '2027-05-28 21:30 m 19 → 20 h' }, buyFallMax: { d: 8.26, at: '2027-01-27 21:30 m 16 → 17 h' },
     meanBuyQual: { 4: null, 5: 29.06, 6: 29.34, 7: 28.87, 8: 29.78, 9: 30.91, 10: 30.8, 11: 31.12, 12: 31.82, 13: 32.12, 14: 32.77, 15: 34.14, 16: 34.49, 17: 35.35, 18: 36.14, 19: 36.59, 20: 37.1 },
