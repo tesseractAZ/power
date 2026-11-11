@@ -286,10 +286,12 @@ export const FORCE_CHARGE_PLAN_RATE_KW = 10;
 export const FORCE_CHARGE_MIN_RATE_KW = 1;
 /** v1.170.0 — the least each connected Core has been SEEN to take into its pack: on
  *  2026-09-18 three took ~17.8 kW at the grid (≈ 5.5 kW each after the charge leg) while
- *  the grid cap, not the Cores, was the limit. So a Core's own input limit is at least
- *  this — never measured higher. With fewer Cores connected (one out for a pack swap) the
- *  live rate is bounded by slots × this, so the start comes earlier rather than the night
- *  ending short. With all three it never binds (17 × 0.927 = 15.8 < 16.5). */
+ *  the grid cap, not the Cores, was the limit. A Core's own input limit is higher: one
+ *  charging while another had not taken its ON took its full 7.2 kW rating
+ *  (chargeWattPower; 2026-10-05, 10-06, 10-14, 10-16, 11-10). This lower figure is kept on
+ *  purpose: with fewer Cores connected (one out for a pack swap) the live rate is bounded
+ *  by slots × this, so the start comes earlier rather than the night ending short. With
+ *  all three it never binds (17 × 0.927 = 15.8 < 16.5). */
 export const FORCE_CHARGE_PROVEN_KW_PER_SLOT = 5.5;
 /** v1.191.0 (H1) — the per-Core rate in use: FORCE_CHARGE_KW_PER_CORE when it is set above 0, else
  *  the proven FORCE_CHARGE_PROVEN_KW_PER_SLOT. Read per call (limits.ts). */
@@ -352,12 +354,15 @@ export const FORCE_CHARGE_OFF_MAX_RETRIES = 2;
  *  not-taken. It MUST exceed the 5-min per-slot cooldown, or the one re-issue comes back
  *  rate-limited and is spent on a write that never reached the panel. (2026-09-23: the drift
  *  watch saw OFF→ON ~3 min after the ON.)
- *  v1.187.12 — 15 min (was 6). A slot's ON can take longer than 6 min to read back: on
- *  2026-10-05 and 10-06 a slot was re-issued at +7 min and given up at +14 min, yet on 10-06
- *  the pool reached the night's target 19 min AHEAD of a plan sized for all three slots, so
- *  that slot was charging and only its readback lagged. The give-up comes at +30 min now. It
- *  is the longest grace the window-end cutoff allows (FORCE_CHARGE_ON_RETRY_CUTOFF_MS ≥
- *  cooldown + this, pinned in edges.test.ts). */
+ *  v1.187.12 — 15 min (was 6). On 2026-10-05 and 10-06 a slot was re-issued at +7 min and
+ *  given up at +14 min. That was read then as a charging slot whose readback lagged; the
+ *  recorder (re-read 2026-11-11) shows the 10-06 slot at 0 W and flat at 52% throughout, the
+ *  other two at their 7.2 kW rating — its ON had not taken. Every force-charge since 10-05
+ *  has had a Core at 0 W after its first ON; on 10-14, 10-16 and 11-10 this re-issue at
+ *  +15 min recovered it. The give-up comes at +30 min. It is the longest grace the
+ *  window-end cutoff allows (FORCE_CHARGE_ON_RETRY_CUTOFF_MS ≥ cooldown + this, pinned in
+ *  edges.test.ts). A start at the window open counts this lead in its claim
+ *  (FORCE_CHARGE_OPEN_ALLOWANCE_MS). */
 export const FORCE_CHARGE_ON_VERIFY_AFTER_MS = 15 * 60_000;
 /** v1.186.0 — ON is re-issued ONCE; still not applied after that ⇒ the warning. */
 export const FORCE_CHARGE_ON_MAX_RETRIES = 1;
@@ -2409,8 +2414,11 @@ export function decideForceCharge(s: NightActuationState, nowMs: number, o: Forc
     if (s.forceChargeCeilingSyncRetries < FORCE_CHARGE_CEILING_SYNC_RETRIES) return { kind: 'syncCeiling', pct: desired, prior };
     return { kind: 'none', why: `${W.ceilingRefused}${desired}% ceiling (still reads ${o.ceilingReadbackPct}%) — reserve-only tonight rather than overfill` };
   }
-  // v1.167.0 — JUST IN TIME. The ceiling above is synced the moment the night is live,
-  // hours before this, so its readback never delays the start.
+  // v1.167.0 — JUST IN TIME. The ceiling above is synced once the reserve reads back. On a timed
+  // start that is long before this, so its readback does not delay the start; on a start at the
+  // window open the ON waits for it (2026-11-10: ceiling written 23:01:47 on the reserve's
+  // readback tick, ON 23:02:47), up to FORCE_CHARGE_CEILING_VERIFY_AFTER_MS per attempt — the
+  // claim's FORCE_CHARGE_OPEN_ALLOWANCE_MS counts that lead.
   if (o.poolSocPct == null || o.fullKwh == null || !(o.fullKwh > 0)) {
     return { kind: 'none', why: 'no live pool reading to time the start from' };
   }

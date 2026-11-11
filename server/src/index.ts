@@ -2704,8 +2704,9 @@ const broadcast = startBroadcastMonitor(store, (m) => app.log.info(m), {
   cacheUrlPath: '/audio-render',
   // v1.187.3 — a green inside the post-restart warm-up is announced as a recovery only once it has
   // stood its dwell on a SETTLED alert set (broadcast.isRestartRecovery), measured from the alert
-  // monitor's stamp (alertMonitor.alertSetTrusted): the store hydrated, every feed's delivery in the
-  // published set, the boot onset debounces run, no onset clock withholding a fault.
+  // monitor's stamp (alertMonitor.alertSetTrusted): the store hydrated, every feed's value in the
+  // published set a hydrated delivery (provenance, not freshness: a warm feed's newer delivery joins at
+  // the next publish), the boot onset debounces run, no onset clock withholding a fault.
   alertSetSettledSince: () => monitor.alertSetSettledSince(),
 });
 

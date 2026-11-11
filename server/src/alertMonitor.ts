@@ -3701,6 +3701,9 @@ export function startAlertMonitor(
     // v1.187.3 (review) — the settled stamp, judged on the set just published: its live part (above)
     // and each feed's value as this pass read it. Stamped at the first such publish and kept while
     // every pass's set is one; a pass whose set is not cleared it before its first publish (above).
+    // ★ It vouches for PROVENANCE, not freshness: a warm feed whose newer delivery lands after this
+    // pass's read does NOT clear it — that delivery joins at the next publish (≤ one pass, the same
+    // latency as any all-clear). Clearing on such landings could leave a recovery unannounced.
     const feedsInSet = [rForecast, rStormPrep, rCurtailment, rBaseline, rForecastAlerts].map((r) => r.warm);
     if (alertSetTrusted({ firstPollSettledAt: store.firstPollSettledAt, feedsInSet, liveAtMs, pendingOnsets })) {
       if (alertSetSettledSinceMs == null) alertSetSettledSinceMs = Date.now();
