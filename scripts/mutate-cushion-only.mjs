@@ -58,8 +58,8 @@ const MUTANTS = [
   {
     id: 'CO-Q-viii. ★★ (design) the solar refusal left on a sized cushion-only plan\'s inputs',
     file: NCA, tests: [T_CO],
-    find: "    basisBlockedBy: cushionOnly != null ? null : basisBlockedBy,\n",
-    to: "    basisBlockedBy, /* MUTANT */\n",
+    find: "    basisBlockedBy: cushionOnly != null ? null\n      : basisBlockedBy != null && panelBasisRefusal != null && panelBasisRefusal !== ''\n",
+    to: "    basisBlockedBy: (false as boolean) ? null /* MUTANT */\n      : basisBlockedBy != null && panelBasisRefusal != null && panelBasisRefusal !== ''\n",
     why: 'A sized plan carries a refusal: the gate, the push and the ledger read a refusal beside a plan.',
   },
   {
@@ -236,8 +236,8 @@ const MUTANTS = [
   {
     id: 'CO-F-i. ★★★ the tracker\'s nameplate answer is a ratio (the pool on nameplate, the line under the cushion)',
     file: NCA, tests: [T_CO],
-    find: "  const ratioKnown = (sc: CushionPoolScale | null | undefined): boolean => sc != null && sc.basis !== 'nameplate'",
-    to: "  const ratioKnown = (sc: CushionPoolScale | null | undefined): boolean => sc != null /* MUTANT */",
+    find: "export function cushionRatioKnown(sc: CushionPoolScale | null | undefined): boolean {\n  return sc != null && sc.basis !== 'nameplate'\n",
+    to: "export function cushionRatioKnown(sc: CushionPoolScale | null | undefined): boolean {\n  return sc != null /* MUTANT */\n",
     why: 'L 1.63-1.70 kW writes 27%, holding 9.57 kWh at the true ×0.944 against a 9.75-10.12 kWh cushion.',
   },
   {
@@ -259,8 +259,8 @@ const MUTANTS = [
   {
     id: 'CO-E-i. ★★★ (critique) a transient refusal\'s fallback arms at 21:30 and latches',
     file: NCA, tests: [T_CO],
-    find: '  return (plan == null || (!plan.basisComplete && plan.basisTransient === true) || plan.cushionOnly?.transient === true)',
-    to: '  return (plan == null || (!plan.basisComplete && plan.basisTransient === true)) /* MUTANT */',
+    find: '  return (plan == null || (!plan.basisComplete && plan.basisTransient === true) || plan.cushionOnly?.transient === true\n',
+    to: '  return (plan == null || (!plan.basisComplete && plan.basisTransient === true) /* MUTANT */\n',
     why: 'A restart at 21:10 latches a smaller resilience arm in place of the cost plan minutes away (161 of 365 21:30 plans, ~19 kWh each).',
   },
   {
@@ -366,22 +366,22 @@ const MUTANTS = [
   {
     id: 'CO-T-viii. ★★ (owner) the push says "no cost target" on Friday\'s fill',
     file: NTF, tests: [T_CO],
-    find: "    + `${costFill ? 'no cost target but the long-gap fill' : 'no cost target'}.${gap}`;",
-    to: "    + `no cost target.${gap}`; /* MUTANT */",
+    find: "    + `${costFill ? 'no cost target but the long-gap fill' : 'no cost target'}.${gap}${panel}`;",
+    to: "    + `no cost target.${gap}${panel}`; /* MUTANT */",
     why: 'Friday\'s push denies the fill it arms.',
   },
   {
     id: 'CO-T-ix. ★★ a sized hold\'s push drops the basis',
     file: NTF, tests: [T_CO],
-    find: "    const provisionalHold = provisionalBandText(plan.pvBandWiden) + cushionOnlyPushText(plan, 'short');",
-    to: '    const provisionalHold = provisionalBandText(plan.pvBandWiden); /* MUTANT */',
+    find: "    const provisionalHold = provisionalBandText(plan.pvBandWiden) + cushionOnlyPushText(plan, 'short') + panelBasisPushText(plan);",
+    to: '    const provisionalHold = provisionalBandText(plan.pvBandWiden) + panelBasisPushText(plan); /* MUTANT */',
     why: 'A cushion-only hold reads as a full-basis hold.',
   },
   {
     id: 'CO-T-x. ★★★ the card\'s disclosure drops',
     file: CARD, tests: [T_CO],
-    find: '    + provisionalBandText(plan.pvBandWiden) + cushionOnlyCardText(plan.cushionOnly, plan);',
-    to: '    + provisionalBandText(plan.pvBandWiden); /* MUTANT */',
+    find: "    + provisionalBandText(plan.pvBandWiden) + cushionOnlyCardText(plan.cushionOnly, plan) + (plan.pvBasisText ?? '');",
+    to: "    + provisionalBandText(plan.pvBandWiden) + (plan.pvBasisText ?? ''); /* MUTANT */",
     why: 'The card disagrees with the rationale and the push.',
   },
   {

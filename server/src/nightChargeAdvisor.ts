@@ -120,6 +120,9 @@ import { fmtSiteDayHm, siteDayStartMs } from './siteTime.js';
 // v1.194.0 — the charge leg of every walk below (physics/chargeLeg.ts imports nothing — no cycle, and
 // none of analytics.ts's runway basis).
 import { chargeLegStep } from './physics/chargeLeg.js';
+// v1.204.0 — the selected solar basis a plan carries (types only).
+import type { PvBasisKind, PvBasisReason, PvSource } from './panelPvSelection.js';
+import type { UcChecks } from './panelPvBasis.js';
 export { resolveCheapWindow } from './chargeWindows.js';
 
 const HOUR_MS = 3_600_000;
@@ -867,6 +870,18 @@ export interface NightChargePlan {
    *  at the window close alone, no solar credited. The rationale, the push, the card and the ledger (cushion_only_refused_by) state
    *  it. Absent on every other plan, so no other plan's JSON moves. */
   cushionOnly?: CushionOnlyBasis;
+  /** ★★★ v1.204.0 — THE SOLAR BASIS SELECTED (panelPvSelection.ts, index.ts): set on every live overnight plan but one planned on
+   *  the published band that covers every connected slot (that plan's JSON is v1.203.0's). `pvBasis` 'panel' | 'mixed': planned on
+   *  the panel-measured band; null: not (v1.203.0's plan, cushion-only or its long-gap fill, or no plan). The rest: E, each connected slot's source (slot numbers only),
+   *  the 7-day energy balance's figures, why the panel basis is not used (figures only), the transient class, and the sentence the
+   *  rationale closes with (the card shows it word for word). */
+  pvBasis?: PvBasisKind | null;
+  pvBasisAsOfDay?: string;
+  pvBasisSlots?: Array<{ slot: number; source: PvSource }> | null;
+  pvBasisChecks?: UcChecks | null;
+  pvBasisRefusedBy?: PvBasisReason | null;
+  pvBasisTransient?: true;
+  pvBasisText?: string;
   rationale: string;
 }
 
@@ -3234,6 +3249,8 @@ export function nightChargeStateFields(
   night_charge_window_start: string | null;
   night_charge_window_end: string | null;
   charge_tonight: boolean;
+  night_charge_pv_basis: 'cores' | 'panel' | 'mixed' | 'none' | null;
+  night_charge_pv_basis_refused_by: string | null;
 } {
   const fresh = !!plan && plan.basisComplete && nowMs - plan.generatedAt < PLAN_STALENESS_MS;
   const win = plan?.window ?? null;
@@ -3266,6 +3283,13 @@ export function nightChargeStateFields(
     night_charge_window_start: win ? fmtSiteDayHm(win.startMs, nowMs) : null,
     night_charge_window_end: win ? fmtSiteDayHm(win.endMs, nowMs) : null,
     charge_tonight: fresh ? plan!.chargeTonight === true : false,
+    // ★★★ v1.204.0 (L6) — ecoflow_night_charge_target_soc's attributes (NIGHT_CHARGE_ATTRIBUTES_TEMPLATE), under the same freshness:
+    // the basis the plan was sized on — the panel's readings ('panel' | 'mixed'), none (v1.203.0's plan, cushion-only or its long-gap
+    // fill, or a refused plan), or the Cores' band (a plan the selection put nothing on) — and why the panel's readings are not used (a
+    // reason code; null where they are, where none was judged, and on the transient class).
+    night_charge_pv_basis: !fresh ? null
+      : plan!.pvBasis != null ? plan!.pvBasis : plan!.cushionOnly != null ? 'none' : plan!.pvBasisAsOfDay != null ? 'none' : 'cores',
+    night_charge_pv_basis_refused_by: fresh && plan!.pvBasis == null ? (plan!.pvBasisRefusedBy?.code ?? null) : null,
   };
 }
 
@@ -3432,6 +3456,120 @@ export interface NightChargeInputDeps {
   /** v1.203.0 — the capacity floor a cushion-only plan counts its pool on where no pack capacity ratio is known
    *  (the capacity scale's own floor, CAPACITY_SCALE_MIN: index.ts). Read only on a cushion-only plan; absent or no reading there ⇒ refused by name. */
   cushionOnlyFloorScale?: number;
+  /** ★★★ v1.204.0 (M2) — the band passed its own gate (solarBasisGate) but does not cover the Cores of every connected slot of the
+   *  house panel (index.ts selectPvBasis): it is passed as REFUSED, with these words (basisComplete false, so the cushion-only plan
+   *  where eligible, the gate's transience as computed). Absent or null ⇒ the gate alone, byte for byte. */
+  bandCoverageRefusedBy?: string | null;
+  /** ★★★ v1.204.0 (L1) — why the panel's own solar readings are not used in the plan shown (panelPvSelection.ts reason words): appended to a
+   *  refused plan's basisBlockedBy, so the 21:30 "no plan tonight" push carries it. A cushion-only plan's refusal (refusedBy, the
+   *  ledger's cushion_only_refused_by) keeps the gate's words: its rationale gains the panel's sentence instead. Absent or null ⇒ none. */
+  panelBasisRefusal?: string | null;
+}
+
+/**
+ * ★★★ v1.204.0 — THE SOLAR BASIS GATE, alone (it was the head of buildNightChargeInputs): whether a PV band may size tonight's plan,
+ * and if not, which gate refused and whether that refusal is the shape a start-up leaves. ONE definition: the night planner sizes on
+ * it (buildNightChargeInputs) and the basis selector (index.ts, panelPvSelection.selectPvBasis) judges the published band and the
+ * panel-measured planning band with it, so the selector and the sizer cannot disagree. PURE; the words are the ones the planner has
+ * printed since v1.148.0 / v1.198.0.
+ */
+export interface SolarBasisGate {
+  /** forecast present, not climatology, at least the provisional day count, coverage at or above BASIS_MIN_BAND_COVERAGE. */
+  basisGatePasses: boolean;
+  /** The provisional minimum (≤ the full one). */
+  provisionalMinDays: number;
+  /** Passed with fewer than the full minimum of scored days. */
+  provisionalDays: boolean;
+  /** k(n) for a provisional count (null on the full basis, and where no widening is defined). */
+  provisionalK: number | null;
+  /** The plan may be sized on the band: the gate passes, and a provisional count has a widening. */
+  basisComplete: boolean;
+  /** k(n) on a provisional complete basis; null otherwise. */
+  bandWidenK: number | null;
+  /** Which gate refused (null when complete). */
+  basisBlockedBy: string | null;
+  /** The refusal is the shape a start-up leaves: no forecast, or not one scored calibration day. */
+  transient: boolean;
+}
+export function solarBasisGate(o: {
+  forecastPresent: boolean;
+  confidenceTier: 'forecast' | 'mixed' | 'climatology';
+  calScoredDays: number;
+  minCalScoredDays: number;
+  provisionalMinCalScoredDays?: number | null;
+  bandCoverageFrac: number;
+}): SolarBasisGate {
+  const { forecastPresent, confidenceTier, calScoredDays, minCalScoredDays, provisionalMinCalScoredDays, bandCoverageFrac } = o;
+  // v1.48.0 — coverage floor corrected 0.9 → 0.78. The P10–P90 band nominally
+  // covers 80%, and the WRITE gate (nightChargeGate.ts) accepts realized
+  // coverage in [0.78, 0.92] as calibrated. Requiring ≥ 0.9 here meant a
+  // CORRECTLY calibrated forecast (e.g. the live 85%) failed the basis every
+  // night — no plan, no advisory content, nothing scored, readiness starved.
+  // Below 0.78 the band is overconfident (too narrow) and still blocks; above
+  // 0.92 it is over-wide, which is CONSERVATIVE for the P10-PV sizing this
+  // basis feeds, so the advisory basis needs no upper bound (the write gate
+  // keeps its stricter two-sided band).
+  // v1.198.0 — decided BEFORE the band is built: a PROVISIONAL basis (from
+  // provisionalMinCalScoredDays to N_MIN scored days) widens the hours below. The coverage is the
+  // published band's (bandRealizedCoveragePct), judged as before — never on the widened band.
+  const provisionalMinDays = provisionalMinCalScoredDays != null && Number.isFinite(provisionalMinCalScoredDays)
+    ? Math.min(provisionalMinCalScoredDays, minCalScoredDays) : minCalScoredDays;
+  const basisGatePasses =
+    forecastPresent &&
+    confidenceTier !== 'climatology' &&
+    calScoredDays >= provisionalMinDays &&
+    bandCoverageFrac >= BASIS_MIN_BAND_COVERAGE;
+  const provisionalDays = basisGatePasses && calScoredDays < minCalScoredDays;
+  // A provisional day count with no widening defined for it (under the table's first entry, or not
+  // a whole number) is refused: never sized on the band unwidened.
+  const provisionalK = provisionalDays ? provisionalBandWiden(calScoredDays) : null;
+  const basisComplete = basisGatePasses && (!provisionalDays || provisionalK != null);
+  /** v1.198.0 — k(n) on a provisional basis; null on the full basis (and on a refused one): every
+   *  transform below runs only when this is set, so the full basis is the planner as it was. */
+  const bandWidenK: number | null = basisComplete ? provisionalK : null;
+  /** v1.198.0 — the day count as the coverage refusal prints it, the minimum it PASSED: the
+   *  provisional one below the full one, said so ("4/14" read as a failed count on the likeliest
+   *  refusal after a return), and the full one from it, as before. */
+  const calDaysPassedText = calScoredDays < minCalScoredDays
+    ? `${calScoredDays}/${provisionalMinDays}, provisional band below ${minCalScoredDays}`
+    : `${calScoredDays}/${minCalScoredDays}`;
+  // v1.148.0 — SAY WHICH GATE FAILED.
+  //
+  // On 2026-09-10 this returned false, the plan was null, and the backup pool sat
+  // at its 16% reserve floor from 22:36 to 07:50 — 9 h 13 m one grid failure from
+  // empty, recovering on morning solar. The reason appeared NOWHERE: not in the
+  // log, not on the plan, not in the evening advisory, not on the dashboard.
+  // Three of the four gates passed; band coverage missed by six points (72% vs
+  // 78%). Reconstructing that took an hour of live probing.
+  //
+  // "forecast/telemetry basis incomplete" is four conditions wearing one coat.
+  const basisBlockedBy: string | null = basisComplete
+    ? null
+    : !forecastPresent
+      ? 'no PV forecast available'
+      : confidenceTier === 'climatology'
+        ? 'forecast is climatology-tier (no site-specific history yet)'
+        : calScoredDays < provisionalMinDays
+          ? `only ${calScoredDays} scored calibration day(s), need ${provisionalMinDays}`
+            + (provisionalMinDays < minCalScoredDays
+              ? ` (a provisional plan on a widened solar band from ${provisionalMinDays}; the full band from ${minCalScoredDays})` : '')
+          : !(bandCoverageFrac >= BASIS_MIN_BAND_COVERAGE)
+            ? `PV band coverage ${Math.round(bandCoverageFrac * 100)}% < ${Math.round(BASIS_MIN_BAND_COVERAGE * 100)}%`
+              + ` (forecast present, tier=${confidenceTier}, calDays ${calDaysPassedText})`
+            : `no provisional band widening is defined for ${calScoredDays} scored calibration day(s)`;
+  // v1.186.5 — no forecast, or not ONE scored calibration day: what a start-up leaves
+  // (a skill scored on a partial device map is now empty rather than wrong). 1 to the
+  // provisional minimum − 1 (1-3) scored days is a young history and a coverage miss is a real
+  // miss: both persistent.
+  const transient = !basisComplete && (!forecastPresent || calScoredDays === 0);
+  return { basisGatePasses, provisionalMinDays, provisionalDays, provisionalK, basisComplete, bandWidenK, basisBlockedBy, transient };
+}
+
+/** v1.203.0 — a pack capacity ratio is known: a scale that is a reading (not the tracker's nameplate answer) within
+ *  [CUSHION_SCALE_PLAUSIBLE_MIN, 1]. v1.204.0 — exported: the panel basis needs one (G8, index.ts selectPvBasis). PURE. */
+export function cushionRatioKnown(sc: CushionPoolScale | null | undefined): boolean {
+  return sc != null && sc.basis !== 'nameplate'
+    && typeof sc.scale === 'number' && Number.isFinite(sc.scale) && sc.scale >= CUSHION_SCALE_PLAUSIBLE_MIN && sc.scale <= 1 + 1e-9;
 }
 
 /** v1.169.0 — PURE. The fraction of the window hour starting at `hourTs` that is still
@@ -3671,6 +3809,8 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     armedNoLineStartMs,
     // v1.203.0 — the cushion-only fallback's gate and the capacity floor it counts the pool on with no ratio known.
     cushionOnlyEligible, cushionOnlyFloorScale,
+    // v1.204.0 — the published band refused for its coverage of the connected slots (M2), and the panel basis's refusal words (L1).
+    bandCoverageRefusedBy, panelBasisRefusal,
     // v1.125.0 — the islanded-outage cushion inputs. Destructuring here is not
     // decoration: NightChargeInputs is built field-by-field below, so a field
     // added to the deps interface and to the inputs interface but NOT copied
@@ -3700,68 +3840,15 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
   // and a plan with no spec — keeps the configured values exactly as passed.
   const legRole: ChargeLegRole = windowSpec?.role ?? 'cost';
 
-  // v1.48.0 — coverage floor corrected 0.9 → 0.78. The P10–P90 band nominally
-  // covers 80%, and the WRITE gate (nightChargeGate.ts) accepts realized
-  // coverage in [0.78, 0.92] as calibrated. Requiring ≥ 0.9 here meant a
-  // CORRECTLY calibrated forecast (e.g. the live 85%) failed the basis every
-  // night — no plan, no advisory content, nothing scored, readiness starved.
-  // Below 0.78 the band is overconfident (too narrow) and still blocks; above
-  // 0.92 it is over-wide, which is CONSERVATIVE for the P10-PV sizing this
-  // basis feeds, so the advisory basis needs no upper bound (the write gate
-  // keeps its stricter two-sided band).
-  // v1.198.0 — decided BEFORE the band is built: a PROVISIONAL basis (from
-  // provisionalMinCalScoredDays to N_MIN scored days) widens the hours below. The coverage is the
-  // published band's (bandRealizedCoveragePct), judged as before — never on the widened band.
-  const provisionalMinDays = provisionalMinCalScoredDays != null && Number.isFinite(provisionalMinCalScoredDays)
-    ? Math.min(provisionalMinCalScoredDays, minCalScoredDays) : minCalScoredDays;
-  const basisGatePasses =
-    forecastPresent &&
-    confidenceTier !== 'climatology' &&
-    calScoredDays >= provisionalMinDays &&
-    bandCoverageFrac >= BASIS_MIN_BAND_COVERAGE;
-  const provisionalDays = basisGatePasses && calScoredDays < minCalScoredDays;
-  // A provisional day count with no widening defined for it (under the table's first entry, or not
-  // a whole number) is refused: never sized on the band unwidened.
-  const provisionalK = provisionalDays ? provisionalBandWiden(calScoredDays) : null;
-  const basisComplete = basisGatePasses && (!provisionalDays || provisionalK != null);
-  /** v1.198.0 — k(n) on a provisional basis; null on the full basis (and on a refused one): every
-   *  transform below runs only when this is set, so the full basis is the planner as it was. */
-  const bandWidenK: number | null = basisComplete ? provisionalK : null;
-  /** v1.198.0 — the day count as the coverage refusal prints it, the minimum it PASSED: the
-   *  provisional one below the full one, said so ("4/14" read as a failed count on the likeliest
-   *  refusal after a return), and the full one from it, as before. */
-  const calDaysPassedText = calScoredDays < minCalScoredDays
-    ? `${calScoredDays}/${provisionalMinDays}, provisional band below ${minCalScoredDays}`
-    : `${calScoredDays}/${minCalScoredDays}`;
-  // v1.148.0 — SAY WHICH GATE FAILED.
-  //
-  // On 2026-09-10 this returned false, the plan was null, and the backup pool sat
-  // at its 16% reserve floor from 22:36 to 07:50 — 9 h 13 m one grid failure from
-  // empty, recovering on morning solar. The reason appeared NOWHERE: not in the
-  // log, not on the plan, not in the evening advisory, not on the dashboard.
-  // Three of the four gates passed; band coverage missed by six points (72% vs
-  // 78%). Reconstructing that took an hour of live probing.
-  //
-  // "forecast/telemetry basis incomplete" is four conditions wearing one coat.
-  const basisBlockedBy: string | null = basisComplete
-    ? null
-    : !forecastPresent
-      ? 'no PV forecast available'
-      : confidenceTier === 'climatology'
-        ? 'forecast is climatology-tier (no site-specific history yet)'
-        : calScoredDays < provisionalMinDays
-          ? `only ${calScoredDays} scored calibration day(s), need ${provisionalMinDays}`
-            + (provisionalMinDays < minCalScoredDays
-              ? ` (a provisional plan on a widened solar band from ${provisionalMinDays}; the full band from ${minCalScoredDays})` : '')
-          : !(bandCoverageFrac >= BASIS_MIN_BAND_COVERAGE)
-            ? `PV band coverage ${Math.round(bandCoverageFrac * 100)}% < ${Math.round(BASIS_MIN_BAND_COVERAGE * 100)}%`
-              + ` (forecast present, tier=${confidenceTier}, calDays ${calDaysPassedText})`
-            : `no provisional band widening is defined for ${calScoredDays} scored calibration day(s)`;
-  // v1.186.5 — no forecast, or not ONE scored calibration day: what a start-up leaves
-  // (a skill scored on a partial device map is now empty rather than wrong). 1 to the
-  // provisional minimum − 1 (1-3) scored days is a young history and a coverage miss is a real
-  // miss: both persistent.
-  const solarBasisTransient = !basisComplete && (!forecastPresent || calScoredDays === 0);
+  // ★★★ v1.204.0 — the solar basis gate (solarBasisGate: one definition, which the basis selector reads too). The published band
+  // passed by the gate but not covering the Cores of every connected slot (bandCoverageRefusedBy, M2) is refused here: the
+  // cushion-only plan where eligible, the gate's transience as computed (none: the gate passed).
+  const gate = solarBasisGate({ forecastPresent, confidenceTier, calScoredDays, minCalScoredDays, provisionalMinCalScoredDays, bandCoverageFrac });
+  const coverageRefused = gate.basisComplete && bandCoverageRefusedBy != null && bandCoverageRefusedBy !== '';
+  const basisComplete = gate.basisComplete && !coverageRefused;
+  const bandWidenK: number | null = basisComplete ? gate.bandWidenK : null;
+  const basisBlockedBy: string | null = coverageRefused ? bandCoverageRefusedBy! : gate.basisBlockedBy;
+  const solarBasisTransient = !basisComplete && gate.transient;
 
   // ★★★ v1.203.0 — THE CUSHION-ONLY PLAN. With the Cores dark on the vendor cloud the solar basis is refused every night
   // (0 scored calibration days, a PV band of 0), and from 2026-10-16 nothing charged overnight at all. Where the solar basis is
@@ -3781,8 +3868,7 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
    *  one that is no reading, or the tracker's nameplate answer: it has never seen a ratio) the capacity floor, CAPACITY_SCALE_MIN,
    *  never nameplate — a smaller pool is a higher line and a deeper drain, so the floor holds at least the cushion on any pack the
    *  tracker can answer for. No floor passed (or none that is a reading) ⇒ the sizer refuses by name. */
-  const ratioKnown = (sc: CushionPoolScale | null | undefined): boolean => sc != null && sc.basis !== 'nameplate'
-    && typeof sc.scale === 'number' && Number.isFinite(sc.scale) && sc.scale >= CUSHION_SCALE_PLAUSIBLE_MIN && sc.scale <= 1 + 1e-9;
+  const ratioKnown = cushionRatioKnown;
   const floorOk = typeof cushionOnlyFloorScale === 'number' && Number.isFinite(cushionOnlyFloorScale)
     && cushionOnlyFloorScale >= CUSHION_SCALE_PLAUSIBLE_MIN && cushionOnlyFloorScale <= 1;
   const coPoolFloor = cushionOnly != null && !ratioKnown(cushionPoolScale) && floorOk ? cushionOnlyFloorScale! : null;
@@ -3958,7 +4044,10 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     nowMs,
     // R2 — forwarded only when given, so a plan with no spec carries exactly the inputs it did.
     ...(windowSpec !== undefined ? { windowSpec } : {}),
-    basisBlockedBy: cushionOnly != null ? null : basisBlockedBy,
+    // v1.204.0 (L1) — a refused plan's gate words, and why the panel's readings are not used in the plan shown where that was judged.
+    basisBlockedBy: cushionOnly != null ? null
+      : basisBlockedBy != null && panelBasisRefusal != null && panelBasisRefusal !== ''
+        ? `${basisBlockedBy}; the panel's own solar readings are not used: ${panelBasisRefusal}` : basisBlockedBy,
     basisTransient,
     // v1.198.0 — only on a provisional basis: the full basis's inputs carry exactly what they did.
     ...(pvBandWiden != null ? { pvBandWiden } : {}),
@@ -4410,7 +4499,7 @@ export const NIGHT_PLAN_STALE_DEFER_UNTIL_MIN = 22 * 60 + 30;
  * TRANSIENT-shaped failure defers (`basisTransient`); a persistent one is decided at once.
  */
 export function eveningBasisDefers(
-  plan: { basisComplete: boolean; basisTransient?: boolean; cushionOnly?: { transient: boolean } | null } | null,
+  plan: { basisComplete: boolean; basisTransient?: boolean; cushionOnly?: { transient: boolean } | null; pvBasisTransient?: boolean } | null,
   nowMin: number,
   /** v1.191.0 (W3) — the schedule's deferral end (nightSchedule.ts staleDeferUntilMin):
    *  NIGHT_PLAN_STALE_DEFER_UNTIL_MIN on the APS preset. */
@@ -4420,7 +4509,10 @@ export function eveningBasisDefers(
   // owner keeps the full evening to act on it.
   // v1.203.0 — and a cushion-only plan made on a transient refusal (a start-up's 0 scored days): the full plan may be minutes away,
   // so the fallback is the deferral end's last resort, never a latch at 21:30.
-  return (plan == null || (!plan.basisComplete && plan.basisTransient === true) || plan.cushionOnly?.transient === true)
+  // v1.204.0 (L1) — and a night whose panel basis is in the transient class (no planning report yet after a start-up, one built for
+  // another evening): the panel plan may be minutes away, so whatever stands in for it waits to the deferral end too.
+  return (plan == null || (!plan.basisComplete && plan.basisTransient === true) || plan.cushionOnly?.transient === true
+    || plan.pvBasisTransient === true)
     && nowMin < deferUntilMin;
 }
 

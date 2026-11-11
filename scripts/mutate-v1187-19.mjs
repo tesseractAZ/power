@@ -303,8 +303,9 @@ const MUTANTS = [
   {
     id: 'V-xxxv. ★★★ the worker\'s basis reset wipes the measured basis',
     file: ANALYTICS,
-    find: '  multiDayCache = null;\n  bayesCache = null;\n}\n',
-    to: '  multiDayCache = null;\n  bayesCache = null;\n  poolBasisTracker.reset(); /* MUTANT */\n}\n',
+    // v1.204.0 — anchor moved: the planning layer's caches are reset after it.
+    find: '  multiDayCache = null;\n  bayesCache = null;\n  planningForecastCache.clear();\n  planningProbabilisticCache.clear();\n  planningMultiDayCache.clear();\n}\n',
+    to: '  multiDayCache = null;\n  bayesCache = null;\n  planningForecastCache.clear();\n  planningProbabilisticCache.clear();\n  planningMultiDayCache.clear();\n  poolBasisTracker.reset(); /* MUTANT */\n}\n',
     why: 'Every boot-basis step forgets the held ratios: a Core still reporting in runs on the lowest known.',
   },
   {

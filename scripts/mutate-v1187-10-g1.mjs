@@ -29,7 +29,7 @@
  *
  * Not mutated: the night-charge entity rows of the manual's chapter 15 section 9 (C35 — a
  * documentation fix; nightChargeMqtt.test.ts reads them, now in
- * docs/reference/15-2-night-charge-writes.md “9. Delivery surfaces” and docs/guide/entities.md,
+ * docs/reference/15-4-night-charge-surfaces-and-de-bias.md “9. Delivery surfaces” and docs/guide/entities.md,
  * and check-mutant-anchors.mjs did not resolve .md targets then); the one-line log texts.
  *
  * Re-pointed elsewhere in this release: mutate-reserve-posture.mjs vii (the owner-floor condition

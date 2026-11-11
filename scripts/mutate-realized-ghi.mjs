@@ -170,8 +170,8 @@ const MUTANTS = [
     // calibrator is on the realized basis by policy; the regression is now a silent revert.
     id: 'xv. ★★★ the calibrator silently reverts to the first-write basis',
     file: REPORTS,
-    find: "      devicesOf(ctx), ctx.recorder, fc, PV_BAND_CAL_WINDOW_DAYS, 'realized',",
-    to: "      devicesOf(ctx), ctx.recorder, fc, PV_BAND_CAL_WINDOW_DAYS, 'first-write', /* MUTANT */",
+    find: "      devicesOf(ctx), ctx.recorder, fc, PV_BAND_CAL_WINDOW_DAYS, 'realized',\n    );\n    return computeProbabilisticForecast(fc, skill);",
+    to: "      devicesOf(ctx), ctx.recorder, fc, PV_BAND_CAL_WINDOW_DAYS, 'first-write', /* MUTANT */\n    );\n    return computeProbabilisticForecast(fc, skill);",
     why: 'Policy (2026-09-21): the calibrator uses the more accurate data; a one-word edit would put the band back on a 3-4-day-lead forecast error with every hindcast test still green.',
   },
   {

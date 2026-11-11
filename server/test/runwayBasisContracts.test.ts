@@ -466,7 +466,13 @@ test('★★★ SCOPE — source pins: the planner, JIT force-charge and MPC nev
   // Its imports are the ones it had: no module reaches the planner that is not named here. Every module
   // specifier in the file counts — a static import, a re-export, a dynamic import(), wherever it sits.
   const advisorImports = [...new Set([...advisor.matchAll(/(?:\bfrom\s+|\bimport\s*\(?\s*)['"]([^'"]+)['"]/g)].map((m) => m[1]))].sort();
-  assert.deepEqual(advisorImports, ['./chargeTaper.js', './chargeWindows.js', './nightChargeActuator.js', './nightForceCharge.js', './physics/chargeLeg.js', './siteTime.js']);
+  // v1.204.0 — the plan's selected solar basis (NightChargePlan.pvBasis*) is typed from the selector and the energy balance: TYPE
+  // imports only (erased at compile), so no code of either reaches the planner.
+  assert.deepEqual(advisorImports, ['./chargeTaper.js', './chargeWindows.js', './nightChargeActuator.js', './nightForceCharge.js', './panelPvBasis.js', './panelPvSelection.js', './physics/chargeLeg.js', './siteTime.js']);
+  for (const m of ['./panelPvBasis.js', './panelPvSelection.js']) {
+    const lines = advisor.split('\n').filter((l) => l.includes(`'${m}'`));
+    assert.ok(lines.length > 0 && lines.every((l) => /^import type \{[^}]*\} from '/.test(l.trim())), `${m}: type imports only (${lines.join(' | ')})`);
+  }
   const sizing = advisor.slice(advisor.indexOf('function sizeNightChargePlan('), advisor.indexOf('\nexport const MIDDAY_REENTRY_MARGIN_PCT'));
   assert.ok(sizing.length > 20_000, `sizeNightChargePlan: ${sizing.length} chars`);
   // v1.202.0 — THE SEAM: the scale is read ONCE, at the top of the sizing, into the planning pool (plannerPoolKwh), after
@@ -596,6 +602,8 @@ test('★★★ SCOPE — source pins: the planner, JIT force-charge and MPC nev
       'const cushionStandbyW = cushionStandbyOverheadW(cushionPoolScale, fullWh > 0);',
       'const cushionStandbyLogKey = `${cushionStandbyW}:${cushionPoolScale?.connectedCores ?? 0}`;',
       'app.log.info(cushionStandbyLogText(cushionStandbyW, cushionPoolScale?.connectedCores ?? 0));',
+      // v1.204.0 (G8) — the panel basis's selector reads only WHETHER a ratio is known (nightChargeAdvisor.cushionRatioKnown).
+      'ratioKnown: cushionRatioKnown(cushionPoolScale),',
       'cushionPoolScale,', // deps
       '...cushionPoolScaleLedgerColumns(plan),', // recordNightPlanRow: written, never read back
     ]],

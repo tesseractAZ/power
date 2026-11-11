@@ -784,6 +784,25 @@ export interface NightLedgerRow {
    *  (nightLedgerScoring cushionOnlyNote); its realized cushion verdict still stands. Written unconditionally: NULL on every other
    *  plan (a full plan, a refusal), and on every row written before v1.203.0. */
   cushion_only_refused_by: string | null;
+  /** ★★★ v1.204.0 — THE SOLAR BASIS the plan was selected on (panelPvSelection.ts; index.ts NightPlanExtras.pvSelection), written
+   *  unconditionally at plan time (NULL on every row written before v1.204.0):
+   *  - pv_basis: 'cores' (the Cores' own band, covering every connected slot), 'panel' / 'mixed' (the panel's own per-slot readings,
+   *    judged by the 7-day energy balance), NULL (no solar basis: v1.203.0's plan, cushion-only or its long-gap fill, or no plan);
+   *  - pv_basis_slots: each connected slot's source as of the plan's evening ('1:P,2:P,3:C'; slot numbers only), NULL where no
+   *    verdict was read;
+   *  - pv_basis_refused_by: why the panel's readings were not used ('code: words'), 'transient' on the transient class, NULL when
+   *    they were used and where none was judged;
+   *  - pv_upper_ratio: the 7-day energy balance of the window ending on the newest field day as of that evening (the ratio the
+   *    night was planned beside), NULL with none.
+   *  READINESS: a row on 'panel' or 'mixed' (or captured on a panel actual, actual_pv_basis) is kept apart from the actuated pool,
+   *  the under-buy rate, the sizing bias and the PV statistics (nightChargeGate panelApart); its strikes still count. */
+  pv_basis: string | null;
+  pv_basis_slots: string | null;
+  pv_basis_refused_by: string | null;
+  pv_upper_ratio: number | null;
+  /** ★★★ v1.204.0 — the per-slot sources actual_pv_kwh was integrated from on a 'panel' / 'mixed' row ('1:P,2:P,3:C': P the panel's
+   *  own reading src{n}_pv_w, C the slot's Core's pv_total), written at capture; NULL on every other row (the Cores' sum). */
+  actual_pv_basis: string | null;
   /** v1.200.0 — the outage line above the 50% reserve the plan CARRIES with the night force-charge to the
    *  window close: its ask, ⌈line⌉ (NightChargePlan.forceChargeLine.askPct; lineForceChargeLedgerColumns).
    *  NULL where the plan carries none, on a null plan, and on every row written before v1.200.0. A strike on
@@ -1176,6 +1195,8 @@ const NIGHT_LEDGER_COLUMNS: readonly (keyof NightLedgerRow)[] = [
   'plan_pool_kwh', 'plan_walk_standby_w',
   // v1.203.0 — a cushion-only plan's solar refusal.
   'cushion_only_refused_by',
+  // v1.204.0 — the solar basis the plan was selected on, and the sources of a panel row's PV actual.
+  'pv_basis', 'pv_basis_slots', 'pv_basis_refused_by', 'pv_upper_ratio', 'actual_pv_basis',
   // v1.200.0 — the outage line above the reserve envelope: carried (its ask) or disclosed.
   'cushion_line_force_charge_pct', 'cushion_envelope_shortfall',
   // v1.189.0 — the charge cycle (NightLedgerRow.window_kind).
@@ -1464,6 +1485,8 @@ export function createRecorder(
     'plan_pool_kwh REAL', 'plan_walk_standby_w REAL',
     // v1.203.0 — see NightLedgerRow.cushion_only_refused_by.
     'cushion_only_refused_by TEXT',
+    // v1.204.0 — see NightLedgerRow.pv_basis / actual_pv_basis.
+    'pv_basis TEXT', 'pv_basis_slots TEXT', 'pv_basis_refused_by TEXT', 'pv_upper_ratio REAL', 'actual_pv_basis TEXT',
     // v1.200.0 — see NightLedgerRow.cushion_line_force_charge_pct.
     'cushion_line_force_charge_pct REAL', 'cushion_envelope_shortfall INTEGER',
     // v1.189.0 — the charge cycle, from the list the allowlist reads (CHARGE_CYCLE_LEDGER_SCHEMA).

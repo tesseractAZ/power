@@ -226,6 +226,15 @@ export interface NightChargeReadinessOpts {
   completeAfterMs?: number;
 }
 
+/** ★★★ v1.204.0 — a row planned on the panel's own per-slot readings (pv_basis 'panel' / 'mixed') or captured on a panel actual
+ *  (actual_pv_basis with a P slot): kept apart from the actuated pool, the under-buy rate, the sizing bias and the PV statistics.
+ *  nightLedgerScoring.isPanelBasisRow, restated here (this module reads no scorer). PURE. */
+export function panelApart(r: Partial<Pick<NightLedgerRow, 'pv_basis' | 'actual_pv_basis'>>): boolean {
+  return r.pv_basis === 'panel' || r.pv_basis === 'mixed' || (typeof r.actual_pv_basis === 'string' && /:P\b/.test(r.actual_pv_basis));
+}
+/** v1.204.0 — panelBasisUnderBuyNights' threshold, kWh: a panel row's buy_err below minus this is published as a diagnostic. */
+export const PANEL_UNDERBUY_DIAG_KWH = 0.5;
+
 /* ── Defensive coercion — ledger booleans may persist as 0/1 or true/false ─── */
 function asNum(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
@@ -428,7 +437,8 @@ export function computeNightChargeReadiness(
   // (2026-09-11, "PV band coverage 72% < 78%") is exactly what this gate must see, and
   // dropping such nights would bias PV coverage upward. The load verdicts are untouched
   // (the load band is the panel's own history, not the Core map). Counted, never silent.
-  const pvEvidence = (r: NightLedgerRow): boolean => r.pv_verdict_set_aside == null;
+  // ★★★ v1.204.0 — and a row planned on the panel's own per-slot readings is kept apart (panelApart, below) whatever its tag says.
+  const pvEvidence = (r: NightLedgerRow): boolean => r.pv_verdict_set_aside == null && !panelApart(r);
   const pvPool = forecastPool.filter(pvEvidence);
   const pvVerdictsSetAside = forecastPool.length - pvPool.length;
 
@@ -467,10 +477,21 @@ export function computeNightChargeReadiness(
     : null;
 
   // ── ACTUATED pool (chronological; YYYY-MM-DD sorts lexically = by date). ──
+  // ★★★ v1.204.0 — `&& !panelApart(r)`: a night planned on the panel's own per-slot readings ('panel' / 'mixed', or captured on a
+  // panel actual) is kept out of the actuated pool, and with it the under-buy rate, the sizing bias and the strike-free streak: a
+  // high reading raises the actual, lowers the realized need and hides an under-buy, moving every criterion toward graduating, and
+  // no independent meter vouches for it while the Cores are dark. Its strikes still count (the strike rule reads currentAlgo), and
+  // a panel night cannot clear one. Counted (panelApartNights), never silent; panelBasisUnderBuyNights says what they would show.
   const actuated = currentAlgo
-    .filter((r) => truthy(r.actuated) && truthy(r.scored))
+    .filter((r) => truthy(r.actuated) && truthy(r.scored) && !panelApart(r))
     .sort((a, b) => String(a.plan_date).localeCompare(String(b.plan_date)));
   const actuatedNights = actuated.length;
+  const panelApartRows = currentAlgo.filter((r) => panelApart(r));
+  const panelApartNights = panelApartRows.length;
+  const panelBasisUnderBuyNights = panelApartRows.filter((r) => {
+    const e = asNum(r.buy_err_kwh);
+    return e != null && e < -PANEL_UNDERBUY_DIAG_KWH;
+  }).length;
 
   // v1.104.0 — a night whose plan DISCLOSED it could not meet the cushion is not
   // evidence that the engine under-bought. The strike rule fifteen lines below
@@ -660,6 +681,10 @@ export function computeNightChargeReadiness(
     trajStrikesSetAside, // v1.186.0 — see the strike rule
     realizedStrikesSetAside, // v1.196.0 — see realizedCushionBreach
     lineForceChargeStrikes, // v1.200.0 — see the strike rule
+    // ★★★ v1.204.0 — rows kept apart as planned on the panel's own readings, and those among them whose buy_err reads an under-buy
+    // of more than PANEL_UNDERBUY_DIAG_KWH (a diagnostic: they decide nothing).
+    panelApartNights,
+    panelBasisUnderBuyNights,
     buyBiasKwh: buyBiasKwh != null ? round(buyBiasKwh) : null,
     pvMae: pvMae != null ? round(pvMae) : null,
     pvBias: pvBias != null ? round(pvBias) : null,

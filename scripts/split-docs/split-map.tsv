@@ -40,8 +40,9 @@ seg	docs/reference/12-configuration-deployment-security.md	"## 12. Configuration
 seg	docs/reference/13-safety-plumbing.md	"## 13. Safety & Operational Plumbing"	"13. Safety & Operational Plumbing"
 seg	docs/reference/14-lighting-and-hvac.md	"## 14. Intelligent Lighting & HVAC Posture (energy-aware automation)"	"14. Intelligent Lighting & HVAC Posture (energy-aware automation)"
 seg	docs/reference/15-1-night-charge-planning.md	"## 15. Night-Charge TOU Arbitrage Advisor"	"15. Night-Charge TOU Arbitrage Advisor, part 1 — sections 1–5: purpose, the tariff model, inputs, the sizing brain"
-seg	docs/reference/15-2-night-charge-writes.md	"### 8. The write-readiness gate (`computeNightChargeReadiness`, `nightChargeGate.ts:219`)"	"15. Night-Charge TOU Arbitrage Advisor, part 2 — sections 8–13: the write-readiness gate, supervised writes, delivery surfaces, configuration, failure modes, the de-bias factors"
+seg	docs/reference/15-2-night-charge-writes.md	"### 8. The write-readiness gate (`computeNightChargeReadiness`, `nightChargeGate.ts:219`)"	"15. Night-Charge TOU Arbitrage Advisor, part 2 — sections 8–8b: the write-readiness gate, supervised writes"
 seg	docs/reference/15-3-night-charge-ledger-and-scoring.md	"### 6. The learning ledger (`night_charge_ledger`, `recorder.ts`, v1.38.0)"	"15. Night-Charge TOU Arbitrage Advisor, part 3 — sections 6–7: the learning ledger, outcome scoring"
+seg	docs/reference/15-4-night-charge-surfaces-and-de-bias.md	"### 9. Delivery surfaces"	"15. Night-Charge TOU Arbitrage Advisor, part 4 — sections 9–13: delivery surfaces, configuration, failure modes, the de-bias factors"
 seg	docs/reference/A-feature-inventory.md	"## Appendix A — Feature Inventory (evidence linkage)"	"Appendix A — Feature Inventory (evidence linkage)"
 move	E1	docs/history/engineering-release-log-1.md	"#### 2.6 Release log (all subsystems)"	"### 3. The audible dispatch: MA + SIP (`broadcast.ts`)"	"#### 2.6 Engineering history (moved)\n\nThe per-release notes that stood here are frozen, unedited, in [engineering-release-log-1.md](../history/engineering-release-log-1.md)\nand [engineering-release-log-2.md](../history/engineering-release-log-2.md); what each release changed is in the [CHANGELOG](../../ecoflow_panel/CHANGELOG.md).\n"
 cut	E1	docs/history/engineering-release-log-2.md	"**v1.187.3 (ledger and tooling) — "
@@ -57,9 +58,9 @@ sub	E5	docs/reference/13-safety-plumbing.md	"(`\u0000–\u001f`, ``)"	"(`\\x00�
 sub	E6	docs/reference/08-1-alerts.md	"listed it offline since at least <age> ago"	"listed it offline since at least `<age>` ago"
 sub	E6	docs/reference/10-audible-broadcast.md	"keeping the pending <level> retry"	"keeping the pending `<level>` retry"
 sub	E6	docs/reference/11-user-interfaces.md	"stale · as of <time>"	"stale · as of `<time>`"
-sub	E6	docs/reference/15-2-night-charge-writes.md	"was not armed — <reason>. The add-on"	"was not armed — `<reason>`. The add-on"
-sub	E6	docs/reference/15-2-night-charge-writes.md	"Planned charge not armed tonight — <reason>."	"Planned charge not armed tonight — `<reason>`."
-sub	E6	docs/reference/15-2-night-charge-writes.md	"Planned reserve hold not armed tonight — <reason>."	"Planned reserve hold not armed tonight — `<reason>`."
+sub	E6	docs/reference/15-4-night-charge-surfaces-and-de-bias.md	"was not armed — <reason>. The add-on"	"was not armed — `<reason>`. The add-on"
+sub	E6	docs/reference/15-4-night-charge-surfaces-and-de-bias.md	"Planned charge not armed tonight — <reason>."	"Planned charge not armed tonight — `<reason>`."
+sub	E6	docs/reference/15-4-night-charge-surfaces-and-de-bias.md	"Planned reserve hold not armed tonight — <reason>."	"Planned reserve hold not armed tonight — `<reason>`."
 anchor	table-of-contents	README.md	chapters
 anchor	1-system-architecture--data-flow	01-architecture.md	1-system-architecture--data-flow
 anchor	2-ecoflow-cloud-integration--home-assistant-wiring	02-1-cloud-protocol-and-snapshot.md	2-ecoflow-cloud-integration--home-assistant-wiring

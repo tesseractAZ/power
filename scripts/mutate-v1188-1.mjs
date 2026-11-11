@@ -700,8 +700,9 @@ const MUTANTS = [
   {
     id: 'P-vi. ★ the equipment-health series survives a move',
     file: AN,
-    find: '  dailyEnergyWhCache.clear();\n  eqSeriesCache.clear();\n}',
-    to: '  dailyEnergyWhCache.clear();\n  /* MUTANT */\n}',
+    // v1.204.0 — anchor moved: the panel basis's memos are reset after it.
+    find: '  dailyEnergyWhCache.clear();\n  eqSeriesCache.clear();\n  // v1.204.0',
+    to: '  dailyEnergyWhCache.clear();\n  /* MUTANT */\n  // v1.204.0',
     why: 'The inverter-standby idle-floor trend keeps the held ac_out buckets.',
   },
   {
@@ -2051,8 +2052,9 @@ const MUTANTS = [
   {
     id: 'J-xxx. ★ the repair does not say it reset a row (survivor I1)',
     file: IDX,
-    find: '      reset = true;\n',
-    to: '      /* MUTANT */\n',
+    // v1.204.0 — anchor widened: the pending panel-PV repair sets its own flag the same way.
+    find: '        continue;\n      }\n      reset = true;\n',
+    to: '        continue;\n      }\n      /* MUTANT */\n',
     why: 'The sweep captures from the ledger as it read it before the reset: the reset row waits a whole tick uncaptured, and the evening readiness recompute reads it so.',
   },
   {

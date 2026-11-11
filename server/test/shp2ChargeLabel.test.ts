@@ -158,7 +158,7 @@ test('the documentation states the per-battery limit and the measured envelope, 
   const cfg = src('../docs/reference/12-configuration-deployment-security.md');
   assert.ok(!cfg.includes('at most 7.2 kW × 6 h = 43.2 kWh'), 'the whole-pool 43.2 kWh ceiling is gone');
   assert.ok(cfg.includes('7.2 kW for each connected battery'), 'the limit is stated per battery');
-  assert.ok(cfg.includes('15-2-night-charge-writes.md#11-failure-modes--known-limitations'), 'cross-referenced to the measured envelope');
-  const writes = src('../docs/reference/15-2-night-charge-writes.md');
+  assert.ok(cfg.includes('15-4-night-charge-surfaces-and-de-bias.md#11-failure-modes--known-limitations'), 'cross-referenced to the measured envelope');
+  const writes = src('../docs/reference/15-4-night-charge-surfaces-and-de-bias.md');
   assert.ok(writes.includes('7,223 / 6,033 / 7,218 W'), 'the 2026-10-13/14 per-Core peaks are recorded');
 });

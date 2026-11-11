@@ -296,7 +296,10 @@ test('★★★ the realized series has EXACTLY the reviewed readers — and the
   const callers = [...new Set(uses.filter((u) => u.kind === 'call').map((u) => u.fn))].sort();
   // Exact equality: a removed reader (a consumer silently back on the forecast) fails, and so
   // does an added one (a new consumer, above all the calibrator) until someone reviews it.
-  assert.deepEqual(callers, ['alarmModelPredictor', 'computeDayForecastUncached', 'computeForecastSkill', 'computeSoilingDecomposition']);
+  // v1.204.0 — reviewed: computePlanningForecastSkill, the planning band's skill (computeForecastSkill with
+  // basis 'planning'), scores on realized irradiance by the same policy and in the same `ghiBasis ===
+  // 'realized'` arm as the published band's skill (v1.173.1); the calibrator itself still reads none.
+  assert.deepEqual(callers, ['alarmModelPredictor', 'computeDayForecastUncached', 'computeForecastSkill', 'computePlanningForecastSkill', 'computeSoilingDecomposition']);
   assert.ok(!callers.includes('computeProbabilisticForecast'), 'the band calibrator never reads realized GHI itself');
 });
 

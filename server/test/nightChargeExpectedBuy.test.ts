@@ -1478,7 +1478,7 @@ test('★★ a refused arm: the card leads with "not armed tonight — <reason>"
   // index.ts records the refusal with the evening latch, reads it back coerced, and serves it.
   const idx = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
   // v1.187.22 (recheck 3) — a refusal, or a write no channel delivered (eveningNotArmedReason).
-  assert.match(idx, /\n\s+const notArmed = eveningNotArmedReason\(\{\n\s+refused: armRefused, candidate: armedCandidate, delivered: haNotifyDelivered \|\| audibleDelivered, prior: nightActuationMem,\n\s+\}\);\n\s+writeNightChargeLatch\(\{\n\s+lastNotifyDay: today,\n\s+armRefused: notArmed && plan\?\.window\n\s+\? \{ reason: notArmed, windowStartMs: plan\.window\.startMs, windowEndMs: plan\.window\.endMs \} : null,\n\s+\}\); \/\/ latch AFTER a successful send/);
+  assert.match(idx, /\n\s+const notArmed = eveningNotArmedReason\(\{\n\s+refused: armRefused, candidate: armedCandidate, delivered: haNotifyDelivered \|\| audibleDelivered, prior: nightActuationMem,\n\s+\}\);\n\s+writeNightChargeLatch\(\{\n\s+lastNotifyDay: today,\n\s+armRefused: notArmed && plan\?\.window\n\s+\? \{ reason: notArmed, windowStartMs: plan\.window\.startMs, windowEndMs: plan\.window\.endMs \} : null,\n(\s+\/\/.*\n)*\s+pv: pvLatchOf\(fresh, today\),\n\s+\}\); \/\/ latch AFTER a successful send/);
   assert.match(idx, /lastNotifyDay: typeof d === 'string' \? d : null, armRefused: coerceArmRefusalRecord\(raw\?\.armRefused\),\n/);
   assert.match(idx, /nightChargeLatchMem = \{\n\s+lastNotifyDay: l\.lastNotifyDay, armRefused: l\.armRefused \?\? null,\n/);
   const route = idx.slice(idx.indexOf("app.get('/api/night-charge/status'"), idx.indexOf("app.post('/api/night-charge/cancel'"));
@@ -1778,8 +1778,9 @@ test('★★ a write no announcement delivered is recorded like a refusal; a mis
   const cutoffAt = job.indexOf('if (nowMin >= cutoffMin) {');
   assert.ok(cutoffAt > 0);
   const cutoff = job.slice(cutoffAt, job.indexOf('return;', cutoffAt));
-  assert.match(cutoff, /\n\s+writeNightChargeLatch\(\{ lastNotifyDay: today, armRefused: latch\.armRefused \?\? null \}\);\n/);
-  assert.doesNotMatch(cutoff, /writeNightChargeLatch\(\{ lastNotifyDay: today \}\)/);
+  // (v1.204.0 F1 — and says no decision was made: panelPvSelection.test.ts pins what that latch then says.)
+  assert.match(cutoff, /\n\s+writeNightChargeLatch\(\{ lastNotifyDay: today, armRefused: latch\.armRefused \?\? null, noDecision: true \}\);\n/);
+  assert.doesNotMatch(cutoff, /writeNightChargeLatch\(\{ lastNotifyDay: today(, noDecision: true)? \}\)/);
   assert.ok(job.indexOf('const latch = readNightChargeLatch();') < cutoffAt, 'the latch it keeps is the one read at the top');
   const satRefusal = { reason: 'the 2026-10-09 reserve write is still applied and not yet restored', windowStartMs: WIN_START, windowEndMs: WIN_END };
   assert.equal(servedArmRefusal(coerceArmRefusalRecord(JSON.parse(JSON.stringify(satRefusal))), p, 'auto', WIN_START - 30 * 60_000), satRefusal.reason);

@@ -73,8 +73,9 @@ const MUTANTS = [
   {
     id: 'ii. ★★★ a channel carrying the house nets against the charge',
     file: NLS,
-    find: '    wh += integrateWh(pts, true);',
-    to: '    wh += integrateWh(pts, false); /* MUTANT */',
+    // v1.204.0 — anchor widened: a panel row's PV actual integrates its own series the same way (panelRowPvActual).
+    find: '    if (worst == null || cov < worst.cov) worst = { ch, cov };\n    wh += integrateWh(pts, true);',
+    to: '    if (worst == null || cov < worst.cov) worst = { ch, cov };\n    wh += integrateWh(pts, false); /* MUTANT */',
     why: 'The 09-30 night (15.5 kWh of discharge around a 20.5 kWh charge) records ~5 kWh again: the under-count this release removes.',
   },
   {

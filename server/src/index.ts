@@ -26,7 +26,7 @@ import { exportDatabase, describeExistingExport, exportInProgress, DEFAULT_EXPOR
 import { createAuth, isAllowedOrigin } from './auth.js';
 import { SnapshotStore, startPollLoop, alarmPathShp2Sns } from './snapshot.js';
 import type { FleetSnapshot } from './snapshot.js';
-import { shp2ConnectedDpuSns, isShp2Connected, aggregateFleetFlow, findShp2, onlineDpus, isHomePoolDpu, setLastKnownHomeRoster, shp2Panels, shp2ReadbackFresh, nightPlanPanelVerdict, secondaryShp2s, houseSnOf, panelForClient, backupTimerGate } from './shp2Membership.js';
+import { shp2ConnectedDpuSns, isShp2Connected, aggregateFleetFlow, findShp2, onlineDpus, isHomePoolDpu, setLastKnownHomeRoster, shp2Panels, shp2ReadbackFresh, nightPlanPanelVerdict, secondaryShp2s, houseSnOf, panelForClient, backupTimerGate, slotKey } from './shp2Membership.js';
 import { loadMembershipHistory, membershipVerdict } from './membershipHistory.js';
 import {
   loadReconnectWatchState, saveReconnectWatchState, evaluateReconnectWatch,
@@ -134,6 +134,18 @@ import {
 import type {
   ProbabilisticForecast, MultiDayForecast, DayForecast, EvWindowPrediction, ForecastHour,
 } from './analytics.js';
+/** v1.204.0 — the 'planningProbabilisticForecast' report (reports.ts): the band on the panel-measured planning layer as of E, which
+ *  echoes E with its verdict, basis and keys (slot keys: internal, never printed). */
+type PlanningProbabilisticReport = ProbabilisticForecast & {
+  asOfDay?: string;
+  planningIdentity?: boolean;
+  planningPvBasis?: 'cores' | 'mixed' | 'panel';
+  planningVerdict?: UcVerdict | null;
+  planningModelKeys?: string[];
+  planningAdmittedDays?: number;
+  planningAdmittedSlotDays?: Record<string, string[]>;
+  planningGeneratedAt?: number;
+};
 import { startSshServer, loadOrCreateHostKey } from './console/server.js';
 import { authFromEnv, authConfigProblems, describeSshAuth } from './console/session.js';
 import { createTuiDataProvider } from './console/dataProvider.js';
@@ -203,6 +215,13 @@ import { setClockOffsetLogger } from './ecoflow/rest.js';
 import { setRateFloorCollapses, setRateFloorIdleHeld, surfacedCollapseEntry, rateFloorCollapseLine, type RateFloorCollapse, type RateFloorOnsets } from './messageRateFloorAlert.js';
 import { getShedCandidates, initShedRegistry } from './loadShedRegistry.js';
 import * as haStateCache from './haStateCache.js';
+// ★★★ v1.204.0 — the night plan's solar basis, selected (panelPvSelection.ts): the published band, the panel-measured planning band,
+// or v1.203.0's cushion-only plan; E (the evening that owns the window) and the evening's latched basis.
+import {
+  latchedPvBasis, armMayHold, planAsOfDay, selectPvBasis, pvBasisDecoration, withPvBasis, pvBasisReasonText, pvBasisReasonCode,
+  type PvBasisLatch, type PvBasisReason, type PvSelection,
+} from './panelPvSelection.js';
+import type { UcVerdict } from './panelPvBasis.js';
 // v1.38.0 (night-charge WS4 integration) — wire the ADVISORY TOU-arbitrage
 // night-charge advisor (nightChargeAdvisor.ts / nightChargeGate.ts) into the
 // live surfaces. READ-ONLY / NO-WRITE: nothing below produces state the
@@ -216,6 +235,8 @@ import {
   nightChargeRoleFields,
   buildNightChargeInputs,
   computeNightChargePlan,
+  // ★★★ v1.204.0 — the solar basis gate the selector judges both bands with, and the pack capacity ratio test (G8).
+  solarBasisGate, cushionRatioKnown,
   resolveCheapWindow, nextFullCheapWindow, longGapAhead, pessimisticPrePeakSurplus,
   scoreNightOutcome,
   nightWindowBounds,
@@ -352,6 +373,10 @@ import {
   forecastSpanRecaptureHorizonMs, forecastSpanResetColumns,
   // v1.188.1 — held telemetry: a row on held readings is not scored; one captured on them is repaired.
   heldLedgerVerdict, heldLedgerNote, heldLedgerRepair, heldRepairColumns, heldRepairClause, heldSides, basisIncompleteNote, cushionOnlyNote,
+  // v1.204.0 — a row planned on the panel's own readings: its PV actual from the per-slot sources, and its note.
+  isPanelBasisRow, panelRowPvActual, panelPvActualNote,
+  // v1.204.0 (L5) — a panel row's PV actual only on slot-days the 7-day energy balance admitted, judged after its span.
+  panelPvAdmission, panelPvRecaptureDue, panelPvRecaptureColumns, type PanelAdmission,
   // v1.196.0 — the saturation that censors a row's PV for the cost ceiling's PV factor.
   pvSaturationColumns,
 } from './nightLedgerScoring.js';
@@ -3428,6 +3453,28 @@ interface NightChargeLatch {
   armRefused?: ArmRefusalRecord | null;
   /** v1.200.0 (Fix10 review 1) — the window whose no-write push went (chargeCycle.lineNotArmedPushDue), stamped before it goes. */
   lineNotArmedWindowStartMs?: number | null;
+  /** ★★★ v1.204.0 (M1, L2) — the solar basis this evening chose for its window, with E and the window: every live overnight recompute
+   *  but the next evening job's own call (F1) selects it until the window's close (panelPvSelection.latchedPvBasis); a shadow leg
+   *  never reads it. null/absent: no basis latched —
+   *  a latch written before v1.204.0, or an evening that reached no decision — which reads as the published basis (or v1.203.0's plan) to
+   *  the close. */
+  pv?: PvBasisLatch | null;
+  /** ★★★ v1.204.0 (F1) — this day's evening job did not decide before its cutoff (written by the cutoff path only, never inherited by a
+   *  later day's latch): the latch, with no basis, reads as the published basis to its window's close, and a recompute there says no
+   *  evening decision was made (panelPvSelection 'latched', decided false). */
+  noDecision?: boolean;
+  /** ★★★ v1.204.0 (G3) — a key v1.203.0 never wrote: every latch this release writes carries it, true unless the writer re-writes a
+   *  latch it read without it (the push stamp spreads the latch it read). A latch read without it was written before v1.204.0: with
+   *  no basis it records no decision either way, and a recompute there says so (panelPvSelection 'latched', decided null). */
+  pvRecorded?: boolean;
+}
+/** v1.204.0 — a persisted latch basis, or null when it is not one. */
+function coercePvBasisLatch(raw: any): PvBasisLatch | null {
+  if (raw == null || typeof raw !== 'object') return null;
+  const basis = raw.basis === 'planning' ? 'planning' : raw.basis === 'published' ? 'published' : null;
+  if (basis == null || typeof raw.asOfDay !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(raw.asOfDay)) return null;
+  if (!Number.isFinite(raw.windowStartMs) || !Number.isFinite(raw.windowEndMs)) return null;
+  return { basis, asOfDay: raw.asOfDay, windowStartMs: raw.windowStartMs, windowEndMs: raw.windowEndMs };
 }
 function readNightChargeLatchFile(): NightChargeLatch {
   try {
@@ -3436,9 +3483,12 @@ function readNightChargeLatchFile(): NightChargeLatch {
     return {
       lastNotifyDay: typeof d === 'string' ? d : null, armRefused: coerceArmRefusalRecord(raw?.armRefused),
       lineNotArmedWindowStartMs: typeof raw?.lineNotArmedWindowStartMs === 'number' ? raw.lineNotArmedWindowStartMs : null,
+      pv: coercePvBasisLatch(raw?.pv),
+      ...(raw?.noDecision === true ? { noDecision: true } : {}),
+      pvRecorded: raw?.pvRecorded === true,
     };
   } catch {
-    return { lastNotifyDay: null, armRefused: null, lineNotArmedWindowStartMs: null };
+    return { lastNotifyDay: null, armRefused: null, lineNotArmedWindowStartMs: null, pv: null, pvRecorded: false };
   }
 }
 // In-memory mirror of the persisted latch, seeded once from disk at module load.
@@ -3454,6 +3504,13 @@ function writeNightChargeLatch(l: NightChargeLatch): void {
   nightChargeLatchMem = {
     lastNotifyDay: l.lastNotifyDay, armRefused: l.armRefused ?? null,
     lineNotArmedWindowStartMs: l.lineNotArmedWindowStartMs ?? nightChargeLatchMem.lineNotArmedWindowStartMs ?? null,
+    // v1.204.0 — the basis of THIS write's evening (none when the writer passes none: a latch for a new day never inherits one).
+    pv: l.pv ?? null,
+    // v1.204.0 (F1) — the evening that did not decide before its cutoff: only the writer that says so sets it (the cutoff path; the
+    // push stamp keeps its own day's by spreading the latch it read).
+    ...(l.noDecision === true ? { noDecision: true } : {}),
+    // v1.204.0 (G3) — this release's marker, on every write: false only where the writer carries a latch it read without it.
+    pvRecorded: l.pvRecorded !== false,
   };
   try {
     atomicWriteFileSync(NIGHT_CHARGE_LATCH_PATH, JSON.stringify(nightChargeLatchMem));
@@ -3714,10 +3771,107 @@ interface NightPlanExtras {
   /** v1.192.0 — a shadow leg only: the house energy its hold sends to the grid, and the bill effect
    *  (middayShadow.heldImportEstimate). Absent on every live plan. */
   heldImport?: HeldImport | null;
+  /** ★★★ v1.204.0 — the solar basis this plan was selected on (panelPvSelection.ts), for the evening's latch and the ledger row.
+   *  Absent on a shadow leg. `latch`: the basis an evening job latches for its window ('planning' on the panel-measured band,
+   *  'published' otherwise). The ledger columns: pv_basis ('cores' | 'panel' | 'mixed', null with no solar basis), each slot's
+   *  source ('1:P,2:P,3:C'; slot numbers only), why the panel basis was not used (code: words), and the window ratio. */
+  pvSelection?: {
+    latch: 'published' | 'planning';
+    asOfDay: string;
+    pvBasis: 'cores' | 'panel' | 'mixed' | null;
+    pvBasisSlots: string | null;
+    pvBasisRefusedBy: string | null;
+    pvUpperRatio: number | null;
+  };
+}
+
+/** ★★★ v1.204.0 (L2) — after a restart inside a window latched on the planning basis, while the planning report is not yet
+ *  available: the plan snapshot persisted before this window opened, when it is this window's, is served (it was the plan the
+ *  holder served). Nothing else is seeded. */
+function seedPlanFromSnapshot(windowStartMs: number | null): void {
+  if (windowStartMs == null) return;
+  try {
+    const snap = JSON.parse(readFileSync(NIGHT_CHARGE_PLANSNAP_PATH, 'utf8'));
+    if (snap?.plan?.window?.startMs === windowStartMs && typeof snap.plan.generatedAt === 'number') {
+      setLatestNightChargePlan(snap.plan as NightChargePlan);
+      app.log.info(`night-charge: serving this window's persisted plan (issued ${new Date(snap.plan.generatedAt).toISOString()}) until the panel-basis report it was latched on is available again.`);
+    }
+  } catch (e: any) {
+    app.log.debug(`night-charge: plan snapshot seed skipped (${e?.message ?? e})`);
+  }
+}
+
+/** ★★★ v1.204.0 (L1, G4) — the add-on's force-charge in the hour from `hourStartMs`, from the armed record: the night ledger's
+ *  force-charge ON/OFF stamps (an ON with no OFF runs to its window's close), and the live record for tonight's leg. 'unknown'
+ *  when the ledger cannot be read. */
+function forceChargeStateAt(hourStartMs: number): 'on' | 'off' | 'unknown' {
+  const hourEnd = hourStartMs + HOUR_MS;
+  const covers = (on: number | null | undefined, off: number | null | undefined, close: number | null | undefined): boolean =>
+    typeof on === 'number' && on < hourEnd && (typeof off === 'number' ? off : typeof close === 'number' ? close : Infinity) > hourStartMs;
+  const m = nightActuationMem;
+  if (covers(m.forceChargeOnAtMs, m.forceChargeOffAtMs, m.windowEndMs)) return 'on';
+  try {
+    for (const r of recorder.readNightLedger(45)) {
+      if (covers(r.force_charge_on_at_ms, r.force_charge_off_at_ms, r.window_end_ms)) return 'on';
+    }
+    return 'off';
+  } catch {
+    return 'unknown';
+  }
 }
 
 function round2(n: number): number { return Math.round(n * 100) / 100; }
 function round1(n: number): number { return Math.round(n * 10) / 10; }
+
+/** ★★★ v1.204.0 (L5) — the admitted slot-days of the newest planning report read (the latest evening it judged as of, and when the
+ *  worker built it): a panel row's PV actual reads only these (nightLedgerScoring.panelPvAdmission). In memory only: after a restart a
+ *  pending row waits for the next report. Never regresses to an earlier evening. */
+let panelAdmissionMem: PanelAdmission | null = null;
+function notePanelAdmission(r: PlanningProbabilisticReport | null, asOfDay: string | null, nowMs: number): void {
+  if (r == null || asOfDay == null || r.asOfDay !== asOfDay || r.planningAdmittedSlotDays == null) return;
+  const builtAtMs = typeof r.planningGeneratedAt === 'number' && Number.isFinite(r.planningGeneratedAt) ? r.planningGeneratedAt : nowMs;
+  const m = panelAdmissionMem;
+  if (m != null && (asOfDay < m.asOfDay || (asOfDay === m.asOfDay && builtAtMs <= m.builtAtMs))) return;
+  panelAdmissionMem = { asOfDay, builtAtMs, slotDays: r.planningAdmittedSlotDays };
+}
+
+/** ★★★ v1.204.0 — the selection's latch and ledger figures (NightPlanExtras.pvSelection). PURE. */
+function pvSelectionExtras(sel: PvSelection, reason: PvBasisReason | null, asOfDay: string): NonNullable<NightPlanExtras['pvSelection']> {
+  const v = sel.verdict != null && sel.verdict.asOfDay === asOfDay ? sel.verdict : null;
+  const planning = sel.use === 'planning' && v != null;
+  return {
+    latch: planning ? 'planning' : 'published',
+    asOfDay,
+    pvBasis: planning ? (v!.basis === 'mixed' ? 'mixed' : 'panel') : sel.published ? 'cores' : null,
+    pvBasisSlots: v != null && !sel.published
+      ? v.sources.map((x) => `${x.slot}:${x.source === 'core' ? 'C' : x.source === 'panel' ? 'P' : 'N'}`).join(',') : null,
+    pvBasisRefusedBy: reason != null && !planning ? `${pvBasisReasonCode(reason)}: ${pvBasisReasonText(reason)}` : sel.transient ? 'transient' : null,
+    pvUpperRatio: v != null && !sel.published ? (v.checks.ratio ?? null) : null,
+  };
+}
+
+let lastLoggedPvBasisKey: string | null = null;
+/** ★★★ v1.204.0 — the night plan's solar basis, logged on change only: the basis, E, each slot's source and the check's figures, or
+ *  why the panel basis is not used. Slot numbers only — never a slot key or a serial. */
+function logPvBasisOnChange(sel: PvSelection, reason: PvBasisReason | null, asOfDay: string, plan: NightChargePlan): void {
+  const v = sel.verdict != null && sel.verdict.asOfDay === asOfDay ? sel.verdict : null;
+  const slots = v == null ? '' : ` — ${v.sources.map((x) => `slot ${x.slot} ${x.source === 'core' ? "its Core's meter" : x.source === 'panel' ? "the panel's reading" : 'unresolved'}`).join(', ')}`;
+  const figs = v?.checks.ratio != null ? `; 7-day energy balance ${v.checks.ratio.toFixed(4)} (max of the last 7 windows ${v.checks.max7?.toFixed(4) ?? '—'}, refused above ${v.checks.threshold.toFixed(2)}; ${v.checks.fieldDays} whole field days, the newest ${v.checks.newestFieldDay})` : '';
+  const key = sel.published ? `published:${asOfDay}`
+    : sel.use === 'planning' ? `planning:${asOfDay}:${v?.basis}:${v?.checks.ratio}`
+      : sel.transient ? `transient:${asOfDay}` : `refused:${asOfDay}:${pvBasisReasonCode(reason)}:${v?.checks.ratio ?? ''}:${reason?.armedDay ?? ''}`;
+  if (key === lastLoggedPvBasisKey) return;
+  lastLoggedPvBasisKey = key;
+  if (sel.published) {
+    app.log.info(`night-charge: solar basis as of ${asOfDay} — the Cores' own band (it covers every connected slot)`);
+  } else if (sel.use === 'planning') {
+    app.log.info(`night-charge: solar basis as of ${asOfDay} — the panel's own per-slot readings (${v?.basis ?? 'panel'})${slots}${figs}`);
+  } else if (sel.transient) {
+    app.log.info(`night-charge: solar basis as of ${asOfDay} — the panel-basis report is not available yet (a start-up, or one built for another evening); ${plan.cushionOnly != null ? "v1.203.0's plan (cushion-only, or its long-gap fill) stands in, and the evening decision waits to its deferral end" : 'the published basis stands in'}`);
+  } else {
+    app.log.info(`night-charge: solar basis as of ${asOfDay} — the panel's own readings are not used${reason?.armedDay != null ? ' in the plan shown' : ''}: ${reason != null ? pvBasisReasonText(reason) : 'refused'}${slots}${figs}`);
+  }
+}
 
 /**
  * Assemble a NightChargeInputDeps from the LIVE analytics reports + SHP2
@@ -3904,13 +4058,49 @@ async function recomputeNightChargePlan(
   // v1.191.0 (S6) — its schedule: the full-window minimum below, the snapshot's notify time.
   const nightSched = nightScheduleNow(tariffModel);
 
+  // Cheap window (needed here for nextRecharge + morning-surplus bounds; the
+  // sizer resolves it again from the same resolver — identical result).
+  // R4 — a shadow leg's window is the one the chooser pinned.
+  // ★★★ v1.204.0 — resolved FIRST: the evening that owns it (E) is asked of the planning reports below.
+  const window = shadowLeg ? (shadowLeg.spec.window ?? null)
+    : cheapPeriodId == null ? null : resolveCheapWindow(periodIdAt, nowMs, cheapPeriodId, 30, cheapNight);
+  const windowEndMs = window?.endMs ?? nowMs;
+
+  // ★★★ v1.204.0 (M1, L2) — E, THE EVENING THAT OWNS THE WINDOW: the evening job's own site day; for every other recompute the day
+  // of the latch that planned this window (a Saturday's latch governs its Monday window to Sunday's evening job), else the plan date
+  // that will own it. The latched basis comes with it (latchedPvBasis): a recompute inside the latched window selects that basis.
+  // Never a shadow leg (the mid-day, backup and morning-refresh legs stay on the published band).
+  const pvLatchHere = shadowLeg || window == null ? null : latchedPvBasis({
+    lastNotifyDay: readNightChargeLatch().lastNotifyDay,
+    pv: readNightChargeLatch().pv,
+    noDecision: readNightChargeLatch().noDecision === true,
+    recorded: readNightChargeLatch().pvRecorded === true,
+    windowStartMs: window.startMs, windowEndMs: window.endMs, nowMs,
+    planDate: planDateOwningCycle({ nowMs, firstLegStartMs: window.startMs, timezone: siteTimeZone(), notifyMinuteOfDay: nightSched.notify.fireMin }),
+    armed: {
+      day: nightActuationMem.day, windowStartMs: nightActuationMem.windowStartMs,
+      standing: armMayHold(nightActuationMem),
+    },
+  });
+  const pvAsOfDay: string | null = shadowLeg ? null : planAsOfDay({
+    arming: opts.arming === true, todayYmd: siteYmd(nowMs), latched: pvLatchHere,
+    planDate: window == null ? siteYmd(nowMs)
+      : planDateOwningCycle({ nowMs, firstLegStartMs: window.startMs, timezone: siteTimeZone(), notifyMinuteOfDay: nightSched.notify.fireMin }),
+  });
+  // May the panel basis be used tonight at all (selection (b)'s first clauses): the live overnight leg in a write mode on a fresh panel
+  // (cushionOnlyEligible's terms), the night not cancelled. Its reports are asked for only then.
+  const pvWriteMode = lineForceChargeOn(legRole);
+  const pvCancelled = nightActuationMem.cancelled === true && window != null && nightActuationMem.windowStartMs === window.startMs;
+  const pvAsk = pvAsOfDay != null && pvWriteMode && panel.fresh && !pvCancelled;
+
   // Live analytics reports (each best-effort — a missing report degrades the
   // basis to null, never a fabricated number).
   // R5 — the morning refresh asks for a forecast on weather at most `maxWeatherAgeMs` old (the
   // worker re-fetches older weather; the band says when its weather was fetched). Every other
   // caller passes none: the two reports are requested exactly as before.
+  // ★★★ v1.204.0 — and, in the same Promise.all, the planning band and rollup as of E (the panel-measured basis): each echoes E.
   const wxAge = opts.maxWeatherAgeMs;
-  const [prob, multiDay, dayAhead, evReport] = await Promise.all([
+  const [probPublished, multiDayPublished, dayAhead, evReport, probPlanning, multiDayPlanning] = await Promise.all([
     (wxAge != null
       ? analytics.report<ProbabilisticForecast>('probabilisticForecast', { maxWeatherAgeMs: wxAge })
       : analytics.report<ProbabilisticForecast>('probabilisticForecast')).catch(() => null),
@@ -3919,11 +4109,103 @@ async function recomputeNightChargePlan(
       ? analytics.report<DayForecast>('forecast', { maxWeatherAgeMs: wxAge })
       : analytics.report<DayForecast>('forecast')).catch(() => null),
     analytics.report<EvWindowPrediction>('evWindowPrediction').catch(() => null),
+    pvAsk
+      ? analytics.report<PlanningProbabilisticReport | null>('planningProbabilisticForecast', { asOfDay: pvAsOfDay! }).catch(() => null)
+      : Promise.resolve(null),
+    pvAsk
+      ? analytics.report<(MultiDayForecast & { basis?: string; asOfDay?: string }) | null>('multiDayForecast', { days: 4, basis: 'planning', asOfDay: pvAsOfDay! }).catch(() => null)
+      : Promise.resolve(null),
   ]);
+
+  // v1.204.0 (L5) — the planning report's admitted slot-days, for a panel row's PV actual (only a report as of the E it was asked for).
+  notePanelAdmission(probPlanning, pvAsOfDay, nowMs);
 
   // Day-ahead hours by hour-epoch — the load side (probabilistic band is PV-only).
   const dayAheadByEpoch = new Map<number, ForecastHour>();
   for (const fh of dayAhead?.hours ?? []) dayAheadByEpoch.set(Math.floor(fh.ts / HOUR_MS), fh);
+
+  // nextRecharge = the START of the NEXT cheap charge window after tonight's —
+  // the next time we can cheaply top up (design §2.4). Tariff-based and
+  // deterministic: a single transient sunny hour, OR a CENTRAL-forecast pv≥load
+  // crossing that the P10-PV/P90-load sim would still be draining through, can no
+  // longer truncate the multi-day carry. On a weekday this lands ~tomorrow night.
+  // ★ WEEKEND SEMANTICS (v1.39.0 honesty pass): tariff.ts gates OVERNIGHT on
+  // each hour's own calendar weekday, so the model's Friday window is Fri
+  // 23:00–24:00 ONLY (Sat 00:00–05:00 = weekend off-peak) and the next window
+  // opens Mon 00:00 — a ~48 h carry, sized against a 1-hour charge window
+  // (charge-power capped, cushionShortfall honestly flagged). Whether the REAL
+  // APS R-EV extends Friday's overnight into Saturday 00:00–05:00 is an OPEN
+  // tariff question only the owner's bill can settle; if it does, the fix
+  // belongs in tariff.ts's weekday gating, not here. Scan 4 days to bridge
+  // the weekend gap either way.
+  // R2 — nextChargeableOpenMs over the overnight cycle: the same 96 h overnight scan.
+  // R4 — a shadow leg's horizon end is its own (option A for the backup, 23:00 for the mid-day leg).
+  const nextRechargeMs: number | null = shadowLeg ? shadowLeg.nextRechargeMs : nextChargeableOpenMs(tariffModel, windowEndMs + HOUR_MS);
+
+  // Confidence tier — derived from the real-weather horizon vs the plan horizon.
+  // forecast = the whole post-window horizon is weather-backed; climatology =
+  // no real forecast / the window itself is past the weather horizon; mixed =
+  // part of the horizon runs past it (weekend carry beyond the ~4-day forecast).
+  let weatherHorizonEndMs: number | null = null;
+  try {
+    const wx = await getWeather();
+    if (wx && wx.hours.length) weatherHorizonEndMs = Math.max(...wx.hours.map((h) => h.ts)) + HOUR_MS;
+  } catch { /* weather optional — null ⇒ climatology below */ }
+  const horizonEndMs = nextRechargeMs ?? (window ? window.endMs + 24 * HOUR_MS : nowMs + 24 * HOUR_MS);
+  let confidenceTier: 'forecast' | 'mixed' | 'climatology';
+  if (!(dayAhead?.hasWeather === true) || weatherHorizonEndMs == null) {
+    confidenceTier = 'climatology';
+  } else if (horizonEndMs <= weatherHorizonEndMs) {
+    confidenceTier = 'forecast';
+  } else if ((window?.startMs ?? nowMs) >= weatherHorizonEndMs) {
+    confidenceTier = 'climatology';
+  } else {
+    confidenceTier = 'mixed';
+  }
+
+  // ★★★ v1.204.0 — THE SOLAR BASIS, SELECTED (panelPvSelection.selectPvBasis), from the ONE device snapshot above (`devs`):
+  //  (a) the published band when it passes its gate AND covers the Cores of every connected slot of the house panel — v1.203.0;
+  //  (b) else the panel-measured planning band as of E when every clause of (b) holds (its verdict, its keys, G7, G8, its gate);
+  //  (c) else the published deps exactly — passed as refused where the band passed without covering every connected slot (M2).
+  // One gate for both bands and for the sizer (solarBasisGate). Every read below takes the selected band. Never a shadow leg.
+  const bandGateOf = (p: ProbabilisticForecast | null) => solarBasisGate({
+    forecastPresent: (p?.hours ?? []).some((pb) => dayAheadByEpoch.has(Math.floor(pb.ts / HOUR_MS))),
+    confidenceTier, calScoredDays: p?.calScoredDays ?? 0, minCalScoredDays: NIGHT_MIN_CAL_DAYS,
+    provisionalMinCalScoredDays: NIGHT_PROVISIONAL_MIN_CAL_DAYS, bandCoverageFrac: (p?.bandRealizedCoveragePct ?? 0) / 100,
+  });
+  const houseSlots = (Array.isArray(sp.sources) ? sp.sources : [])
+    .filter((c: any) => c?.isConnected === true && typeof c?.sn === 'string' && c.sn !== '' && Number.isInteger(c?.slot))
+    .sort((a: any, b: any) => a.slot - b.slot) as Array<{ slot: number; sn: string }>;
+  const publishedSns = new Set(Array.isArray(probPublished?.solarModelSns) ? probPublished!.solarModelSns : []);
+  const pvSel: PvSelection | null = shadowLeg ? null : selectPvBasis({
+    asOfDay: pvAsOfDay!,
+    eligible: { writeMode: pvWriteMode, panelFresh: panel.fresh, cancelled: pvCancelled },
+    // ★★★ F1 — the evening job's own (arming) call selects afresh as of its own day (E = today above) and reads no latch: Saturday's
+    // latch for the Monday window Sunday shares never decides Sunday's evening (no keep-previous stall, no 'latched' refusal of a
+    // Sunday that passes). Its own latch then governs the window; every other recompute reads the window's latch (L2).
+    latched: opts.arming === true ? null : pvLatchHere,
+    published: { gate: bandGateOf(probPublished), uncoveredSlots: houseSlots.filter((c) => !publishedSns.has(c.sn)).map((c) => c.slot) },
+    planning: probPlanning == null ? null : {
+      asOfDay: probPlanning.asOfDay, keys: probPlanning.planningModelKeys ?? [], verdict: probPlanning.planningVerdict ?? null,
+      gate: bandGateOf(probPlanning),
+    },
+    planningRollupOk: multiDayPlanning != null && multiDayPlanning.asOfDay === pvAsOfDay,
+    connectedKeys: houseSlots.map((c) => slotKey(shp2.sn, c.slot)),
+    ratioKnown: cushionRatioKnown(cushionPoolScale),
+  });
+  // L2 — inside a window latched on the planning basis, its report unavailable: the previous served plan stands (or, after a
+  // restart, the persisted plan snapshot of this window); never a fresh (c) selection.
+  if (pvSel?.use === 'keep-previous') {
+    if (getLatestNightChargePlan() == null) seedPlanFromSnapshot(window?.startMs ?? null);
+    return 'panelStale';
+  }
+  const pvPlanning = pvSel?.use === 'planning';
+  const prob: ProbabilisticForecast | null = pvPlanning ? probPlanning : probPublished;
+  const multiDay: MultiDayForecast | null = pvPlanning ? multiDayPlanning : multiDayPublished;
+  // The reason enriched with what only the main thread knows (G4: the hour's site clock, the add-on's force-charge in it).
+  const pvReason: PvBasisReason | null = pvSel?.reason == null ? null : pvSel.reason.code === 'night-reading'
+    ? { ...pvSel.reason, hourClock: fmtSiteClock(pvSel.reason.hourStartMs), forceCharge: forceChargeStateAt(pvSel.reason.hourStartMs) }
+    : pvSel.reason;
 
   // bandHours (within-24 h authoritative band): PV P10 from the probabilistic
   // forecast; load P90 = day-ahead forecastLoadW × ARB_LOAD_P90_FACTOR. The
@@ -3962,30 +4244,6 @@ async function recomputeNightChargePlan(
   const calScoredDays = prob?.calScoredDays ?? 0;
   const bandCoverageFrac = (prob?.bandRealizedCoveragePct ?? 0) / 100;
 
-  // Cheap window (needed here for nextRecharge + morning-surplus bounds; the
-  // sizer resolves it again from the same resolver — identical result).
-  // R4 — a shadow leg's window is the one the chooser pinned.
-  const window = shadowLeg ? (shadowLeg.spec.window ?? null)
-    : cheapPeriodId == null ? null : resolveCheapWindow(periodIdAt, nowMs, cheapPeriodId, 30, cheapNight);
-  const windowEndMs = window?.endMs ?? nowMs;
-
-  // nextRecharge = the START of the NEXT cheap charge window after tonight's —
-  // the next time we can cheaply top up (design §2.4). Tariff-based and
-  // deterministic: a single transient sunny hour, OR a CENTRAL-forecast pv≥load
-  // crossing that the P10-PV/P90-load sim would still be draining through, can no
-  // longer truncate the multi-day carry. On a weekday this lands ~tomorrow night.
-  // ★ WEEKEND SEMANTICS (v1.39.0 honesty pass): tariff.ts gates OVERNIGHT on
-  // each hour's own calendar weekday, so the model's Friday window is Fri
-  // 23:00–24:00 ONLY (Sat 00:00–05:00 = weekend off-peak) and the next window
-  // opens Mon 00:00 — a ~48 h carry, sized against a 1-hour charge window
-  // (charge-power capped, cushionShortfall honestly flagged). Whether the REAL
-  // APS R-EV extends Friday's overnight into Saturday 00:00–05:00 is an OPEN
-  // tariff question only the owner's bill can settle; if it does, the fix
-  // belongs in tariff.ts's weekday gating, not here. Scan 4 days to bridge
-  // the weekend gap either way.
-  // R2 — nextChargeableOpenMs over the overnight cycle: the same 96 h overnight scan.
-  // R4 — a shadow leg's horizon end is its own (option A for the backup, 23:00 for the mid-day leg).
-  const nextRechargeMs: number | null = shadowLeg ? shadowLeg.nextRechargeMs : nextChargeableOpenMs(tariffModel, windowEndMs + HOUR_MS);
 
   // morningPvSurplusP90Kwh — the over-buy ceiling headroom. Sum over the next
   // solar day (window-end → +14 h) of max(0, P90 PV − forecast load). P90 PV =
@@ -4081,27 +4339,6 @@ async function recomputeNightChargePlan(
     };
   }
 
-  // Confidence tier — derived from the real-weather horizon vs the plan horizon.
-  // forecast = the whole post-window horizon is weather-backed; climatology =
-  // no real forecast / the window itself is past the weather horizon; mixed =
-  // part of the horizon runs past it (weekend carry beyond the ~4-day forecast).
-  let weatherHorizonEndMs: number | null = null;
-  try {
-    const wx = await getWeather();
-    if (wx && wx.hours.length) weatherHorizonEndMs = Math.max(...wx.hours.map((h) => h.ts)) + HOUR_MS;
-  } catch { /* weather optional — null ⇒ climatology below */ }
-  const horizonEndMs = nextRechargeMs ?? (window ? window.endMs + 24 * HOUR_MS : nowMs + 24 * HOUR_MS);
-  let confidenceTier: 'forecast' | 'mixed' | 'climatology';
-  if (!(dayAhead?.hasWeather === true) || weatherHorizonEndMs == null) {
-    confidenceTier = 'climatology';
-  } else if (horizonEndMs <= weatherHorizonEndMs) {
-    confidenceTier = 'forecast';
-  } else if ((window?.startMs ?? nowMs) >= weatherHorizonEndMs) {
-    confidenceTier = 'climatology';
-  } else {
-    confidenceTier = 'mixed';
-  }
-
   const forecastPresent = bandHours.length > 0;
 
   const deps: NightChargeInputDeps = {
@@ -4146,6 +4383,11 @@ async function recomputeNightChargePlan(
     cushionOnlyEligible: shadowLeg == null && lineForceChargeOn(legRole) && panel.fresh,
     // v1.203.0 — the floor such a plan counts the pool on where no pack capacity ratio is known (the scale's own floor).
     cushionOnlyFloorScale: CAPACITY_SCALE_MIN,
+    // ★★★ v1.204.0 (M2) — the published band passed its gate without covering every connected slot's Core: refused (so (c) is always
+    // v1.203.0's plan where eligible: cushion-only, or before a long gap its long-gap fill). (L1) — and why the panel basis is not used,
+    // for a refused plan's push.
+    bandCoverageRefusedBy: pvSel?.bandCoverageRefusedBy ?? null,
+    panelBasisRefusal: pvReason != null && !pvPlanning ? pvBasisReasonText(pvReason) : null,
     // R2 — the leg: the overnight window (resolved above) for every live plan, its role the caller's.
     // R4 — a shadow leg's own spec (its pinned window, taper line and backup hold).
     windowSpec: shadowLeg ? shadowLeg.spec : legRole === 'cost' ? OVERNIGHT_WINDOW_SPEC : { kind: 'overnight', role: legRole },
@@ -4160,6 +4402,23 @@ async function recomputeNightChargePlan(
       ? ` NOTE: sized on a panel reading ${panel.ageMs != null ? `~${Math.round(panel.ageMs / 60_000)} min old` : 'of unknown age'} (${panel.why}) — it did not recover before the deferral deadline. The reserve write and force-charge still wait for a live readback.`
       : ` NOTE: the panel reading is ${panel.ageMs != null ? `~${Math.round(panel.ageMs / 60_000)} min old` : 'of unknown age'} (${panel.why}); it did not recover before the deferral deadline, and no cushion-only plan is made on it.`;
   }
+  // ★★★ v1.204.0 — the selection put on the plan (panelPvSelection.pvBasisDecoration): nothing on (a), the published band covering
+  // every connected slot (that plan is v1.203.0's, byte for byte), and nothing on a shadow leg. Otherwise the pvBasis* fields, and the
+  // rationale's closing sentence: the panel basis on a plan sized on it, the refusal on a cushion-only plan.
+  // In place: `plan` stays the plan of record every reader below takes (the served plan computed apart gets the same, below).
+  const pvDecorate = (p: NightChargePlan): void => {
+    if (pvSel == null || pvAsOfDay == null) return;
+    Object.assign(p, withPvBasis(p, pvBasisDecoration({
+      sel: pvReason === pvSel.reason ? pvSel : { ...pvSel, reason: pvReason },
+      asOfDay: pvAsOfDay,
+      plan: { sized: p.basisComplete && p.requiredExtraKwh != null, cushionOnly: p.cushionOnly != null },
+      calScoredDays,
+      admittedDays: pvPlanning ? (probPlanning?.planningAdmittedDays ?? null) : null,
+    })));
+  };
+  pvDecorate(plan);
+  // v1.204.0 — the basis, logged on change only (slot numbers only, never a key or a serial).
+  if (pvSel != null) logPvBasisOnChange(pvSel, pvReason, pvAsOfDay!, plan);
   // v1.203.0 — the live overnight plan's fallback, logged on change only: made (its solar refusal), or refused (why).
   if (!shadowLeg) {
     // (A plan on the long-gap fill is sized on the cushion and the fill: cushionOnlyFills, its own key.)
@@ -4185,6 +4444,9 @@ async function recomputeNightChargePlan(
   const lineRunOn = shadowLeg == null && opts.arming !== true && nightActuationMem.windowStartMs === plan.window?.startMs ? armedLineRunOn(nightActuationMem) : null;
   // R4 — never a shadow leg: the holder is the live overnight plan the entities, card and status serve.
   if (!shadowLeg) setLatestNightChargePlan(lineClosed != null || lineNoReOn != null || lineRunOn != null ? computeNightChargePlan({ ...inputs, armedLineStartClosed: lineClosed, armedLineNoReOn: lineNoReOn, armedLineRunOnStartMs: lineRunOn }) : plan);
+  // v1.204.0 — the served plan computed apart carries the same selection as the plan of record.
+  const pvServed = shadowLeg ? null : getLatestNightChargePlan();
+  if (pvServed != null && pvServed !== plan) pvDecorate(pvServed);
   if (!shadowLeg) pushLineNotArmedIfDue(getLatestNightChargePlan(), lineClosed, nowMs);
 
   // Ledger diagnostics computed over the authoritative 24 h band (where the
@@ -4258,6 +4520,8 @@ async function recomputeNightChargePlan(
     ...(shadowLeg && window ? windowP50Kwh(bandHours, window) : {}),
     // R5 — and when the weather its band was built on was fetched (the refresh's freshness test).
     ...(shadowLeg ? { weatherFetchedAtMs: prob?.weatherFetchedAtMs ?? dayAhead?.weatherFetchedAtMs ?? null } : {}),
+    // ★★★ v1.204.0 — the basis selected, for the evening's latch and the ledger row (never a shadow leg).
+    ...(pvSel != null && pvAsOfDay != null ? { pvSelection: pvSelectionExtras(pvSel, pvReason, pvAsOfDay) } : {}),
     // v1.192.0 — what the leg's hold sends to the grid, on the band it was planned on: the reserve
     // it would write (only a leg that charges writes one), from the pool expected at the open.
     ...(shadowLeg && window ? {
@@ -4395,6 +4659,12 @@ function recordNightPlanRow(planDate: string, plan: NightChargePlan, extras: Nig
     // ★★★ v1.203.0 — a cushion-only plan's solar refusal (its basis), the scorer's key to leave the row unscored. Written
     // unconditionally (null on every other plan, a refusal included), so a re-issued plan never leaves an earlier one's beside it.
     cushion_only_refused_by: plan.cushionOnly?.refusedBy ?? null,
+    // ★★★ v1.204.0 — the solar basis the plan was selected on, written unconditionally (null with no selection: a snapshot from before
+    // v1.204.0), so a re-issued plan never leaves an earlier plan's basis beside its own.
+    pv_basis: extras.pvSelection?.pvBasis ?? null,
+    pv_basis_slots: extras.pvSelection?.pvBasisSlots ?? null,
+    pv_basis_refused_by: extras.pvSelection?.pvBasisRefusedBy ?? null,
+    pv_upper_ratio: extras.pvSelection?.pvUpperRatio ?? null,
     // v1.189.0 — the cost leg's window (the charge cycle's ledger columns): every plan of record is
     // the overnight leg until the mid-day switch.
     window_kind: 'overnight',
@@ -4541,6 +4811,8 @@ function scoreCompletedNights(nowMs: number): void {
   let rows = recorder.readNightLedger(LEDGER_BACKFILL_SWEEP_DAYS);
   // v1.188.1 — a row captured on held readings is reset first, so the loop below re-captures it.
   if (repairHeldNightOutcomes(rows, shp2Sn, nowMs)) rows = recorder.readNightLedger(LEDGER_BACKFILL_SWEEP_DAYS);
+  // v1.204.0 (L5) — and a panel row captured with its PV actual pending, once the energy balance has judged its span's days.
+  if (repairPendingPanelPv(rows, nowMs)) rows = recorder.readNightLedger(LEDGER_BACKFILL_SWEEP_DAYS);
   // ★ THE v1.39.0 COMPLETION GATE (review HIGH ×2): a night may be captured
   // only once its FULL scored span has elapsed — 16 h past its REAL window
   // close. The pre-fix midnight tick captured yesterday's row while its
@@ -4692,6 +4964,31 @@ function scoreNightRow(
       app.log.warn(`night-charge ledger: actual_pv_kwh WITHHELD — worst per-core PV coverage ${worstCov.toFixed(2)} < ${PV_LEDGER_MIN_CORE_COVERAGE} over the scored span; a fleet sum across a dark core under-counts and this column is durable`);
     }
   }
+  // ★★★ v1.204.0 — a row planned on the panel's own per-slot readings ('panel' / 'mixed'): its PV actual is the per-slot resolver over
+  // the same span — the panel's reading (src{n}_pv_w) for a slot that took it, the slot's Core's pv_total for one that did not
+  // (panelRowPvActual) — each slot at the Cores' coverage minimum, and withheld when the panel or a Core read held telemetry. The
+  // sources go to actual_pv_basis; the note (panelPvActualNote) says what it is and that the row is kept apart.
+  const panelRow = isPanelBasisRow(y);
+  let panelPv: ReturnType<typeof panelRowPvActual> | null = null;
+  let panelAdmission: ReturnType<typeof panelPvAdmission> | null = null;
+  if (panelRow) {
+    const houseSrc = (findShp2(store.get().devices)?.projection?.sources ?? []) as Array<{ slot?: number; sn?: string; isConnected?: boolean }>;
+    panelPv = panelRowPvActual({
+      slots: y.pv_basis_slots, span: { startMs: fcSpanStart, endMs: fcSpanEnd }, panelSn: shp2Sn,
+      coreOfSlot: (slot) => houseSrc.find((x) => x.slot === slot && x.isConnected === true && typeof x.sn === 'string')?.sn ?? null,
+      query: (sn, metric, a, b) => recorder.query(sn, metric, a, b),
+      minCoverage: PV_LEDGER_MIN_CORE_COVERAGE,
+    });
+    const held = heldSide.pv || heldSide.load;
+    // v1.204.0 (L5) — and only on slot-days the 7-day energy balance admitted, as of an evening after the span, read after the
+    // morning its last day's daily total comes in (panelPvAdmission): pending until then (re-captured: repairPendingPanelPv), withheld
+    // where a span day was not passed. The PV-independent columns are captured now either way.
+    panelAdmission = panelPvAdmission({ basis: panelPv.basis, span: { startMs: fcSpanStart, endMs: fcSpanEnd }, admission: panelAdmissionMem });
+    actualPvKwh = held || panelAdmission.state !== 'admitted' ? null : panelPv.kwh;
+    actualPvCoverage = panelPv.worstCoverage;
+    if (held) panelPv = { ...panelPv, kwh: null, why: 'held telemetry over the span' };
+    else if (panelAdmission.state !== 'admitted') panelPv = { ...panelPv, kwh: null };
+  }
   const actualLoadKwh = loadPts.length && !heldSide.load ? round2(integrateWh(loadPts, false) / 1000) : null;
   // v1.196.0 — did the pool reach the charge taper over the same span (pvSaturationColumns)? A day
   // it did shed PV, and the cost ceiling's PV factor leaves its pv_err_frac out.
@@ -4822,6 +5119,11 @@ function scoreNightRow(
 
   // v1.187.22 — the plan's expected buy against what was delivered, and its expected window-open
   // SoC against the measured one (expectedBuyScoreNote; '' on a row without them). Notes only.
+  // v1.204.0 (L5) — a panel row's PV actual, said: its sources, the evening its balance passed as of, the stored ratio, kept apart.
+  if (panelRow && panelPv != null) {
+    const why = panelPv.why != null ? panelPv.why : panelPv.kwh == null && panelAdmission?.state === 'admitted' ? 'withheld' : null;
+    scoreNotes += panelPvActualNote(y, panelPv.basis, why, why != null ? null : panelAdmission);
+  }
   scoreNotes += expectedBuyScoreNote({
     expectedBuyKwh: y.expected_buy_kwh ?? null,
     expectedStartSocPct: y.expected_start_soc_pct ?? null,
@@ -4903,6 +5205,8 @@ function scoreNightRow(
   recorder.recordNightOutcome(yDate, {
     outcome_captured_at_ms: nowMs,
     actual_pv_kwh: actualPvKwh,
+    // v1.204.0 — the per-slot sources of a panel row's PV actual (null on every other row: the Cores' sum).
+    actual_pv_basis: panelRow ? (panelPv?.basis ?? null) : null,
     actual_load_kwh: actualLoadKwh,
     actual_window_import_kwh: windowImportKwh,
     actual_onpeak_import_kwh: onpeak.importKwh,
@@ -5044,6 +5348,15 @@ function pushLineNotArmedIfDue(plan: NightChargePlan | null, closure: LineClosur
   });
 }
 
+/** ★★★ v1.204.0 (M1, L2) — the basis an evening job latches for its window: the one its plan was selected on, as of its own day
+ *  (E = today), with the window; null with no plan, no window or no selection (the latch then reads as the published basis). */
+function pvLatchOf(fresh: { plan: NightChargePlan; extras: NightPlanExtras } | null, today: string): PvBasisLatch | null {
+  const sel = fresh?.extras.pvSelection;
+  const w = fresh?.plan.window;
+  if (sel == null || w == null || sel.asOfDay !== today) return null;
+  return { basis: sel.latch, asOfDay: sel.asOfDay, windowStartMs: w.startMs, windowEndMs: w.endMs };
+}
+
 async function runNightChargeEveningJobInner(): Promise<void> {
   const nowMs = Date.now();
   const today = siteYmd(nowMs);
@@ -5096,7 +5409,8 @@ async function runNightChargeEveningJobInner(): Promise<void> {
     // v1.187.22 — no decision was reached tonight, so a refusal recorded on an earlier evening still
     // stands (Saturday's, for the window Sat and Sun share): keep it. servedArmRefusal serves it only
     // beside a charge plan for that window, and only until the window closes.
-    writeNightChargeLatch({ lastNotifyDay: today, armRefused: latch.armRefused ?? null });
+    // v1.204.0 (F1) — and says no decision was made, so a recompute inside the window does not call it a decision (noDecision).
+    writeNightChargeLatch({ lastNotifyDay: today, armRefused: latch.armRefused ?? null, noDecision: true });
     return;
   }
 
@@ -5164,7 +5478,8 @@ async function runNightChargeEveningJobInner(): Promise<void> {
       // v1.171.1 — the decision still counts: a prior arm must not outlive it.
       cancelStalePriorArm(today, nowMs, 'tonight the engine decided to HOLD (no buy needed)');
       // Suppressed by owner config; still latch so we don't retry all night.
-      writeNightChargeLatch({ lastNotifyDay: today });
+      // v1.204.0 — with the basis this evening chose for its window (pvLatchOf).
+      writeNightChargeLatch({ lastNotifyDay: today, pv: pvLatchOf(fresh, today) });
       app.log.info('night-charge: hold plan — notification suppressed (NIGHT_CHARGE_NOTIFY_ON_HOLD=false); latched.');
       return;
     }
@@ -5347,6 +5662,9 @@ async function runNightChargeEveningJobInner(): Promise<void> {
       lastNotifyDay: today,
       armRefused: notArmed && plan?.window
         ? { reason: notArmed, windowStartMs: plan.window.startMs, windowEndMs: plan.window.endMs } : null,
+      // ★★★ v1.204.0 (M1, L2) — the basis this evening chose for its window, with E: every live overnight recompute but the next
+      // evening job's own call (F1) selects it until the window's close (a shadow leg never reads it).
+      pv: pvLatchOf(fresh, today),
     }); // latch AFTER a successful send
     app.log.info(`night-charge: evening advisory sent (${shape}) and latched for ${today}.`);
   } catch (e: any) {
@@ -5525,6 +5843,26 @@ async function runMiddayShadowTickInner(nowMs: number): Promise<void> {
  * row always carries the verdict and is not reset again. Rows are corrected in place, never
  * deleted. Returns true when it reset one.
  */
+/** ★★★ v1.204.0 (L5) — a 'panel' / 'mixed' row captured with its PV actual PENDING (its span's last day not yet judged by the 7-day
+ *  energy balance) is reset for re-capture once a planning report as of a later evening, built after that day's daily total came in,
+ *  has been read (nightLedgerScoring.panelPvRecaptureDue): the loop then captures it with its PV actual admitted or withheld. Inside
+ *  the re-capture horizon only. */
+function repairPendingPanelPv(rows: NightLedgerRow[], nowMs: number): boolean {
+  let reset = false;
+  try {
+    const horizonMs = forecastSpanRecaptureHorizonMs(config.retentionDays, LEDGER_BACKFILL_SWEEP_DAYS);
+    for (const y of rows) {
+      if (!panelPvRecaptureDue(y, panelAdmissionMem, nowMs, horizonMs) || panelAdmissionMem == null) continue;
+      recorder.recordNightOutcome(String(y.plan_date), panelPvRecaptureColumns(panelAdmissionMem.asOfDay));
+      reset = true;
+      app.log.info(`night-charge: reset ${y.plan_date} for re-capture — its PV actual was pending the 7-day energy balance, which has judged its span's days as of ${panelAdmissionMem.asOfDay}.`);
+    }
+  } catch (e: any) {
+    app.log.debug(`night-charge: pending panel PV repair skipped (${e?.message ?? e})`);
+  }
+  return reset;
+}
+
 function repairHeldNightOutcomes(rows: NightLedgerRow[], shp2Sn: string, nowMs: number): boolean {
   let reset = false;
   try {

@@ -3,7 +3,7 @@ import {
   actuationBannerState, actuationBannerVisible, actuationKey, cancelOutcome, cancelRequestInit, chargeFigureParts, floorCushionLinePct, fmtLinePct,
   holdSummary, noChargeExpected, noPlanText, refusedArmLead, reserveWriteLabel, sizingLine, startClosedLead, withConfirmedCancel, writeStands,
   capsShortfallShown, outageLineRow, lineNotHeldOfCard,
-  writtenReservePct, middayShadowView, cushionOnlyBasisValue, type MiddayShadowStatus, type MiddayShadowPreviewStatus, type CushionOnlyText,
+  writtenReservePct, middayShadowView, cushionOnlyBasisValue, panelBasisStat, type MiddayShadowStatus, type MiddayShadowPreviewStatus, type CushionOnlyText,
 } from './nightChargeText';
 import { apiUrl } from '../api';
 import { fmtHHMMIn } from '../siteTime';
@@ -97,6 +97,12 @@ interface NightChargePlan {
   expectedCloseAfterStopPct?: number;
   /** v1.203.0 — a cushion-only plan (the server's NightChargePlan.cushionOnly): its basis instead of a confidence tier. */
   cushionOnly?: CushionOnlyText | null;
+  /** ★★★ v1.204.0 — the selected solar basis (the server's NightChargePlan.pvBasis*): the Basis stat (panelBasisStat) and the
+   *  closing sentence (pvBasisText, shown word for word). Absent on a plan of the Cores' band. */
+  pvBasis?: 'panel' | 'mixed' | null;
+  pvBasisChecks?: { ratio: number | null; threshold: number } | null;
+  pvBasisRefusedBy?: { code: string } | null;
+  pvBasisText?: string | null;
   longGapAhead?: boolean | null;
   costCeilingSocPct?: number | null;
   confidenceTier: 'forecast' | 'mixed' | 'climatology';
@@ -314,6 +320,9 @@ export const NightChargeCard = memo(function NightChargeCard() {
 
   // CHARGE — surface buy, target SoC, baseline→plan trough, window, confidence.
   const ws = hhmm(plan.window?.startMs);
+  // v1.204.0 — the Basis stat on the selected solar basis (null: the plan carries none), its sub with the window when there is one.
+  const pvStat = panelBasisStat(plan);
+  const withWindow = (sub: string): string => (ws && we ? `${sub} · ${ws}–${we}` : sub);
   const we = hhmm(plan.window?.endMs);
   // v1.187.22 — the headline is the charge the write arms (the expected draw and the level it
   // drives to); the worst case appears once, in the labelled sizing line beneath.
@@ -434,10 +443,14 @@ export const NightChargeCard = memo(function NightChargeCard() {
               .join(' · ') || undefined
           }
         />
-        {/* v1.203.0 — a cushion-only plan reads no forecast PV, so it states its basis, not a confidence tier. */}
+        {/* v1.203.0 — a cushion-only plan reads no forecast PV, so it states its basis, not a confidence tier. v1.204.0 — a plan on
+            the panel-measured band states that basis and its energy balance (panelBasisStat); a cushion-only plan whose panel basis
+            was refused says so in the sub. */}
         {plan.cushionOnly != null
-          ? <Stat label="Basis" value={cushionOnlyBasisValue(plan.cushionOnly, plan)} sub={ws && we ? `no solar basis · ${ws}–${we}` : 'no solar basis'} />
-          : <Stat label="Confidence" value={plan.confidenceTier} sub={ws && we ? `${ws}–${we}` : undefined} />}
+          ? <Stat label="Basis" value={cushionOnlyBasisValue(plan.cushionOnly, plan)} sub={withWindow(pvStat?.sub ?? 'no solar basis')} />
+          : pvStat != null
+            ? <Stat label="Basis" value={pvStat.value ?? plan.confidenceTier} sub={withWindow(pvStat.sub)} />
+            : <Stat label="Confidence" value={plan.confidenceTier} sub={ws && we ? `${ws}–${we}` : undefined} />}
       </div>
 
       <AdvisoryNote mode={status.mode} />

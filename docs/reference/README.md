@@ -29,7 +29,7 @@ it stood in the single-file manual.
 Section numbers are chapter-local. A `§N` or `§N.M` inside a chapter means that chapter's own numbered
 heading unless it names another chapter (`§15.8b` is section 8b of chapter 15). Chapters 2, 8 and 15 are
 split into parts, and their section numbers run on across the parts, except that chapter 15's part 3
-(§6–7) prints after part 2 (§8–13).
+(§6–7) prints after part 2 (§8–8b) and before part 4 (§9–13).
 
 ## Chapters
 
@@ -51,8 +51,9 @@ split into parts, and their section numbers run on across the parts, except that
 - [13. Safety & Operational Plumbing](13-safety-plumbing.md)
 - [14. Intelligent Lighting & HVAC Posture (energy-aware automation)](14-lighting-and-hvac.md)
 - [15. Night-Charge TOU Arbitrage Advisor, part 1 — sections 1–5: purpose, the tariff model, inputs, the sizing brain](15-1-night-charge-planning.md)
-- [15. Night-Charge TOU Arbitrage Advisor, part 2 — sections 8–13: the write-readiness gate, supervised writes, delivery surfaces, configuration, failure modes, the de-bias factors](15-2-night-charge-writes.md)
+- [15. Night-Charge TOU Arbitrage Advisor, part 2 — sections 8–8b: the write-readiness gate, supervised writes](15-2-night-charge-writes.md)
 - [15. Night-Charge TOU Arbitrage Advisor, part 3 — sections 6–7: the learning ledger, outcome scoring](15-3-night-charge-ledger-and-scoring.md)
+- [15. Night-Charge TOU Arbitrage Advisor, part 4 — sections 9–13: delivery surfaces, configuration, failure modes, the de-bias factors](15-4-night-charge-surfaces-and-de-bias.md)
 - [Appendix A — Feature Inventory (evidence linkage)](A-feature-inventory.md)
 <!-- chapters:end -->
 
@@ -118,6 +119,8 @@ Frozen, unedited and not part of the printable manual:
   removed HACS cards from chapter 11.
 - [performance-record-1.md](../history/performance-record-1.md): section 4b of the
   [performance record](../PERFORMANCE.md), the analytics path's first runtime measurement (2026-09-11).
+- [performance-record-2.md](../history/performance-record-2.md): section 4a of the
+  [performance record](../PERFORMANCE.md), the runway replay backtest (2026-10-11) and its live check (2026-10-15).
 - [reference-plant-notes.md](../history/reference-plant-notes.md): the reference plant's own Core roster and
   its circuit 1 wiring note, from chapter 2 (a circuit name replaced by an example).
 
