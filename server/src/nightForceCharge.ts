@@ -1876,7 +1876,8 @@ export const FORCE_CHARGE_OPEN_ALLOWANCE_MS = FORCE_CHARGE_ON_VERIFY_AFTER_MS + 
  *  allowance; otherwise — a start past the allowance, or none expected, where the reach counted from the allowance's end decides —
  *  the window's charge, never a switch-on at the window open the plan does not make (2027-02-15 21:30 on nameplate at 18 h: the
  *  force-charge from ~00:58). The rationale, the 21:30 push, the ARMED lines and the mid-day push word it by this; the card mirrors it
- *  word for word (web nightChargeText.ts outageLineRow). */
+ *  word for word on a line-mode night (web nightChargeText.ts outageLineRow) — on a cost-carried night its row says the force-charge
+ *  runs and the line is not claimed. */
 export function lateStartAllowanceWords(atOpen: boolean | undefined): string {
   return atOpen === true ? 'a late switch-on at the window open' : "a late start of the window's charge";
 }

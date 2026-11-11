@@ -193,7 +193,8 @@ export function walkYear(hours: readonly number[], cases: ReadonlySet<WalkCase>,
     const lineA = p50.chargeTonight && Math.ceil((p50.cushionLineSocPct ?? 0) - 1e-9) > 50;
     const row = (cs: WalkCase, p: Record<string, any>, rec: NightActuationState, reserveOpen: number, p0: number, extra: Partial<WalkRow> = {}) => rows.push({
       ...base, cs, L: p.cushionLineSocPct ?? null, reason: p.cushionEnvelopeReason ?? null, armedAsk: p.forceChargeLine?.askPct ?? null, shortfall: p.cushionShortfall === true,
-      capped: reachCapped.has(p),
+      // review — a cost-carried close the reach capped: never a line-mode walk, whatever closeReachCapped says.
+      capped: reachCapped.has(p) && p.forceChargeLine != null && p.expectedForceChargeMode !== 'line',
       ...extra, ...walkNight(p, d0, rec, { reserveOpen, p0, grid }),
     });
     if (rA && lineA && cases.has('A')) row('A', p50, rA, 50, Math.max(50, p50.expectedStartSocPct ?? 50), { stands: p50.lineReserveStands === true });
