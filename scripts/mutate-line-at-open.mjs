@@ -21,7 +21,7 @@
  * night's line, never an armed night's note (notify.ts refusedEnvelopeNote, chargeText.ts armedNote). AOA-27 (a..e). The card's
  * "Worst-case arrival" names no reserve set under a refused arm (NightChargeCard.tsx). AOA-28. (review) In auto mode too (AOA-27f), a
  * plan with no line force-charge keeping its envelope note (AOA-27g), the force-charge's line where the plan carries no line figure
- * (AOA-27h), and the caps note first (AOA-27i, AOA-27j).
+ * (AOA-27h), and the caps note first (AOA-27i, AOA-27j), on the mid-day push too (AOA-27k).
  *
  *   node scripts/mutate-line-at-open.mjs [--only <id prefix>]
  *
@@ -522,6 +522,13 @@ const MUTANTS = [
     find: '    const refusedNote = capsNote + refusedEnvelopeNote(plan);',
     to: '    const refusedNote = refusedEnvelopeNote(plan); /* MUTANT */',
     why: '2026-10-13 21:30 on nameplate, 13 h, refused: silent that charge/pool limits prevent fully meeting the cushion (1,067 of the year\'s 4,094 refused line nights).',
+  },
+  {
+    id: 'AOA-27k. ★★ the refused mid-day push drops the caps note',
+    file: CTX, tests: [T_AO],
+    find: "because ${i.refused}` : ''}.${shortNote}`,",
+    to: "because ${i.refused}` : ''}.${shortNote.replace(' NOTE: charge/pool limits prevent fully meeting the cushion — residual risk remains.', '') /* MUTANT */}`,",
+    why: '2026-10-13 21:30 on nameplate, 13 h, refused mid-day: silent that charge/pool limits prevent fully meeting the cushion, which its overnight push says (1,067 of the year\'s 4,094 refused line legs).',
   },
   {
     id: 'AOA-28. ★★★ the card names the reserve set under a refused arm',

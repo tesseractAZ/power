@@ -547,13 +547,18 @@ async function middayRoute() {
   };
   return { inputOf, phx };
 }
+/** A plan whose sizing fell short of the cushion (not the envelope): its pushes say the caps note, refused or armed. */
+const sizingShortOf = (p: P): boolean => p.cushionShortfall === true && p.cushionShortfallCause !== 'envelope';
 /** What is wrong with a refused mid-day push on a leg with a line ask (null: nothing): the record's refusal in its write mode ("the
- *  write" in auto mode), then the one note, last — beside the 49% the panel holds for a line in (49, 50] — and no armed leg's words. */
-function middayRefusedWrong(m: { title: string; body: string }, mode: WriteMode, linePct: number): string | null {
+ *  write" in auto mode), then (review) the caps note where the leg's sizing fell short and only there, then the one note, last — beside
+ *  the 49% the panel holds for a line in (49, 50] — and no armed leg's words. */
+function middayRefusedWrong(m: { title: string; body: string }, mode: WriteMode, linePct: number, capsShort: boolean): string | null {
   const write = mode === 'auto' ? 'the write' : 'the supervised write';
   const end = ` NOTE: this leg's outage line is above ${linePct > 50 ? OVER_RESERVE : OVER_HELD}, and nothing is armed to carry it — residual risk remains.`;
   if (m.title !== "Charge plan: tomorrow's 10am–3pm charge NOT armed") return `title: ${m.title}`;
   if (!m.body.includes(`, but ${write} was not armed — ${MIDDAY_WHY}. The add-on will not charge tomorrow.`)) return `not the ${mode} refusal: ${m.body}`;
+  if (!m.body.includes(`The add-on will not charge tomorrow.${capsShort ? CAPS_NOTE : ''} NOTE: this leg's outage line is above`)
+    || (!capsShort && m.body.includes(CAPS_NOTE))) return `the caps note ${capsShort ? 'not first' : 'on a leg whose sizing held'}: ${m.body}`;
   if (!m.body.endsWith(end)) return `not the refused note last: ${m.body}`;
   if (m.body.split('outage line').length !== 2 || m.body.split('nothing is armed to carry it').length !== 2) return `not one line note: ${m.body}`;
   if (ARMED_WORDS.test(m.body) || LATE_WORDS.test(m.body) || UNDER.test(m.body)) return `an armed leg's note: ${m.body}`;
@@ -603,7 +608,7 @@ test('★★★ AO-15 a refused arm arms nothing: the 21:30 and mid-day pushes s
     if (p.forceChargeLine == null) continue;
     const kind = lineNotHeldOf(p) ?? 'none';
     count[kind] = (count[kind] ?? 0) + 1;
-    const sizingShort = p.cushionShortfall === true && p.cushionShortfallCause !== 'envelope';
+    const sizingShort = sizingShortOf(p);
     if (sizingShort) caps++;
     if (noChargeExpected(p)) held++;
     for (const mode of ['supervised', 'auto'] as const) {
@@ -613,7 +618,7 @@ test('★★★ AO-15 a refused arm arms nothing: the 21:30 and mid-day pushes s
       if (sizingShort ? !t.includes(`${CAPS_NOTE} NOTE: tonight's`) : t.includes(CAPS_NOTE)) errs.push(`${c.label} ${b} ${h} h ${mode}: the caps note: ${t}`);
       const i = inputOf(p, mode, true);
       const bad = i.mode !== mode || i.refused !== MIDDAY_WHY ? `the record's ${mode} refusal not read: ${i.mode}, ${i.refused}`
-        : middayRefusedWrong(buildMiddayPlanMessage(i), mode, p.cushionLineSocPct!);
+        : middayRefusedWrong(buildMiddayPlanMessage(i), mode, p.cushionLineSocPct!, sizingShort);
       if (bad != null) errs.push(`${c.label} ${b} ${h} h ${mode} mid-day: ${bad}`);
     }
   }
@@ -632,7 +637,7 @@ test('★★★ AO-15 a refused arm arms nothing: the 21:30 and mid-day pushes s
       const i = inputOf(p, mode, true);
       assert.deepEqual([i.mode, i.refused, i.cost.lineNotHeld], [mode, MIDDAY_WHY, kind]);
       const m = buildMiddayPlanMessage(i);
-      assert.equal(middayRefusedWrong(m, mode, p.cushionLineSocPct!), null, `${kind} ${mode}`);
+      assert.equal(middayRefusedWrong(m, mode, p.cushionLineSocPct!, sizingShortOf(p)), null, `${kind} ${mode}`);
       assert.ok(m.body.endsWith(MIDDAY), `${kind} ${mode}: ${m.body}`);
       assert.doesNotMatch(m.body, ARMED_WORDS, `${kind} ${mode}`);
       assert.doesNotMatch(m.body, LATE_WORDS, `${kind} ${mode}`);
@@ -725,7 +730,7 @@ test('★★ AO-15e refused, a held line plan (the reserve-hold shape) says once
         const i = inputOf(p, mode, true);
         const mid = buildMiddayPlanMessage(i);
         const bad = i.mode !== mode || i.refused !== MIDDAY_WHY ? `the record's ${mode} refusal not read: ${i.mode}, ${i.refused}`
-          : !mid.body.includes('calls for a reserve hold, but') ? `not the reserve hold: ${mid.body}` : middayRefusedWrong(mid, mode, p.cushionLineSocPct!);
+          : !mid.body.includes('calls for a reserve hold, but') ? `not the reserve hold: ${mid.body}` : middayRefusedWrong(mid, mode, p.cushionLineSocPct!, sizingShortOf(p));
         if (bad != null) errs.push(`${where} ${mode} mid-day: ${bad}`);
       }
     }
