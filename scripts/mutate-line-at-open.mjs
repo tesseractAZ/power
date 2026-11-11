@@ -19,7 +19,9 @@
  * start (AOA-19b/c); the deferral's anchor (AOA-22b); the H1 cap the walk identity's guard reads (AOA-26).
  * (F) ROUND 3 (review): a refused arm arms nothing, so the 21:30 and mid-day pushes say once that nothing is armed to carry a line
  * night's line, never an armed night's note (notify.ts refusedEnvelopeNote, chargeText.ts armedNote). AOA-27 (a..e). The card's
- * "Worst-case arrival" names no reserve set under a refused arm (NightChargeCard.tsx). AOA-28.
+ * "Worst-case arrival" names no reserve set under a refused arm (NightChargeCard.tsx). AOA-28. (review) In auto mode too (AOA-27f), a
+ * plan with no line force-charge keeping its envelope note (AOA-27g), the force-charge's line where the plan carries no line figure
+ * (AOA-27h), and the caps note first (AOA-27i, AOA-27j).
  *
  *   node scripts/mutate-line-at-open.mjs [--only <id prefix>]
  *
@@ -484,6 +486,42 @@ const MUTANTS = [
     find: "lineOverReserveText(l.linePct ?? Infinity, 'accepts')",
     to: "lineOverReserveText(Infinity, 'accepts') /* MUTANT */",
     why: 'The overnight and mid-day refused notes disagree on a 49.99% line.',
+  },
+  // (review) M18, M17, M6, M15: the refused shapes in auto mode, without a line force-charge, with no line figure, and with the caps note.
+  {
+    id: 'AOA-27f. ★★★ a refused AUTO-mode mid-day cycle states the armed leg\'s line note',
+    file: CTX, tests: [T_AO],
+    find: "    i.refused != null ? ` NOTE: this leg's outage line is above",
+    to: "    i.refused != null && i.mode !== 'auto' /* MUTANT */ ? ` NOTE: this leg's outage line is above",
+    why: 'An auto-mode cycle refused ("the write was not armed") then states the leg\'s close too close to its line to allow for a switch-on nothing armed; the supervised mode alone was tested.',
+  },
+  {
+    id: 'AOA-27g. ★★ the refused 21:30 push drops the envelope note of a plan with no line force-charge',
+    file: NTF, tests: [T_AO],
+    find: '  if (plan.forceChargeLine == null) return envelopeShortfallNote(plan);',
+    to: "  if (plan.forceChargeLine == null) return ''; /* MUTANT */",
+    why: '2027-01-04 21:30 at ×0.944, 8 h, the reserve reading 51%, refused: silent that the 76.6% line is above the 50% reserve and no write is due while the reserve reads above it.',
+  },
+  {
+    id: 'AOA-27h. ★★ the refused note reads a missing line figure, not the force-charge\'s line',
+    file: NTF, tests: [T_AO],
+    find: '  const l = plan.cushionLineSocPct != null && Number.isFinite(plan.cushionLineSocPct) ? plan.cushionLineSocPct : plan.forceChargeLine.linePct;',
+    to: '  const l = plan.cushionLineSocPct as number; /* MUTANT */',
+    why: 'A plan served with cushionLineSocPct null names "tonight\'s outage line" above the 49% the panel holds, not its 59.4% line above the 50% reserve.',
+  },
+  {
+    id: 'AOA-27i. ★★ the refused 21:30 push states the line note before the caps note',
+    file: NTF, tests: [T_AO],
+    find: '    const refusedNote = capsNote + refusedEnvelopeNote(plan);',
+    to: '    const refusedNote = refusedEnvelopeNote(plan) + capsNote; /* MUTANT */',
+    why: '2026-10-13 21:30 on nameplate, 13 h, refused: the two notes out of the order every other shape states them in (the caps note first).',
+  },
+  {
+    id: 'AOA-27j. ★★★ the refused 21:30 push drops the caps note',
+    file: NTF, tests: [T_AO],
+    find: '    const refusedNote = capsNote + refusedEnvelopeNote(plan);',
+    to: '    const refusedNote = refusedEnvelopeNote(plan); /* MUTANT */',
+    why: '2026-10-13 21:30 on nameplate, 13 h, refused: silent that charge/pool limits prevent fully meeting the cushion (1,067 of the year\'s 4,094 refused line nights).',
   },
   {
     id: 'AOA-28. ★★★ the card names the reserve set under a refused arm',
