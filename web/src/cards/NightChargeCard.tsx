@@ -94,7 +94,7 @@ interface NightChargePlan {
   cushionStandby?: { w: number; kwh: number; basis: 'runway-overhead' | 'implausible' };
   /** v1.202.0 — the pool and the Cores' standby the plan's walks counted (planPool: the sizing line names the standby), and
    *  on a line night the cost force-charge carries whose walk past its stop closes under the line, that close
-   *  (expectedCloseAfterStopPct: the outage-line row names it). */
+   *  (expectedCloseAfterStopPct: the outage-line row names it; v1.205.0 — also beside 'lateStart', read by lineNotHeldOfCard). */
   planPool?: { kwh: number; standbyW: number } | null;
   expectedCloseAfterStopPct?: number;
   /** v1.203.0 — a cushion-only plan (the server's NightChargePlan.cushionOnly): its basis instead of a confidence tier. */

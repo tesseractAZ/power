@@ -9,7 +9,7 @@ import {
 } from '../src/nightChargeAdvisor.js';
 import {
   FORCE_CHARGE_OPEN_ALLOWANCE_MS, FORCE_CHARGE_ON_VERIFY_AFTER_MS, FORCE_CHARGE_TICK_MS, forceChargeLineArmNote, armedLineRunOnSinceMs,
-  lateStartAllowanceWords,
+  lateStartAllowanceWords, lateStartArmTail,
 } from '../src/nightForceCharge.js';
 import { buildNightChargeMessage } from '../src/notify.js';
 import { buildMiddayPlanMessage } from '../src/chargeText.js';
@@ -31,7 +31,8 @@ import { MEASURED_SCALE } from './fixtures/measuredCushionLineFigures.js';
  * the plan walks from ends it.
  *
  * fixtures/lineAtOpenAllowance.args.json holds expectedBuyFromPlan's arguments as sizeNightChargePlan passed them, captured once
- * (an instrumented copy of the planner, the year fixture's deps, the live cost gate, eligibility true).
+ * (an instrumented copy of the planner, the year fixture's deps, the live cost gate, eligibility true). (review) Two more were captured
+ * the same way for the sweep's grid and its start (AO-13b, AO-13c); the first two are unchanged.
  */
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -148,17 +149,26 @@ test('★★★ AO-4 path (a), window-bound: 2027-02-15 21:30 on nameplate at 18
   assert.doesNotMatch(p.rationale + pushOf(p) + (card.outageLineRow(p) ?? ''), /switch-on at the window open/);
 });
 
-test('★★★ AO-5 a cost-carried line night, window-bound (2027-02-05 21:30 at ×0.944, 20 h): its close past the stop capped at ~59.9% holds the 58.91% line, the allowance does not — disclosed; no surface names the stop as the close', () => {
+test('★★★ AO-5 a cost-carried line night, window-bound (2027-02-05 21:30 at ×0.944, 20 h): its close past the stop capped at ~59.9% holds the 58.91% line, the allowance does not — disclosed; the rationale, the 21:30 push and the ARMED line name ~59.9%, none the stop', () => {
   const p = planAt('2027-02-05 21:30', 'm', 20);
   assert.equal(p.expectedForceChargeMode, undefined, 'the cost force-charge carries it');
   assert.equal(p.expectedDeliverableBound, true);
   assert.equal(p.expectedWriteLevelPct, 87, 'the stop');
   disclosedLate(p, 'cost-carried');
   assert.equal(p.cushionLateStartAtOpen, true, 'the cost force-charge at the open');
+  // (review) The plan carries the close past the stop beside 'lateStart' (it holds the line on the median walk): every surface that
+  // names a figure names it, the stop nowhere as the close.
+  assert.equal(p.expectedCloseAfterStopPct, 59.9);
   assert.ok(p.rationale.includes(RATIONALE('59.9', 58.91)), p.rationale);
-  assert.equal(PUSH_COST.exec(pushOf(p))?.[1], OPEN, pushOf(p));
+  assert.deepEqual(PUSH_LINE.exec(pushOf(p))?.slice(1), ['59.9', OPEN], pushOf(p));
+  assert.equal(lateStartArmTail(p.expectedCloseAfterStopPct, p.cushionLateStartAtOpen),
+    ' Line NOT assured: ~59.9% expected at the close, too close to the line to allow for a late switch-on at the window open.', 'the ARMED line');
   assert.doesNotMatch(pushOf(p), /close at ~87%/);
   assert.match(card.outageLineRow(p) ?? '', CARD_COST);
+  // A plan without the close (none this build makes) names no figure, never the stop.
+  const bare = { ...p, expectedCloseAfterStopPct: undefined } as P;
+  assert.equal(PUSH_COST.exec(pushOf(bare))?.[1], OPEN, pushOf(bare));
+  assert.doesNotMatch(pushOf(bare), /close at ~/);
 });
 
 test('★★★ AO-5a (H1) a cost-carried line night\'s close past its stop is capped at the window\'s reach: 2027-02-05 21:30 at ×0.944, 20 h — ~59.9%, not the walk\'s ~65.8%; the stop, the start and the write unchanged', () => {
@@ -177,6 +187,11 @@ test('★★★ AO-5a (H1) a cost-carried line night\'s close past its stop is c
   const free = expectedBuyFromPlan({ ...k.args, deliverableKwh: 1e6 });
   assert.deepEqual([free.levelPct, free.closePct, free.rawClosePct, free.deliverableBound ?? false], [87, 65.8, 65.8, false]);
   assert.deepEqual([e.forceChargeStartMs, e.forceChargeFromPct], [free.forceChargeStartMs, free.forceChargeFromPct], 'the start the walk decides');
+  // (review) The cap is recorded where it binds (closeReachCapped: the walk identity's guard, lineStandingWalk W1), not on every
+  // bound window: a window that reaches ~70% is bound (the stop is 87%) and leaves the ~65.8% close past the stop as walked.
+  assert.deepEqual([e.closeReachCapped, free.closeReachCapped], [true, undefined]);
+  const mid = expectedBuyFromPlan({ ...k.args, deliverableKwh: 0.7 * k.args.fullKwh - k.args.startKwh! });
+  assert.deepEqual([mid.deliverableBound, mid.closePct, mid.rawClosePct, mid.closeReachCapped], [true, 65.8, 65.8, undefined]);
   // Under the reserve the stated close is floored at it (the level convention of every bound night); the claim's is not.
   const low = expectedBuyFromPlan({ ...k.args, deliverableKwh: 0 });
   const lowReach = Math.round((k.args.startKwh! / k.args.fullKwh) * 1000) / 10;
@@ -184,13 +199,27 @@ test('★★★ AO-5a (H1) a cost-carried line night\'s close past its stop is c
   assert.ok(lowReach < 50 && low.closePct === 50, `${low.closePct} / ${low.rawClosePct}`);
 });
 
-test('★★★ AO-6 a line in (49, 50] (2026-11-27 21:30 at ×0.944, 16 h): the claim reads the close unfloored — stated at the 50% floor, the 49.99% line is not held by what the window reaches', () => {
+test('★★★ AO-6 a line in (49, 50] (2026-11-27 21:30 at ×0.944, 16 h): the claim reads the assured close unfloored — the median walk reaches ~50.0% (it holds the 49.99% line), the assured walk ~47.5% at the allowance\'s end, which the 50% floor would read as 50%', () => {
   const p = planAt('2026-11-27 21:30', 'm', 16);
   assert.equal(p.cushionLineSocPct, 49.99);
   assert.equal(p.expectedWriteLevelPct, 50, 'stated at the floor, as before');
   assert.equal(p.expectedDeliverableBound, true);
   disclosedLate(p, '(49, 50]');
   assert.ok(p.rationale.includes(RATIONALE('50', 49.99)), p.rationale);
+  // (review) What it shows, on its captured arguments: the median walk, capped at the window's reach (~50.01%), holds the line
+  // unfloored too; the night is disclosed for the allowance alone. The walk from each ON minute is capped at the reach from that
+  // minute — ~49.9% at +1, ~47.5% at the allowance's end — and the floored (stated) close reads 50% at every one of them: the claim
+  // reads the unfloored close, or the night is carried on the floor.
+  const k = ARGS['2026-11-27 21:30|m|16'];
+  const W0 = k.windowStartMs;
+  assert.deepEqual([k.linePct, k.args.window.fromMs, p.window!.startMs], [49.99, W0, W0], 'the captured arguments are this plan\'s, planned before the open');
+  const median = expectedBuyFromPlan(k.args);
+  assert.deepEqual([median.mode, median.levelPct, median.rawClosePct, median.deliverableBound, median.forceChargeStartMs], ['line', 50, 50, true, W0]);
+  const at = (min: number) => expectedBuyFromPlan({ ...k.args, onNotBeforeMs: W0 + min * M, deliverableKwh: liftFrom(k.args, W0 + min * M) });
+  assert.deepEqual([1, 2, 20].map((min) => at(min).rawClosePct), [49.9, 49.8, 47.5], 'unfloored');
+  assert.deepEqual([1, 2, 20].map((min) => at(min).levelPct), [50, 50, 50], 'floored, every minute reads as held');
+  const r = expectedBuyFromPlan({ ...k.args, assureUntilMs: W0 + FORCE_CHARGE_OPEN_ALLOWANCE_MS });
+  assert.deepEqual([r.assuredClosePct, (r.assuredAtMs! - W0) / M], [47.5, 20]);
 });
 
 test('★★★ AO-7 a timed start inside the window, and a pool opening above its line at the open, stay carried', () => {
@@ -279,7 +308,14 @@ test('★★ AO-12 the ARMED line: "Line NOT assured" for both kinds, never "NOT
   // (review) The one predicate's words: the switch-on at the open only where the plan's own start is inside the allowance.
   assert.deepEqual([lateStartAllowanceWords(true), lateStartAllowanceWords(false), lateStartAllowanceWords(undefined)], [OPEN, CHARGE, CHARGE]);
   const idx = readFileSync(resolve(HERE, '../src/index.ts'), 'utf8');
-  assert.ok(idx.includes("  return eligible + (lineNotHeldOf(plan) === 'lateStart' ? ` Line NOT assured: too close to the line to allow for ${lateStartAllowanceWords(plan?.cushionLateStartAtOpen)}.` : '');\n"));
+  // (review) Both ARMED lines word a 'lateStart' night by one helper: its close (the cost walk's past the stop, never the stop).
+  assert.ok(idx.includes("  return eligible + (lineNotHeldOf(plan) === 'lateStart' ? lateStartArmTail(plan?.expectedCloseAfterStopPct, plan?.cushionLateStartAtOpen) : '');\n"));
+  assert.ok(line.endsWith(lateStartArmTail(59.5, undefined)) && open.endsWith(lateStartArmTail(59.5, true)), 'the line-mode note is the helper\'s');
+  assert.deepEqual([lateStartArmTail(59.94, true), lateStartArmTail(null, false), lateStartArmTail(undefined, true)], [
+    ' Line NOT assured: ~59.9% expected at the close, too close to the line to allow for a late switch-on at the window open.',
+    " Line NOT assured: a level near the line expected at the close, too close to the line to allow for a late start of the window's charge.",
+    ' Line NOT assured: a level near the line expected at the close, too close to the line to allow for a late switch-on at the window open.',
+  ]);
   assert.ok(idx.includes("      notHeld: notHeld != null ? { kind: notHeld, closePct: plan?.expectedWriteLevelPct ?? null, atOpen: plan?.cushionLateStartAtOpen === true } : null,\n"));
   // The served and the plan of record alike: never the arm, never a shadow leg — as armedNoLineStartMs.
   const ONE = '    armedLineOnVerifiedAtMs: shadowLeg == null && opts.arming !== true ? armedLineRunOnSinceMs(nightActuationMem) : null,\n';
@@ -343,6 +379,37 @@ test('★★★ AO-13 every whole ON minute of the allowance is walked, the lowe
   assert.deepEqual([blind.mode, blind.rawClosePct, blind.assuredClosePct], ['line', undefined, null]);
 });
 
+test('★★★ AO-13b every minute, not a coarser grid: 2027-08-09 21:30 at ×0.944, 11 h (captured arguments; an at-open start) — the lowest close ~65.6% at +12 min, a minute no 5-minute grid walks (~66.9% at +15 is its lowest)', () => {
+  const k = ARGS['2027-08-09 21:30|m|11'];
+  const W0 = k.windowStartMs;
+  assert.equal(k.args.window.fromMs, W0, 'planned before the open');
+  const median = expectedBuyFromPlan(k.args);
+  assert.deepEqual([median.mode, median.forceChargeStartMs, median.rawClosePct], ['line', W0, 76.3], 'an at-open start');
+  const closeAt = (min: number) => expectedBuyFromPlan({ ...k.args, onNotBeforeMs: W0 + min * M, deliverableKwh: liftFrom(k.args, W0 + min * M) }).rawClosePct;
+  assert.deepEqual([5, 10, 11, 12, 13, 15, 20].map(closeAt), [74.5, 70.7, 69.2, 65.6, 66.1, 66.9, 69.3]);
+  const r = expectedBuyFromPlan({ ...k.args, assureUntilMs: W0 + FORCE_CHARGE_OPEN_ALLOWANCE_MS });
+  assert.deepEqual([r.assuredClosePct, (r.assuredAtMs! - W0) / M], [65.6, 12]);
+  assert.notEqual(((r.assuredAtMs! - W0) / M) % 5, 0, 'the lowest minute is not on a 5-minute grid');
+  assert.equal(r.assuredClosePct! >= k.linePct - 0.05, true, 'it holds the 60.72% line');
+});
+
+test('★★★ AO-13c a median start inside the allowance: 2027-08-29 21:30 at ×0.944, 20 h (captured arguments) — its force-charge from +5 min; every minute is walked, the lowest close ~91.0% at +12, after that start, under the allowance end\'s ~91.5%', () => {
+  const k = ARGS['2027-08-29 21:30|m|20'];
+  const W0 = k.windowStartMs;
+  const until = W0 + FORCE_CHARGE_OPEN_ALLOWANCE_MS;
+  assert.equal(k.args.window.fromMs, W0, 'planned before the open');
+  const median = expectedBuyFromPlan(k.args);
+  assert.equal(median.mode, 'line');
+  assert.equal((median.forceChargeStartMs! - W0) / M, 5, 'its own start strictly inside the allowance');
+  assert.equal(median.rawClosePct, 96.6);
+  const closeAt = (min: number) => expectedBuyFromPlan({ ...k.args, onNotBeforeMs: W0 + min * M, deliverableKwh: liftFrom(k.args, W0 + min * M) }).rawClosePct;
+  assert.deepEqual([4, 5, 11, 12, 13, 20].map(closeAt), [96.6, 96.6, 97, 91, 91, 91.5]);
+  const r = expectedBuyFromPlan({ ...k.args, assureUntilMs: until });
+  assert.deepEqual([r.assuredClosePct, (r.assuredAtMs! - W0) / M], [91, 12]);
+  assert.ok(r.assuredAtMs! > median.forceChargeStartMs! && r.assuredAtMs! < until, 'an interior minute after the start');
+  assert.equal(r.assuredClosePct! >= k.linePct - 0.05, true, 'it holds the 86.33% line');
+});
+
 test('★★★ G1 a sunny mid-day leg whose reserve leg ends past the allowance (open 40%, P50 PV 3.5 kW, a 1-h window, line 61.5%): its walk is untouched, and the reach counted from the allowance\'s end decides', () => {
   const W0 = Date.UTC(2026, 9, 15, 17);
   const hours = [0, 1].map((i) => ({ ts: W0 + i * H, pvP10W: 3500, pvP50W: 3500, loadP90W: 1200, loadP50W: 1000, evP90W: 0 }));
@@ -390,10 +457,14 @@ test('★ G5 (a residual, stated in docs 15-1) a pool the walk draws down to the
  *  windows): their words name a late start of the window's charge; the other 53 a late switch-on at the window open. */
 const PIN_AO14 = { np: { line: 21, cost: 7 }, m: { line: 24, cost: 5 } };
 const PIN_AO14_PAST_OPEN = { np: 2, m: 2 };
+/** (review) The cost-carried 'lateStart' nights whose 21:30 push and ARMED line name the close past the stop, as the rationale does
+ *  (each of the 12 above; before, they named only the ~87% stop): measured on the landed change. */
+const PIN_AO14_COST_CLOSE_NAMED = { np: 7, m: 5 };
 
 test('★★★ AO-14 the year at 21:30, 4-20 h, both pools: every \'lateStart\' night is armed with its median close at or above the line less 0.05, said by the server and the card alike, never "under"; counted', () => {
   const count = { np: { line: 0, cost: 0 }, m: { line: 0, cost: 0 } };
   const pastOpen = { np: 0, m: 0 };
+  const closeNamed = { np: 0, m: 0 };
   const errs: string[] = [];
   for (const c of CASES.filter((x) => / 21:30$/.test(x.label))) for (const b of ['np', 'm'] as const) for (let h = 4; h <= 20; h++) {
     const p = planAt(c.label, b, h);
@@ -402,6 +473,8 @@ test('★★★ AO-14 the year at 21:30, 4-20 h, both pools: every \'lateStart\'
     if (p.cushionEnvelopeReason !== 'lateStart') {
       if (LATE_WORDS.test(p.rationale + pushOf(p) + (card.outageLineRow(p) ?? ''))) errs.push(`${where}: late-start words on a night that is not 'lateStart'`);
       if (p.cushionLateStartAtOpen !== undefined) errs.push(`${where}: cushionLateStartAtOpen on a night that is not 'lateStart'`);
+      // (review) Beside any other reason the close past the stop is carried only under the line.
+      if (p.expectedCloseAfterStopPct != null && p.expectedCloseAfterStopPct >= p.cushionLineSocPct! - 0.05 - 1e-9) errs.push(`${where}: a held close past the stop carried on a night that is not 'lateStart'`);
       continue;
     }
     // (review) The one predicate every surface words by: the switch-on at the open only where the plan's own start is inside the allowance.
@@ -415,6 +488,13 @@ test('★★★ AO-14 the year at 21:30, 4-20 h, both pools: every \'lateStart\'
     const x = /expected to close at ~([\d.]+)%, too close to tonight's/.exec(p.rationale);
     if (x == null || Number(x[1]) < p.cushionLineSocPct! - 0.05 - 1e-9) errs.push(`${where}: the median close ${x?.[1]} under ${p.cushionLineSocPct}`);
     if (mode === 'line' && Number(x?.[1]) !== p.expectedWriteLevelPct) errs.push(`${where}: the rationale's close is not the stated level`);
+    // (review) A cost-carried night: the plan carries the close the rationale names, and the push and the ARMED line name it too.
+    if (mode === 'cost') {
+      if (p.expectedCloseAfterStopPct == null || Number(x?.[1]) !== p.expectedCloseAfterStopPct) errs.push(`${where}: the rationale's close ${x?.[1]} is not the plan's ${p.expectedCloseAfterStopPct}`);
+      else if (PUSH_LINE.exec(pushOf(p))?.[1] !== x?.[1]) errs.push(`${where}: the push does not name ~${x?.[1]}%`);
+      else if (!lateStartArmTail(p.expectedCloseAfterStopPct, p.cushionLateStartAtOpen).startsWith(` Line NOT assured: ~${x?.[1]}% expected at the close,`)) errs.push(`${where}: the ARMED line does not name ~${x?.[1]}%`);
+      else closeNamed[b] += 1;
+    }
     for (const [s, t] of [['rationale', p.rationale], ['push', pushOf(p)], ['card', card.outageLineRow(p) ?? '']]) {
       if (UNDER.test(t)) errs.push(`${where}: ${s} says "under"`);
       if ((s !== 'card' || mode === 'line') && !t.includes(`allow for ${said}`)) errs.push(`${where}: ${s} does not say "${said}"`);
@@ -426,4 +506,5 @@ test('★★★ AO-14 the year at 21:30, 4-20 h, both pools: every \'lateStart\'
   assert.deepEqual(errs.slice(0, 10), [], `${errs.length} errors`);
   assert.deepEqual(count, PIN_AO14);
   assert.deepEqual(pastOpen, PIN_AO14_PAST_OPEN);
+  assert.deepEqual(closeNamed, PIN_AO14_COST_CLOSE_NAMED);
 });

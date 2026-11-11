@@ -278,8 +278,8 @@ export interface CushionNotePlan {
   expectedWriteLevelPct?: number | null;
   expectedForceChargeStartMs?: number | null;
   /** v1.202.0 — a line night the cost force-charge carries whose walk past its stop closes under the line, whether or not
-   *  its sizing fell short: that close (NightChargePlan.expectedCloseAfterStopPct; the outage-line row names it). Absent
-   *  otherwise. */
+   *  its sizing fell short: that close (NightChargePlan.expectedCloseAfterStopPct; the outage-line row names it). v1.205.0 — present
+   *  beside 'lateStart' too, where it holds the line (the row reads it by lineNotHeldOfCard, so never as under). Absent otherwise. */
   expectedCloseAfterStopPct?: number;
 }
 

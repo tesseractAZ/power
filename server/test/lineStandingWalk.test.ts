@@ -57,11 +57,12 @@ if (process.env.STANDING_WALK_WRITE === '1') {
       const g = group(cs, b, h);
       assert.deepEqual(g, FX.groups[`${cs}|${b}|${h}`], `${cs} ${b} ${h}`);
       walks += g.n;
-      // v1.205.0 — every walk left out is one the claim moves, and no other: a cost-carried night on a bound window, or 'lateStart'.
+      // v1.205.0 — every walk left out is one the claim moves, and no other: 'lateStart', or (review) a cost-carried night whose close
+      // past the stop the window's reach actually capped (H1) — not merely one on a bound window.
       const rows = groupRows(cs, b, h);
       for (const label of EXCLUDED[`${cs}|${b}|${h}`] ?? []) {
         const r = rows.find((x) => x.label === label);
-        assert.ok(r != null && (r.reason === 'lateStart' || r.costBound === true), `${cs} ${b} ${h} ${label}: excluded, yet neither 'lateStart' nor cost-carried on a bound window`);
+        assert.ok(r != null && (r.reason === 'lateStart' || r.capped === true), `${cs} ${b} ${h} ${label}: excluded, yet neither 'lateStart' nor a cost-carried close the reach capped`);
       }
     }
     if (FULL) assert.equal(walks, FX.walks);

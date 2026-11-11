@@ -439,8 +439,10 @@ const MUTANTS = [
   {
     id: 'MPW-X-vii. ★★★ the close past the stop named only where the sizing held the line (the gate before the fix)',
     file: NCA, tests: [T_MPW],
-    find: '  const closeAfterStopField = lineArmed && lineCloseAfterStopPct != null && !lineWalkHolds(lineCloseAfterStopPct, cushionLineSocPct)',
-    to: '  const closeAfterStopField = lineCloseUnder && lineCloseAfterStopPct != null /* MUTANT */',
+    // v1.205.0 (review) — repointed: the field is carried beside 'lateStart' too (a held close); the mutant keeps that arm and drops,
+    // as before, the nights whose sizing fell short.
+    find: '  const closeAfterStopField = lineArmed && lineCloseAfterStopPct != null && (!lineWalkHolds(lineCloseAfterStopPct, cushionLineSocPct) || lineLateStart)',
+    to: '  const closeAfterStopField = (lineCloseUnder || lineLateStart) && lineCloseAfterStopPct != null /* MUTANT */',
     why: 'A cost-carried night sized short closes up to ~22 points under its line with only the caps note: no surface names the close (70 nights on nameplate, 57 at ×0.944).',
   },
   {

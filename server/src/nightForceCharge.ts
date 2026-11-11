@@ -919,7 +919,7 @@ export function forceChargeLineArmNote(o: {
   const tail = o.notHeld == null ? ''
     : o.notHeld.kind === 'aboveFull' ? ' Line NOT held: above a full pool.'
     // v1.205.0 — held on the median walk, not with the at-open allowance: never "NOT held".
-    : o.notHeld.kind === 'lateStart' ? ` Line NOT assured: ${o.notHeld.closePct != null ? `~${round1(o.notHeld.closePct)}%` : 'a level near the line'} expected at the close, too close to the line to allow for ${lateStartAllowanceWords(o.notHeld.atOpen)}.`
+    : o.notHeld.kind === 'lateStart' ? lateStartArmTail(o.notHeld.closePct, o.notHeld.atOpen)
       : o.notHeld.kind === 'nearFull' ? ` Line NOT held: within ${2 * FORCE_CHARGE_LINE_HEADROOM_PCT} points of a full pool.`
         : ` Line NOT held: ${o.notHeld.closePct != null ? `~${round1(o.notHeld.closePct)}%` : 'under the line'} expected at the close.`;
   const from = o.expectedStartText != null ? `on from ~${o.expectedStartText}` : 'on just in time';
@@ -1879,6 +1879,15 @@ export const FORCE_CHARGE_OPEN_ALLOWANCE_MS = FORCE_CHARGE_ON_VERIFY_AFTER_MS + 
  *  word for word (web nightChargeText.ts outageLineRow). */
 export function lateStartAllowanceWords(atOpen: boolean | undefined): string {
   return atOpen === true ? 'a late switch-on at the window open' : "a late start of the window's charge";
+}
+
+/** ★★ v1.205.0 (review) — PURE. The ARMED line's tail on a 'lateStart' night, in line mode (forceChargeLineArmNote) and on a night
+ *  the cost force-charge carries (index.ts forceChargeArmNote) alike: the median walk's close — the line walk's (the stated level),
+ *  or the walk past the cost stop (NightChargePlan.expectedCloseAfterStopPct), never the stop — as the rationale and the 21:30
+ *  notice name it, and what the line is too close to it to allow for (lateStartAllowanceWords). Never "NOT held". */
+export function lateStartArmTail(closePct: number | null | undefined, atOpen: boolean | undefined): string {
+  const close = closePct != null && Number.isFinite(closePct) ? `~${round1(closePct)}%` : 'a level near the line';
+  return ` Line NOT assured: ${close} expected at the close, too close to the line to allow for ${lateStartAllowanceWords(atOpen)}.`;
 }
 
 /** v1.200.0 (review 2) — one pool reading of a line night's trail (forceChargeLinePoolSamples). */

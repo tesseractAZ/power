@@ -778,7 +778,9 @@ export interface NightChargePlan {
    *  that close is under the line less the tolerance, whatever the sizing (lineNotHeldOf 'closeUnder'): beside
    *  cushionEnvelopeReason 'closeUnder' where the sizing held a line more than 10 points under full, beside the caps note
    *  (cushionShortfall, no envelope cause) where the sizing fell short, beside 'nearFull' on a line within 10 points of full.
-   *  A cost-carried night whose walk holds its line keeps its JSON. */
+   *  A cost-carried night whose walk holds its line keeps its JSON. v1.205.0 (review) — present too beside cushionEnvelopeReason
+   *  'lateStart' (that close holds the line on the median walk, not with the at-open allowance), where the 21:30 notice and the
+   *  ARMED line name it as the rationale does; every surface reads it by lineNotHeldOf, so it never reads as a close under the line. */
   expectedCloseAfterStopPct?: number;
 
   /** v1.60.0 — EV-contention disclosure for tonight's window (see the type).
@@ -1395,6 +1397,17 @@ export interface ExpectedBuy {
   assuredClosePct?: number | null;
   /** v1.205.0 — the ON minute that lowest close was walked from. */
   assuredAtMs?: number;
+  /** v1.205.0 (review) — on a cost-carried line night: its close past the stop was above the window's reach and is capped at it
+   *  (H1, lineWindowReachKwh). Absent otherwise. Nothing bought, levelled, started or stated reads it, and no plan field carries
+   *  it: the walk identity's guard reads it (lineStandingWalk W1, through setExpectedBuyObserverForTesting). */
+  closeReachCapped?: true;
+}
+
+/** v1.205.0 (review) — TEST SEAM. sizeNightChargePlan hands each plan's median walk (ExpectedBuy) to `f`, for what no plan field
+ *  carries (closeReachCapped: lineStandingWalk W1's guard). null — the default, and the add-on never sets it — calls nothing. */
+let expectedBuyObserverForTesting: ((e: ExpectedBuy) => void) | null = null;
+export function setExpectedBuyObserverForTesting(f: ((e: ExpectedBuy) => void) | null): void {
+  expectedBuyObserverForTesting = f;
 }
 
 /**
@@ -1648,6 +1661,7 @@ export function expectedBuyFromPlan(o: {
     if (out.rawClosePct > reachPct + 1e-9) {
       out.rawClosePct = round1(Math.min(100, reachPct));
       out.closePct = round1(Math.max(reservePct, Math.min(100, reachPct)));
+      out.closeReachCapped = true;
     }
   }
   out.buyKwh = round2(Math.min(liftKwh, deliverableKwh) / o.legEff);
@@ -2935,6 +2949,9 @@ function sizeNightChargePlan(inputs: NightChargeInputs, holdUndershootPct: numbe
   // the clock and a recompute never takes off minutes already gone. A verified ON in the pool reading the plan walks from ends it:
   // stamped at or after the open (the window's own) and at or before nowMs, when the pool was read (index.ts reads both before
   // its first await and the record after it, so a verify landing in between keeps the allowance for that recompute).
+  // (review) The same recompute may read the run as on (armedLineRunOnStartMs, read from the record too): it walks the run from a
+  // pool read before the ON and still discloses 'lateStart' — the conservative side, nothing pushed, until the next recompute,
+  // past the allowance's end (accepted; AO-8).
   const lineOnVerifiedBy = inputs.armedLineOnVerifiedAtMs != null && Number.isFinite(inputs.armedLineOnVerifiedAtMs)
     && inputs.armedLineOnVerifiedAtMs >= windowStart && inputs.armedLineOnVerifiedAtMs <= nowMs;
   const lineOpenAllowanceEndMs = windowStart + FORCE_CHARGE_OPEN_ALLOWANCE_MS;
@@ -2949,6 +2966,7 @@ function sizeNightChargePlan(inputs: NightChargeInputs, holdUndershootPct: numbe
       ...(lineAssureUntilMs != null ? { assureUntilMs: lineAssureUntilMs } : {}),
     })
     : { buyKwh: 0, levelPct: null };
+  expectedBuyObserverForTesting?.(expected);
   // A5 — CARRIED (the line claimed, no envelope cause) only where the force-charge can hold it: ⌈L⌉ + 2H ≤ 100 (the
   // margin the close guarantee was emulated with: lineForceChargeClose.test.ts T7) and — where the sizing held the line —
   // the plan's own line walk, capped at the window's reach (expectedLineBuy, H1), closes at or above L less
@@ -3139,7 +3157,9 @@ function sizeNightChargePlan(inputs: NightChargeInputs, holdUndershootPct: numbe
   // Whatever the sizing, as a line-mode night's close is named (lineNotHeldOf): beside the closeUnder disclosure
   // (lineCloseUnder) where the sizing held a line more than 10 points under full, beside the caps note where it fell short.
   // Text only: the rationale, the 21:30 notice, the ARMED line and the card read it; nothing written, armed or bought does.
-  const closeAfterStopField = lineArmed && lineCloseAfterStopPct != null && !lineWalkHolds(lineCloseAfterStopPct, cushionLineSocPct)
+  // ★★ v1.205.0 (review) — and beside 'lateStart' (the close held on the median walk, not with the at-open allowance): the close the
+  // rationale names, which the 21:30 notice and the ARMED line name too, never the stop. Every other surface reads it by lineNotHeldOf.
+  const closeAfterStopField = lineArmed && lineCloseAfterStopPct != null && (!lineWalkHolds(lineCloseAfterStopPct, cushionLineSocPct) || lineLateStart)
     ? { expectedCloseAfterStopPct: lineCloseAfterStopPct } : {};
   const lineNotHeld = lineNotHeldOf({
     ...(forceChargeLine != null ? { forceChargeLine } : {}), expectedForceChargeMode: expected.mode, expectedWriteLevelPct: expected.levelPct,

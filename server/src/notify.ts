@@ -1510,10 +1510,11 @@ function envelopeShortfallNote(plan: Pick<NightChargePlan, 'cushionShortfallCaus
       return ` NOTE: on the median load the pool is expected to close at ${e != null && Number.isFinite(e) ? `~${round1(e)}%` : 'a level'}, under ${line} — residual risk remains.`;
     }
     if (kind === 'aboveFull') return ` NOTE: ${line} is above a full pool, so no charge can hold it — residual risk remains.`;
-    // ★★★ v1.205.0 — held on the median walk, not with the at-open allowance. In line mode the stated level is that close; a night
-    // the cost force-charge carries names no figure (its level is the stop, and the plan names its close past it only under the line).
+    // ★★★ v1.205.0 — held on the median walk, not with the at-open allowance. In line mode the stated level is that close; on a night
+    // the cost force-charge carries its level is the stop, so (review) the close past it (expectedCloseAfterStopPct, which the plan
+    // carries beside 'lateStart'), as the rationale names it. A plan without it names no figure.
     if (kind === 'lateStart') {
-      const e = plan.expectedForceChargeMode === 'line' ? plan.expectedWriteLevelPct : null;
+      const e = plan.expectedForceChargeMode === 'line' ? plan.expectedWriteLevelPct : plan.expectedCloseAfterStopPct ?? null;
       // (review) A switch-on at the window open only where the plan's own start is inside the allowance (cushionLateStartAtOpen).
       const what = lateStartAllowanceWords(plan.cushionLateStartAtOpen);
       return e != null && Number.isFinite(e)
