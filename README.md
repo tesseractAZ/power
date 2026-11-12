@@ -68,7 +68,7 @@ Energy Dashboard), and opt-in **Home Assistant notifications** with companion-ap
 
 Every change ships through the test suite, and a guard that a plausible refactor could silently
 disarm is held by a committed mutation harness: **151 harnesses** holding
-**5475 anchor-asserted mutants**. The harness, mutant, test and reference counts, the engine
+**5524 anchor-asserted mutants**. The harness, mutant, test and reference counts, the engine
 floor and group counts, and every engine-index row's code anchor are checked against the tree in
 CI ([Quality & accuracy](#quality--accuracy)).
 
@@ -447,7 +447,7 @@ want to do, and the add-on's Configuration tab shows each one's help text.
 ## Development
 
 ```bash
-cd server && npm install && npm test     # 6,528 tests
+cd server && npm install && npm test     # 6,542 tests
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.json      # src
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.test.json # src + tests
 cd web    && npm install && npm run build
