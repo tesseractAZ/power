@@ -190,7 +190,13 @@ const pctText = (v: number): string => `~${Math.round(v * 10) / 10}%`;
  * and that carries no other line note (no line force-charge, no envelope note): nothing is armed to hold its floor+cushion line.
  * The line is named as the armed push of such a night names it ("the floor+cushion line is 31.3%": floorCushionLinePct, one
  * decimal); with no figure, unnumbered. `whose`: "tonight's" (notify.buildNightChargeMessage), "this leg's" (the mid-day push).
- * Nothing in it says the line is above anything, so a line in (49, 50] needs no other words. PURE.
+ * Nothing in it says the line is above anything, so a line in (49, 50] needs no other words.
+ * ★★ On a CUSHION-ONLY plan (plan.cushionOnly: the solar basis refused, as with the Cores dark) the armed push calls the same figure
+ * "the 33.3% line" — but it defines it in that sentence ("the 33.3% line is the 16% reserve floor plus 4 h of islanded backup load
+ * at the window close": cushionOnlyPushText's 'charge' form). The refused push states only the short basis ("Outage cushion only;
+ * no solar basis (…).", the 'short' form), which does not define the line, so this note keeps "floor+cushion line" there too, by
+ * design: it names what the line is (the reserve floor plus the outage cushion, as the card's stat sub "floor+cushion 33.3%" does),
+ * and the figure is the same one, rounded alike. It follows the basis sentence there, as the armed push's notes do. PURE.
  */
 export function refusedCushionLineNote(whose: string, linePct: number | null | undefined): string {
   const n = linePct != null && Number.isFinite(linePct) ? `${Math.round(linePct * 10) / 10}% ` : '';

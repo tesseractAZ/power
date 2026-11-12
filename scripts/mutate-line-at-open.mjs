@@ -38,6 +38,10 @@
  * lineOverReserveText words every line at or below 50 (AOA-30j); the armed mid-day renders the year over, line gate off and with
  * the night's backup leg, byte-identical to v1.205.0 but for that correction (refusedNotesArmedYear.test.ts: AOA-30h, AOA-30i,
  * AOA-30k); and every envelope cause of a refused cost leg, 'envelope+caps' too, keeps the unheld-line note off it (AOA-29n).
+ * (J) v1.205.1 (round 3): a refused CUSHION-ONLY night (the plant's live shape, the Cores dark) states its basis sentence straight
+ * after the lead and every NOTE after it, the caps note first, as its armed push orders them (notify.ts refusedTail: AOA-31,
+ * AOA-31b); its note keeps "floor+cushion line", since the refused push's short basis does not define the armed push's "the 33.3%
+ * line" (AOA-31c). refusedNotes.test.ts RN-9: 2026-10-12 word for word, the dark year counted.
  *
  *   node scripts/mutate-line-at-open.mjs [--only <id prefix>]
  *
@@ -715,6 +719,28 @@ const MUTANTS = [
     find: "      + `${b.cushionShortfallCause != null ? `; the line is above",
     to: "      + `${b.cushionShortfallCause === 'envelope' /* MUTANT */ ? `; the line is above",
     why: 'The evening log of a backup leg whose envelope comes with the caps (2026-11-25 21:30 on nameplate, 11 h) no longer says its line is above what the reserve write holds.',
+  },
+  /* ── (J) v1.205.1 (round 3, F5): the refused cushion-only night — the note's place and its name ── */
+  {
+    id: 'AOA-31. ★★ the refused cushion-only push puts its notes between the lead and the basis',
+    file: NTF, tests: [T_RN],
+    find: "    const refusedTail = cushionOnlyPushText(plan, 'short') + refusedNote;",
+    to: "    const refusedTail = refusedNote + cushionOnlyPushText(plan, 'short'); /* MUTANT */",
+    why: 'The 2026-10-12 dark-plant refusal reads "… will not raise the reserve tonight. NOTE: nothing is armed to hold … Outage cushion only; no solar basis (…)." — the basis split from its lead, in the reverse of the armed push\'s order.',
+  },
+  {
+    id: 'AOA-31b. ★★ the refused cushion-only push puts the caps note before the basis',
+    file: NTF, tests: [T_RN],
+    find: "    const refusedTail = cushionOnlyPushText(plan, 'short') + refusedNote;",
+    to: "    const refusedTail = capsNote + cushionOnlyPushText(plan, 'short') + refusedEnvelopeNote(plan); /* MUTANT */",
+    why: 'A dark night the charge rate cannot carry reads the caps note before the basis and its unheld line after it, where the armed push states both notes after the basis.',
+  },
+  {
+    id: 'AOA-31c. ★★ the cushion-only note names "tonight\'s 33.3% line", which the refused push never defines',
+    file: NTF, tests: [T_RN],
+    find: '    return refusedCushionLineNote("tonight\'s", floorCushionLinePct(plan));',
+    to: "    return refusedCushionLineNote(\"tonight's\", floorCushionLinePct(plan)).replace((plan as NightChargePlan).cushionOnly != null ? ' floor+cushion line' : '\\u0000', ' line'); /* MUTANT */",
+    why: 'The armed push defines "the 33.3% line" as the reserve floor plus the cushion\'s hours; the refused push\'s short basis sentence does not, so the line the note names is undefined.',
   },
   {
     id: 'AOA-28. ★★★ the card names the reserve set under a refused arm',

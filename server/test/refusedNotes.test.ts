@@ -12,6 +12,7 @@ import {
 import { buildApsREvModel } from '../src/tariff.js';
 import { legacyIdentityCases } from './fixtures/legacyIdentityFixtures.js';
 import { MEASURED_SCALE } from './fixtures/measuredCushionLineFigures.js';
+import { darkDeps } from './fixtures/cushionOnlyFigures.js';
 
 /**
  * ★★★ v1.205.1 — A REFUSED NIGHT WITH NO LINE FORCE-CHARGE.
@@ -364,4 +365,93 @@ test('★★★ RN-7 through the record: a backup leg sized on a 49.99% line (20
     const edgeCost = cross(noAsk('2026-11-27 21:30', 16), noAsk('2027-04-09 21:30', 7), mode);
     assert.ok(edgeCost.includes(notCarried('this leg', OVER_HELD)), `${mode}: ${edgeCost}`);
   }
+});
+
+/* ── v1.205.1 (round 3, F5) — the refused CUSHION-ONLY night: the note's name and its place ─────────────────────────────────────── */
+
+/** The plant's live shape: the Cores dark (0 scored calibration days, a 0% band coverage, the Cores' standby), on the seeded ×0.944
+ *  held ratio (cushionOnlyFigures.ts darkDeps). */
+const darkAt = (label: string, o: Record<string, unknown> = {}): P => computeNightChargePlan({
+  ...buildNightChargeInputs({ ...darkDeps(CASES.find((c) => c.label === label)!.deps as never, 'held'), ...o } as never)!,
+} as never) as P;
+const SOLAR_REFUSAL_0 = 'only 0 scored calibration day(s), need 4 (a provisional plan on a widened solar band from 4; the full band from 14)';
+/** The refused push's lead, by shape and write mode. */
+const leadOf = (p: P, mode: WriteMode): string => {
+  const write = mode === 'auto' ? 'the write' : 'the supervised write';
+  return noChargeExpected(p)
+    ? `but ${write} was not armed — ${WHY}. The add-on will not raise the reserve tonight.`
+    : `but ${write} was not armed — ${WHY}. The add-on will not charge tonight.`;
+};
+/** RN-9 — the dark year (every case of the fixture year with the Cores dark, on the held ratio, at its own 4 h): the cushion-only
+ *  charge plans, refused, by the NOTEs their push carries — U the unheld floor+cushion line, C the caps note, L a line force-charge's
+ *  refused note — each count the same in both write modes. */
+const PIN_RN9 = { plans: 614, U: 467, CU: 65, L: 40, CL: 21, none: 21 };
+/** …of them, the plans whose basis sentence carries a long gap's words after the refusal (each still before every note). */
+const PIN_RN9_GAP = 71;
+
+test('★★★ RN-9 a refused cushion-only night (the plant\'s live shape, the Cores dark): the note keeps "floor+cushion line" — the refused push\'s short basis sentence does not define "the 33.3% line" as the armed push\'s does — on the same figure; and every NOTE follows the basis sentence, the caps note first, as the armed push orders them. 2026-10-12 word for word; the dark year counted', () => {
+  // 2026-10-12, the cost case, held ratio, 4 h: 26.42 kWh asked against a 33.3% line over a 16% floor, no line force-charge, a reserve
+  // hold (no charge expected).
+  const p = darkAt('2026-10-12 cost', { outageCushionHours: 4 });
+  assert.deepEqual([p.cushionOnly?.refusedBy, p.requiredExtraKwh, floorCushionLinePct(p), p.reserveFloorPct, p.forceChargeLine ?? null, p.cushionShortfall, noChargeExpected(p)],
+    [SOLAR_REFUSAL_0, 26.42, 33.26, 16, null, false, true]);
+  // The armed push defines the line in its basis sentence: "the 33.3% line is the 16% reserve floor plus 4 h of islanded backup load".
+  assert.ok(buildNightChargeMessage(p, 'charge', SUP as never).body.includes(`Outage cushion only; no solar basis (${SOLAR_REFUSAL_0}): the 33.3% line is the 16% reserve floor plus 4 h of islanded backup load at the window close, with no solar credited and no cost target.`));
+  // Refused: the lead, the basis it was refused on, then the note — word for word, both write modes.
+  assert.equal(refusedOf(p).body, "Tonight's plan holds the backup reserve at 35% overnight as a floor, with no charge expected, but the supervised write was not armed — "
+    + 'the panel reports the grid is not connected. The add-on will not raise the reserve tonight. Outage cushion only; no solar basis (only 0 scored '
+    + 'calibration day(s), need 4 (a provisional plan on a widened solar band from 4; the full band from 14)). NOTE: nothing is armed to hold '
+    + "tonight's 33.3% floor+cushion line — residual risk remains.");
+  assert.equal(refusedOf(p, 'auto').body, "Tonight's plan holds the backup reserve at 35% overnight as a floor, with no charge expected, but the write was not armed — "
+    + 'the panel reports the grid is not connected. The add-on will not raise the reserve tonight. Outage cushion only; no solar basis (only 0 scored '
+    + 'calibration day(s), need 4 (a provisional plan on a widened solar band from 4; the full band from 14)). NOTE: nothing is armed to hold '
+    + "tonight's 33.3% floor+cushion line — residual risk remains.");
+  // A night the charge rate cannot carry (2026-10-12 resilience at 18%, 1.5 kW): the armed push's basis, then its caps note; refused,
+  // the basis, the caps note, then the unheld line — never a note between the lead and the basis.
+  const toward = darkAt('2026-10-12 resilience', { socNowPct: 18, chargeCapKw: 1.5 });
+  assert.ok(sizingShortOf(toward) && toward.forceChargeLine == null && asked(toward));
+  assert.ok(buildNightChargeMessage(toward, 'charge', SUP as never).body.includes(`no solar credited and no cost target.${CAPS_NOTE} SUPERVISED: `));
+  assert.equal(refusedOf(toward, 'auto').body, `Tonight's plan calls for a charge, ${leadOf(toward, 'auto')} Outage cushion only; no solar basis (${SOLAR_REFUSAL_0}).`
+    + `${CAPS_NOTE}${tonight('33.3')}`);
+  // The dark year: every refused cushion-only charge plan, both write modes.
+  const count = { supervised: { plans: 0, U: 0, CU: 0, L: 0, CL: 0, none: 0 }, auto: { plans: 0, U: 0, CU: 0, L: 0, CL: 0, none: 0 } };
+  const errs: string[] = [];
+  let gapWords = 0;
+  for (const c of CASES) {
+    const q = darkAt(c.label);
+    if (q.cushionOnly == null || !q.chargeTonight) continue;
+    const armedBody = buildNightChargeMessage(q, 'charge', SUP as never).body;
+    const refusedBy = q.cushionOnly.refusedBy;
+    for (const mode of ['supervised', 'auto'] as const) {
+      const body = refusedOf(q, mode).body;
+      const lead = leadOf(q, mode);
+      const at = body.indexOf(lead);
+      const rest = at < 0 ? '' : body.slice(at + lead.length);
+      const n = rest.indexOf(' NOTE: ');
+      const basis = n < 0 ? rest : rest.slice(0, n);
+      const notes = n < 0 ? '' : rest.slice(n);
+      // The basis sentence straight after the lead (the 'short' form: the refusal, and a gap's words where one follows), no note in it.
+      const head = ['Outage cushion only; no solar basis', 'No solar basis'].map((b) => ` ${b} (${refusedBy})`).find((h) => basis.startsWith(`${h}.`));
+      if (head == null) errs.push(`${c.label} ${mode}: no basis after the lead: ${body}`);
+      else if (!armedBody.includes(`${head}: `)) errs.push(`${c.label} ${mode}: not the armed push's basis: ${body}`);
+      if (head != null && basis !== `${head}.`) gapWords += 1;
+      // Every NOTE after it: the caps note first where the sizing fell short, then the line's.
+      const short = sizingShortOf(q);
+      if (short !== notes.startsWith(CAPS_NOTE)) errs.push(`${c.label} ${mode}: the caps note not first: ${body}`);
+      const own = short ? notes.slice(CAPS_NOTE.length) : notes;
+      const kind = own === '' ? '' : own.includes('nothing is armed to hold') ? 'U' : own.includes('nothing is armed to carry it') ? 'L' : '?';
+      if (kind === '?' || own.split(' NOTE: ').length > 2) errs.push(`${c.label} ${mode}: not one line note: ${body}`);
+      if (kind === 'U') {
+        // Named on the armed push's figure: "the X% line is the …" there, "tonight's X% floor+cushion line" here.
+        const named = /: the ([\d.]+)% line is the /.exec(armedBody)?.[1];
+        if (named == null || own !== tonight(named)) errs.push(`${c.label} ${mode}: armed ${named}: ${body}`);
+      }
+      const k = `${short ? 'C' : ''}${kind}` || 'none';
+      count[mode].plans += 1;
+      if (k in count[mode]) count[mode][k as keyof typeof PIN_RN9] += 1; else errs.push(`${c.label} ${mode}: ${k}`);
+    }
+  }
+  assert.deepEqual(errs.slice(0, 5), [], `${errs.length} errors`);
+  assert.deepEqual(count, { supervised: PIN_RN9, auto: PIN_RN9 });
+  assert.equal(gapWords, 2 * PIN_RN9_GAP, 'the basis carrying a gap\'s words before the notes');
 });

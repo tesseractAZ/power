@@ -552,20 +552,24 @@ export function buildNightChargeMessage(
   if (!supervised && armRefused) {
     const write = mode === 'auto' ? 'the write' : 'the supervised write';
     const refusedNote = capsNote + refusedEnvelopeNote(plan);
+    // ★★ v1.205.1 — a cushion-only plan's basis sentence comes straight after the lead and every NOTE after it, the caps note first,
+    // as its armed push orders them (cushionOnlyPushText before shortfallNote): a note never splits the lead from the basis it was
+    // refused on. '' basis on every other plan, so its body reads as before.
+    const refusedTail = cushionOnlyPushText(plan, 'short') + refusedNote;
     return held
       ? {
         ...base,
         title: 'Night-charge: planned reserve hold NOT armed tonight',
         body:
           `Tonight's plan holds the backup reserve at ${reserveText} overnight as a floor, with no charge expected, but ${write} `
-          + `was not armed — ${armRefused}. The add-on will not raise the reserve tonight.${refusedNote}${cushionOnlyPushText(plan, 'short')}`,
+          + `was not armed — ${armRefused}. The add-on will not raise the reserve tonight.${refusedTail}`,
       }
       : {
         ...base,
         title: 'Night-charge: planned charge NOT armed tonight',
         body:
           `Tonight's plan calls for a charge, but ${write} was not armed — ${armRefused}. `
-          + `The add-on will not charge tonight.${refusedNote}${cushionOnlyPushText(plan, 'short')}`,
+          + `The add-on will not charge tonight.${refusedTail}`,
       };
   }
   const overBuyNote = plan.bindingCap === 'overBuy'
@@ -1545,7 +1549,9 @@ function envelopeShortfallNote(plan: Pick<NightChargePlan, 'cushionShortfallCaus
  *  The card drops its line row under a refused arm (NightChargeCard). Every other plan: envelopeShortfallNote, as before.
  *  ★★★ v1.205.1 — and a plan with neither whose cushion asked for energy (requiredExtraKwh above 0) says once that nothing is armed to
  *  hold its floor+cushion line, named as its armed push names it (refusedCushionLineNote): the add-on will not charge, so nothing
- *  lifts the pool toward the line the cushion asked for. A plan whose cushion asked for nothing: unchanged. PURE. */
+ *  lifts the pool toward the line the cushion asked for. A plan whose cushion asked for nothing: unchanged. On a cushion-only plan
+ *  the figure is the one its armed push calls "the X% line", kept "floor+cushion line" here by design (refusedCushionLineNote), and
+ *  the note follows the basis sentence (buildNightChargeMessage's refused shapes). PURE. */
 function refusedEnvelopeNote(plan: Parameters<typeof envelopeShortfallNote>[0]
   & Pick<NightChargePlan, 'requiredExtraKwh' | 'cushionLineSocPct' | 'reserveFloorPct' | 'cushionPct'>): string {
   if (plan.forceChargeLine == null && envelopeShortfallNote(plan) === '' && plan.requiredExtraKwh != null && plan.requiredExtraKwh > 0) {
