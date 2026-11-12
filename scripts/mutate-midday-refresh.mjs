@@ -30,10 +30,12 @@
  *                             refresh: a reserve above the announced one is a cap, and is said so)
  *   Fix 3      R-xxix (a cap keeps the announced worst case: the entity, the shadow ledger and the live
  *                             refreshed_buy_kwh hold the figure the leg runs on)
- *   Not armed  N-i..N-x      (v1.205.1: a cycle the evening would not arm, shadowCycleRefusal, is never re-sized at 09:30 —
+ *   Not armed  N-i..N-xiv    (v1.205.1: a cycle the evening would not arm, shadowCycleRefusal, is never re-sized at 09:30 —
  *                             shadowRefreshDue 'notArmed', index.ts records notArmedRefresh first — and the record says so: no
  *                             push, the evening's figures, read back across a restart, the card's row not "due" in either write
- *                             mode (N-ix), the entity 'not-armed' from the evening, never 'pending' (N-x))
+ *                             mode (N-ix), the entity 'not-armed' from the evening, never 'pending' (N-x)); (round 3) its log
+ *                             line states no figures (N-xi) while every other disposition's keeps them (N-xiv), its reason
+ *                             never says the evening's figures stand (N-xii), and the card's row reads "none" (N-xiii)
  *
  *   node scripts/mutate-midday-refresh.mjs [--only <id prefix>]
  */
@@ -708,7 +710,7 @@ const MUTANTS = [
   {
     id: 'N-viii. ★★ the card shows a not-armed refresh as figures',
     file: CARD,
-    find: "        : r.disposition === 'not-armed' ? 'not armed'\n",
+    find: "        : r.disposition === 'not-armed' ? 'none'\n",
     to: '        /* MUTANT */\n',
     why: 'The card reads "not-armed, ~89.5%, ~34 kWh expected" as if a refresh had sized the leg.',
   },
@@ -725,6 +727,35 @@ const MUTANTS = [
     find: "(charges ? (shadowCycleRefusal(rec!) != null ? 'not-armed' : 'pending') : null)",
     to: "(charges ? 'pending' /* MUTANT */ : null)",
     why: 'From 21:30 to 09:30 midday_charge_refresh says a re-check is coming while the card says none will be made.',
+  },
+  /* ── v1.205.1 (round 3, F3): a not-armed cycle has no refresh and no charge, and its words never read as a plan that stands ── */
+  {
+    id: 'N-xi. ★★ the not-armed log line states the unarmed plan\'s figures as if they stood',
+    file: MS,
+    find: "  const figures = r.disposition === 'not-armed' ? ''",
+    to: "  const figures = (false as boolean) ? '' /* MUTANT */",
+    why: '"refresh — not-armed: … so there was nothing to refresh; level ~89.5%, reserve 50%, expected 34 kWh" reads as a charge that stands, for a cycle the add-on will not charge.',
+  },
+  {
+    id: 'N-xii. ★★ the not-armed reason says the evening\'s figures stand',
+    file: MS,
+    find: ", so there was nothing to refresh`,",
+    to: ", so there was nothing to refresh; the evening's figures stand`, /* MUTANT */",
+    why: 'The log line and the card\'s row say the plan of a cycle that was not armed stands.',
+  },
+  {
+    id: 'N-xiii. ★ the card\'s not-armed row says "not armed — the evening cycle would not arm"',
+    file: CARD,
+    find: "        : r.disposition === 'not-armed' ? 'none'\n",
+    to: "        : r.disposition === 'not-armed' ? 'not armed' /* MUTANT */\n",
+    why: 'The row says it twice over, where the row before the record reads "none".',
+  },
+  {
+    id: 'N-xiv. ★★ the stood and not-comparable log lines lose their figures too',
+    file: MS,
+    find: "  const figures = r.disposition === 'not-armed' ? ''",
+    to: "  const figures = !refreshResized(r) ? '' /* MUTANT */",
+    why: 'Every other disposition\'s log line is no longer v1.205.0\'s: a stood refresh no longer states the evening plan it stood on.',
   },
   {
     id: 'T-xxi. ★★★ a reserve cap is pushed as "calls for more" than a level it did not ask above',

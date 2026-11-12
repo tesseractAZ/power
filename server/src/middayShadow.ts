@@ -738,13 +738,16 @@ export function shadowCycleRefusal(rec: MiddayShadowRecord): string | null {
 
 /** ★★★ v1.205.1 — the refresh recorded for a cycle the evening would not arm (shadowRefreshDue 'notArmed'): nothing was armed, so
  *  nothing is re-sized, pushed or previewed — never "a live refresh would push this" or a "Lowered to" about a cycle whose 21:30
- *  words said the add-on will not charge. The evening's figures stand (as 'stood' keeps them), and the reason says why. PURE. */
+ *  words said the add-on will not charge. The record keeps the evening's figures (as 'stood' does: the ledger's shadow_refresh_*
+ *  columns and the entities read them, labelled by the disposition), but no word says they stand: they are the figures of a cycle
+ *  that was not armed, and no charge or refresh follows. The reason says only why there was nothing to refresh, and the log line
+ *  states no figures for it (middayShadowRefreshLogLine). PURE. */
 export function notArmedRefresh(rec: MiddayShadowRecord, nowMs: number): ShadowRefresh {
   const c = rec.cost!;
   return {
     atMs: nowMs, disposition: 'not-armed', levelPct: c.levelPct, reservePct: c.reservePct, buyKwh: c.buyKwh,
     expectedBuyKwh: c.expectedBuyKwh, wouldPush: false,
-    reason: `the evening cycle would not arm (${shadowCycleRefusal(rec) ?? 'the arm probe refused it'}), so there is nothing to refresh; the evening's figures stand`,
+    reason: `the evening cycle would not arm (${shadowCycleRefusal(rec) ?? 'the arm probe refused it'}), so there was nothing to refresh`,
   };
 }
 
@@ -950,11 +953,15 @@ export function middayShadowLogLines(rec: MiddayShadowRecord): string[] {
   return out;
 }
 
-/** The refresh's log line. PURE. */
+/** The refresh's log line. PURE. ★★ v1.205.1 — a 'not-armed' refresh states no figures: it re-sized nothing, and the figures its
+ *  record keeps are the unarmed evening plan's (the evening's own log line states them), which "level ~89.5%, reserve 50%,
+ *  expected 34 kWh" after the reason would read as a charge that stands. Every other disposition: as before, byte for byte. */
 export function middayShadowRefreshLogLine(rec: MiddayShadowRecord, r: ShadowRefresh): string {
   const age = r.weatherAgeS != null ? `; sized on weather ${Math.round(r.weatherAgeS / 60)} min old` : '';
-  return `${MIDDAY_SHADOW_LOG_TAG} ${rec.day} refresh — ${r.disposition}: ${r.reason}; level ~${pct(r.levelPct)}, reserve ${pct(r.reservePct)}, `
-    + `expected ${kwh(r.expectedBuyKwh)}${age}${r.wouldPush ? '; a live refresh would push this' : ''}. Shadow only: nothing is written or pushed.`;
+  const figures = r.disposition === 'not-armed' ? ''
+    : `; level ~${pct(r.levelPct)}, reserve ${pct(r.reservePct)}, expected ${kwh(r.expectedBuyKwh)}`;
+  return `${MIDDAY_SHADOW_LOG_TAG} ${rec.day} refresh — ${r.disposition}: ${r.reason}${figures}`
+    + `${age}${r.wouldPush ? '; a live refresh would push this' : ''}. Shadow only: nothing is written or pushed.`;
 }
 
 /* ── the words (R5): what the evening and the refresh would say — never sent ──────── */

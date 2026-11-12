@@ -816,8 +816,9 @@ export function middayShadowView(
     // 'not-comparable': the live overnight charge wrote to the panel, so no re-sized figures exist.
     const fig = r.disposition === 'cancelled' ? 'cancelled'
       : r.disposition === 'not-comparable' ? 'not comparable'
-        // v1.205.1 — 'not-armed': the evening cycle would not arm, so nothing was re-sized (the reason says so).
-        : r.disposition === 'not-armed' ? 'not armed'
+        // v1.205.1 — 'not-armed': the evening cycle would not arm, so no refresh was made: "none", as the row before it reads (the
+        // reason says why), never "not armed — the evening cycle would not arm" twice over, nor the unarmed plan's figures.
+        : r.disposition === 'not-armed' ? 'none'
           : [r.disposition, `~${fmtPct(r.levelPct)}`, fmtKwh(r.expectedBuyKwh)].filter(Boolean).join(', ');
     lines.push(`Morning refresh ${hhmm(r.atMs) ?? '—'}: ${fig} — ${r.reason}`);
   } else if (c.basisComplete && c.chargeTonight && s.mode != null && s.mode !== 'advisory' && !c.wouldArm) {

@@ -897,7 +897,9 @@ const refusedRecord = (o: Partial<MiddayShadowRecord> = {}): MiddayShadowRecord 
   const r = record(o);
   return { ...r, cost: { ...r.cost!, wouldArm: false, disposition: `would not arm — ${WHY_REFUSED}` } };
 };
-const NOT_ARMED_REASON = `the evening cycle would not arm (${WHY_REFUSED}), so there is nothing to refresh; the evening's figures stand`;
+/** (round 3, F3) The reason says why there was nothing to refresh, and no more: never that the evening's figures stand, of a cycle the
+ *  add-on will not charge. */
+const NOT_ARMED_REASON = `the evening cycle would not arm (${WHY_REFUSED}), so there was nothing to refresh`;
 /** v1.205.0's shadowRefreshDue, for the armed records it must still answer exactly. */
 const dueBefore = (rec: MiddayShadowRecord | null, nowMs: number): 'run' | 'stand' | null => {
   const c = rec?.cost;
@@ -934,7 +936,7 @@ test('★★★ RF-1 a refused cycle (the probe would not arm its cost leg, in a
   assert.equal(shadowCycleRefusal({ ...record(), cost: null }), null);
 });
 
-test('★★★ RF-2 the refused cycle\'s refresh is recorded, not silent: disposition "not-armed", the evening\'s figures, no push — the ledger, the entities, the log and the preview say so; never "a live refresh would push this" nor "Lowered to"', async () => {
+test('★★★ RF-2 the refused cycle\'s refresh is recorded, not silent: disposition "not-armed", no push — the ledger and the entities keep the evening\'s figures, the log line states none and no word says they stand (every other disposition\'s log line as before); never "a live refresh would push this" nor "Lowered to"', async () => {
   const r = refusedRecord();
   const at = phx(10, 15, 9, 30);
   const na = notArmedRefresh(r, at);
@@ -967,9 +969,20 @@ test('★★★ RF-2 the refused cycle\'s refresh is recorded, not silent: dispo
   }
   // A hold (nothing charges): no refresh to name, refused or not.
   assert.equal(middayChargeStateFields({ ...r, cost: { ...r.cost!, chargeTonight: false } }, phx(10, 14, 22)).midday_charge_refresh, null);
-  // The log line, word for word; no preview push.
-  assert.equal(middayShadowRefreshLogLine(rec, na), `${MIDDAY_SHADOW_LOG_TAG} ${DAY} refresh — not-armed: ${NOT_ARMED_REASON}; level ~89.5%, reserve 50%, `
-    + 'expected 34 kWh. Shadow only: nothing is written or pushed.');
+  // The log line, word for word; no preview push. (round 3, F3) No figures: the record keeps the unarmed evening plan's (the ledger and
+  // the entity above, labelled by the disposition), but "level ~89.5%, reserve 50%, expected 34 kWh" after the reason would read as a
+  // charge that stands, for a cycle the add-on will not charge; the evening's own log line states them.
+  assert.equal(middayShadowRefreshLogLine(rec, na), `${MIDDAY_SHADOW_LOG_TAG} ${DAY} refresh — not-armed: ${NOT_ARMED_REASON}. Shadow only: nothing is written or pushed.`);
+  assert.equal(NOT_ARMED_REASON, "the evening cycle would not arm (a prior night's reserve write is unresolved), so there was nothing to refresh");
+  for (const t of [na.reason, middayShadowRefreshLogLine(rec, na)]) assert.doesNotMatch(t, /stand|level ~|reserve \d|expected \d|89\.5|34 kWh/, t);
+  // Every other disposition's log line keeps its figures, byte for byte as v1.205.0 renders it (4f5fcdb8): 'stood' the evening's,
+  // 'not-comparable' none (dashes), a re-sized one its own.
+  const st = standingRefresh(r, phx(10, 15, 9, 55));
+  assert.equal(middayShadowRefreshLogLine({ ...r, refresh: st }, st), `${MIDDAY_SHADOW_LOG_TAG} ${DAY} refresh — stood: no refresh completed by 5 minutes before the window; `
+    + 'the evening plan stands; level ~89.5%, reserve 50%, expected 34 kWh. Shadow only: nothing is written or pushed.');
+  const ncr = notComparableRefresh(at);
+  assert.equal(middayShadowRefreshLogLine({ ...r, refresh: ncr }, ncr), `${MIDDAY_SHADOW_LOG_TAG} ${DAY} refresh — not-comparable: ${NOT_COMPARABLE_REASON}; `
+    + 'level ~—, reserve —, expected —. Shadow only: nothing is written or pushed.');
   assert.equal(middayShadowRefreshPreview(rec, na), null);
   assert.equal(middayShadowRefreshPreviewLogLine(rec, na), null);
   // The defect it replaces: the same record re-sized on the 09:30 pool would say a live refresh pushes "Lowered to …" about a
@@ -1004,7 +1017,7 @@ test('★★★ RF-3 the record across a restart: a refused cycle\'s "not-armed"
   assert.equal(coerceMiddayShadowRecord(JSON.parse(JSON.stringify({ ...record(), refresh: { ...standingRefresh(record(), at), disposition: 'not-sure' } })))!.refresh, null);
 });
 
-test('★★ RF-4 the card\'s "Morning refresh" row: a refused cycle is not "due" a refresh, and once recorded reads "not armed" with the reason; an armed or advisory cycle reads as before', () => {
+test('★★ RF-4 the card\'s "Morning refresh" row: a refused cycle is not "due" a refresh, and once recorded reads "none" with the reason (never "not armed — … would not arm", never figures that stand); an armed or advisory cycle reads as before', () => {
   const hhmm = (ms: number): string => {
     const d = new Date(ms - 7 * H);
     return `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`;
@@ -1016,7 +1029,11 @@ test('★★ RF-4 the card\'s "Morning refresh" row: a refused cycle is not "due
     const r = refusedRecord({ mode });
     assert.equal(shadowRefreshDue(r, phx(10, 15, 9, 30)), 'notArmed', mode);
     assert.equal(view(r)[2], 'Morning refresh: none — the evening cycle would not arm, so there is nothing to refresh', mode);
-    assert.equal(view({ ...r, refresh: notArmedRefresh(r, phx(10, 15, 9, 30)) })[2], `Morning refresh 09:30: not armed — ${NOT_ARMED_REASON}`, mode);
+    // (round 3, F3) Once recorded, "none" as before it — never "not armed — the evening cycle would not arm" twice over, nor the
+    // evening's figures said to stand.
+    const after = view({ ...r, refresh: notArmedRefresh(r, phx(10, 15, 9, 30)) })[2];
+    assert.equal(after, `Morning refresh 09:30: none — the evening cycle would not arm (${WHY_REFUSED}), so there was nothing to refresh`, mode);
+    assert.doesNotMatch(after, /not armed|stand|89\.5|34 kWh/, mode);
   }
   const r = refusedRecord();
   assert.equal(view(record())[2], 'Morning refresh: due 30 minutes before 10:00');
