@@ -1,6 +1,6 @@
 {
   "capturedAt": "d42b556",
-  "_amended": "v1.196.0 — the evening entries regenerated, deliberately: a resilience night writes its cushion line asked to the whole percent above it (32% on this fixture's 31.1% line) where it wrote 50%, so the reserve-only charges, the reserve hold and its refusal read 32% (setpointOneTest.test.ts); the case 'charge, reserve only, window-bound (toward)' was added to keep a reserve-only 'toward' shape; the 'no plan tonight' push names what refused the plan, and a null plan says the panel's pool readings are unavailable (noPlanReason.test.ts). Every other evening entry, and the summary, revertDeadline and missedApply sections, are the words captured at d42b556. v1.203.0 — the evening entries whose resilience night writes its line regenerated, deliberately: the panel holds the pool one point under a reserve it charged up to, so the 31.1% line is written at its whole percent and one point more, 33% (was 32%), and the expected draw to it rises (~10 → ~11 kWh); 6 entries move by those figures alone. Every other entry is as before.",
+  "_amended": "v1.196.0 — the evening entries regenerated, deliberately: a resilience night writes its cushion line asked to the whole percent above it (32% on this fixture's 31.1% line) where it wrote 50%, so the reserve-only charges, the reserve hold and its refusal read 32% (setpointOneTest.test.ts); the case 'charge, reserve only, window-bound (toward)' was added to keep a reserve-only 'toward' shape; the 'no plan tonight' push names what refused the plan, and a null plan says the panel's pool readings are unavailable (noPlanReason.test.ts). Every other evening entry, and the summary, revertDeadline and missedApply sections, are the words captured at d42b556. v1.203.0 — the evening entries whose resilience night writes its line regenerated, deliberately: the panel holds the pool one point under a reserve it charged up to, so the 31.1% line is written at its whole percent and one point more, 33% (was 32%), and the expected draw to it rises (~10 → ~11 kWh); 6 entries move by those figures alone. Every other entry is as before. v1.205.1 — the three refused evening entries regenerated, deliberately: a refused night with no line force-charge whose cushion asked for energy says once that nothing is armed to hold its floor+cushion line (\"NOTE: nothing is armed to hold tonight's 31.1% floor+cushion line — residual risk remains.\", refusedNotes.test.ts); the note is appended to each and nothing else moves. Every armed entry is as before.",
   "evening": [
     {
       "name": "charge, force-charge riding (10-12)",
@@ -165,7 +165,7 @@
         "severity": "info",
         "dedupId": "night_charge_plan",
         "title": "Night-charge: planned charge NOT armed tonight",
-        "body": "Tonight's plan calls for a charge, but the supervised write was not armed — a prior night's reserve write is unresolved. The add-on will not charge tonight."
+        "body": "Tonight's plan calls for a charge, but the supervised write was not armed — a prior night's reserve write is unresolved. The add-on will not charge tonight. NOTE: nothing is armed to hold tonight's 31.1% floor+cushion line — residual risk remains."
       },
       "spoken": null
     },
@@ -175,7 +175,7 @@
         "severity": "info",
         "dedupId": "night_charge_plan",
         "title": "Night-charge: planned charge NOT armed tonight",
-        "body": "Tonight's plan calls for a charge, but the write was not armed — a prior night's reserve write is unresolved. The add-on will not charge tonight."
+        "body": "Tonight's plan calls for a charge, but the write was not armed — a prior night's reserve write is unresolved. The add-on will not charge tonight. NOTE: nothing is armed to hold tonight's 31.1% floor+cushion line — residual risk remains."
       },
       "spoken": null
     },
@@ -185,7 +185,7 @@
         "severity": "info",
         "dedupId": "night_charge_plan",
         "title": "Night-charge: planned reserve hold NOT armed tonight",
-        "body": "Tonight's plan holds the backup reserve at 33% overnight as a floor, with no charge expected, but the supervised write was not armed — the reserve reads 0%. The add-on will not raise the reserve tonight."
+        "body": "Tonight's plan holds the backup reserve at 33% overnight as a floor, with no charge expected, but the supervised write was not armed — the reserve reads 0%. The add-on will not raise the reserve tonight. NOTE: nothing is armed to hold tonight's 31.1% floor+cushion line — residual risk remains."
       },
       "spoken": null
     },

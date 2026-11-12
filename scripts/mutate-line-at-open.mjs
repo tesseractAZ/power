@@ -22,6 +22,27 @@
  * "Worst-case arrival" names no reserve set under a refused arm (NightChargeCard.tsx). AOA-28. (review) In auto mode too (AOA-27f), a
  * plan with no line force-charge keeping its envelope note (AOA-27g), the force-charge's line where the plan carries no line figure
  * (AOA-27h), and the caps note first (AOA-27i, AOA-27j), on the mid-day push too (AOA-27k).
+ * (G) v1.205.1: a refused night with NO line force-charge whose cushion asked for energy (requiredExtraKwh above 0) and that carries
+ * no envelope note says once that nothing is armed to hold its floor+cushion line, named as its armed push names it (notify.ts
+ * refusedEnvelopeNote, chargeText.ts refusedCushionLineNote), the caps note first; the mid-day refused push says it of the leg
+ * ("this leg's"), before the backup leg's note, through the leg's record (middayShadow.ts ShadowLegSummary.cushionAskedLinePct:
+ * summariseLeg, middayShadowAnnounceInput); never on an armed render. AOA-29 (b, d..j, l, m). Already held by v1.205.0's tests,
+ * so not listed: the envelope note beside or replaced by this one (AO-15b pins the lead and the envelope note end to end), and
+ * the restore dropping the line (middayShadow.test.ts's round-trip of a sized evening).
+ * (H) v1.205.1: the mid-day push's "no force-charge carries it on <leg>" note is worded by the named leg's own line (chargeText.ts
+ * notCarried, lineOverReserveText; MiddayBackupText.linePct and a no-ask MiddayCostText.linePct from the record through
+ * middayShadowAnnounceInput), as the overnight envelope note is: a line in (49, 50] is above the 49% the panel holds; so too the
+ * shadow's backup log line. AOA-30 (a..e).
+ * (I) v1.205.1 (review): each leg's note by its OWN line — a cost leg's "on this leg" never by the backup leg's line (AOA-30f), a
+ * backup leg with no figure (a v1.205.0 record) never by the cost leg's (AOA-30g); a line of exactly 49.00 in the 49% form, as
+ * lineOverReserveText words every line at or below 50 (AOA-30j); the armed mid-day renders the year over, line gate off and with
+ * the night's backup leg, byte-identical to v1.205.0 but for that correction (refusedNotesArmedYear.test.ts: AOA-30h, AOA-30i,
+ * AOA-30k); and every envelope cause of a refused cost leg, 'envelope+caps' too, keeps the unheld-line note off it (AOA-29n).
+ * (J) v1.205.1 (round 3): a refused CUSHION-ONLY night (the plant's live shape, the Cores dark) states its basis sentence straight
+ * after the lead and every NOTE after it, the caps note first, as its armed push orders them (notify.ts refusedTail: AOA-31,
+ * AOA-31b); its note keeps "floor+cushion line", since the refused push's short basis does not define the armed push's "the 33.3%
+ * line" (AOA-31c); the panel's refusal stays in that basis, before every NOTE (AOA-31d, AOA-31e). refusedNotes.test.ts RN-9:
+ * 2026-10-12 word for word, the dark year counted; RN-10: the same night with the panel's readings refused.
  *
  *   node scripts/mutate-line-at-open.mjs [--only <id prefix>]
  *
@@ -48,6 +69,8 @@ const T_MPW = 'test/measuredPlannerWalks.test.ts';
 const T_YEAR = 'test/lineForceChargeYear.test.ts';
 const T_LINE = 'test/lineForceCharge.test.ts';
 const T_WALK = 'test/lineStandingWalk.test.ts';
+const T_RN = 'test/refusedNotes.test.ts';
+const T_RNY = 'test/refusedNotesArmedYear.test.ts';
 
 const LATE = "  const lineLateStart = lineArmed && chargeTonight && !lineNearFull && !cushionShortfall && !lineCloseUnder\n    && expected.assuredClosePct !== undefined && !lineWalkHolds(expected.assuredClosePct, cushionLineSocPct);";
 const VERIFIED = '  const lineOnVerifiedBy = inputs.armedLineOnVerifiedAtMs != null && Number.isFinite(inputs.armedLineOnVerifiedAtMs)\n    && inputs.armedLineOnVerifiedAtMs >= windowStart && inputs.armedLineOnVerifiedAtMs <= nowMs;';
@@ -55,6 +78,10 @@ const SWEEP = '    const close = expectedBuyFromPlan({ ...o, onNotBeforeMs: m, d
 const MINUTES = '  if (startMs != null && startMs <= untilMs) for (let m = fromMs + EXPECTED_JIT_STEP_MS; m <= untilMs; m += EXPECTED_JIT_STEP_MS) minutes.push(m);';
 const LINE_WALK_DEFER = "    acceptKw: o.window.acceptKw ?? null, noReOn: o.noReOn, runOn: o.runOn, standbyW: o.window.standbyW,\n    ...(o.onNotBeforeMs != null ? { onNotBeforeMs: o.onNotBeforeMs } : {}),";
 const CLOSE_FIELD = '  const closeAfterStopField = lineArmed && lineCloseAfterStopPct != null && (!lineWalkHolds(lineCloseAfterStopPct, cushionLineSocPct) || lineLateStart)';
+// v1.205.1 (G) — the refused non-line notes' anchors.
+const RN_GATE = "  if (plan.forceChargeLine == null && envelopeShortfallNote(plan) === '' && plan.requiredExtraKwh != null && plan.requiredExtraKwh > 0) {";
+const RN_MID = '  const unheldCushion = i.refused != null && c.lineAskPct == null && c.cushionShortfallCause == null && c.cushionAskedLinePct != null';
+const RN_SUM = '    ...(p != null && p.requiredExtraKwh != null && p.requiredExtraKwh > 0 && fin(floorCushionLinePct(p)) != null';
 const COST_ARM = "  return eligible + (lineNotHeldOf(plan) === 'lateStart' ? lateStartArmTail(plan?.expectedCloseAfterStopPct, plan?.cushionLateStartAtOpen) : '');";
 
 const MUTANTS = [
@@ -529,6 +556,206 @@ const MUTANTS = [
     find: "because ${i.refused}` : ''}.${shortNote}`,",
     to: "because ${i.refused}` : ''}.${shortNote.replace(' NOTE: charge/pool limits prevent fully meeting the cushion — residual risk remains.', '') /* MUTANT */}`,",
     why: '2026-10-13 21:30 on nameplate, 13 h, refused mid-day: silent that charge/pool limits prevent fully meeting the cushion, which its overnight push says (1,067 of the year\'s 4,094 refused line legs).',
+  },
+  /* ── G: v1.205.1 — a refused night with no line force-charge ── */
+  {
+    id: 'AOA-29. ★★★ the refused 21:30 push says nothing of a non-line night\'s floor+cushion line',
+    file: NTF, tests: [T_RN],
+    find: RN_GATE,
+    to: RN_GATE.replace('  if (', '  if ((false as boolean) && /* MUTANT */ '),
+    why: '2026-10-13 21:30 on nameplate, 4 h, refused: "The add-on will not charge tonight." and nothing of the 31.3% line its cushion asked 15.19 kWh for (3,711 charge-shape and 1,128 hold-shape pushes per write mode).',
+  },
+  {
+    id: 'AOA-29b. ★★ the note on a refused plan whose cushion asked for nothing',
+    file: NTF, tests: [T_RN],
+    find: RN_GATE,
+    to: "  if (plan.forceChargeLine == null && envelopeShortfallNote(plan) === '') { /* MUTANT */",
+    why: 'A night the cushion needs nothing from (a cost-only buy, 727 refused plans) reads as an unheld cushion: residual risk where there is none.',
+  },
+  {
+    id: 'AOA-29d. ★★ the note names the line to the whole percent, not as the armed push does',
+    file: CTX, tests: [T_RN],
+    find: "  const n = linePct != null && Number.isFinite(linePct) ? `${Math.round(linePct * 10) / 10}% ` : '';",
+    to: "  const n = linePct != null && Number.isFinite(linePct) ? `${Math.round(linePct)}% ` : ''; /* MUTANT */",
+    why: '"tonight\'s 31% floor+cushion line" beside an armed push that names it 31.3%.',
+  },
+  {
+    id: 'AOA-29e. ★★★ the refused mid-day push says nothing of the leg\'s floor+cushion line',
+    file: CTX, tests: [T_RN],
+    find: RN_MID,
+    to: RN_MID.replace('= i.refused != null', '= (false as boolean) /* MUTANT */ && i.refused != null'),
+    why: 'The mid-day cycle refused ("The add-on will not charge tomorrow.") is silent on the line its cushion asked for, which its overnight push names.',
+  },
+  {
+    id: 'AOA-29f. ★★★ the note on an ARMED mid-day push',
+    file: CTX, tests: [T_RN],
+    find: RN_MID,
+    to: RN_MID.replace('= i.refused != null && ', '= /* MUTANT */ '),
+    why: 'An armed cycle\'s push says nothing is armed to hold the line its write is armed for.',
+  },
+  {
+    id: 'AOA-29g. ★★ the mid-day note beside the leg\'s own envelope note',
+    file: CTX, tests: [T_RN],
+    find: RN_MID,
+    to: RN_MID.replace(' && c.cushionShortfallCause == null', ' /* MUTANT */'),
+    why: 'Two notes for one leg: "no force-charge carries it on this leg" and "nothing is armed to hold this leg\'s line".',
+  },
+  {
+    id: 'AOA-29h. ★★ the mid-day leg\'s note after the backup leg\'s',
+    file: CTX, tests: [T_RN],
+    find: "      : unheldCushion + (c.cushionShortfallCause != null || i.backup?.cushionShortfallCause != null\n        ? notCarried(c.cushionShortfallCause != null ? 'this leg' : 'the backup leg') : ''));",
+    to: "      : (c.cushionShortfallCause != null || i.backup?.cushionShortfallCause != null\n        ? notCarried(c.cushionShortfallCause != null ? 'this leg' : 'the backup leg') : '') + unheldCushion); /* MUTANT */",
+    why: 'The cost leg\'s note after the backup leg\'s, where an armed leg\'s note comes first.',
+  },
+  {
+    id: 'AOA-29i. ★★★ the record drops the line the leg\'s cushion asked for',
+    file: MSH, tests: [T_RN],
+    find: RN_SUM,
+    to: RN_SUM.replace('...(p != null', '...((false as boolean) /* MUTANT */ && p != null'),
+    why: 'Every refused mid-day push reads as v1.205.0\'s: the record never carries the line.',
+  },
+  {
+    id: 'AOA-29j. ★★ the record carries a line where the cushion asked for nothing',
+    file: MSH, tests: [T_RN],
+    find: RN_SUM,
+    to: '    ...(p != null && fin(floorCushionLinePct(p)) != null /* MUTANT */',
+    why: 'A refused cost-only leg says nothing is armed to hold a line its cushion did not ask for.',
+  },
+  {
+    id: 'AOA-29l. ★★ the evening input drops the line',
+    file: MSH, tests: [T_RN],
+    find: '      ...(c.cushionAskedLinePct != null ? { cushionAskedLinePct: c.cushionAskedLinePct } : {}),',
+    to: '      /* MUTANT */',
+    why: 'The record carries the line and the push never reads it.',
+  },
+  {
+    id: 'AOA-29m. ★★ the refused 21:30 note names the leg, not tonight',
+    file: NTF, tests: [T_RN],
+    find: '    return refusedCushionLineNote("tonight\'s", floorCushionLinePct(plan));',
+    to: '    return refusedCushionLineNote("this leg\'s", floorCushionLinePct(plan)); /* MUTANT */',
+    why: 'The overnight push names a leg it does not have.',
+  },
+  /* ── H: v1.205.1 — the mid-day note worded by the named leg's line ── */
+  {
+    id: 'AOA-30. ★★★ the mid-day "no force-charge carries it" note in the 50% form whatever the leg\'s line',
+    file: CTX, tests: [T_RN],
+    find: "lineOverReserveText((which === 'this leg' ? c.linePct : i.backup?.linePct) ?? Infinity, 'accepts')",
+    to: "lineOverReserveText(Infinity /* MUTANT */, 'accepts')",
+    why: 'A backup leg sized on a 49.99% line (2026-11-27 21:30 at ×0.944, 16 h): "above the 50% the panel accepts as a reserve" in a push whose cost leg, and whose overnight push, name the 49% the panel holds.',
+  },
+  {
+    id: 'AOA-30b. ★★ the backup leg\'s note worded by the cost leg\'s line',
+    file: CTX, tests: [T_RN],
+    find: "lineOverReserveText((which === 'this leg' ? c.linePct : i.backup?.linePct) ?? Infinity, 'accepts')",
+    to: "lineOverReserveText(c.linePct /* MUTANT */ ?? Infinity, 'accepts')",
+    why: 'Two legs, two lines: the backup leg\'s 49.99% line worded by a cost leg that carries none (the 50% form), or the reverse.',
+  },
+  {
+    id: 'AOA-30c. ★★ the evening input drops the backup leg\'s line',
+    file: MSH, tests: [T_RN],
+    find: '      ...(b.cushionShortfallCause != null && b.cushionLineSocPct != null ? { linePct: b.cushionLineSocPct } : {}),',
+    to: '      /* MUTANT */',
+    why: 'The record carries the backup leg\'s 49.99% line and the shadow\'s preview names the 50% form.',
+  },
+  {
+    id: 'AOA-30d. ★★ the evening input drops a no-ask cost leg\'s line',
+    file: MSH, tests: [T_RN],
+    find: '      ...(c.lineAskPct == null && c.cushionShortfallCause != null && c.cushionLineSocPct != null ? { linePct: c.cushionLineSocPct } : {}),',
+    to: '      /* MUTANT */',
+    why: 'A cost leg on a 49.99% line no force-charge carries (advisory) is pushed "above the 50% the panel accepts as a reserve".',
+  },
+  {
+    id: 'AOA-30e. ★★ the shadow\'s backup log line names a (49, 50] line above the 50%',
+    file: MSH, tests: [T_RN],
+    find: "lineOverReserveText(b.cushionLineSocPct ?? Infinity, 'accepts')",
+    to: "lineOverReserveText(Infinity /* MUTANT */, 'accepts')",
+    why: 'The evening log says the 49.99% line is above the 50% the panel accepts, beside a preview push that names the 49% it holds.',
+  },
+  /* ── I: v1.205.1 (review) — each leg by its own line; the armed renders the year over ── */
+  {
+    id: 'AOA-29n. ★★ the mid-day unheld-line note beside a leg\'s own \'envelope+caps\' note',
+    file: CTX, tests: [T_RN],
+    find: RN_MID,
+    to: RN_MID.replace('c.cushionShortfallCause == null', "c.cushionShortfallCause !== 'envelope' /* MUTANT */"),
+    why: 'A refused leg whose envelope comes with the caps reads the caps note, "nothing is armed to hold this leg\'s …% floor+cushion line" and "no force-charge carries it on this leg": two line notes for one leg.',
+  },
+  {
+    id: 'AOA-30f. ★★ the cost leg\'s "on this leg" note worded by the backup leg\'s line',
+    file: CTX, tests: [T_RN],
+    find: "lineOverReserveText((which === 'this leg' ? c.linePct : i.backup?.linePct) ?? Infinity, 'accepts')",
+    to: "lineOverReserveText((which === 'this leg' ? i.backup?.linePct ?? c.linePct /* MUTANT */ : i.backup?.linePct) ?? Infinity, 'accepts')",
+    why: 'A cost leg on a 59.43% line (2027-04-09 21:30 at ×0.944, 7 h, advisory) beside a 49.99% backup leg is pushed "above the 49% the panel holds the pool at": a level its line is not under.',
+  },
+  {
+    id: 'AOA-30g. ★★ a backup leg with no line figure worded by the cost leg\'s line',
+    file: CTX, tests: [T_RN],
+    find: "lineOverReserveText((which === 'this leg' ? c.linePct : i.backup?.linePct) ?? Infinity, 'accepts')",
+    to: "lineOverReserveText((which === 'this leg' ? c.linePct : i.backup?.linePct ?? c.linePct /* MUTANT */) ?? Infinity, 'accepts')",
+    why: 'A v1.205.0 record (no backup figure) beside the 49.99% line ask of 2026-11-27 21:30 at ×0.944, 16 h no longer renders as it did: the backup leg takes the cost leg\'s 49% form.',
+  },
+  {
+    id: 'AOA-30j. ★★ a line of exactly 49.00 named above the 50% the panel accepts',
+    file: CTX, tests: [T_RN, T_RNY],
+    find: "lineOverReserveText((which === 'this leg' ? c.linePct : i.backup?.linePct) ?? Infinity, 'accepts')",
+    to: "lineOverReserveText(((l: number | undefined): number => (l != null && l > 49 ? l : Infinity))(which === 'this leg' ? c.linePct : i.backup?.linePct) /* MUTANT */, 'accepts')",
+    why: '2027-08-31 21:30 at ×0.944, 7 h, line gate off: the mid-day push names its 49.00% line above the 50% the panel accepts, where that night\'s overnight push names the 49% the panel holds.',
+  },
+  {
+    id: 'AOA-30h. ★★ the backup log line words a line in (50, 51) as one at or below 50',
+    file: MSH, tests: [T_RNY],
+    find: "lineOverReserveText(b.cushionLineSocPct ?? Infinity, 'accepts')",
+    to: "lineOverReserveText(Math.floor(b.cushionLineSocPct ?? Infinity) /* MUTANT */, 'accepts')",
+    why: 'The backup leg of 2026-10-13 21:30 on nameplate, 9 h (a 50.42% line, armed) is logged "above the 49% the panel holds the pool at": an armed render v1.205.0 rendered in the 50% form, outside the corrected set (828 records the year over).',
+  },
+  {
+    id: 'AOA-30i. ★★ the backup leg\'s note dropped beside a line ask when its envelope comes with the caps',
+    file: CTX, tests: [T_RNY],
+    find: "      ? armedNote(c) + (i.backup?.cushionShortfallCause != null ? notCarried('the backup leg') : '')",
+    to: "      ? armedNote(c) + (i.backup?.cushionShortfallCause === 'envelope' /* MUTANT */ ? notCarried('the backup leg') : '')",
+    why: '2026-10-13 21:30 on nameplate, 13 h: the armed line-ask push beside the night\'s \'envelope+caps\' backup leg (a 65.71% line) is silent that no force-charge carries the backup leg\'s line.',
+  },
+  {
+    id: 'AOA-30k. ★★ the backup log line silent on an \'envelope+caps\' backup leg',
+    file: MSH, tests: [T_RNY],
+    find: "      + `${b.cushionShortfallCause != null ? `; the line is above",
+    to: "      + `${b.cushionShortfallCause === 'envelope' /* MUTANT */ ? `; the line is above",
+    why: 'The evening log of a backup leg whose envelope comes with the caps (2026-11-25 21:30 on nameplate, 11 h) no longer says its line is above what the reserve write holds.',
+  },
+  /* ── (J) v1.205.1 (round 3, F5): the refused cushion-only night — the note's place and its name ── */
+  {
+    id: 'AOA-31. ★★ the refused cushion-only push puts its notes between the lead and the basis',
+    file: NTF, tests: [T_RN],
+    find: "    const refusedTail = cushionOnlyPushText(plan, 'short') + refusedNote;",
+    to: "    const refusedTail = refusedNote + cushionOnlyPushText(plan, 'short'); /* MUTANT */",
+    why: 'The 2026-10-12 dark-plant refusal reads "… will not raise the reserve tonight. NOTE: nothing is armed to hold … Outage cushion only; no solar basis (…)." — the basis split from its lead, in the reverse of the armed push\'s order.',
+  },
+  {
+    id: 'AOA-31b. ★★ the refused cushion-only push puts the caps note before the basis',
+    file: NTF, tests: [T_RN],
+    find: "    const refusedTail = cushionOnlyPushText(plan, 'short') + refusedNote;",
+    to: "    const refusedTail = capsNote + cushionOnlyPushText(plan, 'short') + refusedEnvelopeNote(plan); /* MUTANT */",
+    why: 'A dark night the charge rate cannot carry reads the caps note before the basis and its unheld line after it, where the armed push states both notes after the basis.',
+  },
+  {
+    id: 'AOA-31c. ★★ the cushion-only note names "tonight\'s 33.3% line", which the refused push never defines',
+    file: NTF, tests: [T_RN],
+    find: '    return refusedCushionLineNote("tonight\'s", floorCushionLinePct(plan));',
+    to: "    return refusedCushionLineNote(\"tonight's\", floorCushionLinePct(plan)).replace((plan as NightChargePlan).cushionOnly != null ? ' floor+cushion line' : '\\u0000', ' line'); /* MUTANT */",
+    why: 'The armed push defines "the 33.3% line" as the reserve floor plus the cushion\'s hours; the refused push\'s short basis sentence does not, so the line the note names is undefined.',
+  },
+  {
+    id: 'AOA-31d. ★★ the refused cushion-only push drops why the panel\'s readings were not used',
+    file: NTF, tests: [T_RN],
+    find: "    const refusedTail = cushionOnlyPushText(plan, 'short') + refusedNote;",
+    to: "    const refusedTail = cushionOnlyPushText(plan, 'short').replace(/ Panel solar not used: .*$/, '') + refusedNote; /* MUTANT */",
+    why: 'A dark night whose 7-day balance refused the panel\'s readings no longer says, once refused, why the panel\'s solar is not used — the armed push says it.',
+  },
+  {
+    id: 'AOA-31e. ★★ the refused cushion-only push states the panel\'s refusal after its notes',
+    file: NTF, tests: [T_RN],
+    find: "    const refusedTail = cushionOnlyPushText(plan, 'short') + refusedNote;",
+    to: "    const refusedTail = cushionOnlyPushText(plan, 'short').replace(panelRefusedPushText(plan), '') + refusedNote + panelRefusedPushText(plan); /* MUTANT */",
+    why: 'The panel\'s refusal, part of the basis the armed push states before every NOTE, follows the unheld line\'s note once refused.',
   },
   {
     id: 'AOA-28. ★★★ the card names the reserve set under a refused arm',

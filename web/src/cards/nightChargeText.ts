@@ -752,6 +752,9 @@ export interface MiddayShadowLeg {
 /** The mid-day cycle computed in shadow (server: middayShadow.ts MiddayShadowRecord). */
 export interface MiddayShadowStatus {
   day: string;
+  /** v1.205.1 — the configured write mode the record was computed in ('advisory' arms nothing); with the cost leg's verdict, whether
+   *  the cycle is refused (the server's shadowCycleRefusal). Absent ⇒ read as not refused. */
+  mode?: string;
   backup: MiddayShadowLeg | null;
   cost: MiddayShadowLeg | null;
   refresh: {
@@ -813,8 +816,14 @@ export function middayShadowView(
     // 'not-comparable': the live overnight charge wrote to the panel, so no re-sized figures exist.
     const fig = r.disposition === 'cancelled' ? 'cancelled'
       : r.disposition === 'not-comparable' ? 'not comparable'
-        : [r.disposition, `~${fmtPct(r.levelPct)}`, fmtKwh(r.expectedBuyKwh)].filter(Boolean).join(', ');
+        // v1.205.1 — 'not-armed': the evening cycle would not arm, so no refresh was made: "none", as the row before it reads (the
+        // reason says why), never "not armed — the evening cycle would not arm" twice over, nor the unarmed plan's figures.
+        : r.disposition === 'not-armed' ? 'none'
+          : [r.disposition, `~${fmtPct(r.levelPct)}`, fmtKwh(r.expectedBuyKwh)].filter(Boolean).join(', ');
     lines.push(`Morning refresh ${hhmm(r.atMs) ?? '—'}: ${fig} — ${r.reason}`);
+  } else if (c.basisComplete && c.chargeTonight && s.mode != null && s.mode !== 'advisory' && !c.wouldArm) {
+    // v1.205.1 — a cycle the evening would not arm (the server's shadowCycleRefusal) gets no re-sizing: none is "due".
+    lines.push('Morning refresh: none — the evening cycle would not arm, so there is nothing to refresh');
   } else if (c.basisComplete && c.chargeTonight) {
     lines.push(`Morning refresh: due 30 minutes before ${hhmm(c.windowStartMs) ?? 'the open'}`);
   }

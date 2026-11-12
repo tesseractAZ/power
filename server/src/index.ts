@@ -330,7 +330,7 @@ import {
 } from './morningRefresh.js';
 import {
   runMiddayShadowEvening, shadowCycleConfig, shadowRefreshDue, standingRefresh, refreshFromSized, refreshSizing,
-  liveOvernightWrote, notComparableRefresh,
+  liveOvernightWrote, notComparableRefresh, notArmedRefresh,
   middayShadowLedgerColumns, middayShadowRefreshLedgerColumns, middayShadowLogLines, middayShadowRefreshLogLine,
   coerceMiddayShadowRecord, getMiddayShadow, setMiddayShadow, middayChargeStateFields, shadowServed, windowP50Kwh, MIDDAY_SHADOW_LOG_TAG,
   heldImportEstimate, heldSpan, type HeldImport,
@@ -5818,9 +5818,12 @@ async function runMiddayShadowTickInner(nowMs: number): Promise<void> {
   // nothing is armed; it records what the live refresh would have done. Not when the live overnight
   // leg of the same evening wrote to the panel (liveOvernightWrote): the 09:30 pool it would size on
   // is not the one a mid-day cycle would have had, and the refresh is recorded as not comparable.
+  // ★★★ v1.205.1 — and never on a cycle the evening would not arm (shadowRefreshDue 'notArmed'): nothing was armed, so nothing is
+  // re-sized, previewed or said to be pushed; the refresh is recorded so (notArmedRefresh), whatever the live overnight leg did.
   const due = shadowRefreshDue(cur, nowMs);
   if (cur == null || due == null) return;
-  let refresh = liveOvernightWrote(cur, nightActuationMem) ? notComparableRefresh(nowMs)
+  let refresh = due === 'notArmed' ? notArmedRefresh(cur, nowMs)
+    : liveOvernightWrote(cur, nightActuationMem) ? notComparableRefresh(nowMs)
     : due === 'stand' ? standingRefresh(cur, nowMs) : null;
   if (refresh == null) {
     const sizing = refreshSizing(model, cur, cfg, homeChgMaxSocPcts());

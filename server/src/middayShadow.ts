@@ -36,10 +36,13 @@ import { saturationThresholdPct, meanChargeCeilingPct, surplusSpanEndMs } from '
 import {
   chargeIsWindowBound, chargeLevelPct, statedBuyKwh, lineNotHeldOf, type NightChargePlan, type WindowSpec, type MiddayReserveBasis,
   type LineNotHeld,
+  // v1.205.1 — the floor+cushion line a leg's cushion asked for, as the overnight push names it.
+  floorCushionLinePct,
 } from './nightChargeAdvisor.js';
-import { APPLY_LEAD_MS, clampReserveTarget, MAX_SPOKEN_ADVISORY_CHARS, RESERVE_WRITE_MAX_PCT, revertDueMs, type NightChargeMode } from './nightChargeActuator.js';
+import { APPLY_LEAD_MS, clampReserveTarget, MAX_SPOKEN_ADVISORY_CHARS, revertDueMs, type NightChargeMode } from './nightChargeActuator.js';
 import { eveningAnnouncement } from './chargeAnnounce.js';
-import { buildMiddayRefreshMessage, type MiddayAnnounceInput } from './chargeText.js';
+// v1.205.1 — the level a leg's outage line is above, in the overnight words (nightForceCharge.lineOverReserveText, through chargeText).
+import { buildMiddayRefreshMessage, lineOverReserveText, type MiddayAnnounceInput } from './chargeText.js';
 import type { NotifyMessage } from './notify.js';
 import { rateAt, type TariffModel } from './tariff.js';
 import type { NightLedgerRow } from './recorder.js';
@@ -328,14 +331,19 @@ export interface ShadowLegSummary {
   /** v1.192.0 — the house energy its hold sends to the grid, and the bill effect (heldImportEstimate);
    *  null when it writes nothing or the band does not cover the hold. Absent on an older record. */
   heldImport?: HeldImport | null;
+  /** ★★★ v1.205.1 — the leg's floor+cushion line (floorCushionLinePct, the line the overnight push names) where its cushion asked
+   *  for energy (plan.requiredExtraKwh above 0): the line a refused cycle's push says nothing is armed to hold. Absent where the
+   *  cushion asked for none, and on a record from before v1.205.1 (whose push then reads as before). */
+  cushionAskedLinePct?: number;
 }
 
 /** What the morning refresh decided (refreshLeg). */
 export type RefreshDisposition = 'unchanged' | 'lowered' | 'capped' | 'cancelled' | 'stood';
 /** What the SHADOW refresh recorded: refreshLeg's decision, or that it was not made —
  *  'not-comparable' when the live overnight leg of the same evening wrote to the panel
- *  (liveOvernightWrote): the pool it would size on is not the one a mid-day cycle would have had. */
-export type ShadowRefreshDisposition = RefreshDisposition | 'not-comparable';
+ *  (liveOvernightWrote): the pool it would size on is not the one a mid-day cycle would have had;
+ *  ★★★ v1.205.1 — 'not-armed' when the evening cycle would not arm (shadowCycleRefusal): there is nothing to refresh. */
+export type ShadowRefreshDisposition = RefreshDisposition | 'not-comparable' | 'not-armed';
 
 export interface ShadowRefresh {
   atMs: number;
@@ -439,6 +447,8 @@ export function summariseLeg(
     ...(p != null && !p.basisComplete && typeof p.basisBlockedBy === 'string' && p.basisBlockedBy !== ''
       ? { basisBlockedBy: p.basisBlockedBy } : {}),
     heldImport: sized?.heldImport ?? null,
+    ...(p != null && p.requiredExtraKwh != null && p.requiredExtraKwh > 0 && fin(floorCushionLinePct(p)) != null
+      ? { cushionAskedLinePct: floorCushionLinePct(p)! } : {}),
   };
 }
 
@@ -626,11 +636,13 @@ export function refreshLeg(i: RefreshInputs): Omit<ShadowRefresh, 'atMs' | 'disp
 /** Whether the shadow refresh is due now: 'run' inside [open − REFRESH_LEAD_MS, open −
  *  REFRESH_DEADLINE_MS) with no refresh yet; 'stand' once that has passed with none (the evening
  *  plan stands), until the window closes; null otherwise — no mid-day leg, a leg that holds, or a
- *  refresh already made. PURE. */
-export function shadowRefreshDue(rec: MiddayShadowRecord | null, nowMs: number): 'run' | 'stand' | null {
+ *  refresh already made. ★★★ v1.205.1 — a cycle the evening would not arm (shadowCycleRefusal) is never re-sized: from
+ *  open − REFRESH_LEAD_MS until the window closes it is 'notArmed', and the refresh recorded is notArmedRefresh's. PURE. */
+export function shadowRefreshDue(rec: MiddayShadowRecord | null, nowMs: number): 'run' | 'stand' | 'notArmed' | null {
   const c = rec?.cost;
   if (rec == null || c == null || rec.refresh != null || !c.basisComplete || !c.chargeTonight) return null;
   if (nowMs >= c.windowEndMs) return null;
+  if (shadowCycleRefusal(rec) != null) return nowMs >= c.windowStartMs - REFRESH_LEAD_MS ? 'notArmed' : null;
   if (nowMs >= c.windowStartMs - REFRESH_DEADLINE_MS) return 'stand';
   return nowMs >= c.windowStartMs - REFRESH_LEAD_MS ? 'run' : null;
 }
@@ -707,9 +719,42 @@ export function notComparableRefresh(nowMs: number): ShadowRefresh {
   };
 }
 
+/**
+ * ★★★ v1.205.1 — the cycle a write mode would not arm, in the probe's words, else null: a cost leg that charges (a complete basis,
+ * chargeTonight) that the arm probe would not arm, outside advisory mode. The evening's words name it refused
+ * (middayShadowAnnounceInput: "the supervised write was not armed — <why>. The add-on will not charge tomorrow"), and its morning
+ * refresh has nothing to re-size (shadowRefreshDue 'notArmed'). PURE.
+ */
+export function shadowCycleRefusal(rec: MiddayShadowRecord): string | null {
+  const c = rec.cost;
+  if (c == null) return null;
+  const advisory = rec.mode === 'advisory';
+  // A write mode that would not arm a cost leg that charges: the cycle is refused, with the probe's words.
+  const refusedPrefix = 'would not arm — ';
+  const refused = !advisory && c.basisComplete && c.chargeTonight && !c.wouldArm
+    ? (c.disposition.startsWith(refusedPrefix) ? c.disposition.slice(refusedPrefix.length) : c.disposition) : null;
+  return refused;
+}
+
+/** ★★★ v1.205.1 — the refresh recorded for a cycle the evening would not arm (shadowRefreshDue 'notArmed'): nothing was armed, so
+ *  nothing is re-sized, pushed or previewed — never "a live refresh would push this" or a "Lowered to" about a cycle whose 21:30
+ *  words said the add-on will not charge. The record keeps the evening's figures (as 'stood' does: the ledger's shadow_refreshed_*
+ *  columns and the entities read them, labelled by the disposition, shadow_refresh_disposition), but no word says they stand: they
+ *  are the figures of a cycle that was not armed, and no charge or refresh follows. The reason says only why there was nothing to
+ *  refresh, and the log line states no figures for it (middayShadowRefreshLogLine). PURE. */
+export function notArmedRefresh(rec: MiddayShadowRecord, nowMs: number): ShadowRefresh {
+  const c = rec.cost!;
+  return {
+    atMs: nowMs, disposition: 'not-armed', levelPct: c.levelPct, reservePct: c.reservePct, buyKwh: c.buyKwh,
+    expectedBuyKwh: c.expectedBuyKwh, wouldPush: false,
+    reason: `the evening cycle would not arm (${shadowCycleRefusal(rec) ?? 'the arm probe refused it'}), so there was nothing to refresh`,
+  };
+}
+
 /** The refresh's figures are re-sized ones the surfaces show in place of the evening's: not when the
- *  evening plan stood, nor when the refresh could not be compared. PURE. */
+ *  evening plan stood, nor when the refresh could not be compared, nor (v1.205.1) when nothing was armed to refresh. PURE. */
 export function refreshResized(r: Pick<ShadowRefresh, 'disposition'> | null): boolean {
+  if (r?.disposition === 'not-armed') return false;
   return r != null && r.disposition !== 'stood' && r.disposition !== 'not-comparable';
 }
 
@@ -753,7 +798,9 @@ export const MIDDAY_CHARGE_BASIS: MiddayChargeBasis = 'shadow';
  *  - `midday_charge_basis`: MIDDAY_CHARGE_BASIS, with or without a current record.
  *  - the figures are the mid-day leg as computed — the refreshed figures once the morning refresh
  *    ran (a cancelled refresh nulls them) — null when there is no current record (shadowServed).
- *  - `midday_charge_refresh`: 'pending' before the refresh, then its disposition.
+ *  - `midday_charge_refresh`: 'pending' before the refresh, then its disposition. ★★ v1.205.1 — a cycle the evening would not
+ *    arm (shadowCycleRefusal) gets no re-check, so it reads 'not-armed' from the evening, as the card's row reads "none" and as
+ *    the refresh recorded at open − REFRESH_LEAD_MS reads (notArmedRefresh); never 'pending' for a re-check that is not made.
  */
 export function middayChargeStateFields(rec: MiddayShadowRecord | null, nowMs: number = Date.now()): {
   midday_charge_recommended: boolean;
@@ -791,7 +838,7 @@ export function middayChargeStateFields(rec: MiddayShadowRecord | null, nowMs: n
     midday_charge_buy_kwh: pick('buyKwh'),
     midday_charge_window_start_at: iso(c.windowStartMs),
     midday_charge_window_end_at: iso(c.windowEndMs),
-    midday_charge_refresh: r?.disposition ?? (charges ? 'pending' : null),
+    midday_charge_refresh: r?.disposition ?? (charges ? (shadowCycleRefusal(rec!) != null ? 'not-armed' : 'pending') : null),
     midday_charge_basis: MIDDAY_CHARGE_BASIS,
   };
 }
@@ -890,7 +937,8 @@ export function middayShadowLogLines(rec: MiddayShadowRecord): string[] {
     out.push(`${t} ${rec.day} backup ${at(b.windowStartMs)}→${at(b.windowEndMs)} — ${b.disposition}: reserve ${pct(b.reservePct)}, `
       + `expected ${kwh(b.expectedBuyKwh)} (worst-case sizing ${kwh(b.buyKwh)}); troughs at ${pct(b.cushionTroughSocPct)} against the ${pct(b.cushionLineSocPct)} line (the islanded walk it is sized on, to the next overnight open)`
       // v1.200.0 — the envelope, where it contributes: the line is above what a reserve write can hold.
-      + `${b.cushionShortfallCause != null ? `; the line is above the ${RESERVE_WRITE_MAX_PCT}% the panel accepts as a reserve, and the backup leg writes the reserve only — residual risk remains` : ''}.`
+      // v1.205.1 — keyed on the leg's line: a line at or below 50 is above the 49% the panel holds (lineOverReserveText).
+      + `${b.cushionShortfallCause != null ? `; the line is above ${lineOverReserveText(b.cushionLineSocPct ?? Infinity, 'accepts')}, and the backup leg writes the reserve only — residual risk remains` : ''}.`
       + `${heldImportText(b.heldImport)} Shadow only: nothing is armed, written or announced for it.`);
   }
   const bb = rec.backupB;
@@ -905,11 +953,15 @@ export function middayShadowLogLines(rec: MiddayShadowRecord): string[] {
   return out;
 }
 
-/** The refresh's log line. PURE. */
+/** The refresh's log line. PURE. ★★ v1.205.1 — a 'not-armed' refresh states no figures: it re-sized nothing, and the figures its
+ *  record keeps are the unarmed evening plan's (the evening's own log line states them), which "level ~89.5%, reserve 50%,
+ *  expected 34 kWh" after the reason would read as a charge that stands. Every other disposition: as before, byte for byte. */
 export function middayShadowRefreshLogLine(rec: MiddayShadowRecord, r: ShadowRefresh): string {
   const age = r.weatherAgeS != null ? `; sized on weather ${Math.round(r.weatherAgeS / 60)} min old` : '';
-  return `${MIDDAY_SHADOW_LOG_TAG} ${rec.day} refresh — ${r.disposition}: ${r.reason}; level ~${pct(r.levelPct)}, reserve ${pct(r.reservePct)}, `
-    + `expected ${kwh(r.expectedBuyKwh)}${age}${r.wouldPush ? '; a live refresh would push this' : ''}. Shadow only: nothing is written or pushed.`;
+  const figures = r.disposition === 'not-armed' ? ''
+    : `; level ~${pct(r.levelPct)}, reserve ${pct(r.reservePct)}, expected ${kwh(r.expectedBuyKwh)}`;
+  return `${MIDDAY_SHADOW_LOG_TAG} ${rec.day} refresh — ${r.disposition}: ${r.reason}${figures}`
+    + `${age}${r.wouldPush ? '; a live refresh would push this' : ''}. Shadow only: nothing is written or pushed.`;
 }
 
 /* ── the words (R5): what the evening and the refresh would say — never sent ──────── */
@@ -923,10 +975,9 @@ export function middayShadowAnnounceInput(rec: MiddayShadowRecord, model: Tariff
   const advisory = rec.mode === 'advisory';
   const onPeakStart = nextOnPeakStartMs(model, c.windowStartMs);
   const onPeak = onPeakStart != null ? { startMs: onPeakStart, endMs: onPeakEndMs(model, onPeakStart) } : null;
-  // A write mode that would not arm a cost leg that charges: the cycle is refused, with the probe's words.
-  const refusedPrefix = 'would not arm — ';
-  const refused = !advisory && c.basisComplete && c.chargeTonight && !c.wouldArm
-    ? (c.disposition.startsWith(refusedPrefix) ? c.disposition.slice(refusedPrefix.length) : c.disposition) : null;
+  // A write mode that would not arm a cost leg that charges: the cycle is refused, with the probe's words (v1.205.1: one predicate,
+  // shadowCycleRefusal, which the morning refresh reads too).
+  const refused = shadowCycleRefusal(rec);
   // The backup the notice names: the one that would arm; in advisory mode the one the plan calls for;
   // in a refused cycle the one the plan called for ("no outage backup tonight because …").
   const backupNamed = b != null && b.basisComplete && b.chargeTonight && (advisory || refused != null || b.wouldArm);
@@ -949,6 +1000,10 @@ export function middayShadowAnnounceInput(rec: MiddayShadowRecord, model: Tariff
       ...(c.lateStartAtOpen === true ? { lateStartAtOpen: true as const } : {}),
       // (Fix7 review 1) The line beside its ask: the plan's forceChargeLine.linePct is its cushionLineSocPct.
       ...(c.lineAskPct != null && c.cushionLineSocPct != null ? { linePct: c.cushionLineSocPct } : {}),
+      // ★★ v1.205.1 — and, with no ask, beside an envelope cause: the line its "no force-charge carries it" note is worded by.
+      ...(c.lineAskPct == null && c.cushionShortfallCause != null && c.cushionLineSocPct != null ? { linePct: c.cushionLineSocPct } : {}),
+      // ★★★ v1.205.1 — the floor+cushion line its cushion asked for: a refused cycle's push says nothing is armed to hold it.
+      ...(c.cushionAskedLinePct != null ? { cushionAskedLinePct: c.cushionAskedLinePct } : {}),
     },
     backup: backupNamed && b != null ? {
       windowStartMs: b.windowStartMs, windowEndMs: b.windowEndMs, reservePct: b.reservePct,
@@ -956,6 +1011,8 @@ export function middayShadowAnnounceInput(rec: MiddayShadowRecord, model: Tariff
       ...(b.cushionShortfallCause != null ? { cushionShortfallCause: b.cushionShortfallCause } : {}),
       ...(b.lineAskPct != null ? { lineAskPct: b.lineAskPct } : {}),
       ...(b.lineNotHeld != null ? { lineNotHeld: b.lineNotHeld } : {}),
+      // ★★ v1.205.1 — beside an envelope cause, the backup leg's line: its note is worded by it (chargeText notCarried).
+      ...(b.cushionShortfallCause != null && b.cushionLineSocPct != null ? { linePct: b.cushionLineSocPct } : {}),
     } : null,
     onPeak,
     refreshAtMs: c.windowStartMs - REFRESH_LEAD_MS,
@@ -996,7 +1053,8 @@ export function middayShadowPreviewLogLines(rec: MiddayShadowRecord, model: Tari
 /** The refresh push a live refresh would send (null when it would send none). Never sent. PURE. */
 export function middayShadowRefreshPreview(rec: MiddayShadowRecord, r: ShadowRefresh): NotifyMessage | null {
   const c = rec.cost;
-  if (c == null || r.disposition === 'not-comparable') return null;
+  // v1.205.1 — nor for a cycle that was not armed: a live refresh has nothing to push about it.
+  if (c == null || r.disposition === 'not-comparable' || r.disposition === 'not-armed') return null;
   return buildMiddayRefreshMessage({
     nowMs: r.atMs,
     windowStartMs: c.windowStartMs, windowEndMs: c.windowEndMs,
@@ -1049,6 +1107,7 @@ const coerceLeg = (raw: unknown): ShadowLegSummary | null => {
     ...(o.lineNotHeld === 'lateStart' && o.lateStartAtOpen === true ? { lateStartAtOpen: true as const } : {}),
     ...(typeof o.basisBlockedBy === 'string' && o.basisBlockedBy !== '' ? { basisBlockedBy: o.basisBlockedBy } : {}),
     ...('heldImport' in o ? { heldImport: coerceHeldImport(o.heldImport) } : {}),
+    ...(fin(o.cushionAskedLinePct) != null ? { cushionAskedLinePct: fin(o.cushionAskedLinePct)! } : {}),
   };
 };
 
@@ -1062,7 +1121,12 @@ const coerceHeldImport = (raw: unknown): HeldImport | null => {
   return { fromMs, untilMs, kwh, importUsd: fin(o.importUsd), creditUsd: fin(o.creditUsd), netUsd: fin(o.netUsd) };
 };
 
-const DISPOSITIONS: readonly ShadowRefreshDisposition[] = ['unchanged', 'lowered', 'capped', 'cancelled', 'stood', 'not-comparable'];
+// v1.205.1 — every disposition, by the type (a Record: a value added to ShadowRefreshDisposition and not here does not compile), so a
+// persisted refresh of each one reads back; a record from before a value existed is unaffected.
+const DISPOSITION_SET: Readonly<Record<ShadowRefreshDisposition, true>> = {
+  unchanged: true, lowered: true, capped: true, cancelled: true, stood: true, 'not-comparable': true, 'not-armed': true,
+};
+const DISPOSITIONS = Object.keys(DISPOSITION_SET) as ShadowRefreshDisposition[];
 const WHYS: readonly ChargeCycleWhy[] = Object.keys(SHADOW_WHY_TEXT) as ChargeCycleWhy[];
 
 /** A persisted shadow record read back (restart path): anything malformed is no record. PURE. */

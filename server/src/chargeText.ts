@@ -27,6 +27,8 @@ import type { NotifyMessage } from './notify.js';
 import type { ForceChargeNightOutcome } from './nightForceCharge.js';
 // v1.205.0 (review) — what a 'lateStart' leg's line is too close to allow for (the switch-on at the open, or the window's charge).
 import { lateStartAllowanceWords, lineOverReserveText } from './nightForceCharge.js';
+// v1.205.1 — the shadow's log names the backup leg's line by the same words (middayShadow.middayShadowLogLines).
+export { lineOverReserveText };
 import type { LineNotHeld } from './nightChargeAdvisor.js';
 import { MAX_SPOKEN_ADVISORY_CHARS, NO_CHARGE_EXPECTED_KWH, RESERVE_WRITE_MAX_PCT, revertRetryText, type RevertResendOnReport, type RestoreSummaryKind } from './nightChargeActuator.js';
 
@@ -183,6 +185,24 @@ function kwhPhrase(kwh: number): string {
 /** A whole percentage, "~90%". */
 const pctText = (v: number): string => `~${Math.round(v * 10) / 10}%`;
 
+/**
+ * ★★★ v1.205.1 — the note of a REFUSED arm on a plan, or a mid-day leg, whose cushion asked for energy (requiredExtraKwh above 0)
+ * and that carries no other line note (no line force-charge, no envelope note): nothing is armed to hold its floor+cushion line.
+ * The line is named as the armed push of such a night names it ("the floor+cushion line is 31.3%": floorCushionLinePct, one
+ * decimal); with no figure, unnumbered. `whose`: "tonight's" (notify.buildNightChargeMessage), "this leg's" (the mid-day push).
+ * Nothing in it says the line is above anything, so a line in (49, 50] needs no other words.
+ * ★★ On a CUSHION-ONLY plan (plan.cushionOnly: the solar basis refused, as with the Cores dark) the armed push calls the same figure
+ * "the 33.3% line" — but it defines it in that sentence ("the 33.3% line is the 16% reserve floor plus 4 h of islanded backup load
+ * at the window close": cushionOnlyPushText's 'charge' form). The refused push states only the short basis ("Outage cushion only;
+ * no solar basis (…).", the 'short' form), which does not define the line, so this note keeps "floor+cushion line" there too, by
+ * design: it names what the line is (the reserve floor plus the outage cushion, as the card's stat sub "floor+cushion 33.3%" does),
+ * and the figure is the same one, rounded alike. It follows the basis sentence there, as the armed push's notes do. PURE.
+ */
+export function refusedCushionLineNote(whose: string, linePct: number | null | undefined): string {
+  const n = linePct != null && Number.isFinite(linePct) ? `${Math.round(linePct * 10) / 10}% ` : '';
+  return ` NOTE: nothing is armed to hold ${whose} ${n}floor+cushion line — residual risk remains.`;
+}
+
 /* ── the legs a mid-day text names ────────────────────────────────────────── */
 
 /** The 10:00–15:00 cost leg as the evening announces it. */
@@ -220,8 +240,13 @@ export interface MiddayCostText {
    *  cushionLateStartAtOpen). Absent ⇒ the words name the window's charge (nightForceCharge.lateStartAllowanceWords). */
   lateStartAtOpen?: true;
   /** v1.200.0 (Fix7 review 1) — beside `lineAskPct`: the outage line itself (the plan's forceChargeLine.linePct, its
-   *  cushionLineSocPct), the number the words give the line, round1 as the overnight clause gives it — never the ask ⌈L⌉. */
+   *  cushionLineSocPct), the number the words give the line, round1 as the overnight clause gives it — never the ask ⌈L⌉.
+   *  v1.205.1 — and, on a leg with no ask, beside an envelope cause: the line its "no force-charge carries it on this leg" note is
+   *  worded by (lineOverReserveText: a line at or below 50 is above the 49% the panel holds). Absent ⇒ the 50% form, as before. */
   linePct?: number;
+  /** ★★★ v1.205.1 — the leg's floor+cushion line where its cushion asked for energy (the record's ShadowLegSummary
+   *  cushionAskedLinePct): what a refused cycle's push says nothing is armed to hold (refusedCushionLineNote). Absent ⇒ none said. */
+  cushionAskedLinePct?: number;
 }
 
 /** The overnight outage-backup leg as the evening announces it (reserve only). */
@@ -237,6 +262,10 @@ export interface MiddayBackupText {
   /** v1.200.0 (A5) — as MiddayCostText's (a backup leg is never armed: absent). */
   lineAskPct?: number;
   lineNotHeld?: LineNotHeld;
+  /** ★★ v1.205.1 — beside an envelope cause: the backup leg's outage line (the record's cushionLineSocPct), which its "no force-charge
+   *  carries it on the backup leg" note is worded by, as the overnight envelope note is (lineOverReserveText: a line at or below 50 is above
+   *  the 49% the panel holds, not the 50% it accepts). Absent ⇒ the 50% form, as before. */
+  linePct?: number;
 }
 
 /** What the evening's mid-day notice is told. */
@@ -314,8 +343,11 @@ export function buildMiddayPlanMessage(i: MiddayAnnounceInput): NotifyMessage {
   // reason, L4). A leg with no ask reads as before, byte for byte.
   const capsShort = (l: { cushionShortfall: boolean; cushionShortfallCause?: string } | null | undefined): boolean =>
     l != null && l.cushionShortfall && l.cushionShortfallCause !== 'envelope';
-  const notCarried = (which: string): string =>
-    ` NOTE: the outage line is above the ${RESERVE_WRITE_MAX_PCT}% the panel accepts as a reserve and no force-charge carries it on ${which} — residual risk remains.`;
+  // ★★ v1.205.1 — worded by the named leg's own line (lineOverReserveText), as the overnight envelope note is: a line at or below 50 is
+  // above the 49% the panel holds the pool at, never the 50% it accepts (49.00-50.00 on the fixture year: refusedNotesArmedYear.test.ts);
+  // above 50, or with no figure (a record from before it), word for word. Each leg by its OWN line, never the other leg's.
+  const notCarried = (which: 'this leg' | 'the backup leg'): string =>
+    ` NOTE: the outage line is above ${lineOverReserveText((which === 'this leg' ? c.linePct : i.backup?.linePct) ?? Infinity, 'accepts')} and no force-charge carries it on ${which} — residual risk remains.`;
   // ★★★ v1.205.0 (review) — a REFUSED cycle arms nothing: a leg with a line ask then says once that nothing is armed to carry its
   // line (beside the 49% the panel holds for a line in (49, 50], as the overnight refusedEnvelopeNote names it) — never what an armed
   // leg's walk cannot hold, which states a close its unarmed charge does not make.
@@ -329,12 +361,17 @@ export function buildMiddayPlanMessage(i: MiddayAnnounceInput): NotifyMessage {
           : l.cushionShortfallCause != null
             ? ` NOTE: this leg's outage line is above the ${RESERVE_WRITE_MAX_PCT}% the panel accepts as a reserve; its force-charge runs, but the plan does not claim the line — residual risk remains.`
             : '';
+  // ★★★ v1.205.1 — refused, a cost leg with no line ask and no envelope note of its own, whose cushion asked for energy
+  // (cushionAskedLinePct), says once that nothing is armed to hold its floor+cushion line, as the overnight refused push does: before
+  // the backup leg's note, as an armed leg's note is. Never on a cycle that arms.
+  const unheldCushion = i.refused != null && c.lineAskPct == null && c.cushionShortfallCause == null && c.cushionAskedLinePct != null
+    ? refusedCushionLineNote("this leg's", c.cushionAskedLinePct) : '';
   const shortNote = (capsShort(c) || capsShort(i.backup)
     ? ' NOTE: charge/pool limits prevent fully meeting the cushion — residual risk remains.' : '')
     + (c.lineAskPct != null
       ? armedNote(c) + (i.backup?.cushionShortfallCause != null ? notCarried('the backup leg') : '')
-      : c.cushionShortfallCause != null || i.backup?.cushionShortfallCause != null
-        ? notCarried(c.cushionShortfallCause != null ? 'this leg' : 'the backup leg') : '');
+      : unheldCushion + (c.cushionShortfallCause != null || i.backup?.cushionShortfallCause != null
+        ? notCarried(c.cushionShortfallCause != null ? 'this leg' : 'the backup leg') : ''));
   const backupLine = i.backup != null ? ` ${backupPushLine(i.backup, i.backupApplyAtMs, now, supervised)}` : '';
   if (!c.basisComplete) {
     // v1.196.0 — what refused the plan, as the overnight push says it (notify.buildNightChargeMessage).

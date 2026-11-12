@@ -418,9 +418,14 @@ test('★★★ T9 THE TEXTS: rationale, push and card on every cushion-only sha
       const body = buildNightChargeMessage(p, 'charge', sup).body;
       assert.ok(body.includes(`: the ${Math.round(p.cushionLineSocPct! * 10) / 10}% line is the 16% reserve floor plus 4 h of islanded backup load at the window close, with no solar credited and no cost target.`), body);
     }
-    // A refused arm keeps its words and adds the basis.
+    // A refused arm keeps its words and adds the basis. v1.205.1 (round 3, F5) — straight after its lead, every NOTE after it (the
+    // refused note of v1.205.0, the unheld floor+cushion line of v1.205.1), as the armed push orders its notes after its basis sentence.
     const refused = buildNightChargeMessage(p, 'charge', null, 'the 2026-10-11 reserve write is still applied and not yet restored');
-    if (p.chargeTonight) assert.ok(refused.body.endsWith(`Outage cushion only; no solar basis (${p.cushionOnly!.refusedBy}).`), refused.body);
+    if (p.chargeTonight) {
+      const basis = ` tonight. Outage cushion only; no solar basis (${p.cushionOnly!.refusedBy}).`;
+      const after = refused.body.split(basis);
+      assert.ok(after.length === 2 && (after[1] === '' || after[1].startsWith(' NOTE: ')), refused.body);
+    }
   }
   // The expected clause and the island-low reference credit no solar.
   const c = plan(refDark({ socNowPct: 18 }));
