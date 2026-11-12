@@ -30,12 +30,15 @@
  *                             refresh: a reserve above the announced one is a cap, and is said so)
  *   Fix 3      R-xxix (a cap keeps the announced worst case: the entity, the shadow ledger and the live
  *                             refreshed_buy_kwh hold the figure the leg runs on)
- *   Not armed  N-i..N-xiv    (v1.205.1: a cycle the evening would not arm, shadowCycleRefusal, is never re-sized at 09:30 —
+ *   Not armed  N-i..N-xxi    (v1.205.1: a cycle the evening would not arm, shadowCycleRefusal, is never re-sized at 09:30 —
  *                             shadowRefreshDue 'notArmed', index.ts records notArmedRefresh first — and the record says so: no
  *                             push, the evening's figures, read back across a restart, the card's row not "due" in either write
  *                             mode (N-ix), the entity 'not-armed' from the evening, never 'pending' (N-x)); (round 3) its log
  *                             line states no figures (N-xi) while every other disposition's keeps them (N-xiv), its reason
- *                             never says the evening's figures stand (N-xii), and the card's row reads "none" (N-xiii)
+ *                             never says the evening's figures stand (N-xii), and the card's row reads "none" (N-xiii); (round 4)
+ *                             only 'not-armed' drops them: a cancelled, lowered or unchanged refresh's log line keeps its figures
+ *                             (N-xv..N-xvii), stated before the weather's age (N-xviii), and the card's row for a stood,
+ *                             unchanged or capped refresh keeps the figures form (N-xix..N-xxi)
  *
  *   node scripts/mutate-midday-refresh.mjs [--only <id prefix>]
  */
@@ -756,6 +759,56 @@ const MUTANTS = [
     find: "  const figures = r.disposition === 'not-armed' ? ''",
     to: "  const figures = !refreshResized(r) ? '' /* MUTANT */",
     why: 'Every other disposition\'s log line is no longer v1.205.0\'s: a stood refresh no longer states the evening plan it stood on.',
+  },
+  /* ── v1.205.1 (round 4): only 'not-armed' drops its figures — every re-sized disposition's log line and card row as v1.205.0 ── */
+  {
+    id: 'N-xv. ★★ a cancelled refresh\'s log line loses its figures',
+    file: MS,
+    find: "  const figures = r.disposition === 'not-armed' ? ''",
+    to: "  const figures = r.disposition === 'not-armed' || r.disposition === 'cancelled' /* MUTANT */ ? ''",
+    why: '"refresh — cancelled: the refreshed plan holds: no charge is needed; a live refresh would push this" drops "level ~—, reserve —, expected 0 kWh".',
+  },
+  {
+    id: 'N-xvi. ★★ a lowered refresh\'s log line loses its figures',
+    file: MS,
+    find: "  const figures = r.disposition === 'not-armed' ? ''",
+    to: "  const figures = r.disposition === 'not-armed' || r.disposition === 'lowered' /* MUTANT */ ? ''",
+    why: '"refresh — lowered: lowered to ~80% (announced 89.5%); a live refresh would push this" no longer states the reserve and the expected draw it was lowered to.',
+  },
+  {
+    id: 'N-xvii. ★★ an unchanged refresh\'s log line loses its figures',
+    file: MS,
+    find: "  const figures = r.disposition === 'not-armed' ? ''",
+    to: "  const figures = r.disposition === 'not-armed' || r.disposition === 'unchanged' /* MUTANT */ ? ''",
+    why: '"refresh — unchanged: the evening plan holds as announced" no longer states the expected draw the re-plan moved.',
+  },
+  {
+    id: 'N-xviii. ★ the refresh log line states the weather\'s age before the figures',
+    file: MS,
+    find: "${r.reason}${figures}`\n    + `${age}${r.wouldPush ? '; a live refresh would push this' : ''}. Shadow only: nothing is written or pushed.`;",
+    to: "${r.reason}${age}${figures}`\n    + `${r.wouldPush ? '; a live refresh would push this' : ''}. Shadow only: nothing is written or pushed.`; /* MUTANT */",
+    why: '"lowered to ~80% (announced 89.5%); sized on weather 25 min old; level ~80%, …": no longer v1.205.0\'s order, the figures then the age.',
+  },
+  {
+    id: 'N-xix. ★★ the card reads a stood refresh as "none"',
+    file: CARD,
+    find: "        : r.disposition === 'not-armed' ? 'none'\n",
+    to: "        : r.disposition === 'not-armed' || r.disposition === 'stood' /* MUTANT */ ? 'none'\n",
+    why: '"Morning refresh 09:55: none — no refresh completed by 5 minutes before the window; the evening plan stands" drops the plan that stands, "stood, ~89.5%, ~34 kWh expected".',
+  },
+  {
+    id: 'N-xx. ★★ the card reads an unchanged refresh as "none"',
+    file: CARD,
+    find: "        : r.disposition === 'not-armed' ? 'none'\n",
+    to: "        : r.disposition === 'not-armed' || r.disposition === 'unchanged' /* MUTANT */ ? 'none'\n",
+    why: '"Morning refresh 09:31: none — the evening plan holds as announced" for a refresh that was made and re-sized the draw.',
+  },
+  {
+    id: 'N-xxi. ★★ the card reads a capped refresh as "none"',
+    file: CARD,
+    find: "        : r.disposition === 'not-armed' ? 'none'\n",
+    to: "        : r.disposition === 'not-armed' || r.disposition === 'capped' /* MUTANT */ ? 'none'\n",
+    why: '"Morning refresh 09:31: none — the refreshed need (95%) is above the announced 89.5%: held at it" no longer names the level it is held at.',
   },
   {
     id: 'T-xxi. ★★★ a reserve cap is pushed as "calls for more" than a level it did not ask above',

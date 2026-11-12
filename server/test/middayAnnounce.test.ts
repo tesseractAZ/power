@@ -504,7 +504,9 @@ test('★★ the shadow refresh records how old its weather was: on the record, 
   assert.equal(rf.windowPvP50Kwh, 14);
   assert.equal(rf.neededLevelPct, 89.6);
   assert.equal(middayShadowRefreshLedgerColumns(rf).shadow_refresh_weather_age_s, 1500);
-  assert.match(middayShadowRefreshLogLine(r, rf), /; sized on weather 25 min old;/);
+  // (v1.205.1, round 4) The whole line, word for word as v1.205.0 renders it: the figures, then the weather's age, then the push clause.
+  assert.equal(middayShadowRefreshLogLine(r, rf), `${MIDDAY_SHADOW_LOG_TAG} 2026-10-14 refresh — unchanged: the evening plan holds as announced; `
+    + 'level ~89.6%, reserve 50%, expected 22 kWh; sized on weather 25 min old; a live refresh would push this. Shadow only: nothing is written or pushed.');
   assert.equal(refreshFromSized(r, { plan: p as never, windowPvP50Kwh: 14, windowLoadP50Kwh: 15 }, now).weatherAgeS, null, 'unknown');
   // A record from before R5 (no age) round-trips without one.
   assert.equal(coerceMiddayShadowRecord(JSON.parse(JSON.stringify({ ...r, refresh: { ...rf, weatherAgeS: undefined } })))!.refresh!.weatherAgeS, undefined);

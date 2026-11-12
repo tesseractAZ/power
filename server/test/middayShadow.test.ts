@@ -24,7 +24,7 @@ import {
   notArmedRefresh, shadowCycleRefusal, middayShadowRefreshPreviewLogLine,
   MIDDAY_SHADOW_LOG_TAG, MIDDAY_SHADOW_FRESH_MS, REFRESH_LEAD_MS, REFRESH_DEADLINE_MS,
   heldImportEstimate, heldSpan, OPTION_B_DISPOSITION,
-  type MiddayShadowRecord, type ShadowLegSizing, type ShadowSized, type ShadowArmCandidate, type ShadowArmVerdict,
+  type MiddayShadowRecord, type ShadowLegSizing, type ShadowSized, type ShadowArmCandidate, type ShadowArmVerdict, type ShadowRefresh,
 } from '../src/middayShadow.js';
 
 /**
@@ -900,6 +900,14 @@ const refusedRecord = (o: Partial<MiddayShadowRecord> = {}): MiddayShadowRecord 
 /** (round 3, F3) The reason says why there was nothing to refresh, and no more: never that the evening's figures stand, of a cycle the
  *  add-on will not charge. */
 const NOT_ARMED_REASON = `the evening cycle would not arm (${WHY_REFUSED}), so there was nothing to refresh`;
+/** (round 4, TM-1..TM-3) A re-sized refresh of each disposition refreshLeg gives, as the record holds it, at 09:31: their log lines and
+ *  the card's rows keep their figures, word for word as v1.205.0 and 4f5fcdb8 render them. Only 'not-armed' drops them. */
+const RESIZED: Record<'lowered' | 'unchanged' | 'capped' | 'cancelled', ShadowRefresh> = {
+  lowered: { atMs: phx(10, 15, 9, 31), disposition: 'lowered', levelPct: 80, reservePct: 50, buyKwh: 20, expectedBuyKwh: 12, wouldPush: true, reason: 'lowered to ~80% (announced 89.5%)' },
+  unchanged: { atMs: phx(10, 15, 9, 31), disposition: 'unchanged', levelPct: 89.5, reservePct: 50, buyKwh: 47.8, expectedBuyKwh: 30, wouldPush: false, reason: 'the evening plan holds as announced' },
+  capped: { atMs: phx(10, 15, 9, 31), disposition: 'capped', levelPct: 89.5, reservePct: 50, buyKwh: 47.8, expectedBuyKwh: null, wouldPush: true, reason: 'the refreshed need (95%) is above the announced 89.5%: held at it' },
+  cancelled: { atMs: phx(10, 15, 9, 31), disposition: 'cancelled', levelPct: null, reservePct: null, buyKwh: 0, expectedBuyKwh: 0, wouldPush: true, reason: 'the refreshed plan holds: no charge is needed' },
+};
 /** v1.205.0's shadowRefreshDue, for the armed records it must still answer exactly. */
 const dueBefore = (rec: MiddayShadowRecord | null, nowMs: number): 'run' | 'stand' | null => {
   const c = rec?.cost;
@@ -983,6 +991,22 @@ test('★★★ RF-2 the refused cycle\'s refresh is recorded, not silent: dispo
   const ncr = notComparableRefresh(at);
   assert.equal(middayShadowRefreshLogLine({ ...r, refresh: ncr }, ncr), `${MIDDAY_SHADOW_LOG_TAG} ${DAY} refresh — not-comparable: ${NOT_COMPARABLE_REASON}; `
     + 'level ~—, reserve —, expected —. Shadow only: nothing is written or pushed.');
+  // (round 4, TM-1) And every re-sized disposition, on an armed cycle's record: a lowered, an unchanged, a capped and a cancelled refresh
+  // keep their figures after the reason, word for word as v1.205.0 and 4f5fcdb8 render them.
+  const armed = record();
+  const line = (x: ShadowRefresh): string => middayShadowRefreshLogLine({ ...armed, refresh: x }, x);
+  assert.equal(line(RESIZED.lowered), 'night-charge[midday-shadow]: 2026-10-14 refresh — lowered: lowered to ~80% (announced 89.5%); '
+    + 'level ~80%, reserve 50%, expected 12 kWh; a live refresh would push this. Shadow only: nothing is written or pushed.');
+  assert.equal(line(RESIZED.unchanged), 'night-charge[midday-shadow]: 2026-10-14 refresh — unchanged: the evening plan holds as announced; '
+    + 'level ~89.5%, reserve 50%, expected 30 kWh. Shadow only: nothing is written or pushed.');
+  assert.equal(line(RESIZED.capped), 'night-charge[midday-shadow]: 2026-10-14 refresh — capped: the refreshed need (95%) is above the announced 89.5%: '
+    + 'held at it; level ~89.5%, reserve 50%, expected —; a live refresh would push this. Shadow only: nothing is written or pushed.');
+  assert.equal(line(RESIZED.cancelled), 'night-charge[midday-shadow]: 2026-10-14 refresh — cancelled: the refreshed plan holds: no charge is needed; '
+    + 'level ~—, reserve —, expected 0 kWh; a live refresh would push this. Shadow only: nothing is written or pushed.');
+  // (round 4, TM-2) A refresh sized on aged weather states the figures, then the weather's age, then the push clause — never the age
+  // before the figures.
+  assert.equal(line({ ...RESIZED.lowered, weatherAgeS: 1500 }), 'night-charge[midday-shadow]: 2026-10-14 refresh — lowered: lowered to ~80% (announced 89.5%); '
+    + 'level ~80%, reserve 50%, expected 12 kWh; sized on weather 25 min old; a live refresh would push this. Shadow only: nothing is written or pushed.');
   assert.equal(middayShadowRefreshPreview(rec, na), null);
   assert.equal(middayShadowRefreshPreviewLogLine(rec, na), null);
   // The defect it replaces: the same record re-sized on the 09:30 pool would say a live refresh pushes "Lowered to …" about a
@@ -1017,7 +1041,7 @@ test('★★★ RF-3 the record across a restart: a refused cycle\'s "not-armed"
   assert.equal(coerceMiddayShadowRecord(JSON.parse(JSON.stringify({ ...record(), refresh: { ...standingRefresh(record(), at), disposition: 'not-sure' } })))!.refresh, null);
 });
 
-test('★★ RF-4 the card\'s "Morning refresh" row: a refused cycle is not "due" a refresh, and once recorded reads "none" with the reason (never "not armed — … would not arm", never figures that stand); an armed or advisory cycle reads as before', () => {
+test('★★ RF-4 the card\'s "Morning refresh" row: a refused cycle is not "due" a refresh, and once recorded reads "none" with the reason (never "not armed — … would not arm", never figures that stand); every other recorded refresh keeps its figures, and an armed or advisory cycle reads as before', () => {
   const hhmm = (ms: number): string => {
     const d = new Date(ms - 7 * H);
     return `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`;
@@ -1035,6 +1059,14 @@ test('★★ RF-4 the card\'s "Morning refresh" row: a refused cycle is not "due
     assert.equal(after, `Morning refresh 09:30: none — the evening cycle would not arm (${WHY_REFUSED}), so there was nothing to refresh`, mode);
     assert.doesNotMatch(after, /not armed|stand|89\.5|34 kWh/, mode);
   }
+  // (round 4, TM-3) Every other recorded refresh keeps the figures form, word for word as v1.205.0 and 4f5fcdb8 render it: a stood
+  // refresh the evening's figures, an unchanged, a capped (no expected draw) and a lowered one their own. Only 'not-armed' reads "none".
+  const armed = record();
+  assert.equal(view({ ...armed, refresh: standingRefresh(armed, phx(10, 15, 9, 55)) })[2],
+    'Morning refresh 09:55: stood, ~89.5%, ~34 kWh expected — no refresh completed by 5 minutes before the window; the evening plan stands');
+  assert.equal(view({ ...armed, refresh: RESIZED.unchanged })[2], 'Morning refresh 09:31: unchanged, ~89.5%, ~30 kWh expected — the evening plan holds as announced');
+  assert.equal(view({ ...armed, refresh: RESIZED.capped })[2], 'Morning refresh 09:31: capped, ~89.5% — the refreshed need (95%) is above the announced 89.5%: held at it');
+  assert.equal(view({ ...armed, refresh: RESIZED.lowered })[2], 'Morning refresh 09:31: lowered, ~80%, ~12 kWh expected — lowered to ~80% (announced 89.5%)');
   const r = refusedRecord();
   assert.equal(view(record())[2], 'Morning refresh: due 30 minutes before 10:00');
   assert.equal(view(record({ mode: 'advisory', cost: { ...record().cost!, wouldArm: false, disposition: 'not armed — the night-charge mode is advisory' } }))[2],

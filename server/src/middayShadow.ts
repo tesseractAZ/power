@@ -738,10 +738,10 @@ export function shadowCycleRefusal(rec: MiddayShadowRecord): string | null {
 
 /** ★★★ v1.205.1 — the refresh recorded for a cycle the evening would not arm (shadowRefreshDue 'notArmed'): nothing was armed, so
  *  nothing is re-sized, pushed or previewed — never "a live refresh would push this" or a "Lowered to" about a cycle whose 21:30
- *  words said the add-on will not charge. The record keeps the evening's figures (as 'stood' does: the ledger's shadow_refresh_*
- *  columns and the entities read them, labelled by the disposition), but no word says they stand: they are the figures of a cycle
- *  that was not armed, and no charge or refresh follows. The reason says only why there was nothing to refresh, and the log line
- *  states no figures for it (middayShadowRefreshLogLine). PURE. */
+ *  words said the add-on will not charge. The record keeps the evening's figures (as 'stood' does: the ledger's shadow_refreshed_*
+ *  columns and the entities read them, labelled by the disposition, shadow_refresh_disposition), but no word says they stand: they
+ *  are the figures of a cycle that was not armed, and no charge or refresh follows. The reason says only why there was nothing to
+ *  refresh, and the log line states no figures for it (middayShadowRefreshLogLine). PURE. */
 export function notArmedRefresh(rec: MiddayShadowRecord, nowMs: number): ShadowRefresh {
   const c = rec.cost!;
   return {
