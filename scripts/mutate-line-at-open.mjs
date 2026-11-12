@@ -41,7 +41,8 @@
  * (J) v1.205.1 (round 3): a refused CUSHION-ONLY night (the plant's live shape, the Cores dark) states its basis sentence straight
  * after the lead and every NOTE after it, the caps note first, as its armed push orders them (notify.ts refusedTail: AOA-31,
  * AOA-31b); its note keeps "floor+cushion line", since the refused push's short basis does not define the armed push's "the 33.3%
- * line" (AOA-31c). refusedNotes.test.ts RN-9: 2026-10-12 word for word, the dark year counted.
+ * line" (AOA-31c); the panel's refusal stays in that basis, before every NOTE (AOA-31d, AOA-31e). refusedNotes.test.ts RN-9:
+ * 2026-10-12 word for word, the dark year counted; RN-10: the same night with the panel's readings refused.
  *
  *   node scripts/mutate-line-at-open.mjs [--only <id prefix>]
  *
@@ -741,6 +742,20 @@ const MUTANTS = [
     find: '    return refusedCushionLineNote("tonight\'s", floorCushionLinePct(plan));',
     to: "    return refusedCushionLineNote(\"tonight's\", floorCushionLinePct(plan)).replace((plan as NightChargePlan).cushionOnly != null ? ' floor+cushion line' : '\\u0000', ' line'); /* MUTANT */",
     why: 'The armed push defines "the 33.3% line" as the reserve floor plus the cushion\'s hours; the refused push\'s short basis sentence does not, so the line the note names is undefined.',
+  },
+  {
+    id: 'AOA-31d. ★★ the refused cushion-only push drops why the panel\'s readings were not used',
+    file: NTF, tests: [T_RN],
+    find: "    const refusedTail = cushionOnlyPushText(plan, 'short') + refusedNote;",
+    to: "    const refusedTail = cushionOnlyPushText(plan, 'short').replace(/ Panel solar not used: .*$/, '') + refusedNote; /* MUTANT */",
+    why: 'A dark night whose 7-day balance refused the panel\'s readings no longer says, once refused, why the panel\'s solar is not used — the armed push says it.',
+  },
+  {
+    id: 'AOA-31e. ★★ the refused cushion-only push states the panel\'s refusal after its notes',
+    file: NTF, tests: [T_RN],
+    find: "    const refusedTail = cushionOnlyPushText(plan, 'short') + refusedNote;",
+    to: "    const refusedTail = cushionOnlyPushText(plan, 'short').replace(panelRefusedPushText(plan), '') + refusedNote + panelRefusedPushText(plan); /* MUTANT */",
+    why: 'The panel\'s refusal, part of the basis the armed push states before every NOTE, follows the unheld line\'s note once refused.',
   },
   {
     id: 'AOA-28. ★★★ the card names the reserve set under a refused arm',

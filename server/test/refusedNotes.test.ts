@@ -455,3 +455,27 @@ test('★★★ RN-9 a refused cushion-only night (the plant\'s live shape, the 
   assert.deepEqual(count, { supervised: PIN_RN9, auto: PIN_RN9 });
   assert.equal(gapWords, 2 * PIN_RN9_GAP, 'the basis carrying a gap\'s words before the notes');
 });
+
+/** The 7-day balance's refusal of the panel's readings (panelPvSelection.test.ts BALANCE): the reason a cushion-only plan carries
+ *  when the panel's own solar is refused — the plant's shape whenever the balance reads above its threshold. */
+const BALANCE_REFUSAL = { code: 'balance', windowEnd: '2026-11-05', ratio: 1.0523, daylightRatio: 1.0312, nightResidualKwhPerNight: -1.13, threshold: 1.04 };
+const PANEL_NOT_USED = ' Panel solar not used: the 7-day energy balance read 1.0523 on the week to 2026-11-05, above 1.04 (1.0312 on daylight '
+  + 'hours alone; its nights closed at −1.13 kWh a night against the measured constants); the readings are not used again before the weeks '
+  + 'ending on 7 later whole days have all passed.';
+
+test('★★ RN-10 a refused cushion-only night whose panel readings were refused: the panel\'s sentence stays in the basis — after the refusal and before every NOTE, as the armed push orders it; 2026-10-12 word for word in both write modes', () => {
+  const p = { ...darkAt('2026-10-12 cost', { outageCushionHours: 4 }), pvBasis: null, pvBasisRefusedBy: BALANCE_REFUSAL } as P;
+  // The armed push: the basis, then the panel's sentence, before any note.
+  const armed = buildNightChargeMessage(p, 'charge', SUP as never).body;
+  const panelAt = armed.indexOf(PANEL_NOT_USED);
+  assert.ok(panelAt > armed.indexOf('Outage cushion only; no solar basis') && (armed.indexOf(' NOTE: ') < 0 || panelAt < armed.indexOf(' NOTE: ')), armed);
+  for (const mode of ['supervised', 'auto'] as const) {
+    assert.equal(refusedOf(p, mode).body, `Tonight's plan holds the backup reserve at 35% overnight as a floor, with no charge expected, ${leadOf(p, mode)} `
+      + `Outage cushion only; no solar basis (${SOLAR_REFUSAL_0}).${PANEL_NOT_USED} NOTE: nothing is armed to hold tonight's 33.3% floor+cushion `
+      + 'line — residual risk remains.', mode);
+  }
+  // A night the charge rate cannot carry: the basis, the panel's sentence, the caps note, then the unheld line.
+  const toward = { ...darkAt('2026-10-12 resilience', { socNowPct: 18, chargeCapKw: 1.5 }), pvBasis: null, pvBasisRefusedBy: BALANCE_REFUSAL } as P;
+  assert.equal(refusedOf(toward, 'auto').body, `Tonight's plan calls for a charge, ${leadOf(toward, 'auto')} Outage cushion only; no solar basis (${SOLAR_REFUSAL_0}).`
+    + `${PANEL_NOT_USED}${CAPS_NOTE}${tonight('33.3')}`);
+});
