@@ -208,7 +208,7 @@ function rig(wired = true, retryDelaysMs?: number[], sipTimeoutProbeDelayMs?: nu
       if (i < 0) throw new Error(`never logged: ${s}`);
       return sipAt[i];
     },
-    stop: () => { mon.stop(); rmSync(cacheDir, { recursive: true, force: true }); },
+    stop: () => { mon.stop(); rmSync(cacheDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 }); },
   };
   live.push(r);
   return r;
@@ -306,8 +306,8 @@ after(async () => {
   globalThis.clearTimeout = realClearTimeout;
   setGlobalDispatcher(prevDispatcher);
   await agent.close();
-  rmSync(ROOT, { recursive: true, force: true });
-  rmSync(KLAXON, { recursive: true, force: true });
+  rmSync(ROOT, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+  rmSync(KLAXON, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
 });
 
 /* ══ the 10-01 restart ═══════════════════════════════════════════════════════════════════ */
@@ -521,7 +521,7 @@ test('★★ a monitor not told the alert set is settled (the option absent, thr
       klaxonDir: KLAXON, cacheDir, cacheUrlPath: '/audio-render', renderTts, tickMs: 10,
       ...(reader ? { alertSetSettledSince: reader } : {}),
     });
-    const c: Rig = { mon, boot: Date.now(), logs, has: (x) => logs.some((l) => l.includes(x)), count: (x) => logs.filter((l) => l.includes(x)).length, stop: () => { mon.stop(); rmSync(cacheDir, { recursive: true, force: true }); } };
+    const c: Rig = { mon, boot: Date.now(), logs, has: (x) => logs.some((l) => l.includes(x)), count: (x) => logs.filter((l) => l.includes(x)).length, stop: () => { mon.stop(); rmSync(cacheDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 }); } };
     live.push(c);
     await until(c, () => c.has(CONTINUATION), `the continuation (${what})`);
     alerts = [];

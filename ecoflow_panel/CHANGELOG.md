@@ -32,6 +32,7 @@
 - Partitioned, on 1.205.1's source first: `refusedNotes.test.ts` RN-2 and `refusedNotesArmedYear.test.ts` RN-8 hash the far overnight renders (3,536 and 7,072) apart from the rest. The whole still matched its 1.205.0 pin there (62,050 and 459,170 renders); the far parts are re-cut on the new words.
 - Amended to the new words: RN-2 and RN-9 (the far refused lead and note), `lineAtOpenAllowance.test.ts` AO-15 (a far plan carries the note once in that window's words and never in tonight's, and the reverse), the banner source pins in `chargeCardCancel.test.ts` and `lineNightUnheld.test.ts`, and a negative assertion in `measuredPlannerWalks.test.ts` widened to see the far words.
 - Harnesses: new `mutate-far-window.mjs` (68 mutants: the rule, the window's words, every far shape of the notice and what it carries beside its lows, the card), each killed by the tests it names, with every failing test printed. `mutate-line-force-charge.mjs` F9r2-h(viii) is repointed to the banner's new call line and still killed.
+- `restartRecoveryAllClear.test.ts`: the removal of a rig's audio-cache folder, and of the file's two temporary folders, retries when the folder is not yet empty (`maxRetries: 5, retryDelay: 20`, as `broadcastIntegrity.test.ts` and `restartRecoverySettledSet.test.ts` already do). The removal threw `ENOTEMPTY` in the `beforeEach` hook in one full-suite run on 2026-11-14 and one on 2026-11-15, failing the test that followed before any of its assertions ran; the file passes when run alone. No assertion changes.
 
 **Docs**
 
