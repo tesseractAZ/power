@@ -52,6 +52,8 @@ const SUP = { targetPct: 50, cancelDeadlineText: 'Until 11:00 PM', forceChargeTa
 const refusedOf = (p: P, mode: WriteMode = 'supervised') => buildNightChargeMessage(p, 'charge', null, WHY, mode);
 const CAPS_NOTE = ' NOTE: charge/pool limits prevent fully meeting the cushion — residual risk remains.';
 const tonight = (l: string): string => ` NOTE: nothing is armed to hold tonight's ${l}% floor+cushion line — residual risk remains.`;
+/** v1.206.0 — a plan whose window opens a day or more after it was made (written out here, never read from the subject). */
+const isFarPlan = (p: { window: { startMs: number } | null; generatedAt: number }): boolean => p.window != null && p.window.startMs - p.generatedAt >= 86_400_000;
 const thisLeg = (l: string): string => ` NOTE: nothing is armed to hold this leg's ${l}% floor+cushion line — residual risk remains.`;
 const ANY_UNHELD = /nothing is armed to hold (?:tonight's|this leg's)/g;
 const UNHELD = /nothing is armed to hold (?:tonight's|this leg's)/;
@@ -121,18 +123,29 @@ const PIN_RN2_UNCHANGED = { line: 4094, notAsked: 727 };
 /** Every armed render of every swept plan — the 21:30 push supervised and advisory, the mid-day push and spoken notice in each write
  *  mode, armed — hashed: captured at 8e8c13f4 (v1.205.0) and unchanged. */
 const PIN_ARMED = { renders: 62050, sha256: '6c55e88ec6f8824d65b02c5ba3c6c50be0f7b403552af5f00ba26bf923d517cf' };
+/** v1.206.0 (tests first, on the unmodified v1.205.1 source) — THE SAME RENDERS, PARTITIONED. The overnight push of a plan whose window
+ *  opens a day or more out (2 a plan on 1,768 far plans) is hashed apart from every other render (the near overnight pushes and every
+ *  mid-day render), in the order above. Both parts captured by running this file at 8f4b6748 (v1.205.1), where PIN_ARMED still holds
+ *  over the whole: the partition moves no render. PIN_ARMED_NEAR is the part v1.206.0 must not move. */
+const PIN_ARMED_NEAR = { renders: 58514, sha256: 'e47892357cb49f476b30a83594b1e1769dc3778ab6b5d6957ac91e3368461e3e' };
+const PIN_ARMED_FAR = { renders: 3536, sha256: 'e11f0e84c6cfcd7e70d82af3325b5a0f07ae932b721a7db4e87eeeb19dfb71d4' };
 
-test('★★★ RN-2 the year at 21:30, 4-20 h, both pools: every refused plan with no line force-charge whose cushion asked for energy says once that nothing is armed to hold its floor+cushion line — overnight and mid-day, both write modes, charge and hold shapes, the caps note first — named as its armed push names the line; every armed render byte-identical; counted', () => {
+test('★★★ RN-2 the year at 21:30, 4-20 h, both pools: every refused plan with no line force-charge whose cushion asked for energy says once that nothing is armed to hold its floor+cushion line — overnight and mid-day, both write modes, charge and hold shapes, the caps note first — named as its armed push names the line; every armed render byte-identical; counted', (t) => {
   const count = { supervised: { charge: 0, hold: 0, chargeCaps: 0, holdCaps: 0 }, auto: { charge: 0, hold: 0, chargeCaps: 0, holdCaps: 0 } };
   const unchanged = { line: 0, notAsked: 0 };
   const armed = createHash('sha256');
   let renders = 0;
+  const armedNear = createHash('sha256');
+  let rendersNear = 0;
+  const armedFar = createHash('sha256');
+  let rendersFar = 0;
   const errs: string[] = [];
   for (const { where, p } of year()) {
     // The armed renders (refused unset): the 21:30 push supervised and advisory, the mid-day push and speech armed in each mode.
     for (const m of [buildNightChargeMessage(p, p.chargeTonight ? 'charge' : 'hold', SUP as never), buildNightChargeMessage(p, p.chargeTonight ? 'charge' : 'hold', null)]) {
       armed.update(`${m.title}\n${m.body}\n`);
       renders++;
+      if (isFarPlan(p)) { armedFar.update(`${m.title}\n${m.body}\n`); rendersFar++; } else { armedNear.update(`${m.title}\n${m.body}\n`); rendersNear++; }
       if (UNHELD.test(m.body)) errs.push(`${where}: an armed 21:30 push says nothing is armed: ${m.body}`);
     }
     for (const mode of ['supervised', 'auto', 'advisory'] as const) {
@@ -141,6 +154,9 @@ test('★★★ RN-2 the year at 21:30, 4-20 h, both pools: every refused plan w
       armed.update(`${m.title}\n${m.body}\n`);
       armed.update(`${JSON.stringify(middaySpokenNotice(i))}\n`);
       renders++;
+      armedNear.update(`${m.title}\n${m.body}\n`);
+      armedNear.update(`${JSON.stringify(middaySpokenNotice(i))}\n`);
+      rendersNear++;
       if (UNHELD.test(m.body)) errs.push(`${where} ${mode}: an armed mid-day push says nothing is armed: ${m.body}`);
     }
     if (!p.chargeTonight) continue; // a hold is never refused (index.ts: the arm is tried on a charge plan only)
@@ -170,7 +186,15 @@ test('★★★ RN-2 the year at 21:30, 4-20 h, both pools: every refused plan w
   assert.deepEqual(errs.slice(0, 5), [], `${errs.length} errors`);
   assert.deepEqual(count, PIN_RN2);
   assert.deepEqual(unchanged, PIN_RN2_UNCHANGED);
-  assert.deepEqual({ renders, sha256: armed.digest('hex') }, PIN_ARMED, 'every armed render byte-identical to v1.205.0');
+  const whole = { renders, sha256: armed.digest('hex') };
+  const nearPart = { renders: rendersNear, sha256: armedNear.digest('hex') };
+  const farPart = { renders: rendersFar, sha256: armedFar.digest('hex') };
+  // What this run measured, printed on every run (the evidence beside a commit hash), then held to the pins.
+  t.diagnostic(`measured RN-2 ${JSON.stringify({ whole, near: nearPart, far: farPart })}`);
+  assert.deepEqual(whole, PIN_ARMED, 'every armed render byte-identical to v1.205.0');
+  assert.deepEqual(nearPart, PIN_ARMED_NEAR, 'every armed render inside 24 h, and every mid-day render');
+  assert.deepEqual(farPart, PIN_ARMED_FAR, 'the armed overnight renders of a window a day or more out');
+  assert.equal(rendersNear + rendersFar, renders, 'the two parts are the whole');
 });
 
 test('★★★ RN-3 only where the cushion asked for energy and no other line note fires: a plan whose cushion asked for nothing is unchanged, a plan with an envelope note keeps that note only (AO-15b), a line force-charge keeps its refused note (AO-15)', () => {
