@@ -12,6 +12,9 @@
  * back. The overnight cycle's words are notify.ts's and nightChargeActuator.ts's, unchanged: an
  * overnight-only cycle never reaches a builder here (chargeAnnounce.ts routes by the leg's window
  * kind, and the golden test holds the overnight words byte-identical).
+ * notify.ts's overnight texts do take helpers from this file, and those are live: clocks (phxParts,
+ * phxShortClock), a refused night's line note (refusedCushionLineNote, v1.205.1) and, v1.206.0, the names
+ * of a window that opens a day or more after its plan (farWindowWords, farNoteWords; farWindowText.test.ts).
  *
  * Every text states the charge the plan EXPECTS (statedBuyKwh) and the level the write drives the
  * pool to; the islanded worst case the plan is sized on appears only on the push's labelled
@@ -19,8 +22,8 @@
  * Spanish second pass) stays within MAX_SPOKEN_ADVISORY_CHARS in every shape (middaySpokenNotice
  * drops the least-needed words first, never the level, the cancel time or the cushion clause).
  *
- * Until the mid-day switch (R6) nothing here is sent or spoken: the shadow (middayShadow.ts) logs
- * what the evening and the refresh would say, and the live paths that would send the rest are
+ * Until the mid-day switch (R6) none of the mid-day texts is sent or spoken: the shadow (middayShadow.ts)
+ * logs what the evening and the refresh would say, and the live paths that would send the rest are
  * routed here only for a super off-peak leg, which nothing arms.
  */
 import type { NotifyMessage } from './notify.js';
@@ -34,6 +37,8 @@ import { MAX_SPOKEN_ADVISORY_CHARS, NO_CHARGE_EXPECTED_KWH, RESERVE_WRITE_MAX_PC
 
 // v1.191.0 (lane A, T18) — the site zone (siteTime.ts), read at call time; it was a literal here.
 import { siteTimeZone } from './siteTime.js';
+// v1.206.0 — the rule a window a day or more out is worded by (siteTime.windowBeyondTonight, fmtSiteDayHm's own).
+import { windowBeyondTonight } from './siteTime.js';
 
 /* ── the formatter ────────────────────────────────────────────────────────── */
 
@@ -168,6 +173,39 @@ export function onPeakDayWords(onPeakStartMs: number, nowMs: number): { en: stri
 /** "tomorrow 10am–3pm" — a window named from `nowMs`. PURE. */
 export function windowText(startMs: number, endMs: number, nowMs: number): string {
   return `${dayText(dayWord(startMs, nowMs))} ${spanText(startMs, endMs)}`;
+}
+
+/* ── a window that opens a day or more out (v1.206.0) ─────────────────────── */
+
+/**
+ * ★★★ v1.206.0 — the words of an OVERNIGHT plan whose window opens a day or more after the text is written (a Saturday evening's
+ * plan for Monday 00:00; the Sunday before a Monday holiday, for Tuesday 00:00). The 21:30 push said "charging to ~90% tonight" of
+ * such a window while its own cancel deadline, the spoken notice and the window entities named the day. `when` is the window as
+ * the mid-day texts name one (windowText: "Monday 12am–5am", "tomorrow 10pm–4am"); `opens` its open ("Monday at 12:00 AM").
+ * null inside 24 h (siteTime.windowBeyondTonight, fmtSiteDayHm's rule) and with no window: the overnight words then stand as
+ * they are, byte for byte. PURE.
+ */
+export interface FarWindowWords { when: string; opens: string }
+export function farWindowWords(window: { startMs: number; endMs: number } | null | undefined, nowMs: number): FarWindowWords | null {
+  if (window == null || !Number.isFinite(window.endMs) || !windowBeyondTonight(window.startMs, nowMs)) return null;
+  return {
+    when: windowText(window.startMs, window.endMs, nowMs),
+    opens: `${dayText(dayWord(window.startMs, nowMs))} at ${phxClock(window.startMs)}`,
+  };
+}
+
+/**
+ * v1.206.0 — a NOTE sentence or the supervised tail of the overnight push (notify.buildNightChargeMessage), in the words of a
+ * window a day or more out. Only text that builder composes from its own fixed words, figures and clocks is passed here (the
+ * caps, envelope, over-buy, economic and EV notes; the SUPERVISED tail), never a refusal reason or a basis sentence, so each
+ * phrase below can only be the builder's own. PURE.
+ */
+export function farNoteWords(s: string): string {
+  return s
+    .replaceAll("tonight's ", "that window's ")
+    .replaceAll('Resilience needs no buy tonight', 'Resilience needs no buy in that window')
+    .replaceAll('tomorrow morning’s PV headroom', 'the PV headroom of the morning after that window')
+    .replaceAll('if the car charges overnight', 'if the car charges in that window');
 }
 
 /** The Spanish article for a spoken hour: "la 1 PM", "las 10 AM". */

@@ -87,6 +87,24 @@ export function fmtHHMMIn(ms: number | null | undefined, zone: string | null | u
   }
 }
 
+/** v1.206.0 — the server's siteTime.windowBeyondTonight: an instant a day or more after `nowMs` (false for a missing one). */
+export function beyondTonight(ms: number | null | undefined, nowMs: number): boolean {
+  return ms != null && Number.isFinite(ms) && Number.isFinite(nowMs) && ms - nowMs >= 24 * HOUR_MS;
+}
+
+/** v1.206.0 — "Mon 00:00": the short weekday and "HH:MM" of an instant in `zone`, as the server's fmtSiteDayHm writes an instant
+ *  a day or more out; null as fmtHHMMIn (no zone, an invalid instant). */
+export function fmtWeekdayHHMMIn(ms: number | null | undefined, zone: string | null | undefined): string | null {
+  const hm = fmtHHMMIn(ms, zone);
+  if (hm == null || ms == null || !zone) return hm;
+  try {
+    const wd = new Intl.DateTimeFormat('en-US', { timeZone: zone, weekday: 'short' }).formatToParts(new Date(ms)).find((p) => p.type === 'weekday')?.value ?? '';
+    return wd ? `${wd} ${hm}` : hm;
+  } catch {
+    return hm;
+  }
+}
+
 /** v1.191.1 — hour of the day (0–23) of an instant in `zone`; null without a zone, or for an invalid
  *  instant or zone. */
 export function zonedHourIn(ms: number | null | undefined, zone: string | null | undefined): number | null {

@@ -513,6 +513,10 @@ test('★★★ AO-14 the year at 21:30, 4-20 h, both pools: every \'lateStart\'
  *  whose plan carries a line force-charge (forceChargeLine) is then this one, once — never an armed night's line note
  *  (lineNotHeldOf), which states the close of a charge the refusal does not arm. Measured on the landed change: the year's 21:30
  *  plans at 4-20 h on both pools with a line force-charge, by kind. */
+/** v1.206.0 — a plan whose window opens a day or more after it was made (written out here, never read from the subject). */
+const isFarPlan = (p: { window: { startMs: number } | null; generatedAt: number }): boolean => p.window != null && p.window.startMs - p.generatedAt >= 86_400_000;
+/** v1.206.0 — the same note on a plan whose window opens a day or more out (farWindowText.test.ts): "that window's". */
+const REFUSED_NOTE_FAR = /NOTE: that window's (?:[\d.]+% )?outage line is above the (?:50% the panel accepts as a reserve|49% the panel holds the pool at under the 50% it accepts as a reserve), and nothing is armed to carry it — residual risk remains\./g;
 const REFUSED_NOTE = /NOTE: tonight's (?:[\d.]+% )?outage line is above the (?:50% the panel accepts as a reserve|49% the panel holds the pool at under the 50% it accepts as a reserve), and nothing is armed to carry it — residual risk remains\./g;
 const PIN_AO15 = { none: 3075, closeUnder: 716, nearFull: 142, aboveFull: 104, lateStart: 57 };
 /** (review) Of them, the nights whose SIZING fell short too (the caps note, before the refused note). */
@@ -613,9 +617,10 @@ test('★★★ AO-15 a refused arm arms nothing: the 21:30 and mid-day pushes s
     if (noChargeExpected(p)) held++;
     for (const mode of ['supervised', 'auto'] as const) {
       const t = refusedOf(p, mode).body;
-      if (t.match(REFUSED_NOTE)?.length !== 1) errs.push(`${c.label} ${b} ${h} h ${mode}: not one refused note: ${t}`);
+      const far = isFarPlan(p);
+      if (t.match(far ? REFUSED_NOTE_FAR : REFUSED_NOTE)?.length !== 1 || t.match(far ? REFUSED_NOTE : REFUSED_NOTE_FAR) != null) errs.push(`${c.label} ${b} ${h} h ${mode}: not one refused note: ${t}`);
       if (ARMED_WORDS.test(t) || LATE_WORDS.test(t) || UNDER.test(t)) errs.push(`${c.label} ${b} ${h} h ${mode}: an armed night's note: ${t}`);
-      if (sizingShort ? !t.includes(`${CAPS_NOTE} NOTE: tonight's`) : t.includes(CAPS_NOTE)) errs.push(`${c.label} ${b} ${h} h ${mode}: the caps note: ${t}`);
+      if (sizingShort ? !t.includes(`${CAPS_NOTE} NOTE: ${far ? "that window's" : "tonight's"}`) : t.includes(CAPS_NOTE)) errs.push(`${c.label} ${b} ${h} h ${mode}: the caps note: ${t}`);
       const i = inputOf(p, mode, true);
       const bad = i.mode !== mode || i.refused !== MIDDAY_WHY ? `the record's ${mode} refusal not read: ${i.mode}, ${i.refused}`
         : middayRefusedWrong(buildMiddayPlanMessage(i), mode, p.cushionLineSocPct!, sizingShort);

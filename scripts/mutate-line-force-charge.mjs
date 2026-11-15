@@ -3561,8 +3561,9 @@ const MUTANTS = [
   {
     id: 'F9r2-h(viii). ★ the banner ignores the reading it is given',
     file: CARDX, tests: [T_UNHELD],
-    find: 'const state = actuationBannerState(actuation, hhmm(actuation.cancelDeadlineMs), reservePct);',
-    to: 'const state = actuationBannerState(actuation, hhmm(actuation.cancelDeadlineMs), null);',
+    // v1.206.0 — anchor moved: the call passes the weekday clock and the far flag (a window a day or more out).
+    find: 'const state = actuationBannerState(actuation, (far ? weekdayHm : hhmm)(actuation.cancelDeadlineMs), reservePct, far);',
+    to: 'const state = actuationBannerState(actuation, (far ? weekdayHm : hhmm)(actuation.cancelDeadlineMs), null, far);',
     why: 'See F9r2-h(iii).',
   },
   /* ── F10: a record with its ask whose start is closed ── */

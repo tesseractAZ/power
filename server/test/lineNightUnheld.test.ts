@@ -319,7 +319,7 @@ test('★★★ U1b the armed banner says the reserve reads the target, while th
   assert.equal(banner(a, '22:55').text, 'Supervised write armed — reserve → 50% at 22:55.');
   assert.equal(banner({ ...(a as object), appliedAtMs: 1, priorReservePct: 30 }, '22:55', 50).text, 'Reserve raised to 50% (was 30%); auto-restores after the window closes.');
   const CARD_SRC = readFileSync(resolve(HERE, '../../web/src/cards/NightChargeCard.tsx'), 'utf8');
-  assert.ok(CARD_SRC.includes('const state = actuationBannerState(actuation, hhmm(actuation.cancelDeadlineMs), reservePct);'), 'the live reading reaches it');
+  assert.ok(CARD_SRC.includes('const state = actuationBannerState(actuation, (far ? weekdayHm : hhmm)(actuation.cancelDeadlineMs), reservePct, far);'), 'the live reading reaches it');
   assert.ok(CARD_SRC.includes('reservePct={status.reserveFloorPercent}'), 'the panel\'s live reading (status.reserveFloorPercent)');
 });
 

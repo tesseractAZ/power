@@ -60,8 +60,18 @@ const undo = (s: string): string => s
   .replaceAll(` NOTE: the outage line is above ${OVER_HELD} and no force-charge carries it on`, ` NOTE: the outage line is above ${OVER_RESERVE} and no force-charge carries it on`)
   .replaceAll(`; the line is above ${OVER_HELD}, and the backup leg writes the reserve only`, `; the line is above ${OVER_RESERVE}, and the backup leg writes the reserve only`);
 
-/** Every render, with the correction undone, hashed: captured at 8e8c13f4 (v1.205.0). */
-const PIN_V1205 = { renders: 459170, sha256: '59aa2d8f862f969be46547b81c7071cb44102efea1495da86973b33360073d5c' };
+/** Every render, with the correction undone, hashed. Through v1.205.1 one pin held them all (459,170 renders, sha256 59aa2d8f…3d5c,
+ *  captured at 8e8c13f4, v1.205.0, where the undo is the identity).
+ *  v1.206.0 — PARTITIONED, tests first: the gate-off night's 21:30 push of a plan whose window opens a day or more out (a title and a
+ *  body, armed and advisory, on 1,768 far plans) is hashed apart from every other render, in the order of the sweep, the correction
+ *  undone in both parts. Both parts were captured on the unmodified v1.205.1 source (8f4b6748), where the one pin
+ *  still held over the whole.
+ *   - PIN_V1205_NEAR is the part v1.206.0 must not move: as captured at 8f4b6748, byte for byte.
+ *   - PIN_FAR_OVERNIGHT is v1.206.0's own output, a REGRESSION PIN: those pushes are worded from the window (at 8f4b6748 they hashed to
+ *     f9b66a8c…b19a). What they must say is held by farWindowText.test.ts (FW-3 word for word, FW-4 and FW-5 by rule), not by this hash. */
+const PIN_V1205_NEAR = { renders: 452098, sha256: 'eedf2d22e716f94504af86ce843f5e05670e1e6cc5ff6af70a96b30231204121' };
+const PIN_FAR_OVERNIGHT = { renders: 7072, sha256: '958aba9e0312bbb4b981c13c76da9a6db4217f1c72ee0bccf4c05fbe44ecf0ec' };
+const isFarPlan = (p: { window: { startMs: number } | null; generatedAt: number }): boolean => p.window != null && p.window.startMs - p.generatedAt >= 86_400_000;
 /** The renders the correction moves (with the line gate on and no backup leg, none: RN-2). */
 const PIN_MOVED = {
   renders: 2430, records: 1458, configurations: 486,
@@ -69,20 +79,25 @@ const PIN_MOVED = {
   lines: { min: 49, max: 50 },
 };
 
-test('★★★ RN-8 the armed mid-day renders, the year over (line gate on and off, with the night\'s backup leg and without, three modes): byte-identical to v1.205.0 but for the one correction — each "no force-charge carries it" note and the backup leg\'s log line worded by its own leg\'s line — which moves only renders naming a line in [49.00, 50.00]; counted', () => {
-  const hash = createHash('sha256');
-  let renders = 0;
+test('★★★ RN-8 the armed mid-day renders, the year over (line gate on and off, with the night\'s backup leg and without, three modes): byte-identical to v1.205.0 but for the one correction — each "no force-charge carries it" note and the backup leg\'s log line worded by its own leg\'s line — which moves only renders naming a line in [49.00, 50.00]; counted', (t) => {
   const moved = { renders: 0, records: 0, nights: new Set<string>(), byNote: { 'this leg': 0, 'the backup leg': 0, 'backup log': 0 } as Record<string, number>, lines: [] as number[] };
   const named = new Set<string>();
   const errs: string[] = [];
-  const add = (s: string): void => { hash.update(`${undo(s)}\n`); renders++; };
+  const nearHash = createHash('sha256');
+  let nearRenders = 0;
+  const farHash = createHash('sha256');
+  let farRenders = 0;
+  /** `far` (a far plan's 21:30 push) says which part a render goes into. */
+  const add = (s: string, far = false): void => {
+    if (far) { farHash.update(`${undo(s)}\n`); farRenders++; } else { nearHash.update(`${undo(s)}\n`); nearRenders++; }
+  };
   for (const c of CASES.filter((x) => / 21:30$/.test(x.label))) for (const b of ['np', 'm'] as const) for (let h = 4; h <= 20; h++) {
     const on = planAt(c.label, b, h, true);
     const off = planAt(c.label, b, h, false);
     // The gate-off night's armed and advisory 21:30 push (RN-2 hashes the gate-on night's).
     for (const m of [buildNightChargeMessage(off, off.chargeTonight ? 'charge' : 'hold', SUP as never), buildNightChargeMessage(off, off.chargeTonight ? 'charge' : 'hold', null)]) {
-      add(m.title);
-      add(m.body);
+      add(m.title, isFarPlan(off));
+      add(m.body, isFarPlan(off));
     }
     for (const [gate, p, withBackup] of [['on', on, true], ['off', off, false], ['off', off, true]] as const) for (const mode of ['supervised', 'auto', 'advisory'] as const) {
       const where = `${c.label} ${b} ${h} h, gate ${gate}${withBackup ? ', backup' : ''}, ${mode}`;
@@ -122,8 +137,14 @@ test('★★★ RN-8 the armed mid-day renders, the year over (line gate on and 
       if (any) { moved.records++; moved.nights.add(where.replace(/, (supervised|auto|advisory)$/, '')); }
     }
   }
-  // v1.205.0's renders, with the one correction undone: captured at 8e8c13f4 (where `undo` changes nothing).
-  assert.deepEqual({ renders, sha256: hash.digest('hex') }, PIN_V1205, 'every armed render byte-identical to v1.205.0 but for the correction');
+  // v1.205.1's renders inside 24 h, with the one correction undone: captured at 8f4b6748.
+  const nearPart = { renders: nearRenders, sha256: nearHash.digest('hex') };
+  const farPart = { renders: farRenders, sha256: farHash.digest('hex') };
+  // What this run measured, printed on every run (the evidence beside a commit hash), then held to the pins.
+  t.diagnostic(`measured RN-8 ${JSON.stringify({ near: nearPart, far: farPart })}`);
+  assert.deepEqual(nearPart, PIN_V1205_NEAR, 'every render but the 21:30 push of a window a day or more out: byte-identical to v1.205.1 but for the correction');
+  assert.deepEqual(farPart, PIN_FAR_OVERNIGHT, 'the 21:30 pushes of a window a day or more out (a regression pin)');
+  assert.equal(nearRenders + farRenders, 459170, 'the two parts are the whole sweep');
   assert.deepEqual(errs.slice(0, 5), [], `${errs.length} errors`);
   assert.deepEqual({
     renders: moved.renders, records: moved.records, configurations: moved.nights.size, byNote: moved.byNote,
