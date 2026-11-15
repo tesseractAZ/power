@@ -54,9 +54,12 @@ const CAPS_NOTE = ' NOTE: charge/pool limits prevent fully meeting the cushion �
 const tonight = (l: string): string => ` NOTE: nothing is armed to hold tonight's ${l}% floor+cushion line — residual risk remains.`;
 /** v1.206.0 — a plan whose window opens a day or more after it was made (written out here, never read from the subject). */
 const isFarPlan = (p: { window: { startMs: number } | null; generatedAt: number }): boolean => p.window != null && p.window.startMs - p.generatedAt >= 86_400_000;
+/** v1.206.0 — the same note on a far plan, and the refused lead's close there ("Nothing is armed for that window."). */
+const thatWindow = (l: string): string => ` NOTE: nothing is armed to hold that window's ${l}% floor+cushion line — residual risk remains.`;
+const noteOf = (p: P, l: string): string => (isFarPlan(p) ? thatWindow(l) : tonight(l));
 const thisLeg = (l: string): string => ` NOTE: nothing is armed to hold this leg's ${l}% floor+cushion line — residual risk remains.`;
-const ANY_UNHELD = /nothing is armed to hold (?:tonight's|this leg's)/g;
-const UNHELD = /nothing is armed to hold (?:tonight's|this leg's)/;
+const ANY_UNHELD = /nothing is armed to hold (?:tonight's|that window's|this leg's)/g;
+const UNHELD = /nothing is armed to hold (?:tonight's|that window's|this leg's)/;
 /** The plan's sizing fell short (the caps note): refused or armed, its pushes say it. */
 const sizingShortOf = (p: P): boolean => p.cushionShortfall === true && p.cushionShortfallCause !== 'envelope';
 /** The cushion asked for energy. */
@@ -121,20 +124,19 @@ const PIN_RN2 = {
 /** …the refused plans with no new note: a line force-charge (AO-15's 4,094, per mode), and a cushion that asked for nothing. */
 const PIN_RN2_UNCHANGED = { line: 4094, notAsked: 727 };
 /** Every armed render of every swept plan — the 21:30 push supervised and advisory, the mid-day push and spoken notice in each write
- *  mode, armed — hashed: captured at 8e8c13f4 (v1.205.0) and unchanged. */
-const PIN_ARMED = { renders: 62050, sha256: '6c55e88ec6f8824d65b02c5ba3c6c50be0f7b403552af5f00ba26bf923d517cf' };
-/** v1.206.0 (tests first, on the unmodified v1.205.1 source) — THE SAME RENDERS, PARTITIONED. The overnight push of a plan whose window
- *  opens a day or more out (2 a plan on 1,768 far plans) is hashed apart from every other render (the near overnight pushes and every
- *  mid-day render), in the order above. Both parts captured by running this file at 8f4b6748 (v1.205.1), where PIN_ARMED still holds
- *  over the whole: the partition moves no render. PIN_ARMED_NEAR is the part v1.206.0 must not move. */
+ *  mode, armed — hashed. Through v1.205.1 one pin held them all (62,050 renders, sha256 6c55e88e…17cf, captured at 8e8c13f4, v1.205.0).
+ *  v1.206.0 — PARTITIONED, tests first: the overnight push of a plan whose window opens a day or more out (2 a plan on 1,768 far plans)
+ *  is hashed apart from every other render (the near overnight pushes and every mid-day render), in the order of the sweep. Both parts
+ *  were captured on the unmodified v1.205.1 source (8f4b6748), where the one pin still held over the whole.
+ *   - PIN_ARMED_NEAR is the part v1.206.0 must not move: as captured at 8f4b6748, byte for byte.
+ *   - PIN_ARMED_FAR is v1.206.0's own output, a REGRESSION PIN: those renders are worded from the window (at 8f4b6748 they hashed to
+ *     e11f0e84…71d4). What they must say is held by farWindowText.test.ts (FW-3 word for word, FW-4 and FW-5 by rule), not by this hash. */
 const PIN_ARMED_NEAR = { renders: 58514, sha256: 'e47892357cb49f476b30a83594b1e1769dc3778ab6b5d6957ac91e3368461e3e' };
-const PIN_ARMED_FAR = { renders: 3536, sha256: 'e11f0e84c6cfcd7e70d82af3325b5a0f07ae932b721a7db4e87eeeb19dfb71d4' };
+const PIN_ARMED_FAR = { renders: 3536, sha256: 'f77775352cd9103f71f2dae743747b40e988c6223c744be2e3a24d106be394d8' };
 
-test('★★★ RN-2 the year at 21:30, 4-20 h, both pools: every refused plan with no line force-charge whose cushion asked for energy says once that nothing is armed to hold its floor+cushion line — overnight and mid-day, both write modes, charge and hold shapes, the caps note first — named as its armed push names the line; every armed render byte-identical; counted', (t) => {
+test('★★★ RN-2 the year at 21:30, 4-20 h, both pools: every refused plan with no line force-charge whose cushion asked for energy says once that nothing is armed to hold its floor+cushion line — overnight and mid-day, both write modes, charge and hold shapes, the caps note first — named as its armed push names the line; every armed render inside 24 h byte-identical; counted', (t) => {
   const count = { supervised: { charge: 0, hold: 0, chargeCaps: 0, holdCaps: 0 }, auto: { charge: 0, hold: 0, chargeCaps: 0, holdCaps: 0 } };
   const unchanged = { line: 0, notAsked: 0 };
-  const armed = createHash('sha256');
-  let renders = 0;
   const armedNear = createHash('sha256');
   let rendersNear = 0;
   const armedFar = createHash('sha256');
@@ -143,17 +145,12 @@ test('★★★ RN-2 the year at 21:30, 4-20 h, both pools: every refused plan w
   for (const { where, p } of year()) {
     // The armed renders (refused unset): the 21:30 push supervised and advisory, the mid-day push and speech armed in each mode.
     for (const m of [buildNightChargeMessage(p, p.chargeTonight ? 'charge' : 'hold', SUP as never), buildNightChargeMessage(p, p.chargeTonight ? 'charge' : 'hold', null)]) {
-      armed.update(`${m.title}\n${m.body}\n`);
-      renders++;
       if (isFarPlan(p)) { armedFar.update(`${m.title}\n${m.body}\n`); rendersFar++; } else { armedNear.update(`${m.title}\n${m.body}\n`); rendersNear++; }
       if (UNHELD.test(m.body)) errs.push(`${where}: an armed 21:30 push says nothing is armed: ${m.body}`);
     }
     for (const mode of ['supervised', 'auto', 'advisory'] as const) {
       const i = inputOf(p, mode);
       const m = buildMiddayPlanMessage(i);
-      armed.update(`${m.title}\n${m.body}\n`);
-      armed.update(`${JSON.stringify(middaySpokenNotice(i))}\n`);
-      renders++;
       armedNear.update(`${m.title}\n${m.body}\n`);
       armedNear.update(`${JSON.stringify(middaySpokenNotice(i))}\n`);
       rendersNear++;
@@ -174,10 +171,11 @@ test('★★★ RN-2 the year at 21:30, 4-20 h, both pools: every refused plan w
       count[mode][shape] += 1;
       const short = sizingShortOf(p);
       if (short) count[mode][`${shape}Caps`] += 1;
-      const lead = shape === 'hold' ? 'The add-on will not raise the reserve tonight.' : 'The add-on will not charge tonight.';
+      // v1.206.0 — a far plan's refused push closes on what is armed for its window (nothing), in either shape.
+      const lead = isFarPlan(p) ? 'Nothing is armed for that window.' : shape === 'hold' ? 'The add-on will not raise the reserve tonight.' : 'The add-on will not charge tonight.';
       // Named as the armed push names it (its own rounding: a 48.99% line is "49%" there and here).
       if (named == null || named !== String(Math.round(line! * 10) / 10)) errs.push(`${where}: the armed push names ${named}, the line is ${line}`);
-      if (!body.endsWith(`${lead}${short ? CAPS_NOTE : ''}${tonight(named ?? '?')}`)) errs.push(`${where} ${mode}: ${body}`);
+      if (!body.endsWith(`${lead}${short ? CAPS_NOTE : ''}${noteOf(p, named ?? '?')}`)) errs.push(`${where} ${mode}: ${body}`);
       if (body.match(ANY_UNHELD)?.length !== 1 || body.split(' NOTE: ').length !== (short ? 3 : 2)) errs.push(`${where} ${mode}: not one note per fact: ${body}`);
       if (!mid.endsWith(`The add-on will not charge tomorrow.${short ? CAPS_NOTE : ''}${thisLeg(named ?? '?')}`)) errs.push(`${where} ${mode} mid-day: ${mid}`);
       if (mid.match(ANY_UNHELD)?.length !== 1) errs.push(`${where} ${mode} mid-day: not one note: ${mid}`);
@@ -186,15 +184,13 @@ test('★★★ RN-2 the year at 21:30, 4-20 h, both pools: every refused plan w
   assert.deepEqual(errs.slice(0, 5), [], `${errs.length} errors`);
   assert.deepEqual(count, PIN_RN2);
   assert.deepEqual(unchanged, PIN_RN2_UNCHANGED);
-  const whole = { renders, sha256: armed.digest('hex') };
   const nearPart = { renders: rendersNear, sha256: armedNear.digest('hex') };
   const farPart = { renders: rendersFar, sha256: armedFar.digest('hex') };
   // What this run measured, printed on every run (the evidence beside a commit hash), then held to the pins.
-  t.diagnostic(`measured RN-2 ${JSON.stringify({ whole, near: nearPart, far: farPart })}`);
-  assert.deepEqual(whole, PIN_ARMED, 'every armed render byte-identical to v1.205.0');
-  assert.deepEqual(nearPart, PIN_ARMED_NEAR, 'every armed render inside 24 h, and every mid-day render');
-  assert.deepEqual(farPart, PIN_ARMED_FAR, 'the armed overnight renders of a window a day or more out');
-  assert.equal(rendersNear + rendersFar, renders, 'the two parts are the whole');
+  t.diagnostic(`measured RN-2 ${JSON.stringify({ near: nearPart, far: farPart })}`);
+  assert.deepEqual(nearPart, PIN_ARMED_NEAR, 'every armed render inside 24 h, and every mid-day render, byte-identical to v1.205.1');
+  assert.deepEqual(farPart, PIN_ARMED_FAR, 'the armed overnight renders of a window a day or more out (a regression pin)');
+  assert.equal(rendersNear + rendersFar, 62050, 'the two parts are the whole sweep');
 });
 
 test('★★★ RN-3 only where the cushion asked for energy and no other line note fires: a plan whose cushion asked for nothing is unchanged, a plan with an envelope note keeps that note only (AO-15b), a line force-charge keeps its refused note (AO-15)', () => {
@@ -402,6 +398,8 @@ const SOLAR_REFUSAL_0 = 'only 0 scored calibration day(s), need 4 (a provisional
 /** The refused push's lead, by shape and write mode. */
 const leadOf = (p: P, mode: WriteMode): string => {
   const write = mode === 'auto' ? 'the write' : 'the supervised write';
+  // v1.206.0 — a far plan's refused push closes on what is armed for its window (nothing), in either shape.
+  if (isFarPlan(p)) return `but ${write} was not armed — ${WHY}. Nothing is armed for that window.`;
   return noChargeExpected(p)
     ? `but ${write} was not armed — ${WHY}. The add-on will not raise the reserve tonight.`
     : `but ${write} was not armed — ${WHY}. The add-on will not charge tonight.`;
@@ -468,7 +466,7 @@ test('★★★ RN-9 a refused cushion-only night (the plant\'s live shape, the 
       if (kind === 'U') {
         // Named on the armed push's figure: "the X% line is the …" there, "tonight's X% floor+cushion line" here.
         const named = /: the ([\d.]+)% line is the /.exec(armedBody)?.[1];
-        if (named == null || own !== tonight(named)) errs.push(`${c.label} ${mode}: armed ${named}: ${body}`);
+        if (named == null || own !== noteOf(q, named)) errs.push(`${c.label} ${mode}: armed ${named}: ${body}`);
       }
       const k = `${short ? 'C' : ''}${kind}` || 'none';
       count[mode].plans += 1;

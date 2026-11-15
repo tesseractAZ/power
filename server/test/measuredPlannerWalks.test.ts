@@ -796,7 +796,7 @@ test('★★★ T14 A LINE NIGHT THE COST FORCE-CHARGE CARRIES walks its drawbac
       late[b] += 1;
       assert.ok(p.expectedCloseAfterStopPct >= p.cushionLineSocPct! - LINE_CARRY_CLOSE_TOLERANCE_PCT - 1e-9, `${at}: 'lateStart' beside a close under the line`);
       assert.equal(lineNotHeldOf(p), 'lateStart', at);
-      assert.doesNotMatch(`${p.rationale}${buildNightChargeMessage(p, 'charge', null).body}${cardText.outageLineRow(p as never, 50) ?? ''}`, /under tonight's|under the line/, at);
+      assert.doesNotMatch(`${p.rationale}${buildNightChargeMessage(p, 'charge', null).body}${cardText.outageLineRow(p as never, 50) ?? ''}`, /under tonight's|under that window's|under the line/, at); // v1.206.0 — and in a far push's words (farNoteWords)
       continue;
     }
     const kind = p.cushionEnvelopeReason === 'closeUnder' ? 'disclosed' : 'capped';

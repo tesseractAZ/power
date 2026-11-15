@@ -149,10 +149,12 @@ function failingTests(out) {
  * @param {boolean} [o.fullSuite] false = the subset alone decides (no full-suite step), for harnesses built that way.
  * @param {number} [o.concurrency] a cap on the default worker count for a suite that is timing-sensitive
  *                                under load (its all-workers baseline fails); MUTATE_CONCURRENCY still wins.
+ * @param {boolean} [o.nameEveryKiller] print every failing test of a mutant, not the first four (v1.206.0: a log that shows
+ *                                what holds each behaviour). The verdicts are the same either way.
  * Argv `--only <id-prefix>` selects mutants (anchors are still checked for all of them).
  * @returns {Promise<never>}      exits the process with the harness's usual codes (0 / 1 / 2)
  */
-export async function runMutantsParallel({ name, mutants, subset = [], root, perMutantTests = false, typecheck = false, knownSurvivor = null, fullSuite = true, concurrency = null }) {
+export async function runMutantsParallel({ name, mutants, subset = [], root, perMutantTests = false, typecheck = false, knownSurvivor = null, fullSuite = true, concurrency = null, nameEveryKiller = false }) {
   root = resolve(root);
   const originals = new Map();
   for (const m of mutants) if (!originals.has(m.file)) originals.set(m.file, readFileSync(m.file, 'utf8'));
@@ -257,8 +259,9 @@ export async function runMutantsParallel({ name, mutants, subset = [], root, per
           verdicts[i] = died;
           console.log(`  ${died ? 'KILLED  ' : 'SURVIVED'} ${m.id}${died ? '' : `\n           ↳ ${m.why}`}`);
           if (note) console.log(`           ↳ ${note}`);
-          for (const t of by.slice(0, 4)) console.log(`           ✖ ${t}`);
-          if (by.length > 4) console.log(`           … and ${by.length - 4} more`);
+          const shown = nameEveryKiller ? by.length : 4;
+          for (const t of by.slice(0, shown)) console.log(`           ✖ ${t}`);
+          if (by.length > shown) console.log(`           … and ${by.length - shown} more`);
         } finally {
           writeFileSync(target, original);
         }

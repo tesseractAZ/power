@@ -430,6 +430,13 @@ export function fmtSiteDayHm(ms: number, nowMs: number): string {
   return wd ? `${wd} ${hm}` : hm;
 }
 
+/** v1.206.0 — fmtSiteDayHm's rule as a predicate: an instant a day or more after `nowMs` is not "tonight" (false for a non-finite
+ *  instant or clock). The night-charge push and card word a window by it (chargeText.farWindowWords), so the title, the cancel
+ *  deadline and the window entities change their wording at the same instant. PURE. */
+export function windowBeyondTonight(ms: number, nowMs: number): boolean {
+  return Number.isFinite(ms) && Number.isFinite(nowMs) && ms - nowMs >= 24 * HOUR_MS;
+}
+
 /** "YYYY-MM-DD HH:MM" (or "…:SS") of an instant in the site zone — the TUI's stamps. */
 export function fmtSiteStamp(ms: number, withSeconds = false): string {
   const p = siteLocalParts(ms);

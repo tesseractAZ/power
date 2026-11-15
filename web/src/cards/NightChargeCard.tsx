@@ -3,10 +3,13 @@ import {
   actuationBannerState, actuationBannerVisible, actuationKey, cancelOutcome, cancelRequestInit, chargeFigureParts, floorCushionLinePct, fmtLinePct,
   holdSummary, noChargeExpected, noPlanText, refusedArmLead, reserveWriteLabel, sizingLine, startClosedLead, withConfirmedCancel, writeStands,
   capsShortfallShown, outageLineRow, lineNotHeldOfCard,
+  farCardWindow, farLeadText,
   writtenReservePct, middayShadowView, cushionOnlyBasisValue, panelBasisStat, type MiddayShadowStatus, type MiddayShadowPreviewStatus, type CushionOnlyText,
 } from './nightChargeText';
 import { apiUrl } from '../api';
 import { fmtHHMMIn } from '../siteTime';
+// v1.206.0 — a window (or an armed write) a day or more out is shown with its weekday, never a bare clock.
+import { beyondTonight, fmtWeekdayHHMMIn } from '../siteTime';
 
 /**
  * Tonight's night-charge advisory — should the home buy grid energy in the
@@ -263,10 +266,13 @@ export const NightChargeCard = memo(function NightChargeCard() {
   // left before it cannot undo it, and the next night's write keeps its Cancel); the 60 s poll
   // converges the rest.
   const hhmm = siteHHMM(status.siteTimeZone);
+  // v1.206.0 — "Mon 00:00" (the server's fmtSiteDayHm beyond 24 h): the clock of a window, or an armed write, that opens a day
+  // or more after the card is drawn. A bare "00:00" on a Saturday evening read as that night's midnight; the window was Monday's.
+  const weekdayHm: ClockFmt = (ms) => fmtWeekdayHHMMIn(ms, status.siteTimeZone);
   const actuation = withConfirmedCancel(status.actuation ?? null, cancelledKey);
   const onCancelled = () => setCancelledKey(actuationKey(actuation));
   const banner = (spacing: 'mt-3' | 'mb-3') => (
-    <ActuationBanner mode={status.mode} actuation={actuation} onCancelled={onCancelled} spacing={spacing} hhmm={hhmm} reservePct={status.reserveFloorPercent} />
+    <ActuationBanner mode={status.mode} actuation={actuation} onCancelled={onCancelled} spacing={spacing} weekdayHm={weekdayHm} hhmm={hhmm} reservePct={status.reserveFloorPercent} />
   );
   const stands = writeStands(actuation, status.mode, Date.now());
 
@@ -321,11 +327,14 @@ export const NightChargeCard = memo(function NightChargeCard() {
   }
 
   // CHARGE — surface buy, target SoC, baseline→plan trough, window, confidence.
-  const ws = hhmm(plan.window?.startMs);
+  // v1.206.0 — the plan's window a day or more out (farCardWindow): both ends carry the weekday, and a line under the figure
+  // says that no charge is planned for tonight. null inside 24 h: the bare clocks, as before.
+  const far = farCardWindow(plan.window, Date.now(), weekdayHm);
+  const ws = far != null ? weekdayHm(plan.window?.startMs) : hhmm(plan.window?.startMs);
   // v1.204.0 — the Basis stat on the selected solar basis (null: the plan carries none), its sub with the window when there is one.
   const pvStat = panelBasisStat(plan);
   const withWindow = (sub: string): string => (ws && we ? `${sub} · ${ws}–${we}` : sub);
-  const we = hhmm(plan.window?.endMs);
+  const we = far != null ? weekdayHm(plan.window?.endMs) : hhmm(plan.window?.endMs);
   // v1.187.22 — the headline is the charge the write arms (the expected draw and the level it
   // drives to); the worst case appears once, in the labelled sizing line beneath.
   const fig = chargeFigureParts(plan, status.reserveWriteMaxPct ?? null);
@@ -375,6 +384,11 @@ export const NightChargeCard = memo(function NightChargeCard() {
             )}
           </div>
         </div>
+      )}
+
+      {/* v1.206.0 — a window that opens a day or more out: said plainly under the figure (not under a refused or closed lead). */}
+      {far != null && !refused && !closedLead && (
+        <div className="text-xs text-muted mb-3 -mt-2">{farLeadText(far)}</div>
       )}
 
       {sizing && <div className="text-xs text-muted mb-3 -mt-2">{sizing}</div>}
@@ -470,10 +484,12 @@ export const NightChargeCard = memo(function NightChargeCard() {
  * v1.189.0 — rendered in every card shape; its words and its Cancel come from
  * actuationBannerState.
  */
-function ActuationBanner({ mode, actuation, onCancelled, spacing, hhmm, reservePct }: {
+function ActuationBanner({ mode, actuation, onCancelled, spacing, hhmm, weekdayHm, reservePct }: {
   mode: NightChargeStatus['mode'];
   /** The site-zone clock formatter (siteHHMM). */
   hhmm: ClockFmt;
+  /** v1.206.0 — the same clock with its weekday ("Mon 00:00"), for a write whose window opens a day or more out. */
+  weekdayHm: ClockFmt;
   actuation: NightActuation | null;
   onCancelled: () => void;
   /** Its margin in the shape it sits in: above the stats (mb-3), or under the shape's text (mt-3). */
@@ -485,7 +501,9 @@ function ActuationBanner({ mode, actuation, onCancelled, spacing, hhmm, reserveP
   const [cancelErr, setCancelErr] = useState<string | null>(null);
   if (mode === 'advisory' || !actuation || !actuationBannerVisible(actuation, Date.now())) return null;
 
-  const state = actuationBannerState(actuation, hhmm(actuation.cancelDeadlineMs), reservePct);
+  // v1.206.0 — a write whose window opens a day or more out: its deadline carries the weekday, and its Cancel is not "tonight".
+  const far = beyondTonight(actuation.windowStartMs, Date.now());
+  const state = actuationBannerState(actuation, (far ? weekdayHm : hhmm)(actuation.cancelDeadlineMs), reservePct, far);
   const doCancel = async () => {
     setBusy(true);
     setCancelErr(null);

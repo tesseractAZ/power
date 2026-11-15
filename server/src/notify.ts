@@ -29,6 +29,8 @@ import { isNoChargeKwh, revertRetryText, RESERVE_WRITE_MAX_PCT, PANEL_RESERVE_HO
 // R5 — the day-aware formatter's clocks (chargeText.ts), shared with the mid-day texts.
 // v1.205.1 — and a refused night's note on a floor+cushion line nothing is armed to hold, shared with the mid-day push.
 import { phxParts, phxShortClock, refusedCushionLineNote } from './chargeText.js';
+// v1.206.0 — a window that opens a day or more out is named from the window, never "tonight" (chargeText.farWindowWords).
+import { farWindowWords, farNoteWords } from './chargeText.js';
 
 /**
  * v1.120.0 — NOTIFY HTTP BUDGETS.
@@ -397,6 +399,12 @@ export async function dispatchMobilePush(
  *   • insufficient_basis — no plan tonight (basis incomplete). Sending this makes
  *               the ABSENCE explicit so the owner never wonders if the job died.
  *
+ * v1.206.0 — a plan whose window opens a day or more after it was made (a Saturday evening
+ * for Monday 00:00) is not "tonight": every shape then names the window, a charge says first
+ * that none is planned for tonight, and a hold, a refused arm and a missing plan say what is
+ * armed for the window at that moment, never what will or will not be charged in it (`far`
+ * below). Inside 24 h, with no plan and with no window, every word is as it was.
+ *
  * ★ SAFETY: this is a READ-ONLY advisory. The message NEVER implies the add-on
  *   will act, and it NEVER fabricates a number — a null plan or a null field
  *   renders as an em-dash and (for a null/insufficient plan) the insufficient
@@ -428,6 +436,13 @@ export function buildNightChargeMessage(
   mode?: NightChargeMode,
 ): NotifyMessage {
   const base = { severity: 'info' as const, dedupId: 'night_charge_plan' };
+  // ★★★ v1.206.0 — A WINDOW THAT OPENS A DAY OR MORE AFTER THE PLAN (a Saturday evening's plan for Monday 00:00; the Sunday
+  // before a Monday holiday). Every shape said "tonight" / "overnight" of it: on 2026-11-14 at 21:30 "charging to ~90% tonight
+  // (~46.6 kWh)" for a window 26.5 h out, with no write due before Monday. Such a push names the window, says no charge is
+  // planned for tonight, and says of the window only what is armed now ("nothing is armed for it", never "nothing will be
+  // charged": a later evening run can plan the same window again). null inside 24 h (siteTime.windowBeyondTonight), with no plan
+  // and with no window: every word below is then as it was, byte for byte.
+  const far = plan != null ? farWindowWords(plan.window, plan.generatedAt) : null;
 
   // A null plan can only ever be "insufficient basis" — never a fabricated
   // charge/hold — regardless of the shape the caller asked for.
@@ -441,6 +456,16 @@ export function buildNightChargeMessage(
     const reason = plan == null
       ? "the panel's pool readings (capacity, state of charge, reserve) are unavailable"
       : `the forecast/telemetry basis is incomplete${plan.basisBlockedBy ? `: ${plan.basisBlockedBy}` : ''}`;
+    // v1.206.0 — no plan for a window a day or more out: about that window, and only what this evening armed (nothing).
+    if (far != null) {
+      return {
+        ...base,
+        title: `Night-charge: no plan for ${far.when}`,
+        body:
+          `No charge plan this evening for the ${far.when} window — ${reason}, so nothing is armed for it. `
+          + '(This confirms the evening job ran; the reserve floor is unchanged.)',
+      };
+    }
     return {
       ...base,
       title: 'Night-charge: no plan tonight',
@@ -503,6 +528,25 @@ export function buildNightChargeMessage(
     // v1.204.0 — and a hold sized on the panel-measured band says so (panelBasisPushText; a cushion-only hold's refusal is in
     // cushionOnlyPushText).
     const provisionalHold = provisionalBandText(plan.pvBandWiden) + cushionOnlyPushText(plan, 'short') + panelBasisPushText(plan);
+    // v1.206.0 — a sized hold for a window a day or more out (far): about that window, and "nothing is armed for it".
+    if (far != null && plan.cushionShortfall) {
+      return {
+        ...base,
+        title: `Night-charge: no charge ${far.when} (the window cannot cover the cushion)`,
+        body:
+          `No charge is planned for the ${far.when} window — the outage cushion needs a charge, but this window cannot deliver `
+          + `enough to clear the minimum buy, so nothing is armed for it.${farNoteWords(shortfallNote + evNote)}${provisionalHold}`,
+      };
+    }
+    if (far != null && plan.requiredExtraKwh > 0) {
+      return {
+        ...base,
+        title: `Night-charge: hold for ${far.when} (the need is under the minimum buy)`,
+        body:
+          `No charge is planned for the ${far.when} window — the islanded worst case the plan is sized on needs only a small `
+          + `top-up, under the minimum buy, so nothing is armed for it.${provisionalHold}`,
+      };
+    }
     if (plan.cushionShortfall) {
       return {
         ...base,
@@ -525,6 +569,17 @@ export function buildNightChargeMessage(
     // labelled as such — with the grid present the SHP2 holds the reserve.
     const trough = plan.cushionTroughSocPct ?? plan.minProjSocPct ?? plan.baselineMinSocPct;
     const wholeHouse = plan.cushionBasis === 'legacy-pct' || plan.cushionTroughSocPct == null;
+    if (far != null) {
+      return {
+        ...base,
+        title: `Night-charge: hold for ${far.when} (no charge needed)`,
+        body:
+          `No charge is needed in the ${far.when} window — even if the grid were lost from now on, ${wholeHouse
+            ? `the whole-house low would stay at ~${pct(trough)}`
+            : `the pack would close the charge window at ~${pct(trough)}`}, at or above the `
+          + `${pct(line)} floor+cushion line. Nothing is armed for it.${provisionalHold}`,
+      };
+    }
     return {
       ...base,
       title: 'Night-charge: hold (no charge needed)',
@@ -556,6 +611,25 @@ export function buildNightChargeMessage(
     // as its armed push orders them (cushionOnlyPushText before shortfallNote): a note never splits the lead from the basis it was
     // refused on. '' basis on every other plan, so its body reads as before.
     const refusedTail = cushionOnlyPushText(plan, 'short') + refusedNote;
+    // v1.206.0 — refused for a window a day or more out: nothing is armed for it, which is all this evening can say of it.
+    if (far != null) {
+      const farRefusedNotes = cushionOnlyPushText(plan, 'short') + farNoteWords(refusedNote);
+      return held
+        ? {
+          ...base,
+          title: `Night-charge: planned reserve hold for ${far.when} NOT armed`,
+          body:
+            `The plan for the ${far.when} window holds the backup reserve at ${reserveText} as a floor, with no charge expected, `
+            + `but ${write} was not armed — ${armRefused}. Nothing is armed for that window.${farRefusedNotes}`,
+        }
+        : {
+          ...base,
+          title: `Night-charge: planned charge for ${far.when} NOT armed`,
+          body:
+            `The plan for the ${far.when} window calls for a charge, but ${write} was not armed — ${armRefused}. `
+            + `Nothing is armed for that window.${farRefusedNotes}`,
+        };
+    }
     return held
       ? {
         ...base,
@@ -705,18 +779,71 @@ export function buildNightChargeMessage(
   const cushionOnlyTitle = plan.cushionOnly == null ? '' : cushionOnlyFills(plan.cushionOnly, plan) ? ' — no solar basis, long-gap fill' : ' — outage cushion only';
   // v1.198.0 — a plan sized on the provisional solar band says so, after its confidence tier.
   const provisionalNote = plan.pvBandWiden != null ? `${provisionalBandText(plan.pvBandWiden).trim()} ` : '';
+  // ★★★ v1.206.0 — the charge and the reserve hold of a window a day or more out (far). The lead says no charge is planned for
+  // tonight and when the window opens; the title and the headline name the window. The island lows are "after that window" (never
+  // "tomorrow's": on a Saturday the window is two days out, and both lows are walked from its close), the two figures said once
+  // where they are the same (they read "~0% without this charge, ~0% with it" five nights running); no day is named beside them.
+  // The notes and the supervised tail are the ones above in that window's words (farNoteWords). An armed push closes with what its
+  // figures are (this evening's) and the one thing that holds in every branch of a later evening run: an arm it makes for the same
+  // window replaces this one (index.ts: an arm persists only once announced, and then replaces the record in place). Nothing is
+  // said of a later run that does not arm — whether it withdraws this arm depends on the record (cancelStalePriorArm), and that
+  // evening's own notice says what it did.
+  let farLead = '';
+  let farProjection = '';
+  let farTail = '';
+  if (far != null) {
+    farLead = `No charge is planned for tonight: the charge window opens ${far.opens}. `;
+    const lowNo = plan.baselineMinSocPct;
+    const lowWith = plan.minProjSocPct;
+    const sameLow = lowNo != null && lowWith != null && round1(lowNo) === round1(lowWith);
+    const atTarget = plan.cushionEnvelopeReason === 'reserveAtTarget';
+    const thisBuy = held && !stands ? 'this write' : 'this charge';
+    const farLow = atTarget
+      ? (sameLow ? `~${pct(lowWith)} with no charge or with the plan's full buy` : `~${pct(lowNo)} with no charge; with the plan's full buy ~${pct(lowWith)}`)
+      : (sameLow ? `~${pct(lowWith)} with or without ${thisBuy}` : `~${pct(lowNo)} without ${thisBuy}; with it ~${pct(lowWith)}`);
+    const farNotes = farNoteWords(`${shortfallNote}${overBuyNote}${economicNote}${held ? '' : evNote}`);
+    farProjection = plan.cushionOnly != null
+      ? `${cushionOnlyPushText(plan, 'charge')}${farNotes} `
+      : `Whole-house island projection (if the grid were lost): the low SoC after that window ${farLow}; the floor+cushion line is ${pct(line)}. `
+        + `Confidence: ${plan.confidenceTier}.${panelBasisPushText(plan)}${farNotes} `;
+    farTail = supervised
+      ? `${farNoteWords(tail)} The figures above are this evening's; a later evening run that arms the same window replaces this arm.`
+      : tail;
+  }
   if (held) {
     // Where the pool is expected to open the window, when that is at or above the reserve (the
     // reason nothing is charged); a figure under it would contradict the clause, so none is given.
     const start = plan.expectedStartSocPct;
     const stays = start != null && Number.isFinite(start) && reservePct != null && start >= reservePct
       ? ` — the pool should open the window near ~${pct(start)} and stay at or above ${reserveText}` : '';
+    if (far != null) {
+      return {
+        ...base,
+        title: `Night-charge: ${supervised ? `reserve held at ${reserveText} ${far.when}` : `reserve hold at ${reserveText} recommended for ${far.when}`} — no charge expected${cushionOnlyTitle}`,
+        body:
+          `${farLead}${supervised ? 'Holding' : 'Recommended: hold'} the backup reserve at ${reserveText} in that window as a floor; `
+          + `no charge is expected${stays}. ${farProjection}${provisionalNote}${farTail}`,
+      };
+    }
     return {
       ...base,
       title: `Night-charge: ${supervised ? `reserve held at ${reserveText}` : `reserve hold at ${reserveText} recommended`} tonight — no charge expected${cushionOnlyTitle}`,
       body:
         `${supervised ? 'Holding' : 'Recommended: hold'} the backup reserve at ${reserveText} overnight as a floor; `
         + `no charge is expected${stays}. ${projection}${provisionalNote}${tail}`,
+    };
+  }
+  if (far != null) {
+    const farKwh = expected == null ? null : kwh(expected);
+    return {
+      ...base,
+      title: `Night-charge: ${supervised ? `charging ${to} ${levelText} ${far.when}` : `charge ${to} ${levelText} recommended for ${far.when}`}`
+        + `${farKwh == null ? '' : ` (~${farKwh})`}${cushionOnlyTitle}`,
+      body:
+        `${farLead}${supervised ? 'Charging' : 'Recommended: charge'} the backup pool ${to} ${levelText} in that window`
+        + `${bound ? ', as far as the window can deliver' : ''}`
+        + `${farKwh == null ? '. ' : `, ~${farKwh} of grid energy expected${plan.cushionOnly != null ? ', with no solar credited' : ''}. `}`
+        + `${farProjection}${provisionalNote}${farTail}`,
     };
   }
   return {

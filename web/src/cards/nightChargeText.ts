@@ -83,7 +83,12 @@ export interface BannerState {
  * incomplete basis or a stale plan does not disarm the write (writeStands), so none of them may
  * hide its Cancel. `deadline` is the cancel deadline as HH:MM, or null.
  */
-export function actuationBannerState(a: BannerTextActuation, deadline: string | null, reservePct: number | null = null): BannerState {
+export function actuationBannerState(a: BannerTextActuation, deadline: string | null, reservePct: number | null = null, far = false): BannerState {
+  // v1.206.0 — `far`: the write's window opens a day or more after the card is drawn (farBannerState).
+  const s = tonightBannerState(a, deadline, reservePct);
+  return far ? farBannerState(s) : s;
+}
+function tonightBannerState(a: BannerTextActuation, deadline: string | null, reservePct: number | null): BannerState {
   const prior = a.priorReservePct ?? '—';
   // v1.189.0 — first: once the reserve has settled as someone else's, nothing of ours holds it and
   // the server answers a cancel with 409, so the banner offers none ("Cancel & revert" over a
@@ -729,6 +734,43 @@ export function refusedArmLead(
   return {
     headline: `Planned charge not armed tonight — ${reason}.`,
     detail: `Tonight's plan calls for a charge, but ${write} was not armed. The add-on will not charge tonight.`,
+  };
+}
+
+/* ── v1.206.0 — a window that opens a day or more out ────────────────────────────────────── */
+
+/** The card's word for a plan whose window opens a day or more after the card is drawn — the server's chargeText.farWindowWords
+ *  on the card's clock: `opens` "Mon 00:00" (`weekdayHm`: the card's site-zone "Mon 00:00" formatter, siteTime.fmtWeekdayHHMMIn).
+ *  The card writes the window's span itself, from the same formatter (NightChargeCard: "Mon 00:00–Mon 05:00"). null inside 24 h,
+ *  with no window, with no close, or with no clock: the card then reads as it did. PURE. */
+export interface FarCardWindow { opens: string }
+export function farCardWindow(
+  window: { startMs: number | null | undefined; endMs: number | null | undefined } | null | undefined,
+  nowMs: number,
+  weekdayHm: (ms: number) => string | null,
+): FarCardWindow | null {
+  const s = window?.startMs;
+  const e = window?.endMs;
+  if (s == null || e == null || !Number.isFinite(s) || !Number.isFinite(e) || !Number.isFinite(nowMs)) return null;
+  if (s - nowMs < 24 * 3_600_000) return null;
+  const opens = weekdayHm(s);
+  return opens == null ? null : { opens };
+}
+
+/** The line under the charge figure of such a plan: nothing is planned for tonight, and when the window opens. */
+export function farLeadText(far: FarCardWindow): string {
+  return `No charge is planned for tonight — the charge window opens ${far.opens}.`;
+}
+
+/** The banner of a write armed for such a window (actuationBannerState's `far`): its Cancel is not "tonight", and a cancel
+ *  leaves no write "tonight" to name. Every other state's words are as they are. */
+export const FAR_CANCEL_LABEL = 'Cancel this write';
+export const FAR_CANCELLED_TEXT = 'Cancelled — the armed write is withdrawn.';
+export function farBannerState(s: BannerState): BannerState {
+  return {
+    ...s,
+    text: s.text === 'Cancelled — no write tonight.' ? FAR_CANCELLED_TEXT : s.text,
+    cancel: s.cancel === 'Cancel tonight' ? FAR_CANCEL_LABEL : s.cancel,
   };
 }
 
