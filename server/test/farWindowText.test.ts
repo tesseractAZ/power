@@ -6,7 +6,7 @@ import { buildNightChargeMessage } from '../src/notify.js';
 import { eveningAnnouncement } from '../src/chargeAnnounce.js';
 import { farWindowWords, farNoteWords } from '../src/chargeText.js';
 import { windowBeyondTonight, fmtSiteDayHm } from '../src/siteTime.js';
-import { farTextCases } from './fixtures/overnightFarTextCases.js';
+import { farTextCases, onPanelBasis } from './fixtures/overnightFarTextCases.js';
 import { legacyIdentityCases } from './fixtures/legacyIdentityFixtures.js';
 import { MEASURED_SCALE } from './fixtures/measuredCushionLineFigures.js';
 import { darkDeps } from './fixtures/cushionOnlyFigures.js';
@@ -75,7 +75,7 @@ test('★★★ FW-2 the window\'s words: named from the moment the text is writ
 test('★★★ FW-3 the 21:30 push of a window a day or more out, shape by shape, word for word — and the evenings beside it unmoved', () => {
   const cases = farTextCases();
   assert.deepEqual(GOLDEN.cases.map((g) => g.name), cases.map((c) => c.name));
-  assert.equal(cases.filter((c) => c.kind === 'far').length, 24);
+  assert.equal(cases.filter((c) => c.kind === 'far').length, 28);
   assert.equal(cases.filter((c) => c.kind === 'near').length, 8);
   cases.forEach((c, i) => {
     const g = GOLDEN.cases[i];
@@ -109,6 +109,8 @@ test('★★★ FW-3 the 21:30 push of a window a day or more out, shape by shap
     /^Night-charge: hold for Monday 12am–5am \(the need is under the minimum buy\)$/, /^Night-charge: no charge Monday 12am–5am \(the window cannot cover the cushion\)$/,
     /^Night-charge: hold for Monday 12am–5am \(no charge needed\)$/, /^Night-charge: charging to ~34% Monday 12am–5am \(~16\.9 kWh\) — outage cushion only$/,
     /^Night-charge: charging toward ~95% Tuesday 12am–5am \(~74\.7 kWh\)$/,
+    /^Night-charge: charging to ~95% Monday 12am–5am \(~20\.8 kWh\)$/,
+    /^Night-charge: reserve held at 22% Monday 12am–5am — no charge expected — outage cushion only$/,
   ]) assert.ok(far.some((p) => re.test(p.title)), `no far case reaches ${re}`);
   for (const s of [
     'No charge is planned for tonight: the charge window opens Monday at 12:00 AM. Charging the backup pool to ~32% in that window, ~11.1 kWh of grid energy expected. ',
@@ -121,6 +123,11 @@ test('★★★ FW-3 the 21:30 push of a window a day or more out, shape by shap
     "Nothing is armed for that window. NOTE: nothing is armed to hold that window's 30.5% floor+cushion line — residual risk remains.",
     'No charge is planned for tonight: the charge window opens Tuesday at 12:00 AM. ',
     'so nothing is armed for it. (This confirms the evening job ran; the reserve floor is unchanged.)',
+    // What a far push carries beside its lows, each where it stands: after the confidence tier, before the supervised sentence.
+    'the low SoC after that window ~31.8% with or without this charge; the floor+cushion line is 23.4%. Confidence: forecast. Resilience needs no buy in that window — the pack already covers the outage cushion; this buy is economic (cost mode). SUPERVISED: on Monday at 12:00 AM ',
+    "the floor+cushion line is 30.5%. Confidence: forecast. Solar from the panel's readings (7-day energy balance 0.9997, refused above 1.04). SUPERVISED: on Monday at 12:00 AM ",
+    'Confidence: forecast. PROVISIONAL SOLAR BAND: 9 of 14 calibration days scored, so the P10 PV this plan is sized on is widened ×1.05 (the next 24 h: ~26.2 → ~24.8 kWh) and the multi-day carry by ±52% per √day; the full band returns at 14 scored days. SUPERVISED: on Monday at 12:00 AM ',
+    'no charge is expected — the pool should open the window near ~23.7% and stay at or above 22%. Outage cushion only; no solar basis (only 0 scored calibration day(s), need 4 (a provisional plan on a widened solar band from 4; the full band from 14)): the 20.5% line is the 10% reserve floor plus 4 h of islanded backup load at the window close, with no solar credited and no cost target. SUPERVISED: on Monday at 12:00 AM ',
   ]) assert.ok(far.some((p) => p.body.includes(s)), `no far case says: ${s}`);
   // No far push names a day beside its island lows: the sentence says "after that window", and reads no instant but the window's.
   for (const p of far) assert.doesNotMatch(p.body, /with it ~[\d.]+%, |full buy ~[\d.]+%, |, on (?:Mon|Tues|Wednes|Thurs|Fri|Satur|Sun)day;/, p.body);
@@ -164,6 +171,10 @@ test('★★★ FW-3 the 21:30 push of a window a day or more out, shape by shap
     assert.ok(m.body.includes("for that window's 86.2% outage line (above the 50% the panel holds as a reserve)"), m.body);
     assert.ok(m.body.endsWith("that reading is restored after the window. Cancel from the night-charge card on the panel. The figures above are this evening's; a later evening run that arms the same window replaces this arm."), m.body);
   }
+  // A cushion-only reserve hold keeps its title's suffix, armed and recommended.
+  const darkHeld = cases.find((x) => x.name === 'Sat for Mon: a reserve hold with the Cores dark, cushion only (2027-04-10, a full pool, 4 h)')!;
+  assert.equal(pushOf(darkHeld.name).title, 'Night-charge: reserve held at 22% Monday 12am–5am — no charge expected — outage cushion only');
+  assert.equal(buildNightChargeMessage(darkHeld.plan, 'charge', null, null, 'advisory').title, 'Night-charge: reserve hold at 22% recommended for Monday 12am–5am — no charge expected — outage cushion only');
   // No expected figure: the title states none, and the body's headline ends at the window.
   const noFigure = pushOf('Sat for Mon: charge with no expected figure (no median load)');
   assert.equal(noFigure.title, 'Night-charge: charging to ~32% Monday 12am–5am');
@@ -179,9 +190,16 @@ test('★★★ FW-3 the 21:30 push of a window a day or more out, shape by shap
  *    objectives, at the default minimum buy and at 40 kWh (holds under the minimum buy; holds whose cushion holds); a starved window
  *    (a 0.2 kW charge cap, a 5 kWh minimum buy, a 20% pool), lit and dark (the window cannot cover the cushion; its caps and EV
  *    notes); the legacy cushion basis (no islanded load) at 40-100% (the whole-house hold); and a panel reserve read at 50% and at
- *    51% under a line at 8 and 12 h (a night that stands; a reserve above the write, which prices no charge).
+ *    51% under a line at 8 and 12 h (a night that stands; a reserve above the write, which prices no charge);
+ *  - and, on each far evening, the plans that carry a basis sentence or a title suffix (set 'basis'; v1.206.0 second review: none of
+ *    the plans above carried the panel-basis or the provisional-band sentence, and no reserve hold, hold under the minimum buy or hold
+ *    whose cushion holds carried a basis sentence at all): the same pool × objective × minimum-buy grid with the Cores dark (cushion
+ *    only), on the provisional solar band (9 of 14 calibration days scored), and with the panel-measured solar basis on the plan
+ *    (onPanelBasis: the plant's basis while its Cores are dark and the 7-day balance passes); and the Cores dark with a full pool at
+ *    4 h (a cushion-only reserve hold, on the evening the planner makes one).
  */
-function* farYear(): Generator<{ where: string; p: NightChargePlan; gate: boolean; set: 'year' | 'variant' }> {
+type FarSet = 'year' | 'variant' | 'basis';
+function* farYear(): Generator<{ where: string; p: NightChargePlan; gate: boolean; set: FarSet }> {
   const CASES = legacyIdentityCases();
   type Deps = (typeof CASES)[number]['deps'];
   const live = (d: Deps): Deps => ({ ...d, forceChargeEligible: d.objectiveMode === 'cost' && (d.costMaxSocPct ?? 90) > 50 } as Deps);
@@ -209,10 +227,27 @@ function* farYear(): Generator<{ where: string; p: NightChargePlan; gate: boolea
       assert.equal(isFar(p), true, `${c.label} ${name}: a far evening's variant is far`);
       yield { where: `${c.label} ${name}`, p, gate: true, set: 'variant' };
     }
+    const basis: Array<[string, NightChargePlan]> = [];
+    for (const socNowPct of [15, 25, 40, 60, 80, 100]) for (const objectiveMode of ['resilience', 'cost'] as const) for (const minBuyKwh of [null, 40]) {
+      const name = `pool ${socNowPct}% ${objectiveMode}${minBuyKwh == null ? '' : ` min buy ${minBuyKwh}`}`;
+      const lit = live({ ...c.deps, socNowPct, objectiveMode, ...(minBuyKwh == null ? {} : { minBuyKwh }) } as Deps);
+      basis.push([`the Cores dark, ${name}`, planOf(darkDeps(lit, 'held'))]);
+      basis.push([`the provisional band, ${name}`, planOf({ ...lit, calScoredDays: 9, provisionalMinCalScoredDays: 4 } as Deps)]);
+      // The panel basis is put on a plan that is sized and not cushion-only (as the evening job puts it); a refused plan carries none.
+      const sized = planOf(lit);
+      if (sized.basisComplete && sized.requiredExtraKwh != null && sized.cushionOnly == null) basis.push([`the panel basis, ${name}`, onPanelBasis(sized)]);
+    }
+    for (const objectiveMode of ['resilience', 'cost'] as const) {
+      basis.push([`the Cores dark, a full pool at 4 h, ${objectiveMode}`, planOf(darkDeps({ ...c.deps, socNowPct: 100, outageCushionHours: 4, objectiveMode } as Deps, 'held'))]);
+    }
+    for (const [name, p] of basis) {
+      assert.equal(isFar(p), true, `${c.label} ${name}: a far evening's variant is far`);
+      yield { where: `${c.label} ${name}`, p, gate: true, set: 'basis' };
+    }
   }
 }
 /** The sweep, planned once for the tests that walk it (the plans are read, never written). */
-let FAR_YEAR: Array<{ where: string; p: NightChargePlan; gate: boolean; set: 'year' | 'variant' }> | null = null;
+let FAR_YEAR: Array<{ where: string; p: NightChargePlan; gate: boolean; set: FarSet }> | null = null;
 const farYearPlans = (): NonNullable<typeof FAR_YEAR> => (FAR_YEAR ??= [...farYear()]);
 const WHY = "a prior night's reserve write is unresolved";
 const renders = (p: NightChargePlan, gate: boolean): Array<{ v: 'armed' | 'advisory' | 'refused'; title: string; body: string }> => {
@@ -272,21 +307,40 @@ const NEAR_HOLD_LEAD: Record<HoldKind, RegExp> = {
  *   - year: the fixture's own far evenings reach no sized hold (holds 0), which is why the variants exist;
  *   - variants: 34 on each of the 52 far evenings (1,768 plans), 359 of them sized holds, by kind in `holds`;
  *   - holdRendersWithANote: every hold whose window cannot cover the cushion carries its caps note (and its EV note where unmodelled);
- *   - lows: how the island lows are said — one figure or two, and the two forms of a reserve read above the write. */
+ *   - lows: how the island lows are said — one figure or two, and the two forms of a reserve read above the write;
+ *   - basis: the plans that carry a basis sentence or a title suffix, counted apart (the counts above are those of the year and the
+ *     variants alone, as first measured): the Cores dark (cushion only), the provisional solar band, and the panel-measured basis on
+ *     the same pool × objective × minimum-buy grid, and the Cores dark with a full pool at 4 h. `holdsWithABasisSentence`: the sized
+ *     holds whose lead is followed by a provisional-band, cushion-only or panel-basis sentence — on every kind of hold but the
+ *     whole-house one (the legacy cushion basis is not in this set). */
 const PIN_FAR = {
   year: { plans: 3588, armed: 3308, advisory: 3308, refused: 3308, noPlan: 280, holds: 0 },
   variants: { plans: 1768, armed: 1269, advisory: 1269, refused: 1269, noPlan: 140, holds: 359 },
   holds: { underMinBuy: 177, cannotCover: 142, cushionHoldsPack: 31, cushionHoldsWholeHouse: 9 },
   holdRendersWithANote: 142,
   lows: { same: 1378, differ: 7520, fullBuySame: 8, fullBuyDiffer: 160 },
+  basis: {
+    plans: { plans: 3752, armed: 2602, advisory: 2602, refused: 2602, noPlan: 304, holds: 846 },
+    holds: { underMinBuy: 626, cannotCover: 160, cushionHoldsPack: 60, cushionHoldsWholeHouse: 0 },
+    holdRendersWithANote: 160,
+    holdsWithABasisSentence: { underMinBuy: 626, cannotCover: 160, cushionHoldsPack: 60, cushionHoldsWholeHouse: 0 },
+    lows: { same: 1696, differ: 1892, fullBuySame: 0, fullBuyDiffer: 0 },
+  },
 };
 
 test('★★★ FW-4 the year\'s far pushes: every one names its window, none says tonight, overnight or tomorrow of it, a charge leads with "No charge is planned for tonight", an armed one closes with the later-arm rule, a hold is one of three literal patterns that close on what is armed, and none promises what a later evening run decides; counted', () => {
   const zero = (): typeof PIN_FAR.year => ({ plans: 0, armed: 0, advisory: 0, refused: 0, noPlan: 0, holds: 0 });
-  const n = { year: zero(), variants: zero(), holds: { underMinBuy: 0, cannotCover: 0, cushionHoldsPack: 0, cushionHoldsWholeHouse: 0 }, holdRendersWithANote: 0, lows: { same: 0, differ: 0, fullBuySame: 0, fullBuyDiffer: 0 } };
+  const zeroKinds = (): typeof PIN_FAR.holds => ({ underMinBuy: 0, cannotCover: 0, cushionHoldsPack: 0, cushionHoldsWholeHouse: 0 });
+  const zeroLows = (): typeof PIN_FAR.lows => ({ same: 0, differ: 0, fullBuySame: 0, fullBuyDiffer: 0 });
+  const n = {
+    year: zero(), variants: zero(), holds: zeroKinds(), holdRendersWithANote: 0, lows: zeroLows(),
+    basis: { plans: zero(), holds: zeroKinds(), holdRendersWithANote: 0, holdsWithABasisSentence: zeroKinds(), lows: zeroLows() },
+  };
   const errs: string[] = [];
   for (const { where, p, gate, set } of farYearPlans()) {
-    const c = set === 'year' ? n.year : n.variants;
+    const c = set === 'year' ? n.year : set === 'variant' ? n.variants : n.basis.plans;
+    // The holds, their notes and the lows of the basis set are counted apart (the rules are the same for every set).
+    const tally = set === 'basis' ? n.basis : n;
     c.plans += 1;
     const when = whenOf(p);
     const day = when.split(' ')[0];
@@ -313,7 +367,7 @@ test('★★★ FW-4 the year\'s far pushes: every one names its window, none sa
       // its notes in that window's words, then its provisional-band and basis sentences untouched.
       if (hold) {
         const kind = holdKindOf(p);
-        n.holds[kind] += 1;
+        tally.holds[kind] += 1;
         if (r.title !== FAR_HOLD_TITLE[kind](when)) errs.push(`${at}: the ${kind} hold's title: ${r.title}`);
         const farLead = FAR_HOLD_LEAD[kind](when).exec(r.body)?.[0];
         const nearBody = buildNightChargeMessage({ ...p, generatedAt: p.window!.startMs - 2.5 * H } as NightChargePlan, 'hold', null, null, 'advisory').body;
@@ -325,7 +379,9 @@ test('★★★ FW-4 the year\'s far pushes: every one names its window, none sa
         if (!nearTail.startsWith(nearNotes)) errs.push(`${at}: a hold's notes do not come first inside 24 h: ${nearBody}`);
         if (tail !== mapped(nearNotes) + nearTail.slice(nearNotes.length)) errs.push(`${at}: after the lead: ${tail} | inside 24 h: ${nearTail}`);
         if (kind !== 'cannotCover' && nearNotes !== '') errs.push(`${at}: a note on a hold that carries none: ${r.body}`);
-        if (nearNotes !== '') n.holdRendersWithANote += 1;
+        if (nearNotes !== '') tally.holdRendersWithANote += 1;
+        // What follows the notes is a basis sentence (the rule above holds it to the same hold's inside 24 h, untouched).
+        if (set === 'basis' && nearTail.length > nearNotes.length) n.basis.holdsWithABasisSentence[kind] += 1;
         continue;
       }
       // The island lows: said once where they are the same figure; a reserve above the write prices no charge.
@@ -336,10 +392,10 @@ test('★★★ FW-4 the year\'s far pushes: every one names its window, none sa
         /the low SoC after that window ~[\d.]+% with no charge or with the plan's full buy; the floor\+cushion line is /.test(r.body),
         /the low SoC after that window ~[\d.]+% with no charge; with the plan's full buy ~[\d.]+%; the floor\+cushion line is /.test(r.body),
       ];
-      if (lows[0]) n.lows.same += 1;
-      if (lows[1]) n.lows.differ += 1;
-      if (lows[2]) n.lows.fullBuySame += 1;
-      if (lows[3]) n.lows.fullBuyDiffer += 1;
+      if (lows[0]) tally.lows.same += 1;
+      if (lows[1]) tally.lows.differ += 1;
+      if (lows[2]) tally.lows.fullBuySame += 1;
+      if (lows[3]) tally.lows.fullBuyDiffer += 1;
       const projected = r.body.includes('Whole-house island projection');
       if (lows.filter(Boolean).length !== (projected ? 1 : 0)) errs.push(`${at}: not one statement of the island lows: ${r.body}`);
       if (projected && atTarget !== (lows[2] || lows[3])) errs.push(`${at}: a reserve above the write prices no charge, and only it: ${r.body}`);
@@ -353,29 +409,106 @@ test('★★★ FW-4 the year\'s far pushes: every one names its window, none sa
   assert.deepEqual(n, PIN_FAR);
 });
 
-test('★★★ FW-5 a far push carries exactly the notes its plan carries inside 24 h, in that window\'s words: none added, none dropped — the starved hold\'s too', () => {
+/** The sentences of a push that a far window rewords: its NOTE sentences and its economic sentence (one of the builder's own notes,
+ *  though it carries no "NOTE:"). Everything else a push carries beside its lows and its tail — the confidence tier, the
+ *  cushion-only, panel-basis and provisional-band sentences — passes through as it is. Written here, never read from the subject. */
+const ECONOMIC = ' Resilience needs no buy tonight — the pack already covers the outage cushion; this (?:buy|write) is economic \\(cost mode\\)\\.';
+const reworded = (s: string): string => s.replace(new RegExp(`${ECONOMIC}| NOTE: .*?${NOTE_END}`, 'g'), mapped);
+/** What a charge or a reserve-hold push carries between its island lows and its tail: from "Confidence:" — on a cushion-only plan
+ *  from its basis sentence, which stands in place of the lows — to the supervised or the advisory sentence (`tail`, from there on). */
+const carriedOf = (body: string): { mid: string; tail: string } | null => {
+  const at = (marks: string[]): number => Math.min(...marks.map((m) => body.indexOf(m)).filter((i) => i >= 0));
+  const from = at(['Confidence: ', 'Outage cushion only; no solar basis (', 'No solar basis (']);
+  const to = at([' SUPERVISED: ', ' Advisory only — ']);
+  return Number.isFinite(from) && Number.isFinite(to) && from < to ? { mid: body.slice(from, to), tail: body.slice(to) } : null;
+};
+/** What a refused push carries after saying what is (far) or will be (inside 24 h) done: its short basis sentence and its notes. */
+const afterRefusal = (body: string): string | null => {
+  for (const lead of ['. Nothing is armed for that window.', '. The add-on will not charge tonight.', '. The add-on will not raise the reserve tonight.']) {
+    const i = body.indexOf(lead);
+    if (i >= 0) return body.slice(i + lead.length);
+  }
+  return null;
+};
+/** A far title is the title of the same plan inside 24 h with its window named where that said "tonight" (four forms, written out);
+ *  nothing else of it moves — its level, its expected draw, its " — outage cushion only" suffix. */
+const farTitleOf = (near: string, when: string): string => {
+  if (near === 'Night-charge: no plan tonight') return `Night-charge: no plan for ${when}`;
+  const refused = /^(Night-charge: planned (?:charge|reserve hold)) NOT armed tonight$/.exec(near);
+  if (refused != null) return `${refused[1]} for ${when} NOT armed`;
+  if (near.includes(' recommended tonight')) return near.replace(' recommended tonight', ` recommended for ${when}`);
+  return near.replace(' tonight', ` ${when}`);
+};
+/** What the far pushes of the sweep carry, counted by the shape of the push (armed and advisory renders; FW-5 holds each to the same
+ *  plan's inside 24 h). No count is zero: every sentence below, and the title's suffix, is carried by a charge and by a reserve hold.
+ *  `refusedWithABasisSentence`: the refused pushes whose lead is followed by the short cushion-only basis sentence. */
+const PIN_CARRIED = {
+  panelBasis: { charge: 1520, reserveHold: 268 },
+  provisionalBand: { charge: 1536, reserveHold: 264 },
+  cushionOnlyBasis: { charge: 1700, reserveHold: 4 },
+  economic: { charge: 60, reserveHold: 38 },
+  titleSuffix: { charge: 1700, reserveHold: 4 },
+  refusedWithABasisSentence: 852,
+};
+
+test('★★★ FW-5 a far push carries exactly what its plan carries inside 24 h: its notes in that window\'s words, none added, none dropped (the starved hold\'s too); its economic sentence; its basis sentences where they stand and as they are; its title with the window named and nothing else moved; its tail, then the later-arm rule on an armed one', () => {
   // The same plan made 2.5 h before its window (only the clock the words are written at differs): its NOTE sentences, with the four
   // phrases mapped here by hand (MAP), are the far push's.
   let plans = 0, withNotes = 0, holdsWithNotes = 0;
+  const pair = (): { charge: number; reserveHold: number } => ({ charge: 0, reserveHold: 0 });
+  const carried = { panelBasis: pair(), provisionalBand: pair(), cushionOnlyBasis: pair(), economic: pair(), titleSuffix: pair(), refusedWithABasisSentence: 0 };
   const errs: string[] = [];
   for (const { where, p, gate } of farYearPlans()) {
     plans += 1;
     const near = { ...p, generatedAt: p.window!.startMs - 2.5 * H } as NightChargePlan;
     assert.equal(isFar(near), false);
+    const when = whenOf(p);
+    const sizedHold = p.basisComplete && !p.chargeTonight;
     const f = renders(p, gate);
     const nr = renders(near, gate);
     f.forEach((r, i) => {
+      const at = `${where} ${r.v}`;
       const want = notes(nr[i].body).map(mapped);
       const got = notes(r.body);
       if (want.length > 0) withNotes += 1;
-      if (want.length > 0 && p.basisComplete && !p.chargeTonight) holdsWithNotes += 1;
-      if (JSON.stringify(got) !== JSON.stringify(want)) errs.push(`${where} ${r.v}: ${JSON.stringify(got)} != ${JSON.stringify(want)}`);
+      if (want.length > 0 && sizedHold) holdsWithNotes += 1;
+      if (JSON.stringify(got) !== JSON.stringify(want)) errs.push(`${at}: ${JSON.stringify(got)} != ${JSON.stringify(want)}`);
+      // A sized hold's title and what follows its lead are held in FW-4, kind by kind.
+      if (sizedHold) return;
+      // The title: the same plan's inside 24 h, with the window named where it said "tonight".
+      if (r.title !== farTitleOf(nr[i].title, when)) errs.push(`${at}: the title ${r.title} is not that of the same plan inside 24 h (${nr[i].title}) with ${when} named`);
+      // No plan: it carries its reason and nothing else (FW-4 holds its close).
+      if (!p.basisComplete) return;
+      if (r.v === 'refused') {
+        const a = afterRefusal(r.body);
+        const b = afterRefusal(nr[i].body);
+        if (a == null || b == null) { errs.push(`${at}: not a refused push: ${r.body} | inside 24 h: ${nr[i].body}`); return; }
+        if (a !== reworded(b)) errs.push(`${at}: after the refusal: ${a} | inside 24 h: ${b}`);
+        if (/^ (?:Outage cushion only; no solar basis|No solar basis) \(/.test(a)) carried.refusedWithABasisSentence += 1;
+        return;
+      }
+      // Armed or advisory, a charge or a reserve hold: between the lows and the tail, the same sentences in the same order — the
+      // notes and the economic sentence in that window's words, every basis sentence untouched — and then the same tail (the
+      // supervised one in that window's words, a force-charge start with its weekday, and the later-arm rule after it).
+      const a = carriedOf(r.body);
+      const b = carriedOf(nr[i].body);
+      if (a == null || b == null) { errs.push(`${at}: no confidence tier or basis sentence before the tail: ${r.body} | inside 24 h: ${nr[i].body}`); return; }
+      if (a.mid !== reworded(b.mid)) errs.push(`${at}: between the lows and the tail: ${a.mid} | inside 24 h: ${b.mid}`);
+      const tail = a.tail.replace(/~(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat) (\d\d:\d\d)/g, '~$1');
+      if (tail !== (r.v === 'armed' ? mapped(b.tail) + ESTIMATE : b.tail)) errs.push(`${at}: the tail: ${a.tail} | inside 24 h: ${b.tail}`);
+      const shape = / reserve (?:held|hold) at /.test(r.title) ? 'reserveHold' : 'charge';
+      if (a.mid.includes(" Solar from the panel's readings (7-day energy balance 0.9997, refused above 1.04).")) carried.panelBasis[shape] += 1;
+      if (a.mid.includes(' PROVISIONAL SOLAR BAND: ')) carried.provisionalBand[shape] += 1;
+      if (/^(?:Outage cushion only; no solar basis|No solar basis) \(/.test(a.mid)) carried.cushionOnlyBasis[shape] += 1;
+      if (a.mid.includes(' Resilience needs no buy in that window — the pack already covers the outage cushion; this ')) carried.economic[shape] += 1;
+      if (/ — (?:outage cushion only|no solar basis, long-gap fill)$/.test(r.title)) carried.titleSuffix[shape] += 1;
     });
   }
   assert.deepEqual(errs.slice(0, 3), [], `${errs.length} errors`);
-  assert.equal(plans, PIN_FAR.year.plans + PIN_FAR.variants.plans);
+  assert.equal(plans, PIN_FAR.year.plans + PIN_FAR.variants.plans + PIN_FAR.basis.plans.plans);
   assert.ok(withNotes > 5000, `${withNotes} renders with a note`);
-  assert.equal(holdsWithNotes, PIN_FAR.holdRendersWithANote, 'the holds that carry a note (the starved window\'s caps and EV notes)');
+  assert.equal(holdsWithNotes, PIN_FAR.holdRendersWithANote + PIN_FAR.basis.holdRendersWithANote, 'the holds that carry a note (the starved window\'s caps and EV notes)');
+  assert.deepEqual(carried, PIN_CARRIED);
 });
 
 test('★★★ FW-6 farNoteWords maps the builder\'s four phrases and nothing else', () => {
@@ -397,6 +530,11 @@ test('★★★ FW-7 a refusal reason and a basis sentence pass through a far pu
   const why = "tonight's write was cancelled, and tomorrow morning’s PV headroom is unknown";
   const m = buildNightChargeMessage(c.plan, 'charge', null, why, 'supervised');
   assert.ok(m.body.includes(`but the supervised write was not armed — ${why}. Nothing is armed for that window.`), m.body);
+  // The refused reserve hold has its own line for the reason: as it is there too.
+  const heldRefused = farTextCases().find((x) => x.name === 'Sat for Mon: a reserve hold, refused (2027-03-06)')!;
+  const mh = buildNightChargeMessage(heldRefused.plan, 'charge', null, why, 'supervised');
+  assert.equal(mh.title, 'Night-charge: planned reserve hold for Monday 12am–5am NOT armed');
+  assert.ok(mh.body.includes(`as a floor, with no charge expected, but the supervised write was not armed — ${why}. Nothing is armed for that window.`), mh.body);
   const refusedBy = "tonight's band is refused";
   const q = { ...c.plan, cushionOnly: { ...c.plan.cushionOnly!, refusedBy } } as NightChargePlan;
   assert.ok(buildNightChargeMessage(q, 'charge', null, WHY, 'supervised').body.includes(` Outage cushion only; no solar basis (${refusedBy}).`));
@@ -410,6 +548,25 @@ test('★★★ FW-7 a refusal reason and a basis sentence pass through a far pu
     + ' NOTE: charge/pool limits prevent fully meeting the cushion — residual risk remains.'
     + ' NOTE: no EVSE prediction covers this window, so EV contention is NOT modelled — if the car charges in that window the packs will receive less than planned.'
     + ` Outage cushion only; no solar basis (${refusedBy}).`);
+  // The two other sized holds close on their basis sentence too, as it is. Under the minimum buy with the Cores dark (cushion only):
+  const farHold = (p: NightChargePlan): string => buildNightChargeMessage(p, 'hold', null, null, 'supervised').body;
+  const UNDER = 'No charge is planned for the Monday 12am–5am window — the islanded worst case the plan is sized on needs only a small top-up, under the minimum buy, so nothing is armed for it.';
+  const darkUnder = computeNightChargePlan(buildNightChargeInputs(darkDeps({ ...sat.deps, socNowPct: 100, minBuyKwh: 40 }, 'held')));
+  assert.deepEqual([isFar(darkUnder), darkUnder.basisComplete, darkUnder.chargeTonight, darkUnder.cushionShortfall, (darkUnder.requiredExtraKwh ?? 0) > 0, darkUnder.cushionOnly != null], [true, true, false, false, true, true]);
+  assert.equal(farHold({ ...darkUnder, cushionOnly: { ...darkUnder.cushionOnly!, refusedBy } } as NightChargePlan), `${UNDER} Outage cushion only; no solar basis (${refusedBy}).`);
+  // …and on the provisional solar band (9 of 14 calibration days scored): the sentence, whole.
+  const PROVISIONAL = { calScoredDays: 9, provisionalMinCalScoredDays: 4 };
+  const provUnder = computeNightChargePlan(buildNightChargeInputs({ ...sat.deps, minBuyKwh: 60, ...PROVISIONAL }));
+  assert.deepEqual([isFar(provUnder), provUnder.chargeTonight, (provUnder.requiredExtraKwh ?? 0) > 0, provUnder.pvBandWiden != null], [true, false, true, true]);
+  assert.equal(farHold(provUnder), `${UNDER} PROVISIONAL SOLAR BAND: 9 of 14 calibration days scored, so the P10 PV this plan is sized on is widened ×1.05 (the next 24 h: ~26.2 → ~24.8 kWh) and the multi-day carry by ±52% per √day; the full band returns at 14 scored days.`);
+  // The hold whose cushion holds (2026-10-24, a full pool): on the provisional band, and with the panel-measured basis on the plan.
+  const full = { ...legacyIdentityCases().find((x) => x.label === '2026-10-24 21:30')!.deps, socNowPct: 100, objectiveMode: 'resilience' as const, forceChargeEligible: false };
+  const provHolds = computeNightChargePlan(buildNightChargeInputs({ ...full, ...PROVISIONAL }));
+  assert.deepEqual([isFar(provHolds), provHolds.chargeTonight, provHolds.requiredExtraKwh, provHolds.pvBandWiden != null], [true, false, 0, true]);
+  assert.equal(farHold(provHolds), 'No charge is needed in the Monday 12am–5am window — even if the grid were lost from now on, the pack would close the charge window at ~50.5%, at or above the 23.4% floor+cushion line. Nothing is armed for it.'
+    + ' PROVISIONAL SOLAR BAND: 9 of 14 calibration days scored, so the P10 PV this plan is sized on is widened ×1.05 (the next 24 h: ~37.7 → ~36.5 kWh) and the multi-day carry by ±39% per √day; the full band returns at 14 scored days.');
+  assert.equal(farHold(onPanelBasis(computeNightChargePlan(buildNightChargeInputs(full)))), 'No charge is needed in the Monday 12am–5am window — even if the grid were lost from now on, the pack would close the charge window at ~55.5%, at or above the 23.4% floor+cushion line. Nothing is armed for it.'
+    + " Solar from the panel's readings (7-day energy balance 0.9997, refused above 1.04).");
 });
 
 test('★★★ FW-8 far is read from the plan\'s own clock (generatedAt), never the wall clock: the same plan made 2.5 h before its window reads "tonight"', () => {
@@ -497,6 +654,9 @@ test('★★★ FW-9 the card: a window a day or more out is shown with its week
   // A state with its own Cancel keeps it.
   assert.equal(card.actuationBannerState({ ...armed, appliedAtMs: MON0, priorReservePct: 16 }, null, 50, true).cancel, 'Cancel & revert');
   assert.deepEqual(card.farBannerState({ text: 'Completed — reserve restored to 16%.', settled: true, cancel: null }), { text: 'Completed — reserve restored to 16%.', settled: true, cancel: null });
+  // Left as it was, and documented so (DOCS.md, the changelog's "Not in this release"): a card that could not read its status has no
+  // window to judge, so the outcome of its cancel reads "no write tonight" whatever window the cancelled write had (FW-10: its button).
+  assert.equal(card.cancelOutcome(200, { ok: true, actuation: { ...armed, cancelled: true, windowStartMs: MON0 } }).text, 'Cancelled — no write tonight.');
 });
 
 test('★★ FW-10 [source pins: the card component cannot be imported here] the card passes the weekday clock and the far flag where a window is a day or more out', () => {
@@ -510,4 +670,9 @@ test('★★ FW-10 [source pins: the card component cannot be imported here] the
   const banner = src.slice(src.indexOf('function ActuationBanner('), src.indexOf('function StatusBlindCancel('));
   assert.ok(banner.includes('  const far = beyondTonight(actuation.windowStartMs, Date.now());\n'));
   assert.ok(banner.includes('  const state = actuationBannerState(actuation, (far ? weekdayHm : hhmm)(actuation.cancelDeadlineMs), reservePct, far);\n'));
+  // The status-blind control is left as it was (it has no status, so no window to judge), and the docs say so.
+  const blind = src.slice(src.indexOf('function StatusBlindCancel('), src.indexOf('function CancelButton('));
+  assert.ok(blind.includes("'What is armed tonight is unknown; a supervised write can still be cancelled.'"), blind);
+  assert.ok(blind.includes('<CancelButton label="Cancel tonight" '), blind);
+  assert.doesNotMatch(blind, /beyondTonight|weekdayHm|FAR_/);
 });

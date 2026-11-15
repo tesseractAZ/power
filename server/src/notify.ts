@@ -786,8 +786,8 @@ export function buildNightChargeMessage(
   // The notes and the supervised tail are the ones above in that window's words (farNoteWords). An armed push closes with what its
   // figures are (this evening's) and the one thing that holds in every branch of a later evening run: an arm it makes for the same
   // window replaces this one (index.ts: an arm persists only once announced, and then replaces the record in place). Nothing is
-  // said of a later run that does not arm — whether it withdraws this arm depends on the record (cancelStalePriorArm), and that
-  // evening's own notice says what it did.
+  // said of a later run that does not arm: whether it withdraws this arm depends on the record (cancelStalePriorArm), and where a
+  // hold does withdraw it with NIGHT_CHARGE_NOTIFY_ON_HOLD=false, a log line says so and no notice does.
   let farLead = '';
   let farProjection = '';
   let farTail = '';

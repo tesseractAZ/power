@@ -11,8 +11,9 @@
  *     Mutants R-i..xi.
  * (P) the push (notify.buildNightChargeMessage): every far shape, its lead, its island lows (said once where they are the same; a
  *     reserve read above the write prices no charge; a night that stands names no write), its notes, its later-arm rule, what each
- *     hold, refusal and missing plan says is armed, and the near words untouched. Mutants P-i..xxxii (no P-xv: the island lows name no
- *     day, so nothing reads the instant of the low).
+ *     hold, refusal and missing plan says is armed, what it carries beside them (the economic sentence; the panel-basis, the
+ *     provisional-band and the cushion-only basis sentences and the title's suffix, each where it stands inside 24 h), and the near
+ *     words untouched. Mutants P-i..xli (no P-xv: the island lows name no day, so nothing reads the instant of the low).
  * (C) the card (web siteTime.ts, nightChargeText.ts, NightChargeCard.tsx): the weekday clock, the far window, the banner. Mutants
  *     C-i..xvii; those on the component are killed by source pins (it cannot be imported in a node test), labelled as such.
  *
@@ -343,6 +344,72 @@ const MUTANTS = [
     find: '          + `enough to clear the minimum buy, so nothing is armed for it.${farNoteWords(shortfallNote + evNote)}${provisionalHold}`,',
     to: '          + `enough to clear the minimum buy, so nothing is armed for it.${shortfallNote + evNote}${provisionalHold}`, /* MUTANT */',
     why: '"if the car charges overnight" on a night with no window.',
+  },
+  /* v1.206.0 second review — what a far push carries beside its lows and its notes. P-xxxiii, P-xxxv..xxxix and P-xli survived the
+   * suite while no far plan of farWindowText.test.ts carried the sentence (FW-4/FW-5 now sweep plans that do, FW-3 and FW-7 write
+   * each out); P-xl was killed only by the two far regression hashes, which may be re-cut; P-xxxiv holds the order. */
+  {
+    id: 'P-xxxiii. ★★★ a far push drops the panel-basis sentence',
+    file: NOTIFY, tests: [T_FAR],
+    find: '        + `Confidence: ${plan.confidenceTier}.${panelBasisPushText(plan)}${farNotes} `;',
+    to: '        + `Confidence: ${plan.confidenceTier}.${farNotes} `; /* MUTANT */',
+    why: 'On the panel-measured band (the plant\'s basis while its Cores are dark) Saturday\'s notice loses "Solar from the panel\'s readings (…)" while Sunday to Friday keep it.',
+  },
+  {
+    id: 'P-xxxiv. ★★ the panel-basis sentence comes after the notes in a far push',
+    file: NOTIFY, tests: [T_FAR],
+    find: '        + `Confidence: ${plan.confidenceTier}.${panelBasisPushText(plan)}${farNotes} `;',
+    to: '        + `Confidence: ${plan.confidenceTier}.${farNotes}${panelBasisPushText(plan)} `; /* MUTANT */',
+    why: 'The basis follows the confidence tier it qualifies, as inside 24 h; after a NOTE it reads as part of the note.',
+  },
+  {
+    id: 'P-xxxv. ★★★ a far charge drops the provisional-band sentence',
+    file: NOTIFY, tests: [T_FAR],
+    find: '        + `${farProjection}${provisionalNote}${farTail}`,',
+    to: '        + `${farProjection}${farTail}`, /* MUTANT */',
+    why: 'A plan sized on the widened band says so on every evening but a Saturday.',
+  },
+  {
+    id: 'P-xxxvi. ★★★ a far reserve hold drops the provisional-band sentence',
+    file: NOTIFY, tests: [T_FAR],
+    find: '          + `no charge is expected${stays}. ${farProjection}${provisionalNote}${farTail}`,',
+    to: '          + `no charge is expected${stays}. ${farProjection}${farTail}`, /* MUTANT */',
+    why: 'As P-xxxv, on the reserve hold.',
+  },
+  {
+    id: 'P-xxxvii. ★★ a far reserve hold\'s title loses "outage cushion only"',
+    file: NOTIFY, tests: [T_FAR],
+    find: '`reserve hold at ${reserveText} recommended for ${far.when}`} — no charge expected${cushionOnlyTitle}`,',
+    to: '`reserve hold at ${reserveText} recommended for ${far.when}`} — no charge expected`, /* MUTANT */',
+    why: 'A cushion-only plan says so in its title, far or near, whatever it expects to charge (as P-xxiii, on the reserve hold).',
+  },
+  {
+    id: 'P-xxxviii. ★★★ a far hold under the minimum buy drops its basis sentences',
+    file: NOTIFY, tests: [T_FAR],
+    find: '          + `top-up, under the minimum buy, so nothing is armed for it.${provisionalHold}`,',
+    to: '          + `top-up, under the minimum buy, so nothing is armed for it.`, /* MUTANT */',
+    why: 'A hold sized on the provisional band, on no solar basis or on the panel\'s readings says which, far or near.',
+  },
+  {
+    id: 'P-xxxix. ★★★ a far hold whose cushion holds drops its basis sentences',
+    file: NOTIFY, tests: [T_FAR],
+    find: '          + `${pct(line)} floor+cushion line. Nothing is armed for it.${provisionalHold}`,',
+    to: '          + `${pct(line)} floor+cushion line. Nothing is armed for it.`, /* MUTANT */',
+    why: 'As P-xxxviii.',
+  },
+  {
+    id: 'P-xl. ★★★ a far push drops the economic sentence',
+    file: NOTIFY, tests: [T_FAR],
+    find: "    const farNotes = farNoteWords(`${shortfallNote}${overBuyNote}${economicNote}${held ? '' : evNote}`);",
+    to: "    const farNotes = farNoteWords(`${shortfallNote}${overBuyNote}${held ? '' : evNote}`); /* MUTANT */",
+    why: '"~31.8% with or without this charge" with nothing saying the buy is economic: a buy that reads as changing nothing (the reading v1.174.0 added the sentence against).',
+  },
+  {
+    id: 'P-xli. ★★ the refusal reason of a far refused reserve hold is reworded',
+    file: NOTIFY, tests: [T_FAR],
+    find: '            + `but ${write} was not armed — ${armRefused}. Nothing is armed for that window.${farRefusedNotes}`,',
+    to: '            + `but ${write} was not armed — ${farNoteWords(armRefused)}. Nothing is armed for that window.${farRefusedNotes}`, /* MUTANT */',
+    why: 'As P-xi, on the reserve-hold arm of the refused push: a refusal\'s text is another module\'s.',
   },
 
   /* ── C: the card ── */

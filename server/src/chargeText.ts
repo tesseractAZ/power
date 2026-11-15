@@ -12,9 +12,9 @@
  * back. The overnight cycle's words are notify.ts's and nightChargeActuator.ts's, unchanged: an
  * overnight-only cycle never reaches a builder here (chargeAnnounce.ts routes by the leg's window
  * kind, and the golden test holds the overnight words byte-identical).
- * v1.206.0 — one exception, and it is names, not a text: an overnight window that opens a day or more
- * after its plan is worded by farWindowWords and farNoteWords below, which notify.ts's push calls
- * (farWindowText.test.ts); inside 24 h its words do not pass through this file.
+ * notify.ts's overnight texts do take helpers from this file, and those are live: clocks (phxParts,
+ * phxShortClock), a refused night's line note (refusedCushionLineNote, v1.205.1) and, v1.206.0, the names
+ * of a window that opens a day or more after its plan (farWindowWords, farNoteWords; farWindowText.test.ts).
  *
  * Every text states the charge the plan EXPECTS (statedBuyKwh) and the level the write drives the
  * pool to; the islanded worst case the plan is sized on appears only on the push's labelled
@@ -22,8 +22,8 @@
  * Spanish second pass) stays within MAX_SPOKEN_ADVISORY_CHARS in every shape (middaySpokenNotice
  * drops the least-needed words first, never the level, the cancel time or the cushion clause).
  *
- * Until the mid-day switch (R6) nothing here is sent or spoken: the shadow (middayShadow.ts) logs
- * what the evening and the refresh would say, and the live paths that would send the rest are
+ * Until the mid-day switch (R6) none of the mid-day texts is sent or spoken: the shadow (middayShadow.ts)
+ * logs what the evening and the refresh would say, and the live paths that would send the rest are
  * routed here only for a super off-peak leg, which nothing arms.
  */
 import type { NotifyMessage } from './notify.js';

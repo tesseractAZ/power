@@ -11,13 +11,17 @@
  *
  * Every plan is the planner's own output. Two cases change its INPUTS, never its output (`inputs`: no median load, so no expected
  * figure). One case stamps a field on the output, and says so in its name (a night that stands at 50% with nothing expected: the
- * planner makes no such plan on the fixture year, and the push has words for it).
+ * planner makes no such plan on the fixture year, and the push has words for it). One case carries the panel-measured solar basis,
+ * put on the planner's output as the evening job puts it (onPanelBasis: the selection's fields and the rationale's closing sentence;
+ * no figure of the plan moves).
  */
 import {
   buildNightChargeInputs, computeNightChargePlan, chargeLevelPct, statedBuyKwh,
   type NightChargeInputDeps, type NightChargeInputs, type NightChargePlan,
 } from '../../src/nightChargeAdvisor.js';
 import { armCycle, emptyCycle } from '../../src/chargeCycle.js';
+import { selectPvBasis, pvBasisDecoration, withPvBasis, type PvSelectionInput } from '../../src/panelPvSelection.js';
+import type { UcVerdict } from '../../src/panelPvBasis.js';
 import type { NightChargeMode } from '../../src/nightChargeActuator.js';
 import { legacyIdentityCases } from './legacyIdentityFixtures.js';
 import { darkDeps } from './cushionOnlyFigures.js';
@@ -65,6 +69,45 @@ function armed(plan: NightChargePlan, deps: NightChargeInputDeps, day: string, d
     forceChargeTargetPct: line == null && c.forceChargeRides === true ? c.forceChargeCeilingPct : null,
     forceChargeLine: line,
   };
+}
+
+/**
+ * A plan with the PANEL-MEASURED solar basis on it (v1.204.0), as the evening job puts it on a plan sized on the planning band
+ * (index.ts: withPvBasis(plan, pvBasisDecoration(...))) once the 7-day energy balance passes — the basis the plant plans on while
+ * its Cores are dark and the balance holds. The selection is the real selector's on the inputs written out here: every connected
+ * slot on the panel's own reading, the balance at 0.9997 against the 1.04 it is refused above (panelPvSelection.test.ts's passing
+ * evening). Only the pvBasis* fields and the rationale's closing sentence are added; every figure of the plan is the planner's.
+ * The push then says " Solar from the panel's readings (7-day energy balance 0.9997, refused above 1.04)." after its confidence tier.
+ */
+const PANEL_AS_OF = '2026-10-29';
+const PANEL_KEYS = ['P#1', 'P#2', 'P#3'];
+const PANEL_SOURCES = [{ slot: 1, source: 'panel' }, { slot: 2, source: 'panel' }, { slot: 3, source: 'panel' }] as UcVerdict['sources'];
+const PANEL_VERDICT: UcVerdict = {
+  asOfDay: PANEL_AS_OF, state: 'pass', ok: true, reason: null, sources: PANEL_SOURCES, basis: 'panel',
+  checks: {
+    asOfDay: PANEL_AS_OF, threshold: 1.04, ratio: 0.9997, balanceDaylightRatio: 0.9781, nightResidualKwhPerNight: -1.13, max7: 0.9997,
+    blindBandPct: 4, fieldDays: 8, newestFieldDay: '2026-10-28', fieldSlots: [1, 2, 3],
+    constants: { 1: { days: 51, chargeHours: 97 }, 2: { days: 51, chargeHours: 96 }, 3: { days: 51, chargeHours: 95 } },
+    vendorDaysPresent: 14, vendorMaxDiffKwh: 0.17, nightMaxW: 0, frozenHours: 0,
+  },
+};
+const PANEL_SELECTION: PvSelectionInput = {
+  asOfDay: PANEL_AS_OF,
+  eligible: { writeMode: true, panelFresh: true, cancelled: false },
+  latched: null,
+  published: { gate: { basisComplete: false, basisBlockedBy: 'only 0 scored calibration day(s), need 4', transient: true }, uncoveredSlots: [1, 2, 3] },
+  planning: { asOfDay: PANEL_AS_OF, keys: PANEL_KEYS, verdict: PANEL_VERDICT, gate: { basisComplete: true, basisBlockedBy: null, transient: false } },
+  planningRollupOk: true,
+  connectedKeys: PANEL_KEYS,
+  ratioKnown: true,
+};
+export function onPanelBasis(p: NightChargePlan): NightChargePlan {
+  const sel = selectPvBasis(PANEL_SELECTION);
+  if (sel.use !== 'planning') throw new Error(`the selection written out here does not take the planning band: ${sel.use}`);
+  if (!p.basisComplete || p.requiredExtraKwh == null || p.cushionOnly != null) throw new Error('the panel basis is put on a plan sized on the planning band, never on a refused or a cushion-only plan');
+  const out = withPvBasis(p, pvBasisDecoration({ sel, asOfDay: PANEL_AS_OF, plan: { sized: true, cushionOnly: false }, calScoredDays: 22, admittedDays: 13 })) as NightChargePlan;
+  if (out.pvBasis !== 'panel') throw new Error('the selection written out here puts no panel basis on the plan');
+  return out;
 }
 
 const MON: [string, string] = ['on Monday at 12:00 AM', 'el lunes a las 12:00 AM'];
@@ -121,6 +164,15 @@ export function farTextCases(): FarTextCase[] {
   add('Sat for Mon: hold, the cushion holds on the legacy basis (2026-10-24, no islanded load)', 'far', '2026-10-24 21:30', null, { over: { socNowPct: 80, islandedLoadKw: null, objectiveMode: 'resilience', forceChargeEligible: false } });
   // No median load: the plan carries no expected figure, and the push states none.
   add('Sat for Mon: charge with no expected figure (no median load)', 'far', '2026-10-17 21:30', MON, { inputs: noMedianLoad });
+  // v1.206.0 review — what a far push carries beside its lows: the economic sentence and each basis sentence, on plans that have them.
+  // An economic buy (cost mode, the cushion already covered): both lows the same figure, so the sentence is what says why it buys.
+  add('Sat for Mon: an economic buy in cost mode, the lows the same (2026-10-24, the pool at 80%)', 'far', '2026-10-24 21:30', MON, { over: { socNowPct: 80 } });
+  // The panel-measured solar basis (the plant's basis while its Cores are dark and the 7-day balance passes): said after the tier.
+  add('Sat for Mon: charge on the panel\'s solar readings (2026-10-17, the panel basis on the plan)', 'far', '2026-10-17 21:30', MON, { plan: onPanelBasis });
+  // The provisional solar band (9 of 14 calibration days scored): said after the notes, before the supervised sentence.
+  add('Sat for Mon: charge on the provisional solar band (2026-10-17, 9 of 14 calibration days)', 'far', '2026-10-17 21:30', MON, { over: { calScoredDays: 9, provisionalMinCalScoredDays: 4 } });
+  // The Cores dark with a full pool at 4 h: cushion only and nothing expected — the reserve hold's title keeps "outage cushion only".
+  add('Sat for Mon: a reserve hold with the Cores dark, cushion only (2027-04-10, a full pool, 4 h)', 'far', '2027-04-10 21:30', MON, { over: { socNowPct: 100, outageCushionHours: 4 }, dark: true });
   // ── FAR: the Sunday before a Monday holiday, for Tuesday 00:00–05:00 ──
   add('Sun for Tue, Monday a holiday: charge toward its level (2027-01-17)', 'far', '2027-01-17 21:30', TUE);
   // ── NEAR: must not move ──

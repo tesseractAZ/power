@@ -431,8 +431,8 @@ export function fmtSiteDayHm(ms: number, nowMs: number): string {
 }
 
 /** v1.206.0 — fmtSiteDayHm's rule as a predicate: an instant a day or more after `nowMs` is not "tonight" (false for a non-finite
- *  instant or clock). The night-charge push and card word a window by it (chargeText.farWindowWords), so the title, the cancel
- *  deadline and the window entities change their wording at the same instant. PURE. */
+ *  instant or clock). The night-charge push words a window by it (chargeText.farWindowWords). The card keeps a twin of it (web
+ *  beyondTonight; farWindowText.test.ts holds both to the same instants), and the cancel deadline compares 24 h in line. PURE. */
 export function windowBeyondTonight(ms: number, nowMs: number): boolean {
   return Number.isFinite(ms) && Number.isFinite(nowMs) && ms - nowMs >= 24 * HOUR_MS;
 }

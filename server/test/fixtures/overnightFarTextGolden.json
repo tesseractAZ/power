@@ -361,6 +361,74 @@
    }
   },
   {
+   "name": "Sat for Mon: an economic buy in cost mode, the lows the same (2026-10-24, the pool at 80%)",
+   "kind": "far",
+   "shape": "charge",
+   "push": {
+    "title": "Night-charge: charging to ~95% Monday 12am–5am (~20.8 kWh)",
+    "body": "No charge is planned for tonight: the charge window opens Monday at 12:00 AM. Charging the backup pool to ~95% in that window, ~20.8 kWh of grid energy expected. Whole-house island projection (if the grid were lost): the low SoC after that window ~31.8% with or without this charge; the floor+cushion line is 23.4%. Confidence: forecast. Resilience needs no buy in that window — the pack already covers the outage cushion; this buy is economic (cost mode). SUPERVISED: on Monday at 12:00 AM the add-on raises the backup reserve to 50% (bounded write; auto-restores after the charge window closes). Then, at ~Mon 02:50, timed to finish by the window close, it switches the panel's force-charge ON just long enough to reach ~95%, and OFF when it gets there (or when the window closes). Cancel from the night-charge card on the panel before then. The figures above are this evening's; a later evening run that arms the same window replaces this arm."
+   },
+   "spoken": {
+    "en": "Night charge notice. Charging the backup pool to about 95 percent, about 21 kilowatt hours, in the charge window that opens on Monday at 12:00 AM. Cancel on the Power panel before then.",
+    "es": "Aviso de carga nocturna. Se cargarán las baterías de respaldo hasta cerca del 95 por ciento, unos 21 kilovatios hora, en la ventana de carga que comienza el lunes a las 12:00 AM. Cancele en el panel Power antes de esa hora."
+   },
+   "was": {
+    "title": "Night-charge: charging to ~95% tonight (~20.8 kWh)",
+    "body": "Charging the backup pool to ~95% overnight, ~20.8 kWh of grid energy expected. Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~31.8% without this charge, ~31.8% with it; the floor+cushion line is 23.4%. Confidence: forecast. Resilience needs no buy tonight — the pack already covers the outage cushion; this buy is economic (cost mode). SUPERVISED: on Monday at 12:00 AM the add-on raises the backup reserve to 50% (bounded write; auto-restores after the charge window closes). Then, at ~Mon 02:50, timed to finish by the window close, it switches the panel's force-charge ON just long enough to reach ~95%, and OFF when it gets there (or when the window closes). Cancel from the night-charge card on the panel before then."
+   }
+  },
+  {
+   "name": "Sat for Mon: charge on the panel's solar readings (2026-10-17, the panel basis on the plan)",
+   "kind": "far",
+   "shape": "charge",
+   "push": {
+    "title": "Night-charge: charging to ~32% Monday 12am–5am (~11.1 kWh)",
+    "body": "No charge is planned for tonight: the charge window opens Monday at 12:00 AM. Charging the backup pool to ~32% in that window, ~11.1 kWh of grid energy expected. Whole-house island projection (if the grid were lost): the low SoC after that window ~0% without this charge; with it ~22.1%; the floor+cushion line is 30.5%. Confidence: forecast. Solar from the panel's readings (7-day energy balance 0.9997, refused above 1.04). SUPERVISED: on Monday at 12:00 AM the add-on raises the backup reserve to 32% (bounded write; auto-restores after the charge window closes). Cancel from the night-charge card on the panel before then. The figures above are this evening's; a later evening run that arms the same window replaces this arm."
+   },
+   "spoken": {
+    "en": "Night charge notice. Charging the backup pool to about 32 percent, about 11 kilowatt hours, in the charge window that opens on Monday at 12:00 AM. Cancel on the Power panel before then.",
+    "es": "Aviso de carga nocturna. Se cargarán las baterías de respaldo hasta cerca del 32 por ciento, unos 11 kilovatios hora, en la ventana de carga que comienza el lunes a las 12:00 AM. Cancele en el panel Power antes de esa hora."
+   },
+   "was": {
+    "title": "Night-charge: charging to ~32% tonight (~11.1 kWh)",
+    "body": "Charging the backup pool to ~32% overnight, ~11.1 kWh of grid energy expected. Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~0% without this charge, ~22.1% with it; the floor+cushion line is 30.5%. Confidence: forecast. Solar from the panel's readings (7-day energy balance 0.9997, refused above 1.04). SUPERVISED: on Monday at 12:00 AM the add-on raises the backup reserve to 32% (bounded write; auto-restores after the charge window closes). Cancel from the night-charge card on the panel before then."
+   }
+  },
+  {
+   "name": "Sat for Mon: charge on the provisional solar band (2026-10-17, 9 of 14 calibration days)",
+   "kind": "far",
+   "shape": "charge",
+   "push": {
+    "title": "Night-charge: charging to ~32% Monday 12am–5am (~11.1 kWh)",
+    "body": "No charge is planned for tonight: the charge window opens Monday at 12:00 AM. Charging the backup pool to ~32% in that window, ~11.1 kWh of grid energy expected. Whole-house island projection (if the grid were lost): the low SoC after that window ~0% with or without this charge; the floor+cushion line is 30.5%. Confidence: forecast. PROVISIONAL SOLAR BAND: 9 of 14 calibration days scored, so the P10 PV this plan is sized on is widened ×1.05 (the next 24 h: ~26.2 → ~24.8 kWh) and the multi-day carry by ±52% per √day; the full band returns at 14 scored days. SUPERVISED: on Monday at 12:00 AM the add-on raises the backup reserve to 32% (bounded write; auto-restores after the charge window closes). Cancel from the night-charge card on the panel before then. The figures above are this evening's; a later evening run that arms the same window replaces this arm."
+   },
+   "spoken": {
+    "en": "Night charge notice. Charging the backup pool to about 32 percent, about 11 kilowatt hours, in the charge window that opens on Monday at 12:00 AM. Cancel on the Power panel before then.",
+    "es": "Aviso de carga nocturna. Se cargarán las baterías de respaldo hasta cerca del 32 por ciento, unos 11 kilovatios hora, en la ventana de carga que comienza el lunes a las 12:00 AM. Cancele en el panel Power antes de esa hora."
+   },
+   "was": {
+    "title": "Night-charge: charging to ~32% tonight (~11.1 kWh)",
+    "body": "Charging the backup pool to ~32% overnight, ~11.1 kWh of grid energy expected. Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~0% without this charge, ~0% with it; the floor+cushion line is 30.5%. Confidence: forecast. PROVISIONAL SOLAR BAND: 9 of 14 calibration days scored, so the P10 PV this plan is sized on is widened ×1.05 (the next 24 h: ~26.2 → ~24.8 kWh) and the multi-day carry by ±52% per √day; the full band returns at 14 scored days. SUPERVISED: on Monday at 12:00 AM the add-on raises the backup reserve to 32% (bounded write; auto-restores after the charge window closes). Cancel from the night-charge card on the panel before then."
+   }
+  },
+  {
+   "name": "Sat for Mon: a reserve hold with the Cores dark, cushion only (2027-04-10, a full pool, 4 h)",
+   "kind": "far",
+   "shape": "charge",
+   "push": {
+    "title": "Night-charge: reserve held at 22% Monday 12am–5am — no charge expected — outage cushion only",
+    "body": "No charge is planned for tonight: the charge window opens Monday at 12:00 AM. Holding the backup reserve at 22% in that window as a floor; no charge is expected — the pool should open the window near ~23.7% and stay at or above 22%. Outage cushion only; no solar basis (only 0 scored calibration day(s), need 4 (a provisional plan on a widened solar band from 4; the full band from 14)): the 20.5% line is the 10% reserve floor plus 4 h of islanded backup load at the window close, with no solar credited and no cost target. SUPERVISED: on Monday at 12:00 AM the add-on raises the backup reserve to 22% (bounded write; auto-restores after the charge window closes). Cancel from the night-charge card on the panel before then. The figures above are this evening's; a later evening run that arms the same window replaces this arm."
+   },
+   "spoken": {
+    "en": "Night charge notice. The backup reserve will be held at 22 percent in the charge window that opens on Monday at 12:00 AM; no charge is expected. Cancel on the Power panel before then.",
+    "es": "Aviso de carga nocturna. La reserva de respaldo se mantendrá en el 22 por ciento en la ventana de carga que comienza el lunes a las 12:00 AM; no se espera ninguna carga. Cancele en el panel Power antes de esa hora."
+   },
+   "was": {
+    "title": "Night-charge: reserve held at 22% tonight — no charge expected — outage cushion only",
+    "body": "Holding the backup reserve at 22% overnight as a floor; no charge is expected — the pool should open the window near ~23.7% and stay at or above 22%. Outage cushion only; no solar basis (only 0 scored calibration day(s), need 4 (a provisional plan on a widened solar band from 4; the full band from 14)): the 20.5% line is the 10% reserve floor plus 4 h of islanded backup load at the window close, with no solar credited and no cost target. SUPERVISED: on Monday at 12:00 AM the add-on raises the backup reserve to 22% (bounded write; auto-restores after the charge window closes). Cancel from the night-charge card on the panel before then."
+   }
+  },
+  {
    "name": "Sun for Tue, Monday a holiday: charge toward its level (2027-01-17)",
    "kind": "far",
    "shape": "charge",
