@@ -26,7 +26,7 @@ export { projectionRecordable, RECORD_FRESH_MS } from './heldSamples.js';
 export type { HeldSpan, HeldScanSummary } from './heldSamples.js';
 // v1.188.1 — battery and solar energy metered at the panel's source slots while a home Core is dark.
 import {
-  createEnergyBridge, ownEnergyUntil, handsBack, slotPvWatts, bridgeSite,
+  createEnergyBridge, ownEnergyUntil, handsBack, coreReports, slotPvWatts, bridgeSite,
   projectedPackKeys, projectionPacksComplete,
   // v1.190.2 — the bridge's windows, recorded for the Today card (bridge_ledger).
   bridgeLedgerRows, bridgeLedgerRowOf, BRIDGE_LEDGER_SELECT_SQL, BRIDGE_CHARGE_KEY,
@@ -3161,17 +3161,32 @@ export function createRecorder(
   // percent is a fraction of), not the recorded pack{N}_full_cap_mah rows. Those were read at most 45 days back, and past
   // that the bridge counted the slot on its nameplate without a word. The recorder keeps a tracker of its own for it: this
   // thread, its own file, seeded read-only from the worker's file while its own holds no Core (the seeded ratios are written
-  // to its own file at first load: persistSeed), and fed every panel's connected Cores at each rollup. No age limit on a held
-  // ratio here (Number.POSITIVE_INFINITY): the pool figures swap a held ratio older than 30 days for the lowest known one, the
-  // runway's safe side, which for the bridge would lower one slot's bound rather than describe its Core. The rows are still
-  // written; other readers use them.
+  // to its own file at first load: persistSeed), and asked for every panel's connected Cores at each rollup. No age limit on a
+  // held ratio here (Number.POSITIVE_INFINITY): the pool figures swap a held ratio older than 30 days for the lowest known
+  // one, the runway's safe side, which for the bridge would lower one slot's bound rather than describe its Core. The rows are
+  // still written; other readers use them.
   const bridgeCapacityTracker = new PoolEnergyBasisTracker({ seedPath: defaultPoolEnergyBasisPath('pool-energy-basis'), path: defaultPoolEnergyBasisPath('pool-energy-basis-bridge'), persistSeed: true });
+  /** v1.207.0 (review) — THE CORES THE BRIDGE'S TRACKER MAY MEASURE NOW: those that are not dark to the bridge, by the
+   *  bridge's own rule (energyBridge.ts offlineState): a marked Core once it has handed back, any other while it delivers a
+   *  reading of its own. Every other Core is left out of the map the tracker reads, so it is answered from its held ratio.
+   *  Listed online with a complete pack list is not enough: a replayed body and a restart's first body carry pack figures
+   *  and are not readings, and a ratio taken from one would move a dark slot's figure in the middle of its span. The bridge
+   *  restates the day's percent change on a new figure in one window, so a rise of a few percent finds an honest trusted
+   *  field short at once (the pack rows this tracker replaces were written for readings only, so they never did that). A
+   *  returning Core's ratio is recorded at the first rollup it has handed back at, when its slot is no longer a dark slot. */
+  const bridgeMeasurableCores = (devices: Record<string, DeviceSnapshot>, nowMs: number): Record<string, DeviceSnapshot> => {
+    const out: Record<string, DeviceSnapshot> = {};
+    for (const [sn, d] of Object.entries(devices)) {
+      if (energyBridge.markersOf(sn).length > 0 ? handsBack(d, nowMs) : coreReports(d, nowMs)) out[sn] = d;
+    }
+    return out;
+  };
   /** Each connected Core's ratio for one panel now; null when the panel is not projected or the tracker threw (the bridge
    *  then keeps the figure it last resolved: energyBridge.ts slotCapacity). */
   const bridgeCoreRatios = (devices: Record<string, DeviceSnapshot>, panelSn: string, nowMs: number): ReadonlyMap<string, CoreRatio> | null => {
     try {
       const panel = allShp2s(devices).find((p) => p.sn === panelSn);
-      return panel ? bridgeCapacityTracker.coreRatios(devices, panel, nowMs, Number.POSITIVE_INFINITY) : null;
+      return panel ? bridgeCapacityTracker.coreRatios(bridgeMeasurableCores(devices, nowMs), panel, nowMs, Number.POSITIVE_INFINITY) : null;
     } catch {
       return null;
     }
@@ -4010,8 +4025,9 @@ export function createRecorder(
     // in its own rows, and it marks the dark Cores' held packs before the BMS pass further down
     // reads the markers. Isolated: a bridge failure is logged and every other counter still advances.
     let br: BridgeRollupResult | null = null;
-    // v1.207.0 — the bridge's capacity tracker sees every panel's connected Cores at each rollup, dark slot or not: the next
-    // dark span starts from the ratio each Core last reported. It logs nothing and resolves no slot's capacity.
+    // v1.207.0 — the bridge's capacity tracker is asked for every panel's connected Cores at each rollup, dark slot or not,
+    // and measures those that deliver a reading (bridgeMeasurableCores): the next dark span starts from the ratio each Core
+    // last reported. It logs nothing and resolves no slot's capacity.
     for (const p of allShp2s(snap.devices)) bridgeCoreRatios(snap.devices, p.sn, now);
     try {
       br = energyBridge.rollup(snap, now);

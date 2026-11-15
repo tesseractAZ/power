@@ -79,14 +79,20 @@
  * CAPACITY (v1.207.0). A dark slot is counted on min(ratio, 1) × the slot's nameplate (the panel's
  * per-source `fullCap`). The ratio is its Core's capacity ratio (Σ the packs' full-charge capacity ÷
  * Σ their design capacity), answered by deps.coreRatio from a tracker the recorder keeps for the
- * bridge (recorder.ts; poolEnergyBasis.ts coreRatios): the ratio in the Core's listed pack figures
- * ('measured'), else the Core's OWN last measured ratio at any age ('held'), else, for a Core with
- * none, the lowest ratio known for any Core ('min-known'). The nameplate stands in only when no ratio
- * has ever been measured ('nameplate'). No answer from the tracker keeps the figure last resolved in
+ * bridge (recorder.ts; poolEnergyBasis.ts coreRatios). The recorder lets that tracker measure a Core
+ * only while the Core is not dark to the bridge (it delivers a reading of its own; a marked Core, once
+ * it has handed back), so a dark slot is answered from what the tracker HOLDS: the Core's OWN last
+ * measured ratio at any age ('held'), else, when it holds none for that Core, the lowest ratio it
+ * holds for any Core ('min-known'), else the nameplate, only when it holds no ratio at all
+ * ('nameplate'). 'measured', the tracker's word for a ratio read from the pack figures now, is the
+ * answer for a Core that reports and so not one the recorder gives for a dark slot: a replayed body
+ * or a restart's first body is not a reading, and must not move a slot's figure in the middle of its
+ * dark span. No answer from the tracker keeps the figure last resolved in
  * this process ('unavailable'); with none, or with no nameplate reported for the slot, the slot has
  * no capacity and the inferred basis and the field check do not run for it — never the nameplate in
- * place of a known ratio. It is resolved at every rollup of a bridged dark slot, day and night, and
- * logged when the slot is first metered and on every change of basis or figure (slotCapacityLogText);
+ * place of a known ratio. It is resolved at every rollup that books a bridged dark slot, day and night
+ * (a rollup that holds its window resolves nothing), and logged when the slot is first metered and on
+ * every change of basis or whole-Wh figure (slotCapacityLogText);
  * nothing is resolved or logged while no slot is bridged. Until v1.207.0 the figure was the recorded
  * pack<N>_full_cap_mah rows read at most 45 days back, cached 6 h, and past that the slot's nameplate
  * with no log line: 2.8–8.8 % more per percent on the reference plant's three slots, which raises
@@ -980,9 +986,10 @@ export interface EnergyBridgeDeps {
    *  only while it is under the integrator's 10 min. */
   heldOpen?: (sn: string, fromMs: number, nowMs: number) => boolean;
   /** v1.207.0 — the capacity ratio of the Core `sn` in a connected slot of panel `panelSn`, from the tracker the recorder keeps
-   *  for the bridge: 'measured' (listed online with a complete pack list now), 'held' (its own last persisted ratio, at any
-   *  age), 'min-known' (it has none: the lowest ratio known for any Core), 'nameplate' (no ratio has ever been measured;
-   *  ratio 1). null: the tracker did not answer. */
+   *  for the bridge: 'held' (the tracker's own last measured ratio for that Core, at any age), 'min-known' (it holds none
+   *  for that Core: the lowest ratio it holds for any Core), 'nameplate' (it holds no ratio at all; ratio 1). 'measured' (the
+   *  ratio in the Core's pack figures now) is the tracker's answer for a Core that reports; the recorder never lets the
+   *  tracker measure a Core that is dark to the bridge. null: the tracker did not answer. */
   coreRatio: (panelSn: string, sn: string, devices: Record<string, DeviceSnapshot>, nowMs: number) => BridgeCoreRatio | null;
   /** The install site for the day/night test (bridgeSite of the configured location), read at each use. */
   site: () => BridgeSite;
@@ -1007,8 +1014,8 @@ export interface EnergyBridgeDebug {
    *  (pvVerdictHolds) and when it first appeared. */
   pvChecks: Array<{ slot: string; sinceMs: number; fieldWh: number; inferredWh: number; stepWh: number; toleranceWh: number; verdict: 'pending' | 'consistent' | 'below'; candidate: 'consistent' | 'below' | null; candidateSinceMs: number | null }>;
   /** v1.207.0 — each bridged dark slot's capacity as last resolved (slotCapacity): the figure the inferred basis and the
-   *  field check count on (`pvChecks[].stepWh` is `wh` / 100), its ratio of the nameplate, where the ratio came from and when
-   *  it was measured. */
+   *  field check count on (`pvChecks[].stepWh` is `wh` / 100), its ratio of the nameplate, where the ratio came from and the
+   *  tracker's instant for a held ratio (heldAtText: after a restart, up to an hour before the Core's last reading). */
   capacity: Array<{ slot: string; wh: number | null; ratio: number | null; basis: BridgeSlotCapacity['basis']; atMs: number | null }>;
   /** Per-Core energy bridged since it went dark. */
   cores: Record<string, { chargeWh: number; dischargeWh: number }>;
@@ -1083,7 +1090,10 @@ export function slotCapacity(nameplateWh: number | null, r: BridgeCoreRatio | nu
 }
 
 /** v1.207.0 — PURE. When a held ratio was measured, for the log line: "of <ISO instant>", or "at an unknown time" for an
- *  instant that is missing or outside the Date range (Date.prototype.toISOString throws there). Never throws. */
+ *  instant that is missing or outside the Date range (Date.prototype.toISOString throws there). Never throws. The instant is
+ *  the tracker's: in the process that measured the ratio, the last rollup its Core delivered a reading at; after a restart,
+ *  the instant last written to the tracker's file, which is re-stamped hourly while the ratio is unchanged — up to an hour
+ *  before the Core's last reading (the ratio is the same one). */
 export function heldAtText(atMs: number | null): string {
   return atMs != null && Number.isFinite(atMs) && Math.abs(atMs) <= 8.64e15 ? `of ${new Date(atMs).toISOString()}` : 'at an unknown time';
 }
@@ -1097,11 +1107,11 @@ export function slotCapacityLogText(where: string, c: BridgeSlotCapacity, namepl
   if (c.basis === 'unavailable') return c.wh != null
     ? `energy bridge: ${where} stays counted on ${kWh(c.wh)} kWh — the capacity tracker did not answer (unavailable)`
     : `energy bridge: ${where} has no capacity figure — the capacity tracker did not answer; ${off} (unavailable)`;
-  if (c.basis === 'nameplate') return `energy bridge: ${where} is counted on its ${np} nameplate — no pack capacity ratio has been measured for any Core (nameplate)`;
+  if (c.basis === 'nameplate') return `energy bridge: ${where} is counted on its ${np} nameplate — the capacity tracker holds no ratio for any Core (nameplate)`;
   const head = `energy bridge: ${where} is counted on ${kWh(c.wh ?? 0)} kWh — ×${(c.ratio ?? 0).toFixed(4)} of its ${np} nameplate, `;
   if (c.basis === 'measured') return `${head}the ratio in its Core's listed pack figures (measured)`;
   if (c.basis === 'held') return `${head}its Core's last measured ratio, ${heldAtText(c.atMs)} (held)`;
-  return `${head}the lowest ratio known for any Core: none has been measured for this slot's Core (min-known)`;
+  return `${head}the lowest ratio the capacity tracker holds: it holds none for this slot's Core (min-known)`;
 }
 
 export function createEnergyBridge(deps: EnergyBridgeDeps): EnergyBridge {
@@ -1364,7 +1374,7 @@ export function createEnergyBridge(deps: EnergyBridgeDeps): EnergyBridge {
       nowBridging.set(s.sn, s);
       const inferKey = `${s.panelSn}#${s.slot}#${s.sn}`;
       darkKeys.add(inferKey);
-      // v1.207.0 — resolved at every rollup of a bridged dark slot, night included: the basis is logged when the slot is first
+      // v1.207.0 — resolved at every rollup that books a bridged dark slot, night included: the basis is logged when the slot is first
       // metered and when it changes, and a daylight window never waits for it.
       const slotCapWh = resolveCapacity(s, inferKey, snap.devices, nowMs);
       // The bridge takes the Core over at the instant it went offline: before it the Core's own

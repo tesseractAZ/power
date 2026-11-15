@@ -55,7 +55,8 @@
  * (pool-energy-basis-bridge.json), the same read-only seed, and `persistSeed`, so the seeded ratios are written to its own file
  * at first load and later boots do not depend on the worker's file. The bridge reads each connected Core's ratio from it
  * (coreRatios), never a scale; that call records the live ratios as evaluate() does and never reads or moves a panel's applied
- * scale or its increase hold.
+ * scale or its increase hold. The recorder hands it only the Cores that are not dark to the bridge, so a dark Core's ratio is
+ * the held one and is never re-measured from a body that is not a reading.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';

@@ -24,6 +24,9 @@
  * no ratio is ever measured and the slot's nameplate is the capacity, the precondition the suites written before v1.207.0
  * state ("no pack capacity recorded"). `seedCapacityRatios` writes the runway tracker's file as a previous process left it
  * (the bridge tracker's seed); `basisFile` reads a tracker's file back; `removeBasisFile` deletes one.
+ * v1.207.0 (review) — TWO PANELS. `second` adds a secondary panel (PANEL2, named "Garage panel") with one source slot holding a
+ * fourth Core (CORE4, packs with a design capacity): its slot series are written each minute like the house panel's, and its
+ * Core reports (content and arrival clocks at the plant's clock) while `second.online`. null (the default): one panel.
  * Test serials are placeholders.
  *
  * DB_PATH must name a fresh file before the recorder is imported: `loadPlant` sets it.
@@ -41,6 +44,14 @@ export const MIN = 60_000;
 export const H = 60 * MIN;
 export const PANEL = 'HD31XXX00XXX0001';
 export const CORES = ['Y711XXX00XXX0001', 'Y711XXX00XXX0002', 'Y711XXX00XXX0003'];
+/** v1.207.0 (review) — the secondary panel and its one Core (`Plant.second`). */
+export const PANEL2 = 'HD31XXX00XXX0002';
+export const CORE4 = 'Y711XXX00XXX0004';
+export const PANEL2_NAME = 'Garage panel';
+/** The secondary panel's state: its Core listed online or not (`changedAt`: the store's transition time), whether the store
+ *  holds a projection for it, its packs' full-charge capacity (mAh a pack, on a 60,000 mAh design), and its slot's meter (W)
+ *  and percent. */
+export interface SecondPanel { online: boolean; changedAt?: number; projected: boolean; fullCapMah: number; w: number; pct: number }
 export const PACK_MAH_TO_WH = 0.1024;
 export const FULL_CAP_MAH = 56_000; // per pack: 5,734 Wh
 export const PACKS = 2;
@@ -105,6 +116,41 @@ export async function loadPlant(prefix: string) {
     };
   }
 
+  /** v1.207.0 (review) — the secondary panel and its Core as the store holds them at `t`. */
+  function secondDevices(t: number, st: SecondPanel): Record<string, Any> {
+    return {
+      [PANEL2]: {
+        sn: PANEL2, deviceName: PANEL2_NAME, productName: 'Smart Home Panel 2', online: true,
+        lastUpdated: t, lastQuotaAtMs: t, contentStaleSinceMs: null,
+        projection: {
+          kind: 'shp2', backupBatPercent: 60, backupFullCapWh: NAMEPLATE_WH, backupRemainWh: 18_000, backupReserveSoc: 10,
+          circuits: [{ ch: 1, watts: 300, name: 'Garage' }], pairedCircuits: [], gridWatt: 0, gridSta: 1, gridConnected: true,
+          sourceWatts: [st.w, 0, 0],
+          sources: [{
+            slot: 1, sn: CORE4, isConnected: true, isAcOpen: true, batteryPercentage: st.pct, fullCap: NAMEPLATE_WH,
+            ratePower: null, emsBatTemp: null, hwConnect: true, errorCodeNum: null, forceCharge: null,
+            pvWatts: 0, pvHighWatts: null, pvLowWatts: null, inputWatts: 0, outputWatts: 0,
+          }],
+          strategy: {},
+        },
+      },
+      [CORE4]: {
+        sn: CORE4, deviceName: CORE4, productName: 'DELTA Pro Ultra', online: st.online, lastUpdated: 0,
+        ...(st.changedAt != null ? { onlineChangedAtMs: st.changedAt } : {}),
+        ...(st.online ? { contentChangedAtMs: t, lastTelemetryAtMs: t } : {}),
+        ...(st.projected ? {
+          projection: {
+            kind: 'dpu', soc: 60, packCount: PACKS, pvTotalWatts: 0, totalInWatts: 0, totalOutWatts: 0, acInWatts: 0, acOutWatts: 0,
+            packs: Array.from({ length: PACKS }, (_, i) => ({
+              num: i + 1, packSn: `${CORE4}-P${i + 1}`, soc: 60, inputWatts: 0, outputWatts: 0,
+              designCapMah: 60_000, fullCapMah: st.fullCapMah, remainCapMah: 30_000, accuChgMah: 1_010_000, accuDsgMah: 1_008_000,
+            })),
+          },
+        } : {}),
+      },
+    };
+  }
+
   class Plant {
     clock: number;
     rec!: Rec;
@@ -153,6 +199,8 @@ export async function loadPlant(prefix: string) {
     measurableCapacity = false;
     /** v1.207.0 — a Core's full-charge capacity per pack, mAh (default FULL_CAP_MAH). */
     packFullCapMah: Record<string, number> = {};
+    /** v1.207.0 (review) — the secondary panel (PANEL2) and its Core (CORE4); null = the plant has one panel. */
+    second: SecondPanel | null = null;
 
     constructor(t0: number, opts: { reuse?: boolean } = {}) {
       if (!opts.reuse) for (const f of readdirSync(tmp)) rmSync(join(tmp, f), { recursive: true, force: true });
@@ -236,6 +284,7 @@ export async function loadPlant(prefix: string) {
         out[sn] = dpu(sn, this.online[sn], projected ? this.regsOf(sn) : null, this.changedAt[sn], c, a != null && (c == null || a > c) ? a : c,
           { measurable: this.measurableCapacity, fullCapMah: this.packFullCapMah[sn] ?? FULL_CAP_MAH });
       }
+      if (this.second) Object.assign(out, secondDevices(this.clock, this.second));
       return out;
     }
     sample(sn: string, metric: string, value: number, ts = this.clock): void {
@@ -249,6 +298,11 @@ export async function loadPlant(prefix: string) {
         this.sample(PANEL, `src${i + 1}_pv_w`, this.pvW[i], t);
       }
       this.sample(PANEL, 'grid_home_w', 0, t);
+      if (this.second) {
+        this.sample(PANEL2, 'src1_w', this.second.w, t);
+        this.sample(PANEL2, 'src1_pct', this.second.pct, t);
+        this.sample(PANEL2, 'src1_pv_w', 0, t);
+      }
     }
     /** A Core's own rows at `t`, as the recorder's gate writes them for a Core that reports: pv_total,
      *  ac_in and each pack's in / out power (`coreBatW` split over its packs, + = discharging). */

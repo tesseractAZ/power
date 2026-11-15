@@ -7,14 +7,17 @@
  * measured, else the Core's own held ratio at any age, else the lowest known, else the nameplate only when no ratio was ever
  * measured. Until v1.207.0 the figure came from pack rows read at most 45 days back and then fell to the nameplate in silence.
  *
- * (R) THE RECORDER'S TRACKER: its seed, its own file, the seed persisted, no age limit, fed at every rollup, each slot its
- *     own Core's ratio.
+ * (R) THE RECORDER'S TRACKER: its seed, its own file, the seed persisted, no age limit (none at day 46, none at day 400),
+ *     fed at every rollup with every panel's Cores, each slot its own Core's ratio from its own panel; only a Core that is
+ *     not dark to the bridge is measured (never a body that is not a reading, never a marked Core before it hands back); a
+ *     tracker failure contained.
  * (T) THE TRACKER (poolEnergyBasis.ts): coreRatios' per-Core answer, basis and instant; the caller's age limit; the live
  *     ratios recorded and saved; the seed written to the own file (persistSeed), for the bridge's tracker alone; a save
  *     that keeps every Core.
  * (B) THE BRIDGE (energyBridge.ts): the cap at the nameplate; no answer never the nameplate; no nameplate, no figure; the
- *     figure asked at every rollup, night included, and used by the daylight window; the line on every change of basis or
- *     figure, again at a second dark span, never a serial, never a throw; the debug block.
+ *     figure asked at every rollup, night included, and used by the daylight window (the one resolved at that rollup, and
+ *     the kept one when the tracker does not answer); the line on every change of basis or whole-Wh figure, again at a
+ *     second dark span, never a serial, never a throw; the debug block.
  *
  *   node scripts/mutate-bridge-capacity.mjs [--only <id prefix>]
  *
@@ -39,6 +42,12 @@ const T_REC = 'test/recorderEnergyBridge.test.ts';
 
 const TRACKER = "  const bridgeCapacityTracker = new PoolEnergyBasisTracker({ seedPath: defaultPoolEnergyBasisPath('pool-energy-basis'), path: defaultPoolEnergyBasisPath('pool-energy-basis-bridge'), persistSeed: true });";
 const RESOLVED = "    resolved.set(c.sn, { ratio, basis: b, atMs: b === 'measured' ? nowMs : b === 'held' ? (held.get(c.sn)?.atMs ?? null) : null });";
+const READ = '      return panel ? bridgeCapacityTracker.coreRatios(bridgeMeasurableCores(devices, nowMs), panel, nowMs, Number.POSITIVE_INFINITY) : null;';
+const MEASURABLE = '      if (energyBridge.markersOf(sn).length > 0 ? handsBack(d, nowMs) : coreReports(d, nowMs)) out[sn] = d;';
+const FEED = '    for (const p of allShp2s(snap.devices)) bridgeCoreRatios(snap.devices, p.sn, now);';
+const SIG = "(c == null ? '' : `${c.basis}:${c.wh == null ? '' : Math.round(c.wh)}`);";
+const CLEANUP = '    for (const k of [...capacity.keys()]) if (!darkKeys.has(k)) capacity.delete(k);';
+const RECORD = '    if (this.recordLive(cand.live, nowMs)) this.save();\n    return cand.perCore ?? new Map();';
 const ASK = '    const next = slotCapacity(nameplate, nameplate != null && nameplate > 0 ? deps.coreRatio(s.panelSn, s.sn, devices, nowMs) : null, prev);';
 
 const MUTANTS = [
@@ -74,14 +83,14 @@ const MUTANTS = [
   {
     id: 'BC-R-v. ★★★ the pool figures\' 30-day expiry applies to the bridge',
     file: RC, tests: [T_PLANT],
-    find: '      return panel ? bridgeCapacityTracker.coreRatios(devices, panel, nowMs, Number.POSITIVE_INFINITY) : null;',
-    to: '      return panel ? bridgeCapacityTracker.coreRatios(devices, panel, nowMs) : null; /* MUTANT */',
+    find: READ,
+    to: '      return panel ? bridgeCapacityTracker.coreRatios(bridgeMeasurableCores(devices, nowMs), panel, nowMs) : null; /* MUTANT */',
     why: 'Slots 1 and 3 fall to the lowest known ratio (-2.3 % and -5.5 %): the figure moves at deploy and the check loosens on the thinnest slot.',
   },
   {
     id: 'BC-R-vi. ★★★ the tracker is fed only while a slot is dark',
     file: RC, tests: [T_PLANT],
-    find: '    for (const p of allShp2s(snap.devices)) bridgeCoreRatios(snap.devices, p.sn, now);',
+    find: FEED,
     to: '    /* MUTANT */',
     why: 'A Core is never measured while it reports, so its next outage starts on the nameplate (or on a ratio months old).',
   },
@@ -91,6 +100,48 @@ const MUTANTS = [
     find: '      const r: BridgeCoreRatio | null = bridgeCoreRatios(devices, panelSn, nowMs)?.get(sn) ?? null;',
     to: '      const r: BridgeCoreRatio | null = [...(bridgeCoreRatios(devices, panelSn, nowMs)?.values() ?? [])][0] ?? null; /* MUTANT */ void sn;',
     why: 'Slots 2 and 3 are counted on slot 1\'s capacity: 2.3 % high and 3.3 % low.',
+  },
+  {
+    id: 'BC-R-viii. ★★★ a held ratio expires after 60 days (a later cliff)',
+    file: RC, tests: [T_PLANT],
+    find: READ,
+    to: '      return panel ? bridgeCapacityTracker.coreRatios(bridgeMeasurableCores(devices, nowMs), panel, nowMs, 60 * 24 * 60 * 60 * 1000) : null; /* MUTANT */',
+    why: 'Day 46 passes and day 60 of the outage moves slots 1 and 3 to the lowest known ratio: the dated step again, two weeks later.',
+  },
+  {
+    id: 'BC-R-ix. ★★★ the tracker measures a Core that is dark to the bridge',
+    file: RC, tests: [T_PLANT],
+    find: MEASURABLE,
+    to: '      out[sn] = d; /* MUTANT */',
+    why: 'A replayed body or a restart\'s first body, listed online with a complete pack list, moves a dark slot\'s figure mid-span: the day is restated on it in one window and a rise of a few percent revokes an honest trusted field.',
+  },
+  {
+    id: 'BC-R-x. ★★★ a marked Core is measured before it hands back',
+    file: RC, tests: [T_PLANT],
+    find: MEASURABLE,
+    to: '      if (coreReports(d, nowMs)) out[sn] = d; /* MUTANT */',
+    why: 'A marked Core listed online with nothing new since delivers a reading while the bridge still meters its slot: its figure moves in the middle of the dark span.',
+  },
+  {
+    id: 'BC-R-xi. ★★★ every slot\'s ratio is read from the first panel',
+    file: RC, tests: [T_PLANT],
+    find: '      const panel = allShp2s(devices).find((p) => p.sn === panelSn);',
+    to: '      const panel = allShp2s(devices)[0]; void panelSn; /* MUTANT */',
+    why: 'On a two-panel install each dark slot of the other panel has no capacity figure: its solar is not inferred and its field is not checked.',
+  },
+  {
+    id: 'BC-R-xii. ★★★ only the first panel\'s Cores are fed to the tracker',
+    file: RC, tests: [T_PLANT],
+    find: FEED,
+    to: '    for (const p of allShp2s(snap.devices).slice(0, 1)) bridgeCoreRatios(snap.devices, p.sn, now); /* MUTANT */',
+    why: 'A secondary panel\'s Cores are never measured while they report: their next outage starts on the lowest known ratio, not their own.',
+  },
+  {
+    id: 'BC-R-xiii. ★★★ a tracker failure is not contained',
+    file: RC, tests: [T_PLANT],
+    find: '    } catch {\n      return null;\n    }\n  };\n  const energyBridge = createEnergyBridge({',
+    to: '    } catch (e) {\n      throw e; /* MUTANT */\n    }\n  };\n  const energyBridge = createEnergyBridge({',
+    why: 'The feed loop runs outside the bridge\'s own isolation: one unreadable pack figure aborts the whole lifetime rollup, every counter with it.',
   },
 
   /* ── T: the tracker ── */
@@ -157,6 +208,20 @@ const MUTANTS = [
     to: '    const out: PersistShape = { v: 1, cores: Object.fromEntries([...this.cores].filter(([sn]) => this.persistedAtMs.has(sn))), panels: Object.fromEntries(this.panels) }; /* MUTANT */',
     why: 'When one Core returns, the file is written with that Core alone; it is never re-seeded, so after the next restart the two still-dark slots fall to the returned Core\'s ratio.',
   },
+  {
+    id: 'BC-T-x. ★★ coreRatios answers a ratio clamped to the pool figures\' floor and ceiling',
+    file: PEB, tests: [T_PEB],
+    find: RESOLVED,
+    to: "    resolved.set(c.sn, { ratio: clampScale(ratio), basis: b, atMs: b === 'measured' ? nowMs : b === 'held' ? (held.get(c.sn)?.atMs ?? null) : null }); /* MUTANT */",
+    why: 'The bridge is handed the pool scale\'s clamp, not the Core\'s ratio as measured.',
+  },
+  {
+    id: 'BC-T-xi. ★★★ coreRatios drops the panels\' applied figures',
+    file: PEB, tests: [T_PEB],
+    find: RECORD,
+    to: '    this.panels.clear(); /* MUTANT */\n    if (this.recordLive(cand.live, nowMs)) this.save();\n    return cand.perCore ?? new Map();',
+    why: 'A tracker read for its ratios loses its applied scale and its increase hold: the new read must leave evaluate() as it was.',
+  },
 
   /* ── B: the bridge ── */
   {
@@ -211,14 +276,14 @@ const MUTANTS = [
   {
     id: 'BC-B-viii. ★★ a change of basis with the same figure is not logged',
     file: EB, tests: [T_EB],
-    find: "(c == null ? '' : `${c.basis}:${c.wh == null ? '' : Math.round(c.wh)}`);",
+    find: SIG,
     to: "(c == null ? '' : `${c.wh == null ? '' : Math.round(c.wh)}`); /* MUTANT */",
     why: 'A slot that moves from its Core\'s own ratio to the lowest known one at the same Wh goes unreported.',
   },
   {
     id: 'BC-B-ix. ★★ a slot\'s capacity entry outlives its dark span',
     file: EB, tests: [T_EB, T_PLANT],
-    find: '    for (const k of [...capacity.keys()]) if (!darkKeys.has(k)) capacity.delete(k);',
+    find: CLEANUP,
     to: '    /* MUTANT */',
     why: 'A second dark span of the same slot on the same figure logs nothing, and the debug block shows a capacity for a slot that is not bridged.',
   },
@@ -256,6 +321,62 @@ const MUTANTS = [
     find: '        capacity: [...capacity.entries()].map(([k, c]) => {',
     to: '        capacity: [...capacity.entries()].slice(0, 0).map(([k, c]) => { /* MUTANT */',
     why: 'The figure the check runs on cannot be read back from /api/debug/battery-lifetime.',
+  },
+  {
+    id: 'BC-B-xv. ★★★ with no answer the window gets no capacity while the line says the figure stands',
+    file: EB, tests: [T_EB, T_PLANT],
+    find: '    return next.wh;',
+    to: "    return next.basis === 'unavailable' ? null : next.wh; /* MUTANT */",
+    why: 'The log prints "stays counted on 28.23 kWh" and the debug block shows it, while the daylight window is not inferred and the field check stops.',
+  },
+  {
+    id: 'BC-B-xvi. ★★★ the window counts on the previous rollup\'s figure',
+    file: EB, tests: [T_EB],
+    find: '    return next.wh;',
+    to: '    return (prev ?? next).wh; /* MUTANT */',
+    why: 'The figure in use differs from the figure stated: the line and the debug block show the new one, the bound runs on the old.',
+  },
+  {
+    id: 'BC-B-xvii. ★★ a move of a fraction of a Wh logs a line',
+    file: EB, tests: [T_EB],
+    find: SIG,
+    to: "(c == null ? '' : `${c.basis}:${c.wh == null ? '' : c.wh}`); /* MUTANT */",
+    why: 'A ratio that moves in its sixth decimal prints the same two-decimal line at every rollup.',
+  },
+  {
+    id: 'BC-B-xviii. ★★ an answer that is not a positive number is taken as a ratio',
+    file: EB, tests: [T_EB],
+    find: '  if (r == null || !Number.isFinite(r.ratio) || !(r.ratio > 0)) {',
+    to: '  if (r == null) { /* MUTANT */',
+    why: 'A zero, negative or NaN ratio from a damaged file becomes a capacity of 0 Wh or NaN.',
+  },
+  {
+    id: 'BC-B-xix. ★★ the tracker is asked for a slot with no nameplate',
+    file: EB, tests: [T_EB],
+    find: ASK,
+    to: '    const next = slotCapacity(nameplate, deps.coreRatio(s.panelSn, s.sn, devices, nowMs), prev); /* MUTANT */',
+    why: 'A ratio cannot count a slot with no nameplate: the call is work at every rollup for a figure that cannot exist.',
+  },
+  {
+    id: 'BC-B-xx. ★★★ no answer forgets the figure last resolved',
+    file: EB, tests: [T_EB],
+    find: "    return { wh: prev?.wh ?? null, ratio: prev?.ratio ?? null, basis: 'unavailable', atMs: prev?.atMs ?? null };",
+    to: "    return { wh: null, ratio: null, basis: 'unavailable', atMs: null }; /* MUTANT */",
+    why: 'One rollup without an answer and the slot\'s inferred basis and field check stop, mid-day.',
+  },
+  {
+    id: 'BC-B-xxi. ★★ the figure is recorded only once its line was logged',
+    file: EB, tests: [T_EB],
+    find: '    capacity.set(key, next);\n    if (capacitySig(next) !== capacitySig(prev)) {\n      try { deps.log(slotCapacityLogText(bridgeSlotLabel(devices, s.panelSn, s.slot), next, nameplate)); } catch { /* the figure stands without its line */ }\n    }',
+    to: '    if (capacitySig(next) !== capacitySig(prev)) {\n      try { deps.log(slotCapacityLogText(bridgeSlotLabel(devices, s.panelSn, s.slot), next, nameplate)); capacity.set(key, next); } catch { /* MUTANT */ }\n    } else capacity.set(key, next);',
+    why: 'A line that cannot be written leaves no figure recorded: the line is attempted again at every rollup and the debug block shows nothing.',
+  },
+  {
+    id: 'BC-B-xxii. ★★ a slot\'s capacity entry is dropped outside daylight',
+    file: EB, tests: [T_EB, T_PLANT],
+    find: CLEANUP,
+    to: '    for (const k of [...capacity.keys()]) if (!live.has(k)) capacity.delete(k); /* MUTANT */',
+    why: 'At night the entry is dropped at every rollup: the line repeats every 5 minutes and the debug block is empty.',
   },
 ];
 
