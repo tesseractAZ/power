@@ -51,6 +51,11 @@
  * arrived after the Cores went dark on the vendor cloud and never saw one, so it answered 'nameplate' while the runway counted the
  * pool on the Cores' held ratios. The seed is the per-Core ratios at their own timestamps, never the worker's panel figures, and
  * the worker's file is still written by the worker alone.
+ * v1.207.0 — a FOURTH tracker, the recorder's (recorder.ts, main thread), for the energy bridge: its own file
+ * (pool-energy-basis-bridge.json), the same read-only seed, and `persistSeed`, so the seeded ratios are written to its own file
+ * at first load and later boots do not depend on the worker's file. The bridge reads each connected Core's ratio from it
+ * (coreRatios), never a scale; that call records the live ratios as evaluate() does and never reads or moves a panel's applied
+ * scale or its increase hold.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -127,6 +132,15 @@ export function coreCapacityRatio(d: DeviceSnapshot | undefined): number | null 
 
 export interface HeldRatio { ratio: number; atMs: number }
 
+/** v1.207.0 — one connected Core's capacity ratio as the candidate scale took it (not clamped). */
+export interface CoreRatio {
+  ratio: number;
+  basis: CapacityBasis;
+  /** When it was measured: the evaluation instant ('measured'), the held entry's time ('held'); null for 'min-known' and
+   *  'nameplate'. */
+  atMs: number | null;
+}
+
 /**
  * PURE. This instant's candidate scale for one panel, before the increase hold. `held` is read,
  * never written (the tracker records the live ratios this returns).
@@ -137,7 +151,7 @@ export function candidatePoolScale(
   held: ReadonlyMap<string, HeldRatio>,
   nowMs: number,
   maxHeldAgeMs = HELD_RATIO_MAX_AGE_MS,
-): { scale: number; basis: CapacityBasis; connected: number; live: Map<string, number> } {
+): { scale: number; basis: CapacityBasis; connected: number; live: Map<string, number>; perCore?: Map<string, CoreRatio> } {
   const connected = (panel.projection.sources ?? []).filter(
     (s) => s?.isConnected === true && typeof s.sn === 'string' && s.sn.length > 0,
   );
@@ -174,6 +188,9 @@ export function candidatePoolScale(
   const useWeights = perCore.every((c) => c.weight != null);
   let num = 0;
   let den = 0;
+  // v1.207.0 — each connected Core's ratio as this loop takes it (coreRatios, the energy bridge's input). Built here only, and
+  // returned on the main return only: with no connected source there is no Core to answer for.
+  const resolved = new Map<string, CoreRatio>();
   for (const c of perCore) {
     let ratio = c.ratio;
     let b = c.basis;
@@ -181,12 +198,13 @@ export function candidatePoolScale(
       if (minKnown != null) ratio = minKnown;
       else { ratio = 1; b = 'nameplate'; }
     }
+    resolved.set(c.sn, { ratio, basis: b, atMs: b === 'measured' ? nowMs : b === 'held' ? (held.get(c.sn)?.atMs ?? null) : null });
     if (rank[b] > rank[basis]) basis = b;
     const w = useWeights ? (c.weight as number) : 1;
     num += ratio * w;
     den += w;
   }
-  return { scale: clampScale(num / den), basis, connected: perCore.length, live };
+  return { scale: clampScale(num / den), basis, connected: perCore.length, live, perCore: resolved };
 }
 
 interface PanelHold { scale: number; pendingScale: number | null; pendingSinceMs: number | null }
@@ -207,8 +225,15 @@ export interface PoolEnergyBasisTrackerOptions {
   /** v1.203.0 — another tracker's file to SEED from, read-only, at load: only while this tracker has no ratio of its own (its own
    *  file holds no Core), the other file's per-Core ratios are taken with their original timestamps, so they age out
    *  (HELD_RATIO_MAX_AGE_MS) on that tracker's own schedule. Never its panels' applied figures, never written back; a missing or
-   *  corrupt file seeds nothing. A seeded entry reaches this tracker's own file only with a live reading's save. null/'' = none. */
+   *  corrupt file seeds nothing. A seeded entry reaches this tracker's own file only with a live reading's save (unless
+   *  persistSeed). null/'' = none. */
   seedPath?: string | null;
+  /** v1.207.0 — write the seeded entries to this tracker's OWN file at first load (when its own file holds no Core and the
+   *  seed file does), each `{ ratio, atMs }` as the seed recorded it, so later boots read them from the own file and do not
+   *  depend on the seed file. Used by the energy bridge's tracker alone (recorder.ts): its Cores may stay dark for months, and
+   *  without it a seeded entry reached the own file only when a Core reported again. Default false: the other trackers keep
+   *  the v1.203.0 behaviour. The seed file is still never written. */
+  persistSeed?: boolean;
   holdMs?: number;
   maxHeldAgeMs?: number;
 }
@@ -217,6 +242,7 @@ export interface PoolEnergyBasisTrackerOptions {
 export class PoolEnergyBasisTracker {
   private readonly path: string | null;
   private readonly seedPath: string | null;
+  private readonly persistSeed: boolean;
   private readonly holdMs: number;
   private readonly maxHeldAgeMs: number;
   private loaded = false;
@@ -227,6 +253,7 @@ export class PoolEnergyBasisTracker {
   constructor(opts: PoolEnergyBasisTrackerOptions = {}) {
     this.path = opts.path ? opts.path : null;
     this.seedPath = opts.seedPath ? opts.seedPath : null;
+    this.persistSeed = opts.persistSeed === true;
     this.holdMs = opts.holdMs ?? CAPACITY_INCREASE_HOLD_MS;
     this.maxHeldAgeMs = opts.maxHeldAgeMs ?? HELD_RATIO_MAX_AGE_MS;
   }
@@ -235,7 +262,10 @@ export class PoolEnergyBasisTracker {
     if (this.loaded) return;
     this.loaded = true;
     this.loadOwn();
+    const own = this.cores.size;
     if (this.cores.size === 0) this.loadSeed();
+    // v1.207.0 — persistSeed: the entries just adopted go to this tracker's own file now, not at a Core's next live reading.
+    if (this.persistSeed && own === 0 && this.cores.size > 0) this.save();
   }
 
   /** v1.203.0 — the seed (seedPath): the other file's valid per-Core ratios, `{ ratio, atMs }` as recorded. Not marked persisted
@@ -280,13 +310,11 @@ export class PoolEnergyBasisTracker {
     try { atomicWriteFileSync(this.path, JSON.stringify(out)); } catch { /* best effort; retried on the next change */ }
   }
 
-  /** The basis for `panel` from `devices` at `nowMs` — read the remaining/full energies from the
-   *  SAME snapshot, with no await in between. */
-  evaluate(devices: Record<string, DeviceSnapshot>, panel: DeviceSnapshot & { projection: Shp2Projection }, nowMs: number): PoolEnergyBasis {
-    this.load();
-    const cand = candidatePoolScale(panel, devices, this.cores, nowMs, this.maxHeldAgeMs);
+  /** Record this evaluation's live ratios as the held entries (evaluate()'s first step, v1.207.0: shared with coreRatios).
+   *  true = something to persist: a new Core, a changed ratio, or a timestamp RATIO_TOUCH_PERSIST_MS past its last write. */
+  private recordLive(live: ReadonlyMap<string, number>, nowMs: number): boolean {
     let dirty = false;
-    for (const [sn, ratio] of cand.live) {
+    for (const [sn, ratio] of live) {
       const prev = this.cores.get(sn);
       this.cores.set(sn, { ratio, atMs: nowMs });
       if (!prev || Math.abs(prev.ratio - ratio) > 1e-6 || nowMs - (this.persistedAtMs.get(sn) ?? -Infinity) >= RATIO_TOUCH_PERSIST_MS) {
@@ -294,6 +322,27 @@ export class PoolEnergyBasisTracker {
         dirty = true;
       }
     }
+    return dirty;
+  }
+
+  /** v1.207.0 — each connected Core's ratio for `panel` at `nowMs`, by the candidate scale's own per-Core rule. Records the live
+   *  ratios as evaluate() does; never reads or moves a panel's applied scale or its increase hold. The energy bridge's input
+   *  (recorder.ts), which passes no age limit: swapping in the lowest known ratio after HELD_RATIO_MAX_AGE_MS is the pool
+   *  figures' safe direction, not a better estimate of that Core. Empty when the panel lists no connected source. */
+  coreRatios(devices: Record<string, DeviceSnapshot>, panel: { projection: Pick<Shp2Projection, 'sources'> }, nowMs: number,
+    maxHeldAgeMs: number = this.maxHeldAgeMs): ReadonlyMap<string, CoreRatio> {
+    this.load();
+    const cand = candidatePoolScale(panel, devices, this.cores, nowMs, maxHeldAgeMs);
+    if (this.recordLive(cand.live, nowMs)) this.save();
+    return cand.perCore ?? new Map();
+  }
+
+  /** The basis for `panel` from `devices` at `nowMs` — read the remaining/full energies from the
+   *  SAME snapshot, with no await in between. */
+  evaluate(devices: Record<string, DeviceSnapshot>, panel: DeviceSnapshot & { projection: Shp2Projection }, nowMs: number): PoolEnergyBasis {
+    this.load();
+    const cand = candidatePoolScale(panel, devices, this.cores, nowMs, this.maxHeldAgeMs);
+    let dirty = this.recordLive(cand.live, nowMs);
     const prev = this.panels.get(panel.sn);
     if (cand.basis !== 'measured') {
       // A figure built on SUBSTITUTES — a connected Core not reporting (a restart while the Cores

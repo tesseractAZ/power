@@ -62,8 +62,9 @@
  *  - 'inferred'   otherwise, in daylight: a monotone envelope of the slot's net AC output plus
  *                 the change in stored energy since the day's first daylight window,
  *                     cum(t) = max(prev, Σ(acOut − acIn) + (pct(t) − pct(anchor)) × capWh)
- *                 (capWh: the Core's measured full-charge capacity, the basis the panel's percent
- *                 is a fraction of). A LOWER BOUND: replayed on 8 recorded days it read 0.83-0.90
+ *                 (capWh: the slot's capacity, its Core's capacity ratio × the slot's nameplate —
+ *                 CAPACITY below — the basis the panel's percent is a fraction of). A LOWER BOUND:
+ *                 replayed on 8 recorded days it read 0.83-0.90
  *                 of the measured PV, short by a near-constant 4.7-6.1 kWh/day (the Cores' own
  *                 draw), and up to one SoC step (~290 Wh) per Core per anchor either way.
  *                 Energy-only: it has no instantaneous power; the power sensors read the field
@@ -74,6 +75,22 @@
  *                 figures for a slot on an ONLINE panel whose reading is not fresh NOW
  *                 (shp2ReadbackFresh), and leave a slot on a cloud-offline panel out of both
  *                 (bridgeFleetFlow). Never PV that passed through a Core booked as battery out.
+ *
+ * CAPACITY (v1.207.0). A dark slot is counted on min(ratio, 1) × the slot's nameplate (the panel's
+ * per-source `fullCap`). The ratio is its Core's capacity ratio (Σ the packs' full-charge capacity ÷
+ * Σ their design capacity), answered by deps.coreRatio from a tracker the recorder keeps for the
+ * bridge (recorder.ts; poolEnergyBasis.ts coreRatios): the ratio in the Core's listed pack figures
+ * ('measured'), else the Core's OWN last measured ratio at any age ('held'), else, for a Core with
+ * none, the lowest ratio known for any Core ('min-known'). The nameplate stands in only when no ratio
+ * has ever been measured ('nameplate'). No answer from the tracker keeps the figure last resolved in
+ * this process ('unavailable'); with none, or with no nameplate reported for the slot, the slot has
+ * no capacity and the inferred basis and the field check do not run for it — never the nameplate in
+ * place of a known ratio. It is resolved at every rollup of a bridged dark slot, day and night, and
+ * logged when the slot is first metered and on every change of basis or figure (slotCapacityLogText);
+ * nothing is resolved or logged while no slot is bridged. Until v1.207.0 the figure was the recorded
+ * pack<N>_full_cap_mah rows read at most 45 days back, cached 6 h, and past that the slot's nameplate
+ * with no log line: 2.8–8.8 % more per percent on the reference plant's three slots, which raises
+ * the inferred bound by the same share of its stored-energy term and can find an honest field short.
  *
  * WHICH ROWS (v1.188.1 review). A window books the slot rows that exist, whatever the panel's
  * reading is at the rollup instant: the recorder writes a panel row only while the panel's reading
@@ -210,6 +227,22 @@ export const bridgeAbsorbedKey = (packCacheKey: string, kind: 'chg' | 'dsg'): st
 /** The persisted "this slot's PV field passed its check against the inferred lower bound" flag
  *  (deleted when a later check finds the field below the bound). */
 export const bridgePvSeenKey = (panelSn: string, slot: number): string => `${PVSEEN_PREFIX}${panelSn}_${slot}`;
+/** v1.207.0 — poolEnergyBasis.ts CapacityBasis, restated: this module imports no option reader (bridgeSite). recorder.ts
+ *  assigns one to the other, so tsc fails there if the tracker's basis gains a member. */
+export type BridgeCapacityBasis = 'measured' | 'held' | 'min-known' | 'nameplate';
+/** v1.207.0 — one Core's capacity ratio as the recorder's tracker answers it (EnergyBridgeDeps.coreRatio). */
+export interface BridgeCoreRatio { ratio: number; basis: BridgeCapacityBasis; atMs: number | null }
+/** v1.207.0 — a dark slot's capacity as the bridge counts it: `wh` = min(ratio, 1) × the slot's nameplate. 'unavailable': the
+ *  tracker did not answer (the figure last resolved stands, else none); 'no-nameplate': the panel reports no capacity for
+ *  the slot (no figure). */
+export interface BridgeSlotCapacity { wh: number | null; ratio: number | null; basis: BridgeCapacityBasis | 'unavailable' | 'no-nameplate'; atMs: number | null }
+/** v1.207.0 — "slot 2"; with more than one panel "<panel name> slot 2". Never a serial: a panel whose name is missing or
+ *  carries its serial (snapshot.ts resolveDeviceName's last fallback) reads "panel". PURE. */
+export function bridgeSlotLabel(devices: Record<string, DeviceSnapshot>, panelSn: string, slot: number): string {
+  if (allShp2s(devices).length <= 1) return `slot ${slot}`;
+  const name = devices[panelSn]?.deviceName;
+  return `${typeof name === 'string' && name.trim() !== '' && !name.includes(panelSn) ? name.trim() : 'panel'} slot ${slot}`;
+}
 /** Per-Core bridged energy since that Core went dark, for the hand-over line. */
 export const bridgeCoreKey = (sn: string, kind: 'chg' | 'dsg'): string => `${CORE_PREFIX}${sn}_${kind}`;
 /** The instant a home Core went cloud-offline (the row's ts), as this process saw it: a restart
@@ -231,8 +264,6 @@ export type MarkedCore = (sn: string) => boolean;
 export const BRIDGE_MAX_WINDOW_MS = 15 * 60 * 1000;
 /** The inferred basis needs the slot meter to cover this share of the window. */
 export const BRIDGE_MIN_COVERAGE = 0.8;
-/** The capacity reading is refreshed this often (pack full-charge capacity moves over weeks). */
-const CAPACITY_CACHE_MS = 6 * 60 * 60 * 1000;
 /** A Core is bridged once it has been cloud-offline this long. Longer than a /status flip (6 s)
  *  and the 2026-10-03 /device/list blip (~92 s); short against an outage. */
 export const BRIDGE_DWELL_MS = 3 * 60 * 1000;
@@ -948,8 +979,11 @@ export interface EnergyBridgeDeps {
    *  held-reading bound (heldSamples.ts createHeldGapLog open). Optional: without it a gap is held
    *  only while it is under the integrator's 10 min. */
   heldOpen?: (sn: string, fromMs: number, nowMs: number) => boolean;
-  /** A Core's measured full-charge capacity (Σ its packs' fullCapMah × 0.1024 Wh/mAh), or null. */
-  coreCapacityWh: (sn: string, nowMs: number) => number | null;
+  /** v1.207.0 — the capacity ratio of the Core `sn` in a connected slot of panel `panelSn`, from the tracker the recorder keeps
+   *  for the bridge: 'measured' (listed online with a complete pack list now), 'held' (its own last persisted ratio, at any
+   *  age), 'min-known' (it has none: the lowest ratio known for any Core), 'nameplate' (no ratio has ever been measured;
+   *  ratio 1). null: the tracker did not answer. */
+  coreRatio: (panelSn: string, sn: string, devices: Record<string, DeviceSnapshot>, nowMs: number) => BridgeCoreRatio | null;
   /** The install site for the day/night test (bridgeSite of the configured location), read at each use. */
   site: () => BridgeSite;
   log: (m: string) => void;
@@ -972,6 +1006,10 @@ export interface EnergyBridgeDebug {
    *  `verdict` is the one in force (acted on), `candidate` a verdict not yet held long enough
    *  (pvVerdictHolds) and when it first appeared. */
   pvChecks: Array<{ slot: string; sinceMs: number; fieldWh: number; inferredWh: number; stepWh: number; toleranceWh: number; verdict: 'pending' | 'consistent' | 'below'; candidate: 'consistent' | 'below' | null; candidateSinceMs: number | null }>;
+  /** v1.207.0 — each bridged dark slot's capacity as last resolved (slotCapacity): the figure the inferred basis and the
+   *  field check count on (`pvChecks[].stepWh` is `wh` / 100), its ratio of the nameplate, where the ratio came from and when
+   *  it was measured. */
+  capacity: Array<{ slot: string; wh: number | null; ratio: number | null; basis: BridgeSlotCapacity['basis']; atMs: number | null }>;
   /** Per-Core energy bridged since it went dark. */
   cores: Record<string, { chargeWh: number; dischargeWh: number }>;
   /** The persisted hand-off instant of each home Core listed offline (bridgeOfflineKey). */
@@ -1006,7 +1044,7 @@ export interface EnergyBridge {
 
 /** The debug block at its empty identity (the read-only worker recorder, test stubs). */
 export function emptyBridgeDebug(): EnergyBridgeDebug {
-  return { chargeWh: 0, dischargeWh: 0, pvWh: 0, gridImportWh: 0, watermarkMs: 0, markers: [], absorbed: [], trustedSlots: [], pvChecks: [], cores: {}, offlineSince: [], slots: [], pending: [], lastRollup: null };
+  return { chargeWh: 0, dischargeWh: 0, pvWh: 0, gridImportWh: 0, watermarkMs: 0, markers: [], absorbed: [], trustedSlots: [], pvChecks: [], capacity: [], cores: {}, offlineSince: [], slots: [], pending: [], lastRollup: null };
 }
 
 const markerSn = (packCacheKey: string): string => {
@@ -1031,6 +1069,40 @@ interface FieldCheck {
 }
 
 const kWh = (wh: number): string => (wh / 1000).toFixed(2);
+
+/** v1.207.0 — PURE. A dark slot's capacity from its nameplate and the tracker's answer `r`. Never the nameplate in place of a
+ *  known ratio: with no answer (null, or a ratio that is not a positive number) the figure last resolved (`prev`) stands,
+ *  else none; with no nameplate there is no figure at all. The ratio is capped at 1 (the slot's nameplate). */
+export function slotCapacity(nameplateWh: number | null, r: BridgeCoreRatio | null, prev: BridgeSlotCapacity | undefined): BridgeSlotCapacity {
+  if (nameplateWh == null || !(nameplateWh > 0)) return { wh: null, ratio: null, basis: 'no-nameplate', atMs: null };
+  if (r == null || !Number.isFinite(r.ratio) || !(r.ratio > 0)) {
+    return { wh: prev?.wh ?? null, ratio: prev?.ratio ?? null, basis: 'unavailable', atMs: prev?.atMs ?? null };
+  }
+  const ratio = Math.min(1, r.ratio);
+  return { wh: ratio * nameplateWh, ratio, basis: r.basis, atMs: r.atMs };
+}
+
+/** v1.207.0 — PURE. When a held ratio was measured, for the log line: "of <ISO instant>", or "at an unknown time" for an
+ *  instant that is missing or outside the Date range (Date.prototype.toISOString throws there). Never throws. */
+export function heldAtText(atMs: number | null): string {
+  return atMs != null && Number.isFinite(atMs) && Math.abs(atMs) <= 8.64e15 ? `of ${new Date(atMs).toISOString()}` : 'at an unknown time';
+}
+
+/** v1.207.0 — PURE. The capacity line: one per slot when the bridge starts metering it, and on every change of basis or
+ *  figure (createEnergyBridge resolveCapacity). `where` is bridgeSlotLabel's text. Never throws. */
+export function slotCapacityLogText(where: string, c: BridgeSlotCapacity, nameplateWh: number | null): string {
+  const np = nameplateWh != null && nameplateWh > 0 ? `${kWh(nameplateWh)} kWh` : 'unknown';
+  const off = 'the inferred basis and the PV-field check do not run for it';
+  if (c.basis === 'no-nameplate') return `energy bridge: ${where} has no capacity figure — the panel reports no capacity for the slot; ${off}`;
+  if (c.basis === 'unavailable') return c.wh != null
+    ? `energy bridge: ${where} stays counted on ${kWh(c.wh)} kWh — the capacity tracker did not answer (unavailable)`
+    : `energy bridge: ${where} has no capacity figure — the capacity tracker did not answer; ${off} (unavailable)`;
+  if (c.basis === 'nameplate') return `energy bridge: ${where} is counted on its ${np} nameplate — no pack capacity ratio has been measured for any Core (nameplate)`;
+  const head = `energy bridge: ${where} is counted on ${kWh(c.wh ?? 0)} kWh — ×${(c.ratio ?? 0).toFixed(4)} of its ${np} nameplate, `;
+  if (c.basis === 'measured') return `${head}the ratio in its Core's listed pack figures (measured)`;
+  if (c.basis === 'held') return `${head}its Core's last measured ratio, ${heldAtText(c.atMs)} (held)`;
+  return `${head}the lowest ratio known for any Core: none has been measured for this slot's Core (min-known)`;
+}
 
 export function createEnergyBridge(deps: EnergyBridgeDeps): EnergyBridge {
   const keys = deps.listLifetimeKeys();
@@ -1093,20 +1165,25 @@ export function createEnergyBridge(deps: EnergyBridgeDeps): EnergyBridge {
   };
   const infer = new Map<string, InferState>();
   const checks = new Map<string, FieldCheck>();
-  const capCache = new Map<string, { atMs: number; wh: number | null }>();
+  /** v1.207.0 — each bridged dark slot's capacity as last resolved, keyed as `infer` is; dropped when the slot leaves the dark
+   *  set, so a later dark span logs its capacity line again. */
+  const capacity = new Map<string, BridgeSlotCapacity>();
   let bridging = new Set<string>();
   let lastRollup: BridgeRollupResult | null = null;
 
-  const capacityWh = (s: DarkSlot, nowMs: number): number | null => {
+  /** v1.207.0 — a bridged dark slot's capacity at this rollup (slotCapacity), Wh or null: no cache and no lookback, the
+   *  tracker is asked every time. The figure is recorded BEFORE its line is logged and a log failure is swallowed, so a line
+   *  that cannot be written never stops the rollup or repeats at the next one. */
+  const capacitySig = (c: BridgeSlotCapacity | undefined): string => (c == null ? '' : `${c.basis}:${c.wh == null ? '' : Math.round(c.wh)}`);
+  const resolveCapacity = (s: DarkSlot, key: string, devices: Record<string, DeviceSnapshot>, nowMs: number): number | null => {
     const nameplate = finite(s.source.fullCap);
-    let c = capCache.get(s.sn);
-    if (!c || nowMs - c.atMs > CAPACITY_CACHE_MS) {
-      c = { atMs: nowMs, wh: deps.coreCapacityWh(s.sn, nowMs) };
-      capCache.set(s.sn, c);
+    const prev = capacity.get(key);
+    const next = slotCapacity(nameplate, nameplate != null && nameplate > 0 ? deps.coreRatio(s.panelSn, s.sn, devices, nowMs) : null, prev);
+    capacity.set(key, next);
+    if (capacitySig(next) !== capacitySig(prev)) {
+      try { deps.log(slotCapacityLogText(bridgeSlotLabel(devices, s.panelSn, s.slot), next, nameplate)); } catch { /* the figure stands without its line */ }
     }
-    const measured = c.wh != null && c.wh > 0 ? c.wh : null;
-    if (measured != null && nameplate != null && nameplate > 0) return Math.min(measured, nameplate);
-    return measured ?? (nameplate != null && nameplate > 0 ? nameplate : null);
+    return next.wh;
   };
 
   const isTrusted = (panelSn: string, slot: number): boolean => trusted.has(bridgePvSeenKey(panelSn, slot));
@@ -1252,6 +1329,8 @@ export function createEnergyBridge(deps: EnergyBridgeDeps): EnergyBridge {
     const nowBridging = new Map<string, DarkSlot>();
     /** The inferred / check state still in use: a slot not dark in daylight now keeps none. */
     const live = new Set<string>();
+    /** v1.207.0 — the bridged dark slots of this rollup, day or night: a slot not among them keeps no capacity entry. */
+    const darkKeys = new Set<string>();
     const coreAdd = new Map<string, { chg: number; dsg: number }>();
     const site = deps.site();
     /** v1.188.1 (review) — where the bridge books nothing for a dark slot and its Core delivers a
@@ -1284,6 +1363,10 @@ export function createEnergyBridge(deps: EnergyBridgeDeps): EnergyBridge {
     for (const s of dark) {
       nowBridging.set(s.sn, s);
       const inferKey = `${s.panelSn}#${s.slot}#${s.sn}`;
+      darkKeys.add(inferKey);
+      // v1.207.0 — resolved at every rollup of a bridged dark slot, night included: the basis is logged when the slot is first
+      // metered and when it changes, and a daylight window never waits for it.
+      const slotCapWh = resolveCapacity(s, inferKey, snap.devices, nowMs);
       // The bridge takes the Core over at the instant it went offline: before it the Core's own
       // figures count (the recorder cuts them there), so this window never books them twice.
       const start = Math.max(since, s.darkSinceMs ?? since);
@@ -1323,7 +1406,7 @@ export function createEnergyBridge(deps: EnergyBridgeDeps): EnergyBridge {
           // The inferred lower bound runs in every daylight window, whatever the basis: it is the
           // basis when the field is not trusted, and the check on the field when it is.
           const pctPts = deps.query(s.panelSn, `src${s.slot}_pct`, start - INTEGRATE_HEAD_LOOKBACK_MS, nowMs);
-          const capWh = capacityWh(s, nowMs);
+          const capWh = slotCapWh;
           const prior = infer.get(inferKey);
           const step = inferPvStep(prior, {
             pctStart: valueAt(pctPts, start),
@@ -1374,6 +1457,8 @@ export function createEnergyBridge(deps: EnergyBridgeDeps): EnergyBridge {
     // later dark span starts both afresh (a stale anchor would land the whole SoC change since).
     for (const k of [...infer.keys()]) if (!live.has(k)) infer.delete(k);
     for (const k of [...checks.keys()]) if (!live.has(k)) checks.delete(k);
+    // v1.207.0 — and a slot that is not a bridged dark slot now keeps no capacity entry: its next dark span logs its line again.
+    for (const k of [...capacity.keys()]) if (!darkKeys.has(k)) capacity.delete(k);
     // The transitions, logged before the per-Core rows below can be cleared.
     for (const [sn, s] of nowBridging) {
       if (bridging.has(sn)) continue;
@@ -1472,6 +1557,10 @@ export function createEnergyBridge(deps: EnergyBridgeDeps): EnergyBridge {
             toleranceWh: pvFieldTolerance(c.inferredWh, c.stepWh), verdict: c.verdict,
             candidate: c.candidate?.verdict ?? null, candidateSinceMs: c.candidate?.sinceMs ?? null,
           };
+        }).sort((a, b) => a.slot.localeCompare(b.slot)),
+        capacity: [...capacity.entries()].map(([k, c]) => {
+          const [panelSn, slot] = k.split('#');
+          return { slot: `${panelSn}_${slot}`, wh: c.wh, ratio: c.ratio, basis: c.basis, atMs: c.atMs };
         }).sort((a, b) => a.slot.localeCompare(b.slot)),
         cores,
         offlineSince: [...offlineAt.entries()].map(([sn, sinceMs]) => ({ sn, sinceMs })).sort((a, b) => a.sn.localeCompare(b.sn)),

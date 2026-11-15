@@ -306,10 +306,12 @@ const MUTANTS = [
     why: 'A restart or panel gap lands the SoC change it spans in one window as solar.',
   },
   {
+    // v1.207.0 — re-cut: the capacity is the Core's ratio × the slot's nameplate (slotCapacity), no longer the recorded
+    // pack rows; the mutant takes the nameplate whatever ratio the tracker answers.
     id: 'B-xxii. ★ the inferred basis ignores the Cores\' measured capacity',
     file: EB,
-    find: '    const measured = c.wh != null && c.wh > 0 ? c.wh : null;',
-    to: '    const measured = null as number | null; /* MUTANT */',
+    find: '  const ratio = Math.min(1, r.ratio);',
+    to: '  const ratio = 1 + 0 * r.ratio; /* MUTANT */',
     why: 'The SoC term uses nameplate, overstating stored energy by the packs\' capacity ratio (0.944).',
   },
   {

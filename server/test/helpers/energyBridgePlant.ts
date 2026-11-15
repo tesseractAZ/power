@@ -18,12 +18,18 @@
  * content is older than the gate's window); its BMS registers move with `coreBatW` and freeze while
  * it does not report, then jump to the true count when it reports again.
  * `restart` is a graceful stop (close(): a final rollup); `crash` is not.
+ * v1.207.0 — CAPACITY. The energy bridge counts a dark slot on its Core's capacity ratio × the slot's nameplate, the ratio from
+ * a tracker the recorder feeds with the Cores' pack figures (poolEnergyBasis.ts). The packs carry a design capacity, and so a
+ * measurable ratio (FULL_CAP_MAH / 60,000 = 0.9333, or `packFullCapMah` per Core), only with `measurableCapacity`; without it
+ * no ratio is ever measured and the slot's nameplate is the capacity, the precondition the suites written before v1.207.0
+ * state ("no pack capacity recorded"). `seedCapacityRatios` writes the runway tracker's file as a previous process left it
+ * (the bridge tracker's seed); `basisFile` reads a tracker's file back; `removeBasisFile` deletes one.
  * Test serials are placeholders.
  *
  * DB_PATH must name a fresh file before the recorder is imported: `loadPlant` sets it.
  */
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
@@ -62,7 +68,7 @@ export async function loadPlant(prefix: string) {
   type Rec = ReturnType<typeof createRecorder>;
   const realNow = Date.now;
 
-  function dpu(sn: string, online: boolean, regs: Regs | null, changedAt: number | undefined, contentAt: number | undefined, telemetryAt: number | undefined): Any {
+  function dpu(sn: string, online: boolean, regs: Regs | null, changedAt: number | undefined, contentAt: number | undefined, telemetryAt: number | undefined, cap: { measurable: boolean; fullCapMah: number }): Any {
     return {
       sn, deviceName: sn, productName: 'DELTA Pro Ultra', online, lastUpdated: 0,
       ...(changedAt != null ? { onlineChangedAtMs: changedAt } : {}),
@@ -73,7 +79,7 @@ export async function loadPlant(prefix: string) {
           kind: 'dpu', soc: 60, packCount: PACKS, pvTotalWatts: 0, totalInWatts: 0, totalOutWatts: 0, acInWatts: 0, acOutWatts: 0,
           packs: Array.from({ length: PACKS }, (_, i) => ({
             num: i + 1, packSn: `${sn}-P${i + 1}`, soc: 60, inputWatts: 0, outputWatts: 0,
-            designCapMah: 60_000, fullCapMah: FULL_CAP_MAH, remainCapMah: 30_000,
+            ...(cap.measurable ? { designCapMah: 60_000 } : {}), fullCapMah: cap.fullCapMah, remainCapMah: 30_000,
             accuChgMah: regs.chg, accuDsgMah: regs.dsg,
           })),
         },
@@ -143,6 +149,10 @@ export async function loadPlant(prefix: string) {
      *  restart while dark (no projection at all). */
     frozenProjection = true;
     panelStale = false;
+    /** v1.207.0 — the packs carry their design capacity, so a Core that reports has a measurable capacity ratio. */
+    measurableCapacity = false;
+    /** v1.207.0 — a Core's full-charge capacity per pack, mAh (default FULL_CAP_MAH). */
+    packFullCapMah: Record<string, number> = {};
 
     constructor(t0: number, opts: { reuse?: boolean } = {}) {
       if (!opts.reuse) for (const f of readdirSync(tmp)) rmSync(join(tmp, f), { recursive: true, force: true });
@@ -223,7 +233,8 @@ export async function loadPlant(prefix: string) {
         const projected = (this.online[sn] || this.frozenProjection) && !this.unprojected.has(sn);
         const c = this.contentAt[sn];
         const a = this.telemetryAt[sn];
-        out[sn] = dpu(sn, this.online[sn], projected ? this.regsOf(sn) : null, this.changedAt[sn], c, a != null && (c == null || a > c) ? a : c);
+        out[sn] = dpu(sn, this.online[sn], projected ? this.regsOf(sn) : null, this.changedAt[sn], c, a != null && (c == null || a > c) ? a : c,
+          { measurable: this.measurableCapacity, fullCapMah: this.packFullCapMah[sn] ?? FULL_CAP_MAH });
       }
       return out;
     }
@@ -333,6 +344,14 @@ export async function loadPlant(prefix: string) {
     seedCapacityRatios(ratios: Record<string, number>, atMs: number): void {
       const cores = Object.fromEntries(Object.entries(ratios).map(([sn, ratio]) => [sn, { ratio, atMs }]));
       writeFileSync(join(tmp, 'pool-energy-basis.json'), JSON.stringify({ v: 1, cores, panels: {} }));
+    }
+    /** v1.207.0 — a tracker's file (`pool-energy-basis`, `pool-energy-basis-bridge`) as it is on disk, or null when absent. */
+    basisFile(name: string): { cores: Record<string, { ratio: number; atMs: number }> } | null {
+      const f = join(tmp, `${name}.json`);
+      return existsSync(f) ? JSON.parse(readFileSync(f, 'utf8')) : null;
+    }
+    removeBasisFile(name: string): void {
+      rmSync(join(tmp, `${name}.json`), { force: true });
     }
     /** Write a lifetime row directly (a state a previous process left). */
     putLifetime(key: string, wh: number, ts = this.clock): void {
