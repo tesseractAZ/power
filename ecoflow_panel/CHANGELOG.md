@@ -1,3 +1,46 @@
+## 1.207.0
+
+### The energy bridge keeps each Core's own capacity, however long the Cores stay dark
+
+**Energy bridge**
+
+- **Why.** While a home Core sends no telemetry, the energy bridge meters its battery and solar at the panel's source slot, and in daylight it counts the slot's stored energy as the panel's percent × the Core's capacity. That capacity came from the recorded `pack<k>_full_cap_mah` rows, read at most 45 days back and cached for 6 hours. Past the 45 days the bridge counted the slot on its 30,720 Wh nameplate, with no log line. On the reference plant's three slots that is 6.3 %, 8.8 % and 2.8 % more per percent (28,889 / 28,227 / 29,879 Wh held), due at the first daylight window 45 days after the Cores' last pack rows (2026-11-29 for Cores dark since mid-October). The inferred lower bound grows by the same share of its stored-energy term, so an honest panel PV field can be found short of it. A field found short loses its trust: the slot is booked on the inferred basis, the power sensors withhold it for the rest of that day, and the night plan refuses the panel's readings that evening.
+- **The capacity source.** A dark slot is counted on its Core's capacity ratio × the slot's nameplate, capped at the nameplate. The ratio comes from a capacity tracker the recorder keeps for the bridge: the ratio in the Core's listed pack figures (`measured`), else the Core's own last measured ratio at any age (`held`), else, for a Core never measured, the lowest ratio known for any Core (`min-known`). The nameplate stands in only when no ratio has ever been measured (`nameplate`). The 45-day read and the 6-hour cache are removed. The pool figures replace a held ratio older than 30 days with the lowest known one; the bridge does not, so each slot keeps its own Core's figure.
+- **No answer is never the nameplate.** When the tracker does not answer, the slot keeps the figure last resolved in that process. With none, or when the panel reports no capacity for the slot, the slot has no capacity figure: the inferred basis and the field check do not run for it, and a trusted field is still booked as measured.
+- **The tracker.** It is the recorder's own (main thread), with its own file, `pool-energy-basis-bridge.json`, beside the other trackers' files. It is fed every panel's connected Cores at each 5-minute rollup, whether or not a slot is dark, so an outage starts from the ratio each Core last reported. While its own file holds no Core it is seeded, read-only, from the runway tracker's file, and the seeded ratios are written to its own file at that first load, at the instants the seed recorded. Later boots read its own file and do not need the runway tracker's.
+- **The log lines.** Each slot's capacity is logged when the bridge starts metering it (day or night) and on every change of basis or figure, for example `energy bridge: slot 2 is counted on 28.23 kWh — ×0.9188 of its 30.72 kWh nameplate, its Core's last measured ratio, of <ISO time> (held)`. The other bases end `the ratio in its Core's listed pack figures (measured)`, `the lowest ratio known for any Core: none has been measured for this slot's Core (min-known)`, `is counted on its 30.72 kWh nameplate — no pack capacity ratio has been measured for any Core (nameplate)`, `stays counted on … kWh — the capacity tracker did not answer (unavailable)` and `has no capacity figure — …`. With more than one panel the line names the panel by name; it never carries a serial. A slot that goes dark a second time logs its line again. Nothing is resolved or logged while no slot is bridged. A line that cannot be written does not stop the rollup.
+- **The debug block.** The bridge block of `/api/debug/battery-lifetime` gains `capacity`: per bridged dark slot, `wh`, `ratio`, `basis` and `atMs`. `pvChecks[].stepWh` is `wh` / 100.
+- **At deploy.** On a supervised install whose Cores' ratios are in the runway tracker's file, the figures do not move: ratio × nameplate is the pack rows' sum (28,889 / 28,227 / 29,879 Wh on the reference plant), and the three lines end `(held)`. They do move where the tracker has no ratio of the Core's own. A secondary panel's Cores take the lowest known ratio (their ratios are in the secondary panels' tracker file, which is not the seed), as does a Core no tracker ever measured. A run with persistence disabled (`POOL_ENERGY_BASIS_DIR` empty, or unsupervised with it unset) is on the nameplate after a restart while the Cores are dark, where the pack rows had covered 45 days. Each case is named by its log line.
+- **Not changed.**
+  - Every panel write, its timing, and every kWh figure a plan computes. `index.ts` is not edited.
+  - The 7-day balance and the just-in-time force-charge start, which keep the panel's nameplate.
+  - The field check's rule and constants (8 steps of evidence, max(2 steps, 15 %), the one-hour hold, the 2 kWh margin) and every existing bridge log line.
+  - The other three capacity trackers: their figures, files, seeding and persistence.
+  - The `pack<k>_full_cap_mah` rows are still recorded.
+  - A capacity figure that changes during a day still restates that day's percent change on the new figure in the window where it changes, as a refreshed figure always did: a known limit at a Core's return.
+  - A revoked field still leaves its log line only: no record, no notice.
+
+**Tests**
+
+- New: `bridgeCapacityBasis.test.ts` (7 tests, through the real recorder).
+  - T1a: the field check's step per slot on 2026-11-27 (day 43) and on 2026-11-30 (day 46). At 8f4b6748 (v1.205.1) it reads 288.89 / 282.27 / 298.79 Wh on day 43 and 307.20 Wh on all three slots on day 46; at 021c030b it reads 288.89 / 282.27 / 298.79 Wh on both days.
+  - T2: a field reading 0.90 of the solar for five hours on 2026-11-30. At 8f4b6748 slot 2's trust is revoked at noon, 10.78 kWh against a bound of 12.87 kWh (tolerance 1.93 kWh); at 021c030b the same field reads 10.78 kWh against 11.92 kWh (tolerance 1.79 kWh) and no slot is revoked all day.
+  - T1b: the three lines word for word, the debug block, and the same three lines from a new process on day 46.
+  - T8: the tracker is fed while the Cores report, with nothing logged; the outage starts from the last reported ratio; a restart reads the bridge's own file.
+  - T9: a start at night logs the basis.
+  - The seed through the recorder: with no Core returning, the first rollup writes the three seeded ratios to the bridge's own file; with the runway tracker's file deleted, a restart logs the same three lines.
+  - T10, the return: one Core reports for 15 minutes at a new ratio and goes dark again. Its slot is held at the new ratio from its return, the two still-dark slots keep their own ratios throughout, the bridge's file holds all three, and a restart without the runway tracker's file gives the same figures.
+- `energyBridge.test.ts`: 7 new tests. The capacity rule and its cap; the label with one panel, two panels and a panel named by its serial; every line word for word, with an instant outside the Date range; the line on every change of basis or figure; a tracker that never answers; a second dark span; a line that cannot be logged.
+- `poolEnergyBasis.test.ts`: 5 new tests. Each Core's own ratio, basis and instant with and without the 30-day limit; no ratio anywhere; the panels' applied scale and increase hold untouched by the new read; the live ratios recorded and saved; the seed written to the own file, off by default.
+- Amended, no expectation moved: the capacity in two `recorderEnergyBridge.test.ts` setups is given as the tracker's ratio where it was pack rows (the same 28,672 Wh); three bridge stubs in `energyBridge.test.ts` take the new input; `runwayBasisContracts.test.ts` pins the recorder's tracker (its construction line, its one read, its file) beside the unchanged `index.ts` counts; `measuredCushionLine.test.ts` names the fourth tracker file. The plant helper's packs carry a design capacity only where a test asks for a measurable ratio.
+- Harness: `mutate-bridge-capacity.mjs` (new, `BC-`, 30 mutants: the recorder's tracker, the tracker's per-Core answer and seed, the bridge's rule, lines and debug block), every mutant killed by the tests above. `B-xxii` in `mutate-energy-core-outage.mjs` is re-cut on the new line and still killed.
+
+**Docs**
+
+- `docs/reference/07-energy-and-cost.md`: the slot's capacity, its bases, its log line, the cases where the figure moves at deploy, and `capacity` in the debug block.
+- `docs/reference/15-1-night-charge-planning.md` and `docs/PERFORMANCE.md`: the bridge's capacity no longer ages out; the replay at nameplate is the figure the bridge fell to until this release.
+- `docs/reference/02-2-home-assistant-wiring.md` and `docs/reference/05-runway-and-soc-alarms.md`: the fourth tracker and its file.
+
 ## 1.206.0
 
 ### A charge window that opens a day or more out is no longer announced as tonight

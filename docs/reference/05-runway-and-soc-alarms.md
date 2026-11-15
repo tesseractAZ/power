@@ -180,7 +180,10 @@ house pool's measured capacity scale, which reaches it through one pinned door (
 in index.ts, a third tracker on the main thread with its own file, `pool-energy-basis-cushion.json`).
 No other consumer reads the scale under any spelling: `runwayBasisContracts.test.ts` pins every source
 line that names the plan's scale, the ledger helper that returns it or the ledger's `cushion_pool_scale`
-columns, and the tracker's file is named only where its tracker is built. Until v1.202.0 every planner
+columns, and the tracker's file is named only where its tracker is built. The energy bridge reads
+per-Core ratios, never a scale, from a fourth tracker that the recorder keeps
+(`pool-energy-basis-bridge.json`, chapter 7); the same contract pins its construction line and that
+`coreRatios` is called nowhere else. Until v1.202.0 every planner
 walk stayed on nameplate kWh per percent.
 The second exception (v1.201.0) is the cushion's STANDBY: an islanded-outage cushion counts the
 Cores' standby draw for its hours, the runway's overhead figure for the Cores the cushion tracker

@@ -414,9 +414,43 @@ Berlin morning (10:00 CEST is 01:00 MST) would take the night basis and book the
 Core passes to the house as battery out, and a Berlin night the inferred basis, with both
 power sensors unknown all night.
 
-`capWh` is the Core's measured full-charge capacity (Σ its packs' last recorded
-`pack<k>_full_cap_mah` × 0.1024 Wh/mAh, capped at the slot's nameplate), the basis the
-panel's per-source percent is a fraction of; the slot's nameplate when none is recorded.
+`capWh` is the slot's capacity: the Core's capacity ratio × the slot's nameplate (the
+panel's per-source `fullCap`), capped at the nameplate, the basis the panel's per-source
+percent is a fraction of. The ratio (Σ the packs' full-charge capacity ÷ Σ their design
+capacity) comes from a capacity tracker the recorder keeps for the bridge (`coreRatios`;
+file `pool-energy-basis-bridge.json`, seeded from the runway tracker's file while its own
+holds no Core, the seeded ratios written to its own file at that first load, and fed every
+panel's connected Cores at each rollup): the ratio in the Core's listed pack figures
+(`measured`), else the Core's own last measured ratio at any age (`held`), else, for a
+Core never measured, the lowest ratio known for any Core (`min-known`). The nameplate
+stands in only when no ratio has ever been measured (`nameplate`). When the tracker does
+not answer, the slot keeps the figure last resolved in that process (`unavailable`), and
+with none, or when the panel reports no capacity for the slot, it has no capacity: the
+inferred basis and the field check do not run for it. The pool figures replace a held
+ratio older than 30 days with the lowest known one, the runway's safe side (chapter 5);
+the bridge does not, since that would lower one slot's bound rather than describe its
+Core. Each slot's capacity is resolved at every rollup of a bridged dark slot, day or
+night, and logged when the bridge starts metering the slot and on every change of basis
+or figure (`energy bridge: slot 2 is counted on 28.23 kWh — ×0.9188 of its 30.72 kWh
+nameplate, its Core's last measured ratio, of <ISO time> (held)`; with more than one panel
+the line names the panel, never a serial); nothing is resolved or logged while no slot is
+bridged. A figure that changes during a day restates that day's percent change on the new
+figure in the window where it changes, as a refreshed figure always did (a limit at a
+Core's return).
+
+Before v1.207.0 the bridge read the recorded `pack<k>_full_cap_mah` rows at most 45 days
+back, cached for 6 hours, and then counted the slot on its nameplate without a log line:
+2.8–8.8 % more a slot on the reference plant, which raises the inferred bound by that
+share of its stored-energy term (for Cores whose last pack rows are of 2026-10-14, from
+the first daylight window of 2026-11-29). The figures are the same before and after the
+release on a supervised install whose Cores' ratios are in the runway tracker's file
+(`pool-energy-basis.json`): ratio × nameplate is the pack rows' sum, 28,889 / 28,227 /
+29,879 Wh on the reference plant. They differ where the tracker has no ratio of the Core's
+own: a secondary panel's Cores (their ratios are in `pool-energy-basis-panels.json`, which
+is not the seed) and a Core no tracker ever measured take the lowest known ratio, and a
+run with persistence disabled (`POOL_ENERGY_BASIS_DIR` empty, or unsupervised with it
+unset) is on the nameplate after a restart while the Cores are dark, where the pack rows
+had covered 45 days. Each case is named by its log line.
 A 0 W reading from a field never checked is not "no PV": the panel PV fields read 0
 at night on 2026-10-16 and had not been observed in daylight when the bridge shipped.
 
@@ -776,7 +810,9 @@ totals (`chargeWh`, `dischargeWh`, `pvWh`, `gridImportWh`, `watermarkMs`), the p
 `markers` whose jump will be absorbed on return, the BMS energy of marked packs already
 absorbed before their hand-over (`absorbed`), the `trustedSlots` (PV field passed its
 check), the running field checks (`pvChecks`: `fieldWh`, `inferredWh`, `stepWh`, `verdict`
-per dark slot in daylight), per-Core bridged energy since it went dark (`cores`), the persisted
+per dark slot in daylight), each bridged dark slot's capacity as last resolved (`capacity`:
+`slot`, `wh`, `ratio`, `basis`, `atMs`; `pvChecks[].stepWh` is `wh` / 100), per-Core bridged
+energy since it went dark (`cores`), the persisted
 hand-off instant of each home Core listed offline (`offlineSince`), each dark slot's power
 basis now (`slots`; `leftOut` when its panel is cloud-offline), and the last rollup window
 per slot with its basis and the reason a window was not booked (`lastRollup`). The emitted battery totals (and the battery
