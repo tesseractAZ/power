@@ -419,9 +419,11 @@ panel's per-source `fullCap`), capped at the nameplate, the basis the panel's pe
 percent is a fraction of. The ratio (Σ the packs' full-charge capacity ÷ Σ their design
 capacity) comes from a capacity tracker the recorder keeps for the bridge (`coreRatios`;
 file `pool-energy-basis-bridge.json`, seeded from the runway tracker's file while its own
-holds no Core, the seeded ratios written to its own file at that first load). At each
-rollup the tracker measures every panel's connected Cores that are not dark to the bridge:
-a Core that delivers a reading of its own, and a marked Core once it has handed back. A
+holds no Core, the seeded ratios written to its own file at that first load; a failed
+write is not logged, and is tried again when a Core is measured or at the next boot). At
+each rollup the tracker measures every panel's connected Cores that are listed online with
+a complete pack list and are not dark to the bridge: a Core that delivers a reading of its
+own, and a marked Core once it has handed back. A
 dark slot's Core is never measured, so its slot is counted on what the tracker holds: the
 Core's own last measured ratio at any age (`held`), else, when the tracker holds none for
 that Core, the lowest ratio it holds for any Core (`min-known`), else the nameplate, only
@@ -447,25 +449,38 @@ last reading; the ratio is the same). A figure that changes while its slot stays
 restates that day's percent change on the new figure in the window where it changes. A
 Core's own ratio does not change while its slot is dark; the figure of a slot counted on
 the lowest ratio the tracker holds, or on the nameplate, changes when another Core's
-reading changes what the tracker holds.
+reading changes what the tracker holds (on the reference ratios one Core's return raises
+it by up to 2.4 %, which revokes a trusted field reading under about 0.87 of its bound).
+A reading the tracker does not measure, one that arrives between two rollups or over MQTT
+while the Core is listed offline, is in the recorded pack rows only: if the Core is dark
+again by the next rollup its slot stays on the older ratio, and a newer reading lower by
+about 2.4 % or more leaves a field reading 0.87 of its bound revoked while that ratio
+stands. A Core that hands back at a rollup that holds its window, and is dark again by the
+next, keeps the day's earlier starting point with its new ratio.
 
 Before v1.207.0 the bridge read the recorded `pack<k>_full_cap_mah` rows at most 45 days
-back, cached for 6 hours, and then counted the slot on its nameplate without a log line:
+back (and only while they survived the samples retention, 30 days by default), cached for
+6 hours, and then counted the slot on its nameplate without a log line:
 2.8–8.8 % more a slot on the reference plant, which raises the inferred bound by that
 share of its stored-energy term (due at the first daylight window of 2026-11-29 for Cores
 whose last pack rows are of 2026-10-14). The figures are the same before and after the
 release on a supervised install whose Cores' ratios are in the runway tracker's file
-(`pool-energy-basis.json`) and whose last pack rows are within the 45 days: ratio ×
+(`pool-energy-basis.json`) and whose last pack rows were still being read (inside the 45
+days and the samples retention): ratio ×
 nameplate is the pack rows' sum where the packs' design capacity sums to the slot's
 nameplate (five packs of 6,144 Wh on the reference plant), 28,889 / 28,227 / 29,879 Wh by
-the ratios in that file. They differ in four cases, each named by its log line. Where the
-pack rows are already older than 45 days at the update, the figure returns from the
-nameplate to the Core's own. Where the tracker holds no ratio of the Core's own, the slot
+the ratios in that file. On the reference plant the running v1.205.1 build's step × 100
+(28,888.99 / 28,226.97 / 29,878.58 Wh on 2026-11-15) equalled ratio × nameplate to under
+0.01 Wh on each slot. They differ in five cases, each named by its log line. Where the
+pack rows are no longer read at the update (older than 45 days, or pruned by the samples
+retention), the figure returns from the nameplate to the Core's own. Where the tracker holds no ratio of the Core's own, the slot
 takes the lowest ratio the tracker holds: a secondary panel's Cores (their ratios are in
 `pool-energy-basis-panels.json`, which is not the seed) and a Core no tracker ever
 measured. A run with persistence disabled (`POOL_ENERGY_BASIS_DIR` empty, or unsupervised
 with it unset) is on the nameplate after a restart while the Cores are dark, where the
-pack rows had covered 45 days. A slot whose panel reports no capacity (`fullCap` missing)
+pack rows had covered 45 days. A supervised install with no readable tracker file (neither
+the bridge's own nor the runway tracker's) is on the nameplate, where pack rows inside the
+45 days had been used. A slot whose panel reports no capacity (`fullCap` missing)
 has no capacity figure, where the pack rows' sum had been used: while its field is not
 trusted nothing is booked for it in daylight (no solar, no battery energy), and the field
 is not checked.

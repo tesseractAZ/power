@@ -80,8 +80,8 @@
  * per-source `fullCap`). The ratio is its Core's capacity ratio (Σ the packs' full-charge capacity ÷
  * Σ their design capacity), answered by deps.coreRatio from a tracker the recorder keeps for the
  * bridge (recorder.ts; poolEnergyBasis.ts coreRatios). The recorder lets that tracker measure a Core
- * only while the Core is not dark to the bridge (it delivers a reading of its own; a marked Core, once
- * it has handed back), so a dark slot is answered from what the tracker HOLDS: the Core's OWN last
+ * only while the Core is listed online and is not dark to the bridge (it delivers a reading of its own; a
+ * marked Core, once it has handed back), so a dark slot is answered from what the tracker HOLDS: the Core's OWN last
  * measured ratio at any age ('held'), else, when it holds none for that Core, the lowest ratio it
  * holds for any Core ('min-known'), else the nameplate, only when it holds no ratio at all
  * ('nameplate'). 'measured', the tracker's word for a ratio read from the pack figures now, is the

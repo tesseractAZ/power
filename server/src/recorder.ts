@@ -4026,8 +4026,8 @@ export function createRecorder(
     // reads the markers. Isolated: a bridge failure is logged and every other counter still advances.
     let br: BridgeRollupResult | null = null;
     // v1.207.0 — the bridge's capacity tracker is asked for every panel's connected Cores at each rollup, dark slot or not,
-    // and measures those that deliver a reading (bridgeMeasurableCores): the next dark span starts from the ratio each Core
-    // last reported. It logs nothing and resolves no slot's capacity.
+    // and measures those that are listed online and deliver a reading (bridgeMeasurableCores): the next dark span starts
+    // from the ratio measured at the last such rollup. It logs nothing and resolves no slot's capacity.
     for (const p of allShp2s(snap.devices)) bridgeCoreRatios(snap.devices, p.sn, now);
     try {
       br = energyBridge.rollup(snap, now);
