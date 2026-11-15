@@ -23,7 +23,7 @@
  * DB_PATH must name a fresh file before the recorder is imported: `loadPlant` sets it.
  */
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
@@ -53,6 +53,8 @@ export async function loadPlant(prefix: string) {
   const tmp = mkdtempSync(join(tmpdir(), prefix));
   const DB_PATH = join(tmp, 'ecoflow.db');
   process.env.DB_PATH = DB_PATH;
+  // v1.207.0 — the pool-energy-basis trackers' files live in the plant's own folder (wiped with it by each new Plant).
+  process.env.POOL_ENERGY_BASIS_DIR = tmp;
   // The v1.98.0 floor-gap re-seed at 5 kWh, so a few bridged hours already cross it.
   process.env.BMS_RESEED_MIN_GAP_WH = '5000';
   process.env.BMS_RESEED_SUSTAINED_ROLLUPS = '2';
@@ -325,6 +327,12 @@ export async function loadPlant(prefix: string) {
     }
     lifetimeKeys(): string[] {
       return (this.db.prepare('SELECT metric_key FROM lifetime_totals ORDER BY metric_key').all() as Array<{ metric_key: string }>).map((r) => r.metric_key);
+    }
+    /** v1.207.0 — the runway tracker's file as a previous process left it (`pool-energy-basis.json`: per-Core capacity ratios
+     *  at `atMs`), the seed of the energy bridge's capacity tracker. Write it after `new Plant` (which wipes the folder). */
+    seedCapacityRatios(ratios: Record<string, number>, atMs: number): void {
+      const cores = Object.fromEntries(Object.entries(ratios).map(([sn, ratio]) => [sn, { ratio, atMs }]));
+      writeFileSync(join(tmp, 'pool-energy-basis.json'), JSON.stringify({ v: 1, cores, panels: {} }));
     }
     /** Write a lifetime row directly (a state a previous process left). */
     putLifetime(key: string, wh: number, ts = this.clock): void {
