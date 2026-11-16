@@ -54,8 +54,9 @@ test('★★★ daylight, grid 0, the Cores supplying 300 W each while PV charge
   const t0 = Date.parse('2026-10-15T09:00:00-07:00');
   const p = new Plant(t0);
   try {
-    // The Cores' measured full-charge capacity, recorded while they reported: 5 packs × 56,000 mAh.
-    for (const sn of CORES) for (let k = 1; k <= 5; k++) p.sample(sn, `pack${k}_full_cap_mah`, FULL_CAP_MAH, t0 - H);
+    // The Cores' capacity ratio, measured while they reported (v1.207.0: the tracker's held ratio, not the recorded pack
+    // rows): 56,000 of 60,000 mAh a pack, 28,672 Wh of the slot's 30,720 Wh nameplate.
+    p.seedCapacityRatios(Object.fromEntries(CORES.map((sn) => [sn, FULL_CAP_MAH / 60_000])), t0 - H);
     p.darkAtFirstSight();
     p.frozenProjection = false; // the live case: dark since before the restart, no projection
     p.sourceWatts = [-300, -300, -300];
@@ -539,7 +540,7 @@ test('★★★ the day/night test is judged at the configured site: 10:00 in Be
   const t0 = Date.parse('2026-10-15T10:00:00+02:00'); // 01:00 in Phoenix
   const p = new Plant(t0);
   try {
-    for (const sn of CORES) for (let k = 1; k <= 5; k++) p.sample(sn, `pack${k}_full_cap_mah`, FULL_CAP_MAH, t0 - H);
+    p.seedCapacityRatios(Object.fromEntries(CORES.map((sn) => [sn, FULL_CAP_MAH / 60_000])), t0 - H);
     p.darkAtFirstSight();
     p.frozenProjection = false;
     p.sourceWatts = [-300, -300, -300];

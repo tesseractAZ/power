@@ -329,11 +329,11 @@ test('★★★ SCOPE — source pins: the planner, JIT force-charge and MPC nev
   const count = (s: string, needle: string) => s.split(needle).length - 1;
   assert.equal(count(index, 'cushionPoolBasisTracker'), 2, 'declared, and read by the door alone');
   assert.equal(count(index, 'measuredCushionScale('), 2, 'defined, and called once');
-  assert.equal(count(index, 'PoolEnergyBasisTracker('), 2, "the main thread's two trackers: the secondary panels' and the cushion's");
+  assert.equal(count(index, 'PoolEnergyBasisTracker('), 2, "index.ts's two trackers: the secondary panels' and the cushion's (the main thread's third, the energy bridge's, is the recorder's: section (g))");
   assert.equal(count(index, 'panelPoolBasisTracker.evaluate('), 1, "the secondary panels' tracker, in their loop only");
   // The tracker's file is named once, where the tracker is built: nothing else opens it.
   // v1.203.0 — and the cushion tracker's seed, the worker's file, read on the same line: the third call, and no fourth reader.
-  assert.equal(count(index, 'defaultPoolEnergyBasisPath('), 3, "the two trackers' files and the cushion tracker's seed, and no fourth reader");
+  assert.equal(count(index, 'defaultPoolEnergyBasisPath('), 3, "in index.ts: the two trackers' files and the cushion tracker's seed, and no fourth reader there");
   assert.equal(count(index, 'pool-energy-basis-cushion'), 1, "the cushion tracker's file, on its construction line alone");
   assert.equal(count(index, "defaultPoolEnergyBasisPath('pool-energy-basis')"), 1, "the worker's file, as the cushion tracker's seed alone");
   assert.equal(count(index, 'seedPath:'), 1, 'one seeded tracker');
@@ -673,11 +673,33 @@ test('★★★ SCOPE — source pins: the planner, JIT force-charge and MPC nev
   // The runway's basis module is imported where it was, and by index.ts only for its two trackers'
   // constructor and path; no other module constructs a tracker or computes a scale.
   const importers = files.filter((f) => /from '(?:\.\.?\/)+poolEnergyBasis(?:\.js)?'|import\(\s*'(?:\.\.?\/)+poolEnergyBasis/.test(src(f))).sort();
-  assert.deepEqual(importers, ['alertMonitor.ts', 'analytics.ts', 'index.ts', 'panelRunway.ts']);
+  // v1.207.0 — and by recorder.ts, for the energy bridge's capacity tracker (below).
+  assert.deepEqual(importers, ['alertMonitor.ts', 'analytics.ts', 'index.ts', 'panelRunway.ts', 'recorder.ts']);
   assert.deepEqual([...index.matchAll(/^import [^;]*? from '\.\/poolEnergyBasis\.js';$/gm)].map((m) => m[0]),
     ["import { PoolEnergyBasisTracker, defaultPoolEnergyBasisPath, CAPACITY_SCALE_MIN } from './poolEnergyBasis.js';"]);
   const constructs = Object.fromEntries(files.map((f): [string, number] => [f, count(src(f), 'new PoolEnergyBasisTracker(')]).filter(([, n]) => n > 0));
-  assert.deepEqual(constructs, { 'analytics.ts': 1, 'index.ts': 2 });
+  assert.deepEqual(constructs, { 'analytics.ts': 1, 'index.ts': 2, 'recorder.ts': 1 });
+  // v1.207.0 — SOURCE PINS for the fourth tracker, the recorder's, which feeds the energy bridge's per-slot capacity (a last
+  // resort: the behaviour is in bridgeCapacityBasis.test.ts and poolEnergyBasis.test.ts). It reads per-Core RATIOS, never a
+  // scale: its own file, seeded from the worker's file, the seed persisted to its own file, and no age limit on a held ratio.
+  // The bridge itself imports no tracker (it imports no option reader: its dep is handed in), and no index.ts count moved.
+  const recorderSrc = src('recorder.ts');
+  assert.deepEqual([...recorderSrc.matchAll(/^import [^;]*? from '\.\/poolEnergyBasis\.js';$/gm)].map((m) => m[0]),
+    ["import { PoolEnergyBasisTracker, defaultPoolEnergyBasisPath, type CoreRatio } from './poolEnergyBasis.js';"]);
+  assert.ok(recorderSrc.includes("  const bridgeCapacityTracker = new PoolEnergyBasisTracker({ seedPath: defaultPoolEnergyBasisPath('pool-energy-basis'), path: defaultPoolEnergyBasisPath('pool-energy-basis-bridge'), persistSeed: true });"),
+    "the recorder's tracker: the worker's file as its seed, its own file, the seed persisted");
+  assert.equal(count(recorderSrc, 'bridgeCapacityTracker'), 2, 'declared, and read on one line');
+  assert.ok(recorderSrc.includes('      return panel ? bridgeCapacityTracker.coreRatios(bridgeMeasurableCores(devices, nowMs), panel, nowMs, Number.POSITIVE_INFINITY) : null;'),
+    'the one read: per-Core ratios, measured only from the Cores that are not dark to the bridge, a held ratio at any age');
+  assert.equal(count(recorderSrc, 'bridgeMeasurableCores('), 1, 'the tracker is never handed the whole device map: the one read passes the Cores it may measure');
+  assert.equal(count(recorderSrc, 'defaultPoolEnergyBasisPath('), 2, "the bridge tracker's file and its seed, and no other reader in recorder.ts");
+  assert.equal(count(recorderSrc, 'pool-energy-basis-bridge'), 1, "the bridge tracker's file, on its construction line alone");
+  assert.equal(count(recorderSrc, '.evaluate('), 0, 'the recorder reads no scale');
+  assert.deepEqual(files.filter((f) => f !== 'poolEnergyBasis.ts' && src(f).includes('.coreRatios(')), ['recorder.ts'], 'coreRatios is called by the recorder alone');
+  assert.deepEqual(files.filter((f) => f !== 'poolEnergyBasis.ts' && /\bpersistSeed\b/.test(src(f))), ['recorder.ts'], "persistSeed is the bridge tracker's alone");
+  assert.deepEqual(files.filter((f) => src(f).includes('pool-energy-basis-bridge') && !['recorder.ts'].includes(f)
+    && src(f).split('\n').some((l) => l.includes('pool-energy-basis-bridge') && !isComment(l.trim()))), [], "no other module names the bridge tracker's file in code");
+  assert.ok(!importers.includes('energyBridge.ts'), 'energyBridge.ts imports no tracker (the importers list above, restated)');
   for (const fn of ['candidatePoolScale(', 'coreCapacityRatio(']) {
     const callers = files.filter((f) => f !== 'poolEnergyBasis.ts' && src(f).includes(fn));
     assert.deepEqual(callers, [], `${fn} is called outside poolEnergyBasis.ts`);

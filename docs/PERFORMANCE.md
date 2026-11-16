@@ -572,7 +572,7 @@ saves a recompute, against the v1.186.5 rule.
 | Blind band (1.04 ÷ R − 1), evening of 11-01 | 1.5% |
 | Planted over-read, every slot (8 starting evenings, 10-27 → 11-03; G6 blind) | ×1.03 refused from 2; ×1.05 from 7; ×1.10 and ×1.25 from 8 (after 1–3 and 0–2 accepted nights) |
 | Planted ×1.10 on one slot | refused from 3–5 of 8 |
-| The energy bridge's check at nameplate capacity (G3; nameplate from 2026-11-29) | 0 revocations; lowest 0.828 of the bound (slot 3, 11-02), under the 0.85 line for less than its one-hour hold |
+| The energy bridge's check at nameplate capacity (G3; until v1.207.0 the bridge fell to this figure 45 days after a Core's last pack rows, due 2026-11-29 for this outage) | 0 revocations; lowest 0.828 of the bound (slot 3, 11-02), under the 0.85 line for less than its one-hour hold |
 | Worker cost, cold / warm / next evening | 0.91 s and 582k rows / 3 ms / 10 ms and 12k rows, on a development machine; the add-on's host is to be measured |
 
 **Availability** (the round-2 critique's resampling of the record's windows, with the 7-window hysteresis and the per-slot night clip): about 40% of nights refused, in spells of about 11 nights, in the late regime with no night charge; about 54% (13-night spells) at the clip's charging level; about 64% (15-night spells) with the plan's own charging at 300 kWh a week; 11 / 20 / 30% over the whole dark era. The clip lifts the honest level about 0.65% on weeks whose nights carry charge. Each refusal is v1.203.0's plan (the cushion-only plan, or before a long gap its long-gap fill), and the outage line is the same either way.

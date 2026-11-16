@@ -709,14 +709,16 @@ test('★★★ end to end: the main thread\'s tracker, evaluated as measuredCus
   assert.equal(written(plan({ cushionPoolScale: s3 })), 31);
 });
 
-test('★★ the cushion tracker\'s file: /data/pool-energy-basis-cushion.json under the Supervisor, distinct from the other two', () => {
+test('★★ the cushion tracker\'s file: /data/pool-energy-basis-cushion.json under the Supervisor, distinct from the other three (v1.207.0: the energy bridge\'s, pool-energy-basis-bridge.json)', () => {
   const serverDir = resolve(HERE, '..');
   const env: NodeJS.ProcessEnv = { ...process.env, SUPERVISOR_TOKEN: 'test-token' };
   delete env.DB_PATH;
   delete env.POOL_ENERGY_BASIS_DIR;
   const out = execFileSync(process.execPath, [
     '--import', 'tsx', '--input-type=module', '--eval',
-    "const m = await import('./src/poolEnergyBasis.ts'); process.stdout.write(JSON.stringify(['pool-energy-basis', 'pool-energy-basis-panels', 'pool-energy-basis-cushion'].map((n) => m.defaultPoolEnergyBasisPath(n))));",
+    "const m = await import('./src/poolEnergyBasis.ts'); process.stdout.write(JSON.stringify(['pool-energy-basis', 'pool-energy-basis-panels', 'pool-energy-basis-cushion', 'pool-energy-basis-bridge'].map((n) => m.defaultPoolEnergyBasisPath(n))));",
   ], { cwd: serverDir, env, encoding: 'utf8' });
-  assert.deepEqual(JSON.parse(out), ['/data/pool-energy-basis.json', '/data/pool-energy-basis-panels.json', '/data/pool-energy-basis-cushion.json']);
+  const paths: string[] = JSON.parse(out);
+  assert.deepEqual(paths, ['/data/pool-energy-basis.json', '/data/pool-energy-basis-panels.json', '/data/pool-energy-basis-cushion.json', '/data/pool-energy-basis-bridge.json']);
+  assert.equal(new Set(paths).size, 4, 'one file per tracker: no two trackers write the same file');
 });

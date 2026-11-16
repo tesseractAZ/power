@@ -4206,8 +4206,10 @@ export function runwayDrainW(loadW: number, overheadW: number, etaM: number = RU
 
 /** v1.187.19 — the analytics WORKER's capacity-basis tracker (poolEnergyBasis.ts). The only
  *  writer of pool-energy-basis.json; nothing on the main thread evaluates it. (The main thread keeps
- *  its own trackers, each with its own file: the secondary panels' runways, and since v1.199.0 the
- *  house panel's for the night-charge cushion line.) */
+ *  its own trackers, each with its own file: the secondary panels' runways, since v1.199.0 the
+ *  house panel's for the night-charge cushion line, and since v1.207.0 the recorder's for the energy
+ *  bridge's per-slot capacity, pool-energy-basis-bridge.json. The cushion's and the bridge's read this
+ *  file as their seed, never write it.) */
 const poolBasisTracker = new PoolEnergyBasisTracker({ path: defaultPoolEnergyBasisPath('pool-energy-basis') });
 /** Test seam: replace the measured basis with fixed figures (legacy = scale 1, overhead 0 —
  *  exactly the pre-v1.187.19 arithmetic at the default 0.94 legs). null restores it. */

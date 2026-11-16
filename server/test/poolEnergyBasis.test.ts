@@ -14,6 +14,7 @@ import {
   CAPACITY_INCREASE_HOLD_MS,
   HELD_RATIO_MAX_AGE_MS,
   type HeldRatio,
+  type CoreRatio,
 } from '../src/poolEnergyBasis.js';
 import {
   computeRunway,
@@ -286,6 +287,169 @@ test('persistence path — POOL_ENERGY_BASIS_DIR, one file per tracker name; emp
     assert.equal(defaultPoolEnergyBasisPath('pool-energy-basis'), null);
   } finally {
     if (prev === undefined) delete process.env.POOL_ENERGY_BASIS_DIR; else process.env.POOL_ENERGY_BASIS_DIR = prev;
+  }
+});
+
+/* ─── v1.207.0: each Core's own ratio (coreRatios — the energy bridge's input) ─── */
+
+/** A tracker over a file holding `cores` (what a previous process persisted). */
+function trackerWith(dir: string, cores: Record<string, HeldRatio>, name = 'own.json'): PoolEnergyBasisTracker {
+  const path = join(dir, name);
+  writeFileSync(path, JSON.stringify({ v: 1, cores, panels: {} }));
+  return new PoolEnergyBasisTracker({ path });
+}
+const ratiosOf = (m: ReadonlyMap<string, CoreRatio>): Record<string, CoreRatio> => Object.fromEntries([...m].sort(([a], [b]) => a.localeCompare(b)));
+
+test('★★★ U1 coreRatios — each connected Core\'s own ratio, basis and instant: measured now, else its held ratio (30 days by default, any age when the caller passes no limit), else the lowest known', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pool-basis-core-'));
+  try {
+    const p = panel(['C1', 'C2', 'C3']);
+    const fleet = fleetOf(p, core('C1', 0.9404), core('C2', 0.99, { online: false }), core('C3', 0.9726));
+    const live = { C1: { ratio: 0.9404, basis: 'measured', atMs: NOW }, C3: { ratio: 0.9726, basis: 'measured', atMs: NOW } };
+    // C2 cloud-offline, its own ratio three days old.
+    const recent = NOW - 3 * DAY;
+    assert.deepEqual(ratiosOf(trackerWith(dir, { C2: { ratio: 0.9188, atMs: recent } }).coreRatios(fleet, p, NOW)),
+      { ...live, C2: { ratio: 0.9188, basis: 'held', atMs: recent } });
+    // 44 days old: the pool figures' rule (the default) swaps it for the lowest known ratio; with no age limit it is still
+    // that Core's own ratio, at its own instant.
+    const old = NOW - 44 * DAY;
+    assert.deepEqual(ratiosOf(trackerWith(dir, { C2: { ratio: 0.9188, atMs: old } }).coreRatios(fleet, p, NOW, Number.POSITIVE_INFINITY)),
+      { ...live, C2: { ratio: 0.9188, basis: 'held', atMs: old } });
+    assert.deepEqual(ratiosOf(trackerWith(dir, { C2: { ratio: 0.9188, atMs: old } }).coreRatios(fleet, p, NOW)),
+      { ...live, C2: { ratio: 0.9188, basis: 'min-known', atMs: null } }, 'the lowest known ratio is its own stale one here');
+    // The two rules give different figures when the stale ratio is not the lowest: 0.99 held, against 0.9404 (C1's).
+    assert.deepEqual(ratiosOf(trackerWith(dir, { C2: { ratio: 0.99, atMs: old } }).coreRatios(fleet, p, NOW, Number.POSITIVE_INFINITY)),
+      { ...live, C2: { ratio: 0.99, basis: 'held', atMs: old } });
+    assert.deepEqual(ratiosOf(trackerWith(dir, { C2: { ratio: 0.99, atMs: old } }).coreRatios(fleet, p, NOW)),
+      { ...live, C2: { ratio: 0.9404, basis: 'min-known', atMs: null } });
+    // A Core never measured, with other ratios known: the lowest of them, never the nameplate.
+    assert.deepEqual(ratiosOf(new PoolEnergyBasisTracker({ path: null }).coreRatios(fleet, p, NOW, Number.POSITIVE_INFINITY)),
+      { ...live, C2: { ratio: 0.9404, basis: 'min-known', atMs: null } });
+    // The ratio is the Core's own, not clamped to the pool scale's floor (the bridge caps it at the nameplate itself).
+    const low = fleetOf(p, core('C1', 0.70), core('C3', 0.9726));
+    assert.equal(new PoolEnergyBasisTracker({ path: null }).coreRatios(low, p, NOW).get('C1')?.ratio, 0.70);
+    // The pure function answers per Core on its main return only: with no connected source there is no Core to answer for.
+    const none = panel(['C1']);
+    (none.projection.sources[0] as { isConnected: boolean }).isConnected = false;
+    assert.equal(candidatePoolScale(none, fleetOf(none), new Map([['C1', { ratio: 0.93, atMs: NOW }]]), NOW).perCore, undefined);
+    assert.equal(trackerWith(dir, { C1: { ratio: 0.93, atMs: NOW } }).coreRatios(fleetOf(none), none, NOW).size, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('★★ U2 coreRatios — no ratio known anywhere: every connected Core reads the nameplate (ratio 1), with no instant', () => {
+  const p = panel(['C1', 'C2', 'C3']);
+  const t = new PoolEnergyBasisTracker({ path: null });
+  const fleet = fleetOf(p, core('C1', [{ full: null }]), core('C2', 0.95, { online: false }));
+  const np = { ratio: 1, basis: 'nameplate', atMs: null };
+  assert.deepEqual(ratiosOf(t.coreRatios(fleet, p, NOW, Number.POSITIVE_INFINITY)), { C1: np, C2: np, C3: np });
+});
+
+test('★★★ U3 coreRatios never reads or moves a panel\'s applied scale or its increase hold: evaluate() answers the same before and after', () => {
+  const p = panel(['C1', 'C2', 'C3']);
+  const at = (r: number) => fleetOf(p, core('C1', r), core('C2', r), core('C3', r));
+  const t = new PoolEnergyBasisTracker({ path: null });
+  t.evaluate(at(0.944), p, NOW);
+  const rising = t.evaluate(at(0.97), p, NOW + HOUR); // an increase waiting out its 24 h
+  assert.ok(near(rising.capacityScale, 0.944, 1e-9), `${rising.capacityScale}`);
+  assert.deepEqual([rising.capacityBasis, rising.increaseHeldSinceMs], ['measured', NOW + HOUR]);
+  for (let i = 0; i < 10; i++) {
+    t.coreRatios(at(0.97), p, NOW + HOUR, Number.POSITIVE_INFINITY);
+    t.coreRatios(fleetOf(p), p, NOW + HOUR, Number.POSITIVE_INFINITY); // and with every Core absent
+  }
+  const after = t.evaluate(at(0.97), p, NOW + HOUR);
+  assert.deepEqual([after.capacityScale, after.capacityBasis, after.candidateScale, after.increaseHeldSinceMs],
+    [rising.capacityScale, rising.capacityBasis, rising.candidateScale, rising.increaseHeldSinceMs]);
+  // A tracker that only ever answered coreRatios has applied nothing: its first evaluate() is a first figure.
+  const u = new PoolEnergyBasisTracker({ path: null });
+  for (let i = 0; i < 10; i++) u.coreRatios(at(0.944), p, NOW + i * 60_000, Number.POSITIVE_INFINITY);
+  const first = u.evaluate(at(0.97), p, NOW + HOUR);
+  assert.ok(near(first.capacityScale, 0.97, 1e-9), `${first.capacityScale}`);
+  assert.equal(first.increaseHeldSinceMs, null, 'no applied figure for the increase to wait under');
+});
+
+test('★★★ U4 coreRatios records the live ratios as evaluate() does: the Core then offline is held at that ratio and that instant, and the file holds it', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pool-basis-live-'));
+  try {
+    const path = join(dir, 'pool-energy-basis-bridge.json');
+    const p = panel(['C1', 'C2', 'C3']);
+    const t = new PoolEnergyBasisTracker({ path });
+    t.coreRatios(fleetOf(p, core('C1', 0.9404), core('C2', 0.9188), core('C3', 0.9726)), p, NOW, Number.POSITIVE_INFINITY);
+    const file = JSON.parse(readFileSync(path, 'utf8'));
+    assert.deepEqual(Object.keys(file.cores).sort(), ['C1', 'C2', 'C3']);
+    assert.deepEqual(file.cores.C2, { ratio: 0.9188, atMs: NOW });
+    assert.deepEqual(file.panels, {}, 'no panel figure is recorded by coreRatios');
+    const dark = fleetOf(p, core('C1', 0.9404, { online: false }), core('C2', 0.9188, { online: false }), core('C3', 0.9726, { online: false }));
+    const later = NOW + 400 * DAY;
+    assert.deepEqual(ratiosOf(t.coreRatios(dark, p, later, Number.POSITIVE_INFINITY)), {
+      C1: { ratio: 0.9404, basis: 'held', atMs: NOW }, C2: { ratio: 0.9188, basis: 'held', atMs: NOW }, C3: { ratio: 0.9726, basis: 'held', atMs: NOW },
+    }, 'day 400: each Core its own ratio');
+    // A new process over the same file answers the same.
+    assert.deepEqual(ratiosOf(new PoolEnergyBasisTracker({ path }).coreRatios(dark, p, later, Number.POSITIVE_INFINITY)).C3, { ratio: 0.9726, basis: 'held', atMs: NOW });
+    // An unchanged ratio is re-persisted hourly, not at every call; a changed one at once.
+    const seen = (): number => JSON.parse(readFileSync(path, 'utf8')).cores.C1.atMs;
+    const live = fleetOf(p, core('C1', 0.9404), core('C2', 0.9188), core('C3', 0.9726));
+    t.coreRatios(live, p, NOW + 5 * 60_000, Number.POSITIVE_INFINITY);
+    assert.equal(seen(), NOW, 'five minutes on, the same ratio: not rewritten');
+    t.coreRatios(live, p, NOW + HOUR, Number.POSITIVE_INFINITY);
+    assert.equal(seen(), NOW + HOUR, 'an hour on: the instant is persisted');
+    t.coreRatios(fleetOf(p, core('C1', 0.95), core('C2', 0.9188), core('C3', 0.9726)), p, NOW + HOUR + 60_000, Number.POSITIVE_INFINITY);
+    assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')).cores.C1, { ratio: 0.95, atMs: NOW + HOUR + 60_000 });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('★★★ persistSeed — the seeded ratios are written to the tracker\'s own file at first load, at their own instants; later boots do not need the seed file. Off by default, and never over a ratio of its own', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pool-basis-seed-'));
+  try {
+    const AT = NOW - 31 * DAY;
+    const seed = join(dir, 'pool-energy-basis.json');
+    const cores = { C1: { ratio: 0.9404, atMs: AT }, C2: { ratio: 0.9188, atMs: AT }, C3: { ratio: 0.9726, atMs: AT } };
+    const seedText = JSON.stringify({ v: 1, cores, panels: { 'PANEL-1': { scale: 0.9, pendingScale: null, pendingSinceMs: null } } });
+    writeFileSync(seed, seedText);
+    const own = join(dir, 'pool-energy-basis-bridge.json');
+    const p = panel(['C1', 'C2', 'C3']);
+    const dark = fleetOf(p);
+    const heldAll = { C1: { ...cores.C1, basis: 'held' }, C2: { ...cores.C2, basis: 'held' }, C3: { ...cores.C3, basis: 'held' } };
+    const t = new PoolEnergyBasisTracker({ seedPath: seed, path: own, persistSeed: true });
+    assert.ok(!existsSync(own), 'nothing is read or written before the first use');
+    assert.deepEqual(ratiosOf(t.coreRatios(dark, p, NOW, Number.POSITIVE_INFINITY)), heldAll);
+    // Written at that first load, with no Core reporting: the three ratios at the SEED's instants, and no panel figure.
+    assert.deepEqual(JSON.parse(readFileSync(own, 'utf8')), { v: 1, cores, panels: {} });
+    assert.equal(readFileSync(seed, 'utf8'), seedText, 'the seed file is never written');
+    // The seed file gone: a new process reads its own file and answers the same.
+    rmSync(seed);
+    const again = new PoolEnergyBasisTracker({ seedPath: seed, path: own, persistSeed: true });
+    assert.deepEqual(ratiosOf(again.coreRatios(dark, p, NOW + DAY, Number.POSITIVE_INFINITY)), heldAll);
+    // Without the option (the three other trackers): the v1.203.0 behaviour — seeded in memory, no file until a live reading.
+    writeFileSync(seed, seedText);
+    const plain = join(dir, 'plain.json');
+    const u = new PoolEnergyBasisTracker({ seedPath: seed, path: plain });
+    assert.deepEqual(ratiosOf(u.coreRatios(dark, p, NOW, Number.POSITIVE_INFINITY)), heldAll);
+    assert.ok(!existsSync(plain), 'no file of its own until a live reading');
+    // A tracker with a ratio of its own is not seeded, and its file is not rewritten.
+    const mine = join(dir, 'mine.json');
+    const mineText = JSON.stringify({ v: 1, cores: { C1: { ratio: 0.99, atMs: NOW - DAY } }, panels: {} });
+    writeFileSync(mine, mineText);
+    const m = new PoolEnergyBasisTracker({ seedPath: seed, path: mine, persistSeed: true });
+    assert.deepEqual(ratiosOf(m.coreRatios(dark, p, NOW, Number.POSITIVE_INFINITY)).C2, { ratio: 0.99, basis: 'min-known', atMs: null });
+    assert.equal(readFileSync(mine, 'utf8'), mineText);
+    // No seed to adopt (missing, corrupt, or holding no Core): nothing is written.
+    for (const [i, text] of [null, '{not json', JSON.stringify({ v: 1, cores: {}, panels: {} })].entries()) {
+      const s = join(dir, `seed-${i}.json`);
+      if (text != null) writeFileSync(s, text);
+      const o = join(dir, `own-${i}.json`);
+      const e = new PoolEnergyBasisTracker({ seedPath: s, path: o, persistSeed: true });
+      assert.equal(e.coreRatios(dark, p, NOW, Number.POSITIVE_INFINITY).get('C1')?.basis, 'nameplate', `${i}`);
+      assert.ok(!existsSync(o), `seed ${i}: no file written`);
+    }
+    // A Core that reports later is recorded beside the seeded ones: the file keeps all three.
+    again.coreRatios(fleetOf(p, core('C1', 0.95)), p, NOW + 2 * DAY, Number.POSITIVE_INFINITY);
+    assert.deepEqual(JSON.parse(readFileSync(own, 'utf8')).cores, { ...cores, C1: { ratio: 0.95, atMs: NOW + 2 * DAY } });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

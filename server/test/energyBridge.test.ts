@@ -16,6 +16,7 @@ import {
   BRIDGE_PV_EVIDENCE_STEPS, createEnergyBridge, bridgeOfflineKey, slotVerdicts, projectionPacksComplete,
   pvFieldTolerance, pvVerdictHolds, BRIDGE_PV_TOLERANCE_STEPS, BRIDGE_PV_TOLERANCE_FRACTION, BRIDGE_PV_VERDICT_HOLD_MS, BRIDGE_PV_GENUINE_WH,
   bridgePvSeenKey, BRIDGE_CHARGE_KEY,
+  slotCapacity, slotCapacityLogText, heldAtText, bridgeSlotLabel, type BridgeCoreRatio, type BridgeSlotCapacity,
 } from '../src/energyBridge.js';
 import { aggregateFleetFlow } from '../src/shp2Membership.js';
 import { publishReadiness } from '../src/publishReadiness.js';
@@ -144,7 +145,7 @@ test('★★★ the bridge persists each hand-off instant once, reads it back in
     deleteLifetime: (k: string) => { rows.delete(k); },
     listLifetimeKeys: () => [...rows.keys()],
     query: () => [],
-    coreCapacityWh: () => null,
+    coreRatio: () => null,
     site: () => PHX,
     log: () => {},
   };
@@ -270,7 +271,7 @@ test('★★ a trusted field that freezes low is booked on the \'measured\' basi
       deleteLifetime: (k) => { store.delete(k); },
       listLifetimeKeys: () => [...store.keys()],
       query: (sn, metric, since, until) => (sn === PANEL ? (rows[metric] ?? []).filter((p) => p.ts >= since && p.ts <= until) : []),
-      coreCapacityWh: () => CAP_WH,
+      coreRatio: () => ({ ratio: CAP_WH / 30_720, basis: 'held', atMs: START - 86_400_000 }),
       site: () => PHX,
       log: (m) => { logs.push(m); },
     });
@@ -635,7 +636,7 @@ test('★★★ a dark Core listed connected by two panels (one panel\u2019s sou
   rows.set('bridge_battery_charge_wh', { wh: 0, ts: NIGHT - 10 * 60_000 });
   const b = createEnergyBridge({
     readLifetime: (k) => rows.get(k) ?? { wh: 0, ts: 0 }, writeLifetime: (k, wh, ts) => { rows.set(k, { wh, ts }); }, deleteLifetime: (k) => { rows.delete(k); },
-    listLifetimeKeys: () => [...rows.keys()], query: samples, coreCapacityWh: () => null, site: () => PHX, log: () => {},
+    listLifetimeKeys: () => [...rows.keys()], query: samples, coreRatio: () => null, site: () => PHX, log: () => {},
   });
   const r = b.rollup({ generatedAt: NIGHT, devices: fresh }, NIGHT);
   assert.equal(r.slots.length, 1);
@@ -666,4 +667,268 @@ test('★★ held pack keys with the device map: the packs the projection carrie
   assert.deepEqual(heldPackKeysOf(C1, keys, withProj), [`${C1}:${C1}-P1`, `${C1}|3`]);
   const noProj: Any = { [C1]: { sn: C1 }, [C2]: { sn: C2, projection: { kind: 'dpu', packs: [{ num: 1, packSn: 'MOVED' }] } } };
   assert.deepEqual(heldPackKeysOf(C1, keys, noProj), [`${C1}:${C1}-P1`, `${C1}:${C1}-POLD`, `${C1}|3`], 'the pack now in another chassis is not marked');
+});
+
+/* ── v1.207.0: the capacity a dark slot is counted on ─────────────────────── */
+
+const NAMEPLATE = 30_720;
+const HELD_AT = Date.parse('2026-10-14T23:52:00-07:00');
+
+test('★★★ slotCapacity: the ratio × the nameplate, capped at the nameplate; no answer keeps the figure last resolved, else none — never the nameplate in place of a known ratio; no nameplate, no figure', () => {
+  const held: BridgeCoreRatio = { ratio: 28_227 / NAMEPLATE, basis: 'held', atMs: HELD_AT };
+  const a = slotCapacity(NAMEPLATE, held, undefined);
+  assert.ok(Math.abs((a.wh as number) - 28_227) < 1e-6, `${a.wh}`);
+  assert.deepEqual([a.basis, a.atMs, a.ratio], ['held', HELD_AT, 28_227 / NAMEPLATE]);
+  // A pack list reading above its design is not a slot larger than its nameplate.
+  assert.deepEqual(slotCapacity(NAMEPLATE, { ratio: 1.05, basis: 'measured', atMs: NOON }, undefined), { wh: NAMEPLATE, ratio: 1, basis: 'measured', atMs: NOON });
+  // The tracker did not answer: the figure last resolved stands.
+  assert.deepEqual(slotCapacity(NAMEPLATE, null, a), { wh: a.wh, ratio: a.ratio, basis: 'unavailable', atMs: HELD_AT });
+  // ... and with none there is no figure: never the nameplate.
+  assert.deepEqual(slotCapacity(NAMEPLATE, null, undefined), { wh: null, ratio: null, basis: 'unavailable', atMs: null });
+  // An answer that is not a positive number is no answer.
+  for (const bad of [0, -0.9, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.deepEqual(slotCapacity(NAMEPLATE, { ratio: bad, basis: 'held', atMs: HELD_AT }, a), { wh: a.wh, ratio: a.ratio, basis: 'unavailable', atMs: HELD_AT }, `${bad}`);
+    assert.equal(slotCapacity(NAMEPLATE, { ratio: bad, basis: 'held', atMs: HELD_AT }, undefined).wh, null, `${bad}`);
+  }
+  // The panel reports no capacity for the slot: no figure, whatever was resolved before.
+  for (const np of [null, 0, -1, Number.NaN]) {
+    assert.deepEqual(slotCapacity(np, held, a), { wh: null, ratio: null, basis: 'no-nameplate', atMs: null }, `${np}`);
+  }
+});
+
+test('★★ bridgeSlotLabel: "slot 2" on one panel; the panel\'s name with two; never a serial (a panel named by its serial, or unnamed, reads "panel")', () => {
+  const P2 = 'HD31XXX00XXX0002';
+  const one: Any = { [PANEL]: panel(NOON, [0, 0, 0]) };
+  assert.equal(bridgeSlotLabel(one, PANEL, 2), 'slot 2');
+  const two: Any = { [PANEL]: panel(NOON, [0, 0, 0], { deviceName: 'Garage panel' }), [P2]: { ...panel(NOON, [0, 0, 0]), sn: P2, deviceName: P2 } };
+  assert.equal(bridgeSlotLabel(two, PANEL, 2), 'Garage panel slot 2');
+  assert.equal(bridgeSlotLabel(two, P2, 3), 'panel slot 3', 'a name that is the serial is not printed');
+  assert.equal(bridgeSlotLabel({ ...two, [P2]: { ...two[P2], deviceName: `SHP2 ${P2}` } }, P2, 3), 'panel slot 3', 'nor a name that carries it');
+  assert.equal(bridgeSlotLabel({ ...two, [P2]: { ...two[P2], deviceName: '  ' } }, P2, 1), 'panel slot 1');
+  assert.equal(bridgeSlotLabel(two, 'HD31XXX00XXX0009', 1), 'panel slot 1', 'a panel not in the device map');
+});
+
+test('★★★ slotCapacityLogText: each basis word for word; a held instant outside the Date range prints "at an unknown time" and never throws', () => {
+  const cap = (over: Partial<BridgeSlotCapacity>): BridgeSlotCapacity => ({ wh: 28_227, ratio: 28_227 / NAMEPLATE, basis: 'held', atMs: HELD_AT, ...over });
+  assert.equal(slotCapacityLogText('slot 2', cap({}), NAMEPLATE),
+    'energy bridge: slot 2 is counted on 28.23 kWh — ×0.9188 of its 30.72 kWh nameplate, its Core\'s last measured ratio, of 2026-10-15T06:52:00.000Z (held)');
+  assert.equal(slotCapacityLogText('slot 2', cap({ basis: 'measured', atMs: NOON }), NAMEPLATE),
+    'energy bridge: slot 2 is counted on 28.23 kWh — ×0.9188 of its 30.72 kWh nameplate, the ratio in its Core\'s listed pack figures (measured)');
+  assert.equal(slotCapacityLogText('slot 2', cap({ basis: 'min-known', atMs: null }), NAMEPLATE),
+    'energy bridge: slot 2 is counted on 28.23 kWh — ×0.9188 of its 30.72 kWh nameplate, the lowest ratio the capacity tracker holds: it holds none for this slot\'s Core (min-known)');
+  assert.equal(slotCapacityLogText('slot 2', { wh: NAMEPLATE, ratio: 1, basis: 'nameplate', atMs: null }, NAMEPLATE),
+    'energy bridge: slot 2 is counted on its 30.72 kWh nameplate — the capacity tracker holds no ratio for any Core (nameplate)');
+  assert.equal(slotCapacityLogText('slot 2', cap({ basis: 'unavailable' }), NAMEPLATE),
+    'energy bridge: slot 2 stays counted on 28.23 kWh — the capacity tracker did not answer (unavailable)');
+  assert.equal(slotCapacityLogText('slot 2', { wh: null, ratio: null, basis: 'unavailable', atMs: null }, NAMEPLATE),
+    'energy bridge: slot 2 has no capacity figure — the capacity tracker did not answer; the inferred basis and the PV-field check do not run for it (unavailable)');
+  assert.equal(slotCapacityLogText('slot 2', { wh: null, ratio: null, basis: 'no-nameplate', atMs: null }, null),
+    'energy bridge: slot 2 has no capacity figure — the panel reports no capacity for the slot; the inferred basis and the PV-field check do not run for it');
+  // A finite instant new Date() cannot print (toISOString throws RangeError past ±8.64e15 ms): words, not a throw.
+  assert.throws(() => new Date(9e15).toISOString(), RangeError);
+  for (const bad of [9e15, -9e15, Number.NaN, Number.POSITIVE_INFINITY, null]) {
+    assert.equal(heldAtText(bad), 'at an unknown time', `${bad}`);
+    assert.equal(slotCapacityLogText('slot 2', cap({ atMs: bad }), NAMEPLATE),
+      'energy bridge: slot 2 is counted on 28.23 kWh — ×0.9188 of its 30.72 kWh nameplate, its Core\'s last measured ratio, at an unknown time (held)', `${bad}`);
+  }
+  assert.equal(heldAtText(8.64e15), 'of +275760-09-13T00:00:00.000Z', 'the last instant a Date holds still prints');
+});
+
+/** One dark Core on slot 1 (cloud-offline since before this process saw it), metered at night every 5 minutes from `T0`;
+ *  `answers[i]` is the tracker's answer at rollup i (the last one repeats). */
+function capacityRun(answers: Array<BridgeCoreRatio | null>, opts: {
+  t0?: number; devices?: (now: number, i: number) => Any; log?: (m: string, logs: string[]) => void; rollups?: number; pct?: (t: number) => number;
+  /** The slot's PV field, W (default 0), and whether an earlier day's check left it trusted (the persisted row). */
+  fieldW?: number; trusted?: boolean;
+  /** No panel row exists in [from, to] (the recorder writes none while the panel's reading is held). */
+  rowGap?: [number, number];
+} = {}) {
+  const t0 = opts.t0 ?? NIGHT;
+  const MIN = 60_000;
+  const store = new Map<string, { wh: number; ts: number }>([[BRIDGE_CHARGE_KEY, { wh: 0, ts: t0 }]]);
+  if (opts.trusted) store.set(bridgePvSeenKey(PANEL, 1), { wh: 2000, ts: t0 - 86_400_000 });
+  const logs: string[] = [];
+  const asked: Array<[string, string]> = [];
+  let i = 0;
+  const series = (metric: string, t: number): number | null =>
+    metric === 'src1_w' ? -1000 : metric === 'src1_pct' ? (opts.pct ?? (() => 50))(t) : metric === 'src1_pv_w' ? (opts.fieldW ?? 0) : null;
+  const b = createEnergyBridge({
+    readLifetime: (k) => store.get(k) ?? { wh: 0, ts: 0 },
+    writeLifetime: (k, wh, ts) => { store.set(k, { wh, ts }); },
+    deleteLifetime: (k) => { store.delete(k); },
+    listLifetimeKeys: () => [...store.keys()],
+    query: (sn, metric, since, until) => {
+      if (sn !== PANEL || series(metric, t0) == null) return [];
+      const out: Array<{ ts: number; value: number }> = [];
+      for (let t = t0 - 15 * MIN; t <= until; t += MIN) {
+        if (t >= since && !(opts.rowGap && t >= opts.rowGap[0] && t <= opts.rowGap[1])) out.push({ ts: t, value: series(metric, t) as number });
+      }
+      return out;
+    },
+    coreRatio: (panelSn, sn) => { asked.push([panelSn, sn]); return answers[Math.min(i, answers.length - 1)]; },
+    site: () => PHX,
+    log: (m) => { if (opts.log) opts.log(m, logs); else logs.push(m); },
+  });
+  const one = (now: number): Any => ({ [PANEL]: panel(now, [-1000, 0, 0], {}, [{}, { isConnected: false }, { isConnected: false }]), [C1]: core(C1, false) });
+  const results: Any[] = [];
+  let devices: Any = one(t0);
+  const n = opts.rollups ?? answers.length;
+  for (i = 0; i < n; i++) {
+    const now = t0 + (i + 1) * 5 * MIN;
+    devices = (opts.devices ?? one)(now, i);
+    results.push(b.rollup({ generatedAt: now, devices } as Any, now));
+  }
+  const capLines = (): string[] => logs.filter((l) => / counted on | has no capacity figure /.test(l));
+  return { b, logs, capLines, results, asked, devices, store, end: t0 + n * 5 * MIN };
+}
+
+test('★★★ T3 — the capacity basis is logged once, and on every change of basis or figure; never a serial', () => {
+  const lo = 28_227 / NAMEPLATE;
+  const hi = 29_879 / NAMEPLATE;
+  const r = capacityRun([
+    { ratio: lo, basis: 'held', atMs: HELD_AT },
+    { ratio: lo, basis: 'held', atMs: HELD_AT },          // the same: no line
+    { ratio: lo, basis: 'measured', atMs: NIGHT },        // the same figure on another basis: a line
+    { ratio: hi, basis: 'measured', atMs: NIGHT },        // another figure: a line
+    null,                                                 // the tracker does not answer: the figure stands, a line
+    { ratio: 1, basis: 'nameplate', atMs: null },
+    { ratio: lo, basis: 'min-known', atMs: null },
+  ]);
+  assert.deepEqual(r.capLines(), [
+    'energy bridge: slot 1 is counted on 28.23 kWh — ×0.9188 of its 30.72 kWh nameplate, its Core\'s last measured ratio, of 2026-10-15T06:52:00.000Z (held)',
+    'energy bridge: slot 1 is counted on 28.23 kWh — ×0.9188 of its 30.72 kWh nameplate, the ratio in its Core\'s listed pack figures (measured)',
+    'energy bridge: slot 1 is counted on 29.88 kWh — ×0.9726 of its 30.72 kWh nameplate, the ratio in its Core\'s listed pack figures (measured)',
+    'energy bridge: slot 1 stays counted on 29.88 kWh — the capacity tracker did not answer (unavailable)',
+    'energy bridge: slot 1 is counted on its 30.72 kWh nameplate — the capacity tracker holds no ratio for any Core (nameplate)',
+    'energy bridge: slot 1 is counted on 28.23 kWh — ×0.9188 of its 30.72 kWh nameplate, the lowest ratio the capacity tracker holds: it holds none for this slot\'s Core (min-known)',
+  ]);
+  for (const l of r.capLines()) assert.ok(!l.includes(PANEL) && !l.includes(C1), `a serial in: ${l}`);
+  assert.deepEqual(r.asked[0], [PANEL, C1], 'the tracker is asked for the slot\'s Core on its panel');
+  assert.equal(r.asked.length, 7, 'at every rollup: no cache');
+  // The debug block carries the figure last resolved, per slot.
+  assert.deepEqual(r.b.debug(r.devices, r.end).capacity, [{ slot: `${PANEL}_1`, wh: lo * NAMEPLATE, ratio: lo, basis: 'min-known', atMs: null }]);
+  // With more than one panel the line names the panel, by name.
+  const P2 = 'HD31XXX00XXX0002';
+  const two = capacityRun([{ ratio: lo, basis: 'held', atMs: HELD_AT }], {
+    devices: (now) => ({
+      [PANEL]: panel(now, [-1000, 0, 0], { deviceName: 'Garage panel' }, [{}, { isConnected: false }, { isConnected: false }]),
+      [P2]: { ...panel(now, [0, 0, 0], {}, [{ isConnected: false }, { isConnected: false }, { isConnected: false }]), sn: P2, deviceName: 'House panel' },
+      [C1]: core(C1, false),
+    }),
+  });
+  assert.deepEqual(two.capLines(), ['energy bridge: Garage panel slot 1 is counted on 28.23 kWh — ×0.9188 of its 30.72 kWh nameplate, its Core\'s last measured ratio, of 2026-10-15T06:52:00.000Z (held)']);
+});
+
+test('★★★ a tracker that never answers: no capacity figure, logged once — the window is not inferred on the nameplate; and a slot the panel reports no capacity for is not asked about', () => {
+  // Daylight, the percent rising a point every 5 minutes, the field untrusted: only the inferred basis could book solar.
+  const pct = (t: number): number => 50 + Math.floor((t - NOON) / 300_000);
+  const r = capacityRun([null], { t0: NOON, rollups: 4, pct });
+  assert.deepEqual(r.capLines(), ['energy bridge: slot 1 has no capacity figure — the capacity tracker did not answer; the inferred basis and the PV-field check do not run for it (unavailable)']);
+  for (const w of r.results.map((x) => x.slots[0])) assert.deepEqual([w.basis, w.reason, w.pvWh], ['unbridgeable', 'no capacity for the slot', 0]);
+  assert.deepEqual(r.b.debug(r.devices, r.end).capacity, [{ slot: `${PANEL}_1`, wh: null, ratio: null, basis: 'unavailable', atMs: null }]);
+  assert.deepEqual(r.b.debug(r.devices, r.end).pvChecks, []);
+  // The same windows with an answer are inferred on it: one step is 1 % of the capacity counted on.
+  const ok = capacityRun([{ ratio: 28_227 / NAMEPLATE, basis: 'held', atMs: HELD_AT }], { t0: NOON, rollups: 4, pct });
+  assert.equal(ok.results[3].slots[0].basis, 'inferred');
+  assert.ok(Math.abs(ok.b.debug(ok.devices, ok.end).pvChecks[0].stepWh - 282.27) < 1e-9);
+  // No nameplate for the slot: no figure, and the tracker is not asked.
+  const none = capacityRun([{ ratio: 0.95, basis: 'held', atMs: HELD_AT }], {
+    t0: NOON, rollups: 2, pct,
+    devices: (now) => ({ [PANEL]: panel(now, [-1000, 0, 0], {}, [{ fullCap: null }, { isConnected: false }, { isConnected: false }]), [C1]: core(C1, false) }),
+  });
+  assert.deepEqual(none.capLines(), ['energy bridge: slot 1 has no capacity figure — the panel reports no capacity for the slot; the inferred basis and the PV-field check do not run for it']);
+  assert.deepEqual(none.asked, []);
+  assert.equal(none.results[1].slots[0].reason, 'no capacity for the slot');
+});
+
+test('★★★ the figure a daylight window counts on is the one resolved at that rollup: a changed figure is used in the window it changes in, and no answer keeps the last figure in use (the inferred basis and the check go on)', () => {
+  const lo = 28_227 / NAMEPLATE;
+  const hi = 29_879 / NAMEPLATE;
+  // Daylight, the percent rising a point every 5 minutes, the field untrusted: the window is inferred on the capacity in use.
+  const pct = (t: number): number => 50 + Math.floor((t - NOON) / 300_000);
+  const heldLo: BridgeCoreRatio = { ratio: lo, basis: 'held', atMs: HELD_AT };
+  const stepOf = (r: ReturnType<typeof capacityRun>): number => r.b.debug(r.devices, r.end).pvChecks[0].stepWh;
+  const base = capacityRun([heldLo, heldLo, heldLo], { t0: NOON, pct });
+  assert.equal(stepOf(base), (lo * NAMEPLATE) / 100, 'three rollups on the held figure: one step is 1 % of it');
+  // The fourth answer is another figure: the window of that same rollup counts on it, as its line and the debug block say.
+  const changed = capacityRun([heldLo, heldLo, heldLo, { ratio: hi, basis: 'held', atMs: NOON }], { t0: NOON, pct });
+  assert.equal(changed.capLines().length, 2);
+  assert.match(changed.capLines()[1], /^energy bridge: slot 1 is counted on 29\.88 kWh — ×0\.9726 /);
+  assert.equal(changed.b.debug(changed.devices, changed.end).capacity[0].wh, hi * NAMEPLATE);
+  assert.equal(stepOf(changed), (hi * NAMEPLATE) / 100, 'the check\'s step at the rollup the figure changed at is 1 % of the NEW figure, never the previous one');
+  assert.equal(changed.results[3].slots[0].basis, 'inferred');
+  // The tracker stops answering in daylight: the last figure stays IN USE, not only in the line.
+  const silent = capacityRun([heldLo, heldLo, heldLo, null, null], { t0: NOON, pct });
+  assert.deepEqual(silent.capLines().slice(1), ['energy bridge: slot 1 stays counted on 28.23 kWh — the capacity tracker did not answer (unavailable)']);
+  for (const i of [3, 4]) assert.deepEqual([silent.results[i].slots[0].basis, silent.results[i].slots[0].reason], ['inferred', undefined], `rollup ${i}: still inferred on the kept figure`);
+  assert.equal(stepOf(silent), (lo * NAMEPLATE) / 100, 'the check runs on the kept figure');
+  assert.ok(silent.results[4].slots[0].pvWh > 0, 'and the window books its inferred solar');
+});
+
+test('★★ a figure that moves by less than a whole Wh logs no line, and the window still counts on the figure as resolved', () => {
+  const lo = 28_227 / NAMEPLATE;
+  const pct = (t: number): number => 50 + Math.floor((t - NOON) / 300_000);
+  const r = capacityRun([
+    { ratio: lo, basis: 'held', atMs: HELD_AT }, { ratio: lo, basis: 'held', atMs: HELD_AT }, { ratio: lo, basis: 'held', atMs: HELD_AT },
+    { ratio: (28_227 + 0.4) / NAMEPLATE, basis: 'held', atMs: HELD_AT },
+  ], { t0: NOON, pct });
+  assert.equal(r.capLines().length, 1, 'one line: 28,227.0 and 28,227.4 Wh are the same whole Wh');
+  assert.ok(Math.abs(r.b.debug(r.devices, r.end).pvChecks[0].stepWh - 282.274) < 1e-9, 'the figure in use is the one resolved, to the fraction');
+});
+
+test('★★ a trusted field with no capacity figure is still booked as measured: the tracker never answers, so nothing is inferred and no check runs, and the field\'s own integral is the solar', () => {
+  const pct = (t: number): number => 50 + Math.floor((t - NOON) / 300_000);
+  const r = capacityRun([null], { t0: NOON, rollups: 3, pct, fieldW: 1200, trusted: true });
+  assert.deepEqual(r.capLines(), ['energy bridge: slot 1 has no capacity figure — the capacity tracker did not answer; the inferred basis and the PV-field check do not run for it (unavailable)']);
+  for (const x of r.results) {
+    assert.equal(x.slots[0].basis, 'measured');
+    assert.ok(Math.abs(x.slots[0].pvWh - 1200 * 5 / 60) < 0.5, `the field's integral: ${x.slots[0].pvWh}`);
+  }
+  assert.deepEqual(r.b.debug(r.devices, r.end).pvChecks, [], 'no check without a capacity');
+  assert.equal(r.b.isTrusted(PANEL, 1), true, 'and the trust stands');
+  // The same field untrusted: nothing to book it on.
+  const u = capacityRun([null], { t0: NOON, rollups: 3, pct, fieldW: 1200 });
+  for (const x of u.results) assert.deepEqual([x.slots[0].basis, x.slots[0].reason, x.slots[0].pvWh], ['unbridgeable', 'no capacity for the slot', 0]);
+});
+
+test('★★ a rollup that holds its window resolves no capacity and logs no line: the line follows at the first rollup that books the slot', () => {
+  const held: BridgeCoreRatio = { ratio: 28_227 / NAMEPLATE, basis: 'held', atMs: HELD_AT };
+  // No panel row from the watermark to the first rollup (the last one 6 minutes old: a gap the next window can bridge).
+  const r = capacityRun([held], { rollups: 1, rowGap: [NIGHT, NIGHT + 5 * 60_000] });
+  assert.equal(r.results[0].held, true, 'precondition: the first rollup holds its window');
+  assert.deepEqual([r.capLines(), r.asked.length, r.b.debug(r.devices, r.end).capacity], [[], 0, []], 'nothing resolved, nothing logged');
+  const two = capacityRun([held], { rollups: 2, rowGap: [NIGHT, NIGHT + 5 * 60_000] });
+  assert.deepEqual([two.results[0].held === true, two.results[1].held === true], [true, false]);
+  assert.deepEqual(two.capLines(), ['energy bridge: slot 1 is counted on 28.23 kWh — ×0.9188 of its 30.72 kWh nameplate, its Core\'s last measured ratio, of 2026-10-15T06:52:00.000Z (held)']);
+  assert.equal(two.asked.length, 1);
+});
+
+test('★★★ a second dark span of the same slot logs its capacity line again; and nothing is resolved or logged while the slot is not dark', () => {
+  const held: BridgeCoreRatio = { ratio: 28_227 / NAMEPLATE, basis: 'held', atMs: HELD_AT };
+  const darkAt = (now: number): Any => ({ [PANEL]: panel(now, [-1000, 0, 0], {}, [{}, { isConnected: false }, { isConnected: false }]), [C1]: core(C1, false) });
+  const liveAt = (now: number): Any => ({ ...darkAt(now), [C1]: live(C1, now) });
+  // Rollups 0-1 dark, 2-3 the Core reports, 4-5 dark again.
+  const r = capacityRun([held], { rollups: 6, devices: (now, i) => (i === 2 || i === 3 ? liveAt(now) : darkAt(now)) });
+  const line = 'energy bridge: slot 1 is counted on 28.23 kWh — ×0.9188 of its 30.72 kWh nameplate, its Core\'s last measured ratio, of 2026-10-15T06:52:00.000Z (held)';
+  assert.deepEqual(r.capLines(), [line, line], 'one line per dark span');
+  assert.equal(r.asked.length, 4, 'asked at the four dark rollups only');
+  // While the Core reports the slot has no capacity entry.
+  const mid = capacityRun([held], { rollups: 3, devices: (now, i) => (i === 2 ? liveAt(now) : darkAt(now)) });
+  assert.deepEqual(mid.b.debug(mid.devices, mid.end).capacity, []);
+  // A fleet that never goes dark: the tracker is never asked and no line is logged.
+  const never = capacityRun([held], { rollups: 3, devices: (now) => liveAt(now) });
+  assert.deepEqual([never.asked.length, never.logs.length], [0, 0]);
+});
+
+test('★★ a capacity line that cannot be logged does not stop the rollup: the figure is recorded, the window is booked, and the line is not retried', () => {
+  const held: BridgeCoreRatio = { ratio: 28_227 / NAMEPLATE, basis: 'held', atMs: HELD_AT };
+  let thrown = 0;
+  const r = capacityRun([held], {
+    rollups: 3,
+    log: (m, logs) => { if (m.includes(' counted on ')) { thrown += 1; throw new Error('log sink failed'); } logs.push(m); },
+  });
+  assert.equal(thrown, 1, 'the line was attempted once');
+  assert.equal(r.results.length, 3, 'every rollup returned');
+  for (const x of r.results) assert.ok(Math.abs(x.dischargeWh - 1000 * 5 / 60) < 0.5, `the window is booked: ${x.dischargeWh}`);
+  assert.deepEqual(r.b.debug(r.devices, r.end).capacity.map((c) => [c.basis, Math.round(c.wh as number)]), [['held', 28_227]]);
 });
