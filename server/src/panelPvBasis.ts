@@ -59,8 +59,12 @@ const H = 3_600_000;
 
 /** The 7-day energy balance refuses above this (strict). Measured on the specified basis (nameplate
  *  fullCap, the record-vouched days): 0 of the 45 Core-era windows (in sample, 0.9900–1.0291) and 0 of
- *  the dark evenings 10-28..11-07 (0.9882–1.0285) above it; a code constant, not an option. */
-export const UC_THRESHOLD = 1.04;
+ *  the dark evenings 10-28..11-07 (0.9882–1.0285) above it; a code constant, not an option.
+ *  v1.207.1 — 1.05, was 1.04 (v1.204.0). The live windows ran 1.0273–1.0370 against 1.04 until the week to
+ *  2026-11-15 read 1.0410 and refused the basis for seven evenings: 1.0069 on its daylight hours alone, its
+ *  nights closing at −1.10 kWh a night, so the excess was the night term's and not the solar readings'. The
+ *  week after read 1.0307. A wider line admits a larger sustained over-read unseen (blindBandPct). */
+export const UC_THRESHOLD = 1.05;
 /** Field days in one balance window. */
 export const UC_WINDOW_DAYS = 7;
 /** A window's days lie within this many site days of its end (inclusive span e−13..e). */

@@ -164,7 +164,7 @@ const MUTANTS = [
   {
     id: 'PB-U-i. ★★★ the threshold 1.04 → 1.10',
     file: PB, tests: [T_UNIT, T_REC],
-    find: 'export const UC_THRESHOLD = 1.04;',
+    find: 'export const UC_THRESHOLD = 1.05;',
     to: 'export const UC_THRESHOLD = 1.10; /* MUTANT */',
     why: 'A ×1.05 over-read passes every window.',
   },
