@@ -266,7 +266,7 @@ test('★★★ (owner) the line is strict AT 1.05 ITSELF (the constant, no test
 
 test('★★ the threshold is the code constant 1.05 (not an option), and the module reads no owner option', () => {
   // v1.207.1 — 1.04 until then. The week to 2026-11-15 read 1.0410 (1.0069 on daylight hours alone), the first refusal
-  // since v1.204.0, with one Core out of the panel's pool for most of it; the week after read 1.0307.
+  // since v1.204.0, with one Core out of the panel's pool on its last day (from 2026-11-14 23:35); the week after read 1.0307.
   assert.equal(UC_THRESHOLD, 1.05);
   const src = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src/panelPvBasis.ts'), 'utf8');
   const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');

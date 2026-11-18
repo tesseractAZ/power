@@ -21,7 +21,9 @@
  *
  * v1.207.1 — the balance's line is 1.05 (1.04 from v1.204.0 through v1.207.0). The honest replay does not move. V2 and W1 measure
  * what a planted over-read does at the line and, through the fixture's `threshold` knob, at 1.04, and assert both: the wider
- * line accepts an over-read for as many nights or more, and on every accepted night only the cost fill is lower.
+ * line accepts an over-read for as many nights or more, and on every accepted night only the cost fill is lower than the honest
+ * night's. W1 also measures the line change itself: a night 1.04 refused (decided at 22:30) and the line accepts (decided at
+ * 21:30) arms the same resilience write at either line but 11-02, which loses its 30.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -484,10 +486,15 @@ test('★★★ W1: a fault planted from another recorded evening, every start 1
     const after = real.filter((o) => o.date > fromDay);
     const accepted = after.filter((o) => o.sel.use === 'planning');
     for (const o of accepted) assert.equal(o.b.arm.write, 50, `×${scale} from ${fromDay}, ${o.date}: every accepted write is 50`);
+    // A night the balance refuses arms v1.203.0's own plan, from every start and at either line (V2 asserts it from 10-20).
+    for (const o of real) if (o.sel.use !== 'planning') assert.equal(fmt(o.b.arm), fmt(o.a.arm), `×${scale} from ${fromDay}, ${o.date}: a refused night is v1.203.0's`);
     real.forEach((o, i) => assert.equal(o.b.plan.cushionLineSocPct, COST[i].b.plan.cushionLineSocPct, `${o.date} ×${scale} from ${fromDay}: the line`));
     // What an accepted over-read costs: the points each fill falls under the honest night's (0 on a fill held at the 90 ceiling).
     const drops = accepted.map((o) => Math.round((COST.find((h) => h.date === o.date)!.b.arm.fc! - o.b.arm.fc!) * 10) / 10);
-    return { fromDay, nights: accepted.map((o) => `${o.date.slice(5)} ${fmt(o.b.arm)}`), refused: after.some((o) => o.sel.use !== 'planning'), drops };
+    return {
+      fromDay, nights: accepted.map((o) => `${o.date.slice(5)} ${fmt(o.b.arm)}`), refused: after.some((o) => o.sel.use !== 'planning'), drops,
+      arm: Object.fromEntries(after.map((o) => [o.date.slice(5), fmt(o.b.arm)])) as Record<string, string>,
+    };
   });
   // [scale, accepted nights per start at the line (1.05), the same at 1.04, the start that runs longest and its nights, and the
   //  least and most points an accepted fill falls under the honest night's (the fills held at the 90 ceiling apart)]
@@ -499,12 +506,37 @@ test('★★★ W1: a fault planted from another recorded evening, every start 1
     [1.10, [4, 3, 3, 4, 3, 3, 2, 2], [2, 3, 2, 2, 1, 2, 2, 2], '2026-10-27', ['10-28 50/77', '10-29 50/90', '10-30 50/76.2', '10-31 50/90'], [2.9, 4.6]],
     [1.25, [1, 1, 2, 1, 0, 2, 1, 1], [1, 1, 2, 1, 0, 1, 1, 0], '2026-10-29', ['10-30 50/71.8', '10-31 50/90'], [1.9, 11.2]],
   ];
+  /** v1.207.0 pinned these two starts night by night (its longest at 1.04); each reads the same at either line. */
+  const pinned: Record<number, [string, string[]]> = {
+    1.05: ['2026-10-30', ['10-31 50/90', '11-01 50/69.4', '11-02 50/69.4', '11-03 50/73.7', '11-04 50/65.5', '11-05 50/80.1']],
+    1.1: ['2026-10-28', ['10-29 50/90', '10-30 50/76.2', '10-31 50/90']],
+  };
   const longest: number[] = [];
+  /** The line change itself: the nights 1.04 refused and the line accepts (cost: what each armed), and those of them whose
+   *  reserve write differs on the resilience objective. */
+  const newly: string[] = [];
+  const lostWrite: string[] = [];
   for (const [scale, n, n104, fromDay, nights, drop] of want) {
     const got = measure(scale);
+    const was = measure(scale, 1.04);
     assert.deepEqual(got.map((g) => g.nights.length), n, `×${scale}: accepted nights per start`);
-    assert.deepEqual(measure(scale, 1.04).map((g) => g.nights.length), n104, `×${scale} at 1.04`);
+    assert.deepEqual(was.map((g) => g.nights.length), n104, `×${scale} at 1.04`);
     n.forEach((x, i) => assert.ok(x >= n104[i], `×${scale} from ${starts[i]}: the wider line accepts as many nights or more`));
+    const pin = pinned[scale];
+    if (pin) for (const run of [got, was]) assert.deepEqual(run.find((g) => g.fromDay === pin[0])!.nights, pin[1], `×${scale} from ${pin[0]}`);
+    // A refused night is decided at 22:30 and an accepted one at 21:30, on the pool as it reads then: on the resilience objective
+    // a night the line newly accepts arms the write it armed at 1.04 but 11-02, whose 21:30 decision arms nothing where the 22:30
+    // one armed 30 (the decision-time test above shows it on honest readings).
+    got.forEach((g, i) => {
+      for (const day of Object.keys(g.arm).filter((d) => g.nights.some((x) => x.startsWith(d)) && !was[i].nights.some((x) => x.startsWith(d)))) {
+        const tag = `×${scale} from ${g.fromDay.slice(5)}: ${day}`;
+        newly.push(`${tag} ${was[i].arm[day]}->${g.arm[day]}`);
+        const night = NIGHTS.find((q) => q.plan_date.endsWith(day))!;
+        const [at104, atLine] = [1.04, undefined].map((threshold) => replay(night, 'resilience', scale, { ro: { fault: { scale, fromDay: g.fromDay }, threshold } }));
+        assert.deepEqual([at104.sel.use, at104.b.at, atLine.sel.use, atLine.b.at], ['published', '22:30', 'planning', '21:30'], tag);
+        if (at104.b.arm.write !== atLine.b.arm.write) lostWrite.push(`${tag} ${at104.b.arm.write ?? '—'}->${atLine.b.arm.write ?? '—'}`);
+      }
+    });
     const top = got.reduce((a, g) => (g.nights.length > a.nights.length ? g : a));
     assert.deepEqual([top.fromDay, top.nights], [fromDay, nights], `×${scale}: the start that runs longest (the first of equals)`);
     longest.push(top.nights.length);
@@ -514,6 +546,12 @@ test('★★★ W1: a fault planted from another recorded evening, every start 1
     if (scale === 1.03) assert.deepEqual(got.map((g) => g.refused), starts.map(() => false));
   }
   assert.deepEqual(longest, [9, 7, 4, 2]);
+  // Over the 32 cases the line newly accepts 24 nights. In cost mode each arms 50 with a cost fill; 1.04 armed 29–30 or nothing
+  // on 23 of them and, on one Friday, the long-gap fill to 90 (a higher fill than the accepted night's).
+  assert.equal(newly.length, 24);
+  assert.deepEqual(newly.filter((x) => !/ (29|30|—)\/—->50\/[\d.]+$/.test(x)), ['×1.1 from 10-27: 10-30 50/90->50/76.2']);
+  // On the resilience objective five of the 24 lose the reserve write, all of them 11-02; the other 19 arm the same write.
+  assert.deepEqual(lostWrite, ['×1.03 from 10-27: 11-02 30->—', '×1.03 from 10-28: 11-02 30->—', '×1.05 from 10-29: 11-02 30->—', '×1.1 from 10-30: 11-02 30->—', '×1.1 from 10-31: 11-02 30->—']);
   const sentence = 'it was accepted on up to 7, 4 and 2 nights (×1.05, ×1.10, ×1.25) before the balance refused it or the replay ended (11-05), and ×1.03 on every night to the replay\'s end from every start (up to 9); every accepted write was 50 and the line never moved.';
   assert.ok(DOC15_1.includes(`Planted from another recorded evening (each of 10-27..11-03), ${sentence}`));
   assert.ok(DOC_PERF.includes(`Planted from another recorded evening (each of 10-27 → 11-03), ${sentence}`));

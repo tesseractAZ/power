@@ -340,6 +340,13 @@ const MUTANTS = [
     to: '    const bad = (false as boolean) && windowBalance(table, w, Fe).ratio > T; /* MUTANT */',
     why: 'Admission no longer shrinks after a refusal.',
   },
+  {
+    id: 'PB-A-iv. ★★ (owner) admission is strict as the verdict is: a window at the threshold admits its days',
+    file: PB, tests: [T_UNIT],
+    find: '    const bad = windowBalance(table, w, Fe).ratio > T;',
+    to: '    const bad = windowBalance(table, w, Fe).ratio >= T; /* MUTANT */',
+    why: 'A window reading exactly 1.05 (105,000 Wh on 100,000 Wh, panelPvBasis.test.ts) passes the verdict (PB-U-ii) and would admit none of its days: the verdict and admission read one rule.',
+  },
 
   /* ── W: the worker ── */
   {
