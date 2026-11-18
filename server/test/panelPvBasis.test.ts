@@ -229,8 +229,10 @@ test('★★★ admission: an unjudged day, day E and later never enter; a day i
   }
 });
 
-test('★★ the threshold is the code constant 1.04 (not an option), and the module reads no owner option', () => {
-  assert.equal(UC_THRESHOLD, 1.04);
+test('★★ the threshold is the code constant 1.05 (not an option), and the module reads no owner option', () => {
+  // v1.207.1 — 1.04 until then. The week to 2026-11-15 read 1.0410 (1.0069 on daylight hours alone), the first refusal
+  // since v1.204.0, with one Core out of the panel's pool for most of it; the week after read 1.0307.
+  assert.equal(UC_THRESHOLD, 1.05);
   const src = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src/panelPvBasis.ts'), 'utf8');
   const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
   for (const banned of ['config.js', 'limits.js', 'option(', 'process.env', 'RUNWAY_', 'DISPATCH_', 'runwayDrainW', 'runwayPoolOverheadW', 'analytics']) {
