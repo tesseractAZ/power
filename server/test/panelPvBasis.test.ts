@@ -13,9 +13,9 @@ import {
   acInSeconds, bridgeVerified, buildSlotDay, buildSlotHours, buildUcDay, chargeProofAt, fitPlantConstants, freezeSpans,
   hourEstimateWh, resolveSlotHour, siteHourStarts, slotDaySource, slotMapOfDay, slotMapOfRecord, windowBalance,
   admittedSlotDays, assembleUcTable, upperCheck,
-  type PlantConstants, type Pt, type SlotHour, type UcTable,
+  type ConstantsFit, type PlantConstants, type Pt, type SlotDay, type SlotHour, type UcDay, type UcTable,
 } from '../src/panelPvBasis.js';
-import { siteDayStartMs } from '../src/siteTime.js';
+import { addDaysYmd, siteDayStartMs } from '../src/siteTime.js';
 import type { MembershipHistory } from '../src/membershipHistory.js';
 import { recordSources } from './fixtures/panelPvRecordFixtures.js';
 
@@ -227,6 +227,41 @@ test('★★★ admission: an unjudged day, day E and later never enter; a day i
       for (const d of days) assert.ok(d < '2026-10-30' || d > '2026-11-30', `${E}: ${d} is faulted`);
     }
   }
+});
+
+test('★★★ (owner) the line is strict AT 1.05 ITSELF (the constant, no test threshold): one window of 7 field days whose solar is 105,000 Wh on an estimate of 100,000 Wh reads exactly 1.05 and passes, and its days are admitted; 10 Wh more reads 1.0501, is refused "above 1.05", and no day of it is admitted', () => {
+  const E = '2026-11-08';
+  const days = [7, 6, 5, 4, 3, 2, 1].map((k) => addDaysYmd(E, -k));
+  const EST = [14_000, 14_000, 14_000, 14_000, 14_000, 15_000, 15_000];
+  assert.equal(EST.reduce((a, b) => a + b, 0), 100_000);
+  /** Whole watt-hours, so every sum is exact and the ratio is the one double nearest 1.05: the literal the constant is. */
+  const table = (extraWh: number): UcTable => {
+    const slotDay = (day: string, i: number): SlotDay => {
+      const truthWh = 15_000 + (i === 6 ? extraWh : 0);
+      return {
+        slot: 1, day, core: 'C', hours: 24, daylightHours: 10, g3: true, complete: true, incomplete: null, fieldDaylightHours: 10, coreDaylightHours: 0,
+        truthWh, truthDaylightWh: truthWh, estDayWh: EST[i], estNightWh: 0, nightMax: null, frozenHours: 0, acChargeHours: 0, unprovedAcChargeHours: 0,
+        fieldAllWh: truthWh, overlap: { hours: 0, fieldWh: 0, coreWh: 0 },
+      };
+    };
+    const ucDays = new Map<string, UcDay>(days.map((day, i) => {
+      const x = slotDay(day, i);
+      return [day, { day, map: { 1: 'C' }, slots: new Map([[1, x]]), vendorWh: x.truthWh, fieldAllWh: x.truthWh, vendorDiffWh: 0, vendorOk: true }];
+    }));
+    const fit: ConstantsFit = { constants: K, days: 51, chargeHours: 97, dayList: [] };
+    return { days: ucDays, mapAsOf: () => ({ 1: 'C' }), constantsOf: () => fit, capacityKnown: () => true };
+  };
+  assert.equal(table(0).threshold, undefined, 'no test threshold: the verdict reads UC_THRESHOLD');
+  assert.equal(windowBalance(table(0), days, [1]).ratio, UC_THRESHOLD, 'exactly the line, not a rounding of it');
+  const at = upperCheck(table(0), E);
+  assert.deepEqual([at.state, at.reason, at.checks.threshold, at.checks.ratio, at.checks.max7, at.checks.blindBandPct, at.checks.fieldDays], ['pass', null, 1.05, 1.05, 1.05, 0, 7]);
+  assert.deepEqual([...admittedSlotDays(table(0), E).get(1)!].sort(), days, 'a window at the line admits its days');
+  const over = upperCheck(table(10), E);
+  assert.equal(over.state, 'refused');
+  assert.deepEqual(over.reason, { code: 'balance', windowEnd: days[6], ratio: 1.0501, daylightRatio: 1.0501, nightResidualKwhPerNight: 0, threshold: 1.05 });
+  assert.equal(admittedSlotDays(table(10), E).get(1)!.size, 0, 'a window above the line admits none of its days');
+  // One watt-hour under: passes (the line is an upper bound only).
+  assert.equal(upperCheck(table(-1), E).state, 'pass');
 });
 
 test('★★ the threshold is the code constant 1.05 (not an option), and the module reads no owner option', () => {

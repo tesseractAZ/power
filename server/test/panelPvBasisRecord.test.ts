@@ -5,6 +5,10 @@
  * slot (from 2026-08-21, the swap entry that carries the slot map). Every figure below is what the module
  * computes on the record; the replay pins it so a later change that moves one is seen.
  *
+ * v1.207.1 — the line is 1.05 (1.04 from v1.204.0 through v1.207.0). The honest record does not move (no window of it reads above
+ * either line). What a planted over-read does was re-measured at 1.05 and each test below states the figure at 1.04 beside it:
+ * a wider line refuses a sustained over-read later, or not at all.
+ *
  * The evening E is the site day of the evening decision that owns the window (M1): Saturday's plan for the
  * Monday window is judged as of Saturday, and reads the same at Saturday 22:30, Sunday 00:30 and Sunday
  * 09:30. The record ends 2026-11-06 18:03 site time, so 2026-11-06 is never a whole day here.
@@ -99,7 +103,7 @@ test('★★★ the evening table 10-16..11-07: refused while fewer than 7 field
   }
 });
 
-test('★★ the honest record: 0 dark windows and 0 of the 45 Core-era windows above 1.04 (in sample for the Core era)', () => {
+test('★★ the honest record: 0 dark windows and 0 of the 45 Core-era windows above 1.05 (in sample for the Core era) — nor above the 1.04 of v1.204.0–v1.207.0', () => {
   const dark = EVENINGS.map((E) => run(E).v.checks.ratio).filter((r): r is number => r != null);
   assert.equal(Math.min(...dark), 0.9882);
   assert.equal(Math.max(...dark), 1.0285);
@@ -124,6 +128,8 @@ test('★★ the honest record: 0 dark windows and 0 of the 45 Core-era windows 
   assert.equal(ratios.length, 45);
   assert.ok(Math.abs(ratios[0] - 0.9900) < 5e-5 && Math.abs(ratios[ratios.length - 1] - 1.0291) < 5e-5, `${ratios[0]}..${ratios[ratios.length - 1]}`);
   assert.equal(ratios.filter((r) => r > UC_THRESHOLD).length, 0);
+  // The largest honest window on the record (1.0291) is 0.021 under the line; it was 0.011 under 1.04.
+  assert.equal([...ratios, ...dark].filter((r) => r > 1.04).length, 0);
 });
 
 test('★★★ M1: Saturday 10-31 judged as of Saturday passes at 1.0044 and reads the same at Sat 22:30, Sun 00:30 and Sun 09:30', () => {
@@ -199,17 +205,17 @@ test('★★ G10: a day the field reads 3 % above the slot\'s Core refuses that 
   assert.equal(run('2026-11-05', lo).v.state, 'pass');
 });
 
-test('★★★ the hysteresis: a ×1.10 week (10-27..10-29) holds the refusal until 7 later windows pass', () => {
+test('★★★ the hysteresis: a ×1.10 week (10-27..10-29) is refused from 11-01 — two evenings later than at 1.04 (10-30) — and the refusal holds until 7 later windows pass', () => {
   const o = { fault: { scale: 1.10, fromDay: '2026-10-27', toDay: '2026-10-29' } };
-  const states = EVENINGS.filter((e) => e >= '2026-10-28').map((E) => {
-    const { v } = run(E, o);
+  const states = (threshold?: number) => EVENINGS.filter((e) => e >= '2026-10-28').map((E) => {
+    const { v } = run(E, { ...o, threshold });
     return `${E.slice(5)} ${v.state === 'pass' ? 'P' : 'R'} ${v.checks.ratio} ${v.checks.max7}`;
   });
-  assert.deepEqual(states, [
+  assert.deepEqual(states(), [
     '10-28 P 1.0044 1.0044',
     '10-29 P 1.0312 1.0312',
-    '10-30 R 1.0459 1.0459',
-    '10-31 R 1.0459 1.0459',
+    '10-30 P 1.0459 1.0459',
+    '10-31 P 1.0459 1.0459',
     '11-01 R 1.0668 1.0668',
     '11-02 R 1.077 1.077',
     '11-03 R 1.0428 1.077',
@@ -217,41 +223,108 @@ test('★★★ the hysteresis: a ×1.10 week (10-27..10-29) holds the refusal u
     '11-05 R 1.034 1.077',
     '11-06 R 1.0222 1.077',
     '11-07 R 1.0222 1.077',
-  ], 'the current window passes from 11-05, the refusal holds while a failed one is among the last 7');
-  // Admission: no faulted day re-enters the planning model, and the window that failed keeps its days out.
+  ], 'the current window reads under the line on 11-03 and from 11-05; the refusal holds while a failed one is among the last 7');
+  // ★ What the wider line gave up, on this fault: the window holding all three faulted days reads 1.0459, over 1.04 and under 1.05,
+  // so the evenings of 10-30 and 10-31 are accepted where v1.204.0–v1.207.0 refused them (the figures are the same; two verdicts move).
+  assert.deepEqual(states(1.04).filter((x, i) => x !== states()[i]), ['10-30 R 1.0459 1.0459', '10-31 R 1.0459 1.0459'], 'at 1.04: the same figures, those two evenings refused');
+  assert.deepEqual(EVENINGS.filter((e) => e >= '2026-10-28').filter((E) => run(E, o).v.ok !== run(E, { ...o, threshold: 1.04 }).v.ok), ['2026-10-30', '2026-10-31']);
+  // …and on those two evenings the three faulted days are in the planning model (9 admitted days a slot; 2 at 1.04).
+  for (const E of ['2026-10-30', '2026-10-31']) {
+    const { adm } = run(E, o);
+    assert.deepEqual(admCounts(adm), [9, 9, 9], E);
+    for (const days of adm.values()) for (const d of ['2026-10-27', '2026-10-28', '2026-10-29']) assert.ok(days.has(d), `${E}: ${d} is admitted while its window passes`);
+    assert.deepEqual(admCounts(run(E, { ...o, threshold: 1.04 }).adm), [2, 2, 2], `${E} at 1.04`);
+  }
+  // Admission once it is refused: no faulted day is in the planning model, and the windows that failed keep their days out.
+  for (const E of EVENINGS.filter((e) => e >= '2026-11-01')) {
+    for (const days of run(E, o).adm.values()) for (const d of ['2026-10-27', '2026-10-28', '2026-10-29']) assert.ok(!days.has(d), `${E}: ${d}`);
+  }
   const { adm } = run('2026-11-07', o);
   for (const days of adm.values()) for (const d of ['2026-10-23', '2026-10-25', '2026-10-26', '2026-10-27', '2026-10-28', '2026-10-29', '2026-10-31', '2026-11-01']) assert.ok(!days.has(d), d);
-  assert.deepEqual(admCounts(adm), [4, 4, 4]);
+  // 5 a slot (10-20..10-22, 11-04, 11-05); 4 at 1.04, where the window ending 10-29 failed and kept 10-22 out with it.
+  assert.deepEqual(admCounts(adm), [5, 5, 5]);
+  assert.deepEqual(admCounts(run('2026-11-07', { ...o, threshold: 1.04 }).adm), [4, 4, 4]);
 });
 
-test('★★★ planted step faults on the field (the vendor scaled with them, so G6 is blind), from each start 10-27..11-03: the first refusing evening', () => {
+test('★★★ planted step faults on the field (the vendor scaled with them, so G6 is blind), from each start 10-27..11-03: the first refusing evening — ×1.03 on every slot is not refused from any start by 11-07 (from 2 at 1.04), ×1.05 from 5 of 8 (7), ×1.10 and ×1.25 from all 8; ×1.10 on one slot from 0–1 of 8 (3–5)', () => {
   const starts = ['2026-10-27', '2026-10-28', '2026-10-29', '2026-10-30', '2026-10-31', '2026-11-01', '2026-11-02', '2026-11-03'];
-  const firstRefusal = (scale: number, slots?: number[]): Array<string | null> => starts.map((s0) => {
-    for (let E = addDaysYmd(s0, 1); E <= '2026-11-07'; E = addDaysYmd(E, 1)) if (!run(E, { fault: { scale, fromDay: s0, slots } }).v.ok) return E.slice(5);
-    return null;
-  });
-  const table: Array<[string, number, number[] | undefined, Array<string | null>]> = [
-    ['×1.03 all', 1.03, undefined, ['11-01', '11-02', null, null, null, null, null, null]],
-    ['×1.05 all', 1.05, undefined, ['11-01', '11-01', '11-02', '11-06', '11-06', '11-06', '11-06', null]],
-    ['×1.10 all', 1.10, undefined, ['10-30', '11-01', '11-01', '11-02', '11-02', '11-04', '11-05', '11-06']],
-    ['×1.25 all', 1.25, undefined, ['10-29', '10-30', '11-01', '11-01', '11-01', '11-03', '11-04', '11-04']],
-    ['×1.25 slot 1', 1.25, [1], ['10-30', '11-01', '11-01', '11-02', '11-02', '11-05', '11-05', '11-06']],
-    ['×1.25 slot 2', 1.25, [2], ['11-01', '11-01', '11-01', '11-02', '11-02', '11-05', '11-05', '11-06']],
-    ['×1.25 slot 3', 1.25, [3], ['11-01', '11-01', '11-01', '11-02', '11-02', '11-05', '11-05', '11-06']],
-    ['×1.10 slot 1', 1.10, [1], ['11-01', '11-02', '11-06', '11-06', '11-06', null, null, null]],
-    ['×1.10 slot 2', 1.10, [2], ['11-01', '11-02', '11-06', null, null, null, null, null]],
-    ['×1.10 slot 3', 1.10, [3], ['11-01', '11-02', '11-06', null, null, null, null, null]],
+  /** The first refusing evening per start (null: none by 11-07), and the evenings accepted before it with the fault in their days. */
+  const firstRefusal = (scale: number, slots?: number[], threshold?: number): { first: Array<string | null>; accepted: number[] } => {
+    const first: Array<string | null> = [];
+    const accepted: number[] = [];
+    for (const s0 of starts) {
+      let n = 0;
+      let at: string | null = null;
+      for (let E = addDaysYmd(s0, 1); E <= '2026-11-07' && at == null; E = addDaysYmd(E, 1)) {
+        if (!run(E, { fault: { scale, fromDay: s0, slots }, threshold }).v.ok) at = E.slice(5); else n++;
+      }
+      first.push(at);
+      accepted.push(n);
+    }
+    return { first, accepted };
+  };
+  // [label, scale, slots, the first refusing evening at the line (1.05), and at 1.04 (v1.204.0–v1.207.0)]
+  const table: Array<[string, number, number[] | undefined, Array<string | null>, Array<string | null>]> = [
+    ['×1.03 all', 1.03, undefined, [null, null, null, null, null, null, null, null], ['11-01', '11-02', null, null, null, null, null, null]],
+    ['×1.05 all', 1.05, undefined, ['11-01', '11-02', '11-06', '11-06', '11-06', null, null, null], ['11-01', '11-01', '11-02', '11-06', '11-06', '11-06', '11-06', null]],
+    ['×1.10 all', 1.10, undefined, ['11-01', '11-01', '11-02', '11-04', '11-04', '11-05', '11-05', '11-06'], ['10-30', '11-01', '11-01', '11-02', '11-02', '11-04', '11-05', '11-06']],
+    ['×1.25 all', 1.25, undefined, ['10-29', '10-30', '11-01', '11-01', '11-01', '11-04', '11-04', '11-05'], ['10-29', '10-30', '11-01', '11-01', '11-01', '11-03', '11-04', '11-04']],
+    ['×1.25 slot 1', 1.25, [1], ['11-01', '11-01', '11-02', '11-05', '11-05', '11-05', '11-05', '11-06'], ['10-30', '11-01', '11-01', '11-02', '11-02', '11-05', '11-05', '11-06']],
+    ['×1.25 slot 2', 1.25, [2], ['11-01', '11-01', '11-02', '11-05', '11-05', '11-06', '11-06', '11-06'], ['11-01', '11-01', '11-01', '11-02', '11-02', '11-05', '11-05', '11-06']],
+    ['×1.25 slot 3', 1.25, [3], ['11-01', '11-01', '11-02', '11-05', '11-05', '11-05', '11-05', '11-06'], ['11-01', '11-01', '11-01', '11-02', '11-02', '11-05', '11-05', '11-06']],
+    ['×1.10 slot 1', 1.10, [1], ['11-02', null, null, null, null, null, null, null], ['11-01', '11-02', '11-06', '11-06', '11-06', null, null, null]],
+    ['×1.10 slot 2', 1.10, [2], [null, null, null, null, null, null, null, null], ['11-01', '11-02', '11-06', null, null, null, null, null]],
+    ['×1.10 slot 3', 1.10, [3], ['11-02', null, null, null, null, null, null, null], ['11-01', '11-02', '11-06', null, null, null, null, null]],
   ];
-  for (const [label, scale, slots, want] of table) assert.deepEqual(firstRefusal(scale, slots), want, label);
+  const got = new Map<string, ReturnType<typeof firstRefusal>>();
+  const got104 = new Map<string, ReturnType<typeof firstRefusal>>();
+  for (const [label, scale, slots, want, was] of table) {
+    const now = firstRefusal(scale, slots);
+    got.set(label, now);
+    assert.deepEqual(now.first, want, label);
+    got104.set(label, firstRefusal(scale, slots, 1.04));
+    assert.deepEqual(got104.get(label)!.first, was, `${label} at 1.04`);
+    // The wider line never refuses a start earlier than 1.04 did, and never one 1.04 let through.
+    now.first.forEach((d, i) => assert.ok(was[i] == null ? d == null : d == null || d >= was[i]!, `${label} from ${starts[i]}: ${d} against ${was[i]}`));
+  }
+  // The accepted evenings before a refusal, the least and the most over the starts that are refused (the reference chapter, the
+  // performance record and the release notes state these ranges), at the line and at 1.04.
+  const range = (label: string, of = got): [number, number] => {
+    const g = of.get(label)!;
+    const n = g.accepted.filter((_, i) => g.first[i] != null);
+    return [Math.min(...n), Math.max(...n)];
+  };
+  assert.deepEqual([range('×1.05 all'), range('×1.10 all'), range('×1.25 all')], [[4, 7], [2, 4], [0, 2]]);
+  assert.deepEqual([range('×1.03 all', got104), range('×1.05 all', got104), range('×1.10 all', got104), range('×1.25 all', got104)], [[4, 4], [3, 6], [1, 3], [0, 2]]);
+  for (const s of [1, 2, 3]) assert.deepEqual(range(`×1.25 slot ${s}`), [2, 5], `×1.25 on slot ${s}`);
+  assert.deepEqual([1, 2, 3].map((s) => range(`×1.25 slot ${s}`, got104)), [[1, 3], [1, 4], [1, 4]]);
+  // ★ ×1.03 from these starts is under the line on every evening to 11-07; the record ends there, so "never" is not measured.
+  assert.deepEqual(got.get('×1.03 all')!.accepted, [11, 10, 9, 8, 7, 6, 5, 4]);
+  // Sustained from the first field day (10-20) the same ×1.03 IS refused, from 11-01 at either line: the two weeks to 10-31 and
+  // 11-01 read 1.0555 and 1.0593 with every day faulted (1.0247 and 1.0285 honest). ×1.05 from 10-20 is refused from 10-30 (10-29).
+  const sustained = (scale: number, threshold?: number) => EVENINGS.filter((e) => e >= '2026-10-28')
+    .map((E) => run(E, { fault: { scale, fromDay: '2026-10-20' }, threshold }).v).map((v) => `${v.asOfDay.slice(5)} ${v.ok ? 'P' : 'R'} ${v.checks.ratio}`);
+  for (const t of [undefined, 1.04]) {
+    assert.deepEqual(sustained(1.03, t).slice(0, 6), ['10-28 P 1.0179', '10-29 P 1.0297', '10-30 P 1.0345', '10-31 P 1.0345', '11-01 R 1.0555', '11-02 R 1.0593'], `×1.03 from 10-20 at ${t ?? 'the line'}`);
+  }
+  assert.deepEqual(sustained(1.05).slice(0, 3), ['10-28 P 1.0376', '10-29 P 1.0497', '10-30 R 1.0546']);
+  assert.deepEqual(sustained(1.05, 1.04).slice(0, 3), ['10-28 P 1.0376', '10-29 R 1.0497', '10-30 R 1.0546']);
+  assert.deepEqual(sustained(1.10).slice(0, 1), ['10-28 R 1.087']);
 });
 
 test('★★ M3: a planted ×1.10 refusal carries figures only — the balance, its daylight-only form and the night residual — and no cause', () => {
   const { v } = run('2026-11-01', { fault: { scale: 1.10, fromDay: '2026-10-28' } });
-  assert.deepEqual(v.reason, { code: 'balance', windowEnd: '2026-10-31', ratio: 1.0613, daylightRatio: 1.0207, nightResidualKwhPerNight: -1.65, threshold: 1.04 });
+  assert.deepEqual(v.reason, { code: 'balance', windowEnd: '2026-10-31', ratio: 1.0613, daylightRatio: 1.0207, nightResidualKwhPerNight: -1.65, threshold: 1.05 });
   const honest = run('2026-11-01').v.checks;
+  assert.equal(honest.threshold, 1.05);
   assert.equal(honest.balanceDaylightRatio, 0.9855, 'the honest week reads below 1 on daylight alone; the nights carry the rest');
   assert.equal(honest.nightResidualKwhPerNight, -1.65);
-  assert.equal(honest.blindBandPct, 1.5, 'a sustained over-read below 1.04/R − 1 is not caught: disclosed');
+  assert.equal(honest.blindBandPct, 2.5, 'a sustained over-read below 1.05/R − 1 is not caught: disclosed');
+  // ★ The blind band moves with the line: about one point wider on every evening of the record (1.1–5.2% at 1.04, 2.1–6.3% at 1.05).
+  assert.equal(run('2026-11-01', { threshold: 1.04 }).v.checks.blindBandPct, 1.5, 'v1.204.0–v1.207.0');
+  const bands = (threshold?: number): number[] => EVENINGS.filter((e) => e >= '2026-10-28').map((E) => run(E, { threshold }).v.checks.blindBandPct as number);
+  assert.deepEqual(bands(), [6.3, 5, 4.5, 4.5, 2.5, 2.1, 5.5, 4.6, 4.6, 4, 4]);
+  assert.deepEqual(bands(1.04), [5.2, 4, 3.5, 3.5, 1.5, 1.1, 4.5, 3.6, 3.6, 3, 3]);
 });
 
 test('★★ capacity: fit and check both on the held per-Core capacities move a window ≤ 1.1 % from nameplate; a lost pack on one slot ≤ 0.8 %', () => {
@@ -301,7 +374,7 @@ test('★★ L1: one reason per clause, in precedence — the record, the capaci
   assert.deepEqual((nv.reason as { uncounted: Array<{ day: string; cause: string }> }).uncounted.find((u) => u.day === '2026-10-27'), { day: '2026-10-27', cause: 'no-vendor-row' });
 });
 
-test('★★★ (owner) 1.040 is strict: a window reading exactly the threshold passes, a hair above refuses', () => {
+test('★★★ (owner) the line is strict: a window reading exactly the threshold passes, a hair above refuses (on the record, the threshold set to the window\'s own ratio; at 1.05 itself in panelPvBasis.test.ts)', () => {
   const E = '2026-10-28';
   const { table } = assembleUcTable(recordSources(E), E);
   const v = upperCheck(table, E);

@@ -1607,7 +1607,7 @@ function cushionOnlyPushText(plan: NightChargePlan | null, form: 'charge' | 'sho
 }
 
 /** ★★★ v1.204.0 — a plan sized on the PANEL-MEASURED band, in the push: " Solar from the panel's readings (7-day energy balance
- *  1.0044, refused above 1.04)." '' on every other plan. PURE. */
+ *  1.0044, refused above 1.05)." (the plan's own threshold: 1.04 before v1.207.1) '' on every other plan. PURE. */
 function panelBasisPushText(plan: NightChargePlan): string {
   return plan.pvBasis != null ? pvBasisPushText({ pvBasis: plan.pvBasis, pvBasisChecks: plan.pvBasisChecks ?? null, pvBasisRefusedBy: null }) : '';
 }
