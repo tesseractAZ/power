@@ -17,11 +17,13 @@
  * clear. A raise needs a dwell, a clear needs capacity evidence held for a dwell, and neither is made by a restart, a
  * skipped body, a stale shadow, a missing panel or age.
  *
- * NOT ESTABLISHED (one event and one raw sample are on record): the fault-time value of every flag, and whether the lost
- * slot's own capacity or connection flag changes. The capacity rule itself was checked against 4,114 hourly rows of Home
- * Assistant's statistics: 4,060 at 92.2 kWh, 44 at 61.4 (this event) and six hours with an earlier dip: four of minutes
- * (one to 0.0 kWh, three to 61.4 kWh) and two of tens of minutes (to 30.7 kWh). Their causes are not established here,
- * and a drop that lasts a dwell raises whatever its cause: that is why capacity alone needs the full 15 minutes.
+ * NOT ESTABLISHED (one event and one raw sample are on record): the fault-time value of every flag but two, and whether
+ * the lost slot's own capacity changes. The two: the slot stayed listed as connected (the add-on's membership history
+ * follows that flag and holds no change in those hours) with no error code (the source-error rule reads it and did not
+ * fire). The capacity rule itself was checked against 4,114 hourly rows of Home Assistant's statistics: 4,060 at 92.2 kWh,
+ * 44 at 61.4 (this event) and the other 10 in six earlier dips: four of minutes (one to 0.0 kWh, three to 61.4 kWh) and
+ * two of tens of minutes (to 30.7 kWh). Their causes are not established here, and a drop that lasts a dwell raises
+ * whatever its cause: that is why capacity alone needs the full 15 minutes.
  */
 import { SHP2_SOURCE_SLOTS } from './hwSpec.js';
 import { zonedParts, type SiteParts } from './siteTime.js';
@@ -269,6 +271,11 @@ export interface PoolOutEpisode {
   /** E and K of the dwell-confirmed observation (the severity reads these, never the live figure). */
   expectedWh: number;
   countedWh: number;
+  /** A raise by the FLAP rule has no dwell behind it: its count and its capacity are those of the two readings of its
+   *  third step. This is that step's tally, going on through a dwell of counted readings at the latched count or above
+   *  it; until it has met one, the severity does not read the capacity. Null: the capacity is dwell-confirmed (every
+   *  raise by a dwell, and every dwell-confirmed set change). */
+  unconfirmed: PoolOutStreak | null;
   before: PoolOutBefore | null;
   /** The newest counted (STRONG or SLOW) observation: the return notice's "before" percent. */
   lastFault: { atMs: number; pct: number | null; capWh: number | null };
@@ -757,6 +764,17 @@ function countNames(st: PoolOutStreak, obs: PoolObservation, sig: PoolSignals): 
 
 const withinStreakGap = (st: PoolOutStreak, atMs: number): boolean => atMs - st.lastMs >= 0 && atMs - st.lastMs <= POOL_OUT_STREAK_MAX_GAP_MS;
 
+/** A tally's dwell starts again from `atMs`: nothing counted yet (its count, capacity and names are left alone). */
+function restartTally(st: PoolOutStreak, atMs: number): void {
+  st.firstMs = atMs;
+  st.lastMs = atMs;
+  st.counted = 0;
+  st.strong = 0;
+  st.firstStrongMs = null;
+  st.lastStrongMs = null;
+  st.run = 0;
+}
+
 /**
  * Count one STRONG or SLOW observation into a streak (the pre-raise streak, or an episode's pending set change).
  *
@@ -817,7 +835,8 @@ function agreesWithLatch(ep: PoolOutEpisode, k: number, named: number[] | null):
 export function poolOutSeverity(state: PoolOutState): 'warning' | 'critical' | null {
   const ep = state.episode;
   if (!ep) return null;
-  if (ep.countedWh < ep.baselineWh / 2) return 'critical';
+  // A flap raise's capacity is two readings' (PoolOutEpisode.unconfirmed): no dwell has confirmed it, so it decides nothing.
+  if (ep.unconfirmed == null && ep.countedWh < ep.baselineWh / 2) return 'critical';
   return ep.gridCritical ? 'critical' : 'warning';
 }
 
@@ -845,6 +864,7 @@ export function advancePoolOut(prev: PoolOutState, obs: PoolObservation): PoolOu
     logs.push({ level, text });
   };
   const severityBefore = poolOutSeverity(s);
+  const gridCriticalBefore = s.episode?.gridCritical === true;
 
   const keptEnds = s.ends.filter((e) => obs.atMs - e.atMs <= POOL_OUT_END_KEEP_MS);
   if (keptEnds.length !== s.ends.length) { s.ends = keptEnds; changed = true; }
@@ -891,7 +911,9 @@ export function advancePoolOut(prev: PoolOutState, obs: PoolObservation): PoolOu
         s.blind.warned = true;
         changed = true;
         events.push({ type: 'blind', atMs: obs.atMs, reason: reason as PoolSkipReason });
-        logs.push({ level: 'warn', text: `pool-out: no usable panel reading for ${Math.round((obs.atMs - s.blind.sinceMs) / 60_000)} min while the panel is fresh (${reason}); a Core leaving the pool cannot be seen until one arrives.` });
+        // The same words as the unjudged reading's line below: the clock runs through both, so "no usable reading
+        // for 30 min" was said of half an hour in which ten readings were usable and unjudged.
+        logs.push({ level: 'warn', text: `pool-out: no capacity verdict for ${Math.round((obs.atMs - s.blind.sinceMs) / 60_000)} min while the panel is fresh (${reason}); a Core leaving the pool cannot be seen until one arrives.` });
       }
     }
     return { state: s, signals: null, skip: reason, converted: null, events, logs, changed };
@@ -946,7 +968,7 @@ export function advancePoolOut(prev: PoolOutState, obs: PoolObservation): PoolOu
         // Adopted with NO reference before it (a first start, or a lost state file) while the panel does not list
         // every slot as connected: a Core already out in that shape is outside this reference, and nothing here can
         // tell its slot from an empty one. Said once, at warn.
-        const leftOut = obs.diag.slots.map((x) => x.slot).filter((n) => !next.roster.includes(n));
+        const leftOut = poolReferenceLeavesOut(obs.diag, next.roster);
         if (s.baseline == null && leftOut.length > 0) {
           logs.push({ level: 'warn', text: `pool-out: this reference has none on record before it and leaves out ${slotWord(leftOut)}, which the panel does not list as connected — a Core in ${leftOut.length === 1 ? 'that slot' : 'those slots'} that is out of the pool is not counted here, and is not seen leaving.` });
         }
@@ -1011,7 +1033,8 @@ export function advancePoolOut(prev: PoolOutState, obs: PoolObservation): PoolOu
         // no larger one has), with that count's capacity and the set its readings named on a dwell of their own. Never
         // the count, the capacity or the name of the one reading that completes the dwell. A larger count still on its
         // way goes on as the episode's pending change.
-        const top = confirmedCount(st) ?? st;
+        const confirmed = confirmedCount(st);
+        const top = confirmed ?? st;
         const slots = confirmedNames(top);
         // A set its readings agree on but have not yet named for a dwell is not thrown away: it goes on as the pending
         // change, and is latched (and logged) when its own readings complete the naming dwell.
@@ -1020,6 +1043,8 @@ export function advancePoolOut(prev: PoolOutState, obs: PoolObservation): PoolOu
           sinceMs: how === 'flap' ? s.flaps[0] : st.firstMs, raisedAtMs: obs.atMs, how, flapSteps: how === 'flap' ? s.flaps.length : 0,
           k: top.k, slots, rosterSize: roster.length,
           baselineWh: s.baseline?.poolCapWh ?? top.expectedWh, expectedWh: top.expectedWh, countedWh: top.countedWh,
+          // No count's readings have met a dwell (only the flap rule raises so): the step's own tally goes on toward one.
+          unconfirmed: confirmed == null ? { ...st, before: null, more: null } : null,
           before: st.before, lastFault: { atMs: obs.atMs, pct: obs.diag.pool.coherent ? obs.diag.pool.pct : null, capWh: cap.countedWh },
           evidence: slots ? top.evidence : null, gridCritical: false, gridAbsentAtMs: null, change: pending, less: null, clear: null, changes: [],
         };
@@ -1078,10 +1103,24 @@ export function advancePoolOut(prev: PoolOutState, obs: PoolObservation): PoolOu
         const named = confirmedNames(ls);
         ep.less = null;
         ep.change = null;
+        ep.unconfirmed = null; // this count's own readings have met a dwell
         setChanged(ls, named, named);
       }
     } else if (counted) {
       ep.less = null;
+      if (ep.unconfirmed != null) {
+        /* A FLAP raise's capacity on its way to a dwell: every counted reading at the latched count or above it, by the
+           streak's own rules (it starts again after the streak gap, and after the healthy readings that end a streak,
+           below). Until the dwell is met the severity does not read the capacity. */
+        const un = ep.unconfirmed;
+        if (un.counted === 0 || !withinStreakGap(un, obs.atMs)) restartTally(un, obs.atMs);
+        countDwell(un, obs, sig);
+        if (dwellMet(un) != null) {
+          ep.unconfirmed = null;
+          changed = true;
+          logs.push({ level: 'info', text: `pool-out: the capacity behind this alarm (${kwh(ep.countedWh)} kWh, raised by the flap rule) has now read ${ep.k} slot${ep.k === 1 ? '' : 's'} short or more for a full dwell — confirmed (${verdicts}).` });
+        }
+      }
       // A pending change whose last reading is more than the streak gap old is over, whatever this reading says.
       if (ep.change != null && !withinStreakGap(ep.change, obs.atMs)) ep.change = null;
       if (!agreesWithLatch(ep, cap.k as number, sig.named)) {
@@ -1093,6 +1132,7 @@ export function advancePoolOut(prev: PoolOutState, obs: PoolObservation): PoolOu
           // is never un-named by a later reading that only counts: it stays, with the rest "not identified".
           const named = confirmedNames(top);
           ep.change = top.more;
+          ep.unconfirmed = null; // this count's own readings have met a dwell
           setChanged(top, named, named ?? ep.slots);
         } else if (ep.change.k === ep.k) {
           // The SAME count: only the name can differ, and a name needs a dwell of readings that agree on it. Readings
@@ -1105,6 +1145,15 @@ export function advancePoolOut(prev: PoolOutState, obs: PoolObservation): PoolOu
             setChanged(ch, named, named);
           }
         }
+      } else if (ep.change != null && ep.change.k === ep.k) {
+        /* The reading says what the latch says, while another NAME is on its way at the latched count.
+           - It NAMES the latched set: the pending name is contradicted, and its naming is over. (Readings naming two
+             slots by turns used to let each complete "a dwell of its own readings", and the title flipped between them.)
+           - It only COUNTS: the pool is still this many short, which says nothing against the pending name, so that
+             name does not age out between its readings (a slot that discharges for four minutes in every twenty is
+             named by each burst, more than the streak gap apart). */
+        if (sig.named != null) ep.change = ep.change.more;
+        else ep.change.lastMs = obs.atMs;
       }
     }
     if (cap.v === 'healthy') {
@@ -1131,6 +1180,8 @@ export function advancePoolOut(prev: PoolOutState, obs: PoolObservation): PoolOu
         }
       }
       ep.clear = run;
+      // The healthy readings that end a streak (three, spanning two minutes) start a flap raise's tally again as well.
+      if (ep.unconfirmed != null && ep.unconfirmed.counted > 0 && runMet(run, POOL_OUT_IN_RESET_OBS, POOL_OUT_IN_RESET_MS)) restartTally(ep.unconfirmed, obs.atMs);
       if (first) {
         changed = true;
         logs.push({ level: 'info', text: `pool-out: the capacity reads the sum of its slots again (${kwh(cap.countedWh as number)} kWh) — the alarm stands until that has held (${verdicts}).` });
@@ -1179,7 +1230,13 @@ export function advancePoolOut(prev: PoolOutState, obs: PoolObservation): PoolOu
   const severityAfter = poolOutSeverity(s);
   if (severityAfter != null && severityBefore != null && severityAfter !== severityBefore) {
     events.push({ type: 'severity', atMs: obs.atMs, severity: severityAfter });
-    logs.push({ level: 'warn', text: `pool-out: severity ${severityBefore} → ${severityAfter} (${s.episode?.gridCritical ? 'the panel and the add-on both report no grid' : severityAfter === 'critical' ? 'the confirmed capacity is under half the reference' : 'the grid reads present again'}).` });
+    // WHY, from what moved in this step: the grid flag, or else the capacity the severity reads (a set change, or a
+    // flap raise's capacity confirmed). Two Cores out and one back is not "the grid reads present again".
+    const gridCriticalNow = s.episode?.gridCritical === true;
+    const why = severityAfter === 'critical'
+      ? (gridCriticalNow && !gridCriticalBefore ? 'the panel and the add-on both report no grid' : 'the confirmed capacity is under half the reference')
+      : (gridCriticalBefore && !gridCriticalNow ? 'the grid reads present again' : 'the confirmed capacity is no longer under half the reference');
+    logs.push({ level: 'warn', text: `pool-out: severity ${severityBefore} → ${severityAfter} (${why}).` });
   }
 
   return { state: s, signals: sig, skip: null, converted, events, logs, changed };
@@ -1201,9 +1258,20 @@ export function poolOutSensorState(state: PoolOutState, nowMs: number): 'on' | '
 }
 
 /** The boot orphan sweep may resolve this alert only once the tracker has, IN THIS PROCESS, raised or seen a full clear
- *  dwell of healthy capacity. A lost state file must not push a "Resolved" that nothing observed. */
-export function poolOutOrphanHoldReleased(state: PoolOutState): boolean {
-  return state.proc.raised || state.proc.cleanDwell;
+ *  dwell of healthy capacity — or when the END of that alarm is on file: no episode standing, and an end record dated
+ *  at or after the push being resolved (`pushedAtMs`). A lost state file must not push a "Resolved" that nothing
+ *  observed; an end the tracker itself recorded IS the observation, and it is the only release there is on a panel
+ *  with an empty slot, whose roster can never earn the clean dwell. An end older than the push is another episode's. */
+export function poolOutOrphanHoldReleased(state: PoolOutState, pushedAtMs?: number): boolean {
+  if (state.proc.raised || state.proc.cleanDwell) return true;
+  const end = state.episode == null ? poolOutLatestEnd(state) : null;
+  return end != null && pushedAtMs != null && end.atMs >= pushedAtMs;
+}
+
+/** The slots a reference leaves out of what the panel's data holds (every slot of the panel has a block in it): a Core
+ *  out of the pool in one of them is not counted against that reference, and is not seen leaving. */
+export function poolReferenceLeavesOut(diag: PoolDiag, roster: number[]): number[] {
+  return diag.slots.map((x) => x.slot).filter((n) => !roster.includes(n));
 }
 
 /** The alert id: the bare stem for the house panel, the stem plus the panel's serial for a secondary one. */
@@ -1218,7 +1286,8 @@ export function poolOutAlertId(panelSn: string, housePanel: boolean): string {
  *
  * WHAT READS IT. `pushNow` for the quiet hours: alerts.ts stamps Alert.pushInQuietHours from it, and the alert monitor
  * reads that flag in the three places an alert can be kept from being pushed at once: the notify quiet hours, the push
- * debounce, and the hold after a send that failed (the send is tried again at every pass). `speak`: NOTHING reads it
+ * debounce, and the hold after a send that failed (the send is tried again after 20 s, then at waits that double to
+ * 10 minutes, and the digest never stands in for it). `speak`: NOTHING reads it
  * in this release. Speech is the broadcast's, by the rules it applies to every alert (broadcast.ts), and this output
  * states what those rules give for this alarm under the shipped options; test/poolOutDelivery.test.ts pins it to those
  * rules and options. A change to `speak` here changes no speech until the broadcast is made to read it.
@@ -1328,6 +1397,8 @@ const readEpisode = (v: unknown): PoolOutEpisode => {
   return {
     sinceMs: num(o.sinceMs), raisedAtMs: num(o.raisedAtMs), how: oneOf(o.how, ['strong', 'slow', 'flap'] as const), flapSteps: count(o.flapSteps),
     k, slots: slotSetN(o.slots), rosterSize: count(o.rosterSize), baselineWh: num(o.baselineWh), expectedWh: num(o.expectedWh), countedWh: num(o.countedWh),
+    // Absent (a file written before the field existed): confirmed, as every raise then was taken to be.
+    unconfirmed: orNull(o.unconfirmed, (x) => readStreak(x)),
     before: orNull(o.before, readBefore), lastFault: { atMs: num(lf.atMs), pct: numN(lf.pct), capWh: numN(lf.capWh) },
     evidence: orNull(o.evidence, readEvidence), gridCritical: bool(o.gridCritical), gridAbsentAtMs: numN(o.gridAbsentAtMs),
     change: orNull(o.change, (x) => readStreak(x)),
@@ -1537,17 +1608,26 @@ function sinceSentence(ep: PoolOutEpisode, ctx: PoolOutTextCtx): string {
   const head = ep.how === 'flap'
     ? `It has read under the sum of its slots ${ep.flapSteps} times since ${since}`
     : `It first read under the sum of its slots at ${since}`;
+  // `before` is the last whole reading BEFORE the streak that raised (a flap raise: before its last step), and the
+  // sentence says so: it stands on while the clear is pending on one reading, beside a newer reading at the same figure.
   return ep.before
-    ? `${head}; the last reading at ${kwh(ep.before.capWh)} kWh was at ${poolOutWhen(ep.before.atMs, ctx)}.`
+    ? `${head}; the last reading at ${kwh(ep.before.capWh)} kWh before ${ep.how === 'flap' ? 'the latest of them' : 'that'} was at ${poolOutWhen(ep.before.atMs, ctx)}.`
     : `${head}; no earlier reading at the full capacity is on record.`;
 }
 
 function observedSentence(ep: PoolOutEpisode, ctx: PoolOutTextCtx): string {
   const ev = ep.evidence;
   if (ep.slots == null || ev == null) {
-    return ep.k === 1
-      ? 'Which slot is not established: the readings do not single out one slot.'
-      : 'Which slots are not established: the readings do not single them out.';
+    const head = ep.k === 1 ? 'Which slot is not established' : 'Which slots are not established';
+    // A set the readings agree on, on its way to the naming dwell (the pending change at the latched count): the one
+    // push this alarm gets says what they point at, where "the readings do not single out one slot" was false of them.
+    // (Readings that named different sets leave no pending change behind them: its naming was started again.)
+    const pend = ep.change != null && ep.change.k === ep.k && ep.change.slots != null && ep.change.names != null ? ep.change : null;
+    if (pend != null && pend.names != null && pend.slots != null) {
+      const n = pend.names.n;
+      return `${head}: ${n} reading${n === 1 ? '' : 's'} since ${poolOutWhen(pend.names.firstMs, ctx)} point${n === 1 ? 's' : ''} at ${slotWord(pend.slots)}, and a slot is named only from ${POOL_OUT_STRONG_MIN_OBS} such readings over ${POOL_OUT_STRONG_MIN_MS / 60_000} minutes.`;
+    }
+    return `${head}: no slot has been named by ${POOL_OUT_STRONG_MIN_OBS} readings over ${POOL_OUT_STRONG_MIN_MS / 60_000} minutes.`;
   }
   const at = poolOutWhen(ev.atMs, ctx);
   if (ev.by === 'flow' && ev.w != null) {
@@ -1613,7 +1693,8 @@ export function poolOutDetail(state: PoolOutState, ctx: PoolOutTextCtx): string 
   if (!ep) return '';
   const last = state.last;
   const out: string[] = [leadSentence(ep, last, ctx)];
-  // A critical raised by the grid says so second, where the spoken lead still carries it.
+  // A critical raised by the grid says so second: the reason for the severity, straight after what is read. (The
+  // voice reads poolOutSpoken, which carries it too.)
   const gridSecond = ep.gridCritical && ep.gridAbsentAtMs != null;
   if (gridSecond) out.push(`The panel reported no grid at ${poolOutWhen(ep.gridAbsentAtMs as number, ctx)}.`);
   // The title carries the LATCHED count and the lead states the newest reading. When that reading is short by another
@@ -1651,11 +1732,44 @@ export function poolOutDetail(state: PoolOutState, ctx: PoolOutTextCtx): string 
   return out.join(' ');
 }
 
+/** The spoken message of a critical says the title twice around its detail, and the first of two spoken passes has
+ *  17 s on the install it was measured on, where 318 characters rendered in 12.8 to 13.9 s (plus about 1.5 s after a
+ *  change of voice): 354 characters is the most that fits. The detail's own lead ran this alarm's criticals to 349–446.
+ *  test/poolOutAlert.test.ts builds every shape and holds each at or under this figure. */
+export const POOL_OUT_SPOKEN_MESSAGE_MAX_CHARS = 345;
+
+/**
+ * What the broadcast READS after the title, in place of the first 200 characters of the detail: the capacity in one
+ * short sentence, and the grid in a second when the alarm is critical by it. The push and the card keep the whole
+ * detail. Every figure is a reading with its tense or its time, as in the detail.
+ */
+export function poolOutSpoken(state: PoolOutState, ctx: PoolOutTextCtx): string {
+  const ep = state.episode;
+  if (!ep) return '';
+  const last = state.last;
+  const { countedWh, expectedWh } = last?.cap ?? { countedWh: null, expectedWh: null };
+  let lead: string;
+  if (last != null && last.cap.v === 'fault' && countedWh != null && expectedWh != null) {
+    lead = `Backup capacity reads ${kwh(countedWh)} of ${kwh(expectedWh)} kWh.`;
+  } else if (last != null && last.cap.v === 'healthy' && countedWh != null && expectedWh != null && ep.clear != null) {
+    // The clear is pending: what the panel reads now. One reading is said as one reading, as the detail says it.
+    lead = ep.clear.n < 2
+      ? `Backup capacity read ${kwh(countedWh)} of ${kwh(expectedWh)} kWh at ${poolOutWhen(ep.clear.firstMs, ctx)}.`
+      : `Backup capacity has read ${kwh(countedWh)} of ${kwh(expectedWh)} kWh since ${poolOutWhen(ep.clear.firstMs, ctx)}.`;
+  } else {
+    // No newest reading, or one whose capacity cannot be compared: the newest SHORT reading, in the past tense.
+    lead = `Backup capacity read ${kwh(ep.lastFault.capWh ?? ep.countedWh)} of ${kwh(ep.expectedWh)} kWh at ${poolOutWhen(ep.lastFault.atMs, ctx)}.`;
+  }
+  return ep.gridCritical && ep.gridAbsentAtMs != null ? `${lead} No grid reported at ${poolOutWhen(ep.gridAbsentAtMs, ctx)}.` : lead;
+}
+
 export interface PoolOutAlertParts {
   severity: 'warning' | 'critical';
   title: string;
   fault: string;
   detail: string;
+  /** What the broadcast reads after the title (poolOutSpoken); the detail is the push body and the card. */
+  spoken: string;
   facts: Array<{ label: string; value: string }>;
 }
 
@@ -1686,7 +1800,7 @@ export function poolOutAlertParts(state: PoolOutState, ctx: PoolOutTextCtx): Poo
     facts.push({ label: 'Grid', value: ep.gridCritical ? (last.grid === 'present' ? 'not detected; present on the newest reading' : 'not detected') : last.grid === 'present' ? 'present' : last.grid === 'absent' ? 'not detected on the newest reading' : 'not known' });
   }
   facts.push({ label: 'Since', value: poolOutWhen(ep.sinceMs, ctx) });
-  return { severity, title: poolOutTitle(ep.k, ep.slots), fault: poolOutFault(ep.k, ep.slots), detail: poolOutDetail(state, ctx), facts };
+  return { severity, title: poolOutTitle(ep.k, ep.slots), fault: poolOutFault(ep.k, ep.slots), detail: poolOutDetail(state, ctx), spoken: poolOutSpoken(state, ctx), facts };
 }
 
 /** The newest end record: what the resolve hook of this alert (and only this one) sends in place of the stale detail. */

@@ -628,6 +628,20 @@ interface TrackedAlert {
    *  68.9h log review found a spurious "Resolved: EcoFlow Cloud session stale"
    *  push after every daily reboot from exactly that boot-seeded path. */
   pushSent?: boolean;
+  /** v1.208.0 — an alert pushed at any hour (Alert.pushInQuietHours) whose send FAILED: how many sends have failed in a
+   *  row, and the earliest instant of the next try (pushRetryDelayMs). Cleared by a send that does not fail. */
+  failedSends?: number;
+  retryAtMs?: number;
+}
+
+/** v1.208.0 — a push that failed, for an alert that is pushed at any hour: the wait before the next try. 20 s after the
+ *  first failure (one evaluation), doubling to 10 minutes. Trying at every evaluation cost a WARN line and a file write
+ *  every 20 s for as long as the channel was down (4,320 a day), and each try against a hung Home Assistant held the
+ *  evaluation for its timeout. PURE. */
+export const PUSH_RETRY_FIRST_MS = 20_000;
+export const PUSH_RETRY_MAX_MS = 10 * 60_000;
+export function pushRetryDelayMs(failedSends: number): number {
+  return Math.min(PUSH_RETRY_MAX_MS, PUSH_RETRY_FIRST_MS * 2 ** Math.max(0, Math.min(30, failedSends - 1)));
 }
 
 /** A historical record of an alert that was raised and later cleared. */
@@ -1799,10 +1813,11 @@ export function bootSeedNotified(p: {
   // said it would be. Seeded only on a delivery record, like a critical.
   if (p.heldByMaintenance === true) return p.alreadyNotified;
   // v1.208.0 — NOR "CORE OUT OF THE BACKUP POOL". The store restores a standing episode from its own state file, so
-  // this alarm standing at the first pass does not mean it was announced before the restart: a restart inside the
-  // push debounce (the episode is saved at the raise, the push follows a minute later) left it on file with no
-  // notification anywhere, and the seed then kept it unpushed for the whole episode. Seeded only on a delivery
-  // record, like a critical: one that was pushed stays deduped, one that was not is pushed by this process.
+  // this alarm standing at the first pass does not mean it was announced before the restart: a restart between the
+  // raise and its push (the episode is saved at the raise; the push goes at the monitor's next evaluation, or later
+  // when a send fails) left it on file with no notification anywhere, and the seed then kept it unpushed for the
+  // whole episode. Seeded only on a delivery record, like a critical: one that was pushed stays deduped, one that
+  // was not is pushed by this process.
   if (p.alert.id === POOL_OUT_ALERT_ID || p.alert.id.startsWith(`${POOL_OUT_ALERT_ID}-`)) return p.alreadyNotified;
   return p.firstRun || p.alreadyNotified;
 }
@@ -2125,7 +2140,10 @@ export function idlePoolInputsFrom(
  * for its panel has, IN THIS PROCESS, either raised (the alert is then in the set and is no orphan) or seen one full
  * clear dwell of healthy capacity against a roster of EVERY slot of the panel (the Core is demonstrably back; a roster
  * that leaves a slot out, which is what a lost state file gives with a Core unplugged, proves nothing about that
- * slot). Held past the sweep's deadline it is dropped without a "Resolved", like every held orphan. PURE.
+ * slot) — or until it holds the END of that alarm on file, dated at or after the push being resolved (the store's
+ * `released` is asked with the record's time: the tracker saw it end, before the restart; on a panel with an empty
+ * slot that is the only release there is). Held past the sweep's deadline it is dropped without a "Resolved", like
+ * every held orphan. PURE.
  *
  * `sourceSn` is the notify record's (every pool-out push records its panel); a secondary panel's id also ends with
  * its serial. With neither there is no tracker to ask, and the id is held.
@@ -2152,6 +2170,22 @@ export function poolOutResolveText(
 ): { title: string; body: string } | null {
   if (alert.id !== POOL_OUT_ALERT_ID && !alert.id.startsWith(`${POOL_OUT_ALERT_ID}-`)) return null;
   return alert.sourceSn == null ? null : endNotice(alert.sourceSn);
+}
+
+/**
+ * v1.208.0 — IS THE NOTIFICATION ON RECORD AN EARLIER EPISODE'S? For a standing "Core out of the backup pool" alert:
+ * the instant the alarm that was pushed at `rec.ts` ENDED, when the tracker holds an end record at or after that push
+ * (`endedSince` is the store's SnapshotStore.poolOutEndedSince), else null. The alert standing now is then a new
+ * episode, and the record must not keep it from being pushed. With no end on file (the usual case, and a lost state
+ * file) the record is this alarm's own. Any other alert: null. PURE.
+ */
+export function poolOutEndedEpisodeAt(
+  alert: Pick<Alert, 'id' | 'sourceSn'>,
+  rec: { ts: number } | undefined,
+  endedSince: (panelSn: string, pushedAtMs: number) => number | null,
+): number | null {
+  const thisAlarm = alert.id === POOL_OUT_ALERT_ID || alert.id.startsWith(`${POOL_OUT_ALERT_ID}-`);
+  return !thisAlarm || rec == null || alert.sourceSn == null ? null : endedSince(alert.sourceSn, rec.ts);
 }
 
 /**
@@ -2692,6 +2726,18 @@ export function startAlertMonitor(
     } catch { /* corrupt sidecar = start empty, exactly pre-v1.86 behavior */ }
   };
   rehydrateDigestState();
+  /** v1.208.0 — an alert that is pushed at any hour (Alert.pushInQuietHours) whose push went out after a send that
+   *  failed: its retry clock is cleared and it leaves the digest's queue, in memory and on file. Left in the queue file,
+   *  a restart before the digest restored it as a hold, and the 07:00 digest listed it as "held overnight" though it
+   *  had been delivered. */
+  const dropDeliveredHold = (t: TrackedAlert, id: string): void => {
+    t.failedSends = undefined;
+    t.retryAtMs = undefined;
+    t.queuedRehydrated = undefined;
+    const heldAt = quietQueue.findIndex((q) => q.id === id);
+    if (heldAt >= 0) quietQueue.splice(heldAt, 1);
+    if (rehydratedHolds.delete(id) || heldAt >= 0) persistDigestState();
+  };
 
   // v0.85.0 — cleared-alert history persistence. The in-memory clearedLog was
   // wiped on every restart, so on a host that power-cycles daily the operator
@@ -2997,7 +3043,13 @@ export function startAlertMonitor(
     } catch (e: any) {
       // v0.80.0 — identity + retry intent in the failure line (the old
       // identity-free info line hid which push a real HTTP 400 ate).
-      warn(`notify: WARNING — send failed for "${title}" — ${e?.message ?? e}; will retry next evaluate tick`);
+      // v1.208.0 — what follows a failure, said as it is. Only a resolve is tried again at the next evaluation; a new
+      // alert is held for the digest (an escalation still pushes), and one that is pushed at any hour is tried again
+      // after a wait (pushRetryDelayMs).
+      const next = kind === 'resolved' ? 'will retry next evaluate tick'
+        : alert.pushInQuietHours === true ? `it will be tried again, after ${PUSH_RETRY_FIRST_MS / 1000} s and then at doubling waits up to ${PUSH_RETRY_MAX_MS / 60_000} min`
+          : 'held for the morning digest; an escalation is tried again at the next evaluation';
+      warn(`notify: WARNING — send failed for "${title}" — ${e?.message ?? e}; ${next}`);
       return 'failed';
     }
   };
@@ -3170,6 +3222,13 @@ export function startAlertMonitor(
       const digestSentMs = Date.now();
       for (const qa of pending) {
         const qt = tracked.get(qa.id);
+        // v1.208.0 — an alert that is pushed at any hour is in this queue only because its own push failed. The digest
+        // line is a title; the push it is owed carries the detail, so the digest does not mark it notified: it stays
+        // owed, and since this send just worked it is tried at the next evaluation, not after the rest of its wait.
+        if (qa.pushInQuietHours === true) {
+          if (qt) qt.retryAtMs = 0;
+          continue;
+        }
         // v0.80.0 — RATCHET, never regress: a queued warning that escalated and
         // was dispatched directly (critical break-through, or the post-quiet
         // pre-digest window) already holds the higher severity; re-marking it
@@ -3900,6 +3959,28 @@ export function startAlertMonitor(
       }
     }
 
+    // v1.208.0 — "CORE OUT OF THE BACKUP POOL" RAISED AGAIN AFTER THE ALARM ON RECORD ENDED. A "Resolved" waits for
+    // the notify quiet hours to end, and with it the tracked entry (still marked notified) and the notify record: an
+    // alarm that rose again in that time continued the old entry, or was taken as already notified after a restart,
+    // and was never pushed. A second loss in one night left nothing on the phone but the first one's card (slot 1 out
+    // at 23:10 and back at 23:23, slot 2 out at 01:00: one push, naming slot 1). The tracker's own end record says
+    // which it is (poolOutEndedEpisodeAt): an end at or after the push on record means that push's alarm is over and
+    // the one standing is NEW. The old episode is closed at that end, through the path a clear uses, and the
+    // rising-edge loop below opens a fresh entry, pushed at the next evaluation under the same card. The card the old
+    // episode put on the screen is still owed its dismissal, so the delivered-push flag carries over.
+    for (const a of alerts) {
+      const rec = persistedNotified.get(a.id);
+      const endedAt = poolOutEndedEpisodeAt(a, rec, (sn, pushedAtMs) => store.poolOutEndedSince(sn, pushedAtMs));
+      if (rec == null || endedAt == null) continue;
+      const t = tracked.get(a.id);
+      packReplaced.set(a.id, { pushSent: rec.sent === true || t?.pushSent === true });
+      if (t) retireTrackedAlert(a.id, t, endedAt); // reads the OLD onset — must precede the restamp
+      persistedNotified.delete(a.id);
+      persistNotified();
+      restampAlertOnset(a.id, now);
+      log(`notify: "${a.title}" is a new alarm — the one on record ended at ${new Date(endedAt).toISOString()} (its notice was still waiting); this one is pushed`);
+    }
+
     // v1.186.0 — new alerts whose feature snapshot is taken after this tick's dispatches.
     const featureCaptures: Alert[] = [];
     // Rising edges + debounce
@@ -4031,8 +4112,8 @@ export function startAlertMonitor(
       // surfaces. Critical still bypasses (these are never critical, but the
       // ordering keeps that invariant explicit).
       // v1.208.0 — nor does an alert that is pushed at any hour (Alert.pushInQuietHours: shp2-pool-out) wait out the
-      // push debounce: its producer has already held it through a dwell of ten to fifteen minutes of readings, so the
-      // debounce could only delay it.
+      // push debounce: its producer has already held it through a dwell of ten to fifteen minutes of readings (or, for
+      // a raise by its flap rule, through three dips inside an hour), so the debounce could only delay it.
       const debounceMs = a.severity === 'critical' || a.pushInQuietHours === true ? 0 : notifyDebounceMsFor(a);
       // v0.23.0 — re-notify when a PERSISTENT alert ESCALATES above the severity
       // it was last dispatched at. The motivating case: shp2-below-reserve flips
@@ -4060,6 +4141,9 @@ export function startAlertMonitor(
       // v1.208.0 — or the alert itself is one that is pushed at any hour (Alert.pushInQuietHours: shp2-pool-out,
       // by poolOut.ts poolOutDelivery). A push, not speech: the broadcast's quiet hours are untouched.
       const breaksThrough = (a.severity === 'critical' && CRITICAL_BREAKS_QUIET) || a.pushInQuietHours === true;
+      // v1.208.0 — an alert that is pushed at any hour, inside the wait after a send of it that failed
+      // (pushRetryDelayMs): not tried at this pass, whether the failed send was its first push or an escalation's.
+      const waitingToRetry = a.pushInQuietHours === true && now < (existing.retryAtMs ?? 0);
       // v0.76.0 — decision extracted to the pure decideAlertDispatch() (tested).
       const action = decideAlertDispatch({
         qualifies: qualifies(a.severity, cfg.minSeverity),
@@ -4067,10 +4151,10 @@ export function startAlertMonitor(
         // v1.208.0 — `queued` also marks an alert whose push FAILED and was held for the digest (v1.171.1, below), and
         // a queued alert is not eligible again: one failed send left it for the morning digest, which prints a title
         // and nothing else. An alert that is pushed at any hour is never queued for quiet hours, so for it the flag
-        // can only mean that failure, and it stays eligible: tried again at every pass until a send succeeds (the
-        // success clears the flag, and the digest then leaves it out).
-        alreadyQueued: existing.queued === true && a.pushInQuietHours !== true,
-        escalated,
+        // can only mean that failure, and it stays eligible: tried again once its wait is over (pushRetryDelayMs),
+        // until a send succeeds (the success clears the flag and takes it out of the digest's queue).
+        alreadyQueued: existing.queued === true && (a.pushInQuietHours !== true || waitingToRetry),
+        escalated: escalated && !waitingToRetry,
         debounceElapsed: now - existing.dwellFrom >= escDebounceMs,
         inQuiet: quiet,
         breaksThrough,
@@ -4127,9 +4211,12 @@ export function startAlertMonitor(
           // successful dispatch clears `queued` above, so it is never reported twice.
           existing.queued = true;
           const heldAt = quietQueue.findIndex((q) => q.id === a.id);
+          // v1.208.0 — written when the hold is new or its digest line changed, not at every failed retry.
+          const sameHold = heldBefore && heldAt >= 0 && quietQueue[heldAt].title === a.title && quietQueue[heldAt].severity === a.severity;
           if (heldAt >= 0) quietQueue[heldAt] = a; else quietQueue.push(a);
-          persistDigestState();
+          if (!sameHold) persistDigestState();
           if (!heldBefore) log(`notify: held "${a.title}" for the morning digest — its push failed and the condition may clear before a retry`);
+          if (a.pushInQuietHours === true) { existing.failedSends = (existing.failedSends ?? 0) + 1; existing.retryAtMs = now + pushRetryDelayMs(existing.failedSends); }
         }
         if (outcome !== 'failed') {
           existing.notified = true;
@@ -4144,6 +4231,8 @@ export function startAlertMonitor(
           // so a restart rehydrates pushSent/notifiedSeverity faithfully.
           persistedNotified.set(a.id, { ts: now, sent: outcome === 'sent', sev: a.severity, title: a.title, sourceSn: a.sourceSn });
           persistNotified();
+          // v1.208.0 — delivered (or handled) after a send that failed: no longer owed to the digest.
+          if (a.pushInQuietHours === true) dropDeliveredHold(existing, a.id);
         }
       }
     }
@@ -4389,7 +4478,7 @@ export function startAlertMonitor(
         // it became unobservable.
         unevaluable: (id, rec) => coldFeedOwns(id) || fallingEdgeFrozenByEvidence({
           id, deviceSns: deviceSnRoster, devices: snap.devices, nowMs: now, sourceSn: rec.sourceSn,
-        }) || heldForHydration(id) || poolOutOrphanHeld(id, rec.sourceSn, (sn) => store.poolOutOrphanReleased(sn)),
+        }) || heldForHydration(id) || poolOutOrphanHeld(id, rec.sourceSn, (sn) => store.poolOutOrphanReleased(sn, rec.ts)),
       });
       // Re-run while anything is held; latching here would strand those records
       // and the fix would be invisible after the first tick.
@@ -4400,7 +4489,7 @@ export function startAlertMonitor(
         if (heldOrphanLogged.has(id)) continue;
         heldOrphanLogged.add(id);
         const r = persistedNotified.get(id);
-        log(`notify: orphan resolve HELD — "${r?.title ?? id}" (${coldFeedOwns(id) ? 'alert feeds not yet delivered' : heldForHydration(id) ? 'no complete poll yet — the device list is empty' : poolOutOrphanHeld(id, r?.sourceSn, (sn) => store.poolOutOrphanReleased(sn)) ? 'the pool-out tracker has neither raised nor seen a full dwell of healthy capacity across every slot since the restart' : `${r?.sourceSn ?? 'source'} offline/stale`}; not a recovery)`);
+        log(`notify: orphan resolve HELD — "${r?.title ?? id}" (${coldFeedOwns(id) ? 'alert feeds not yet delivered' : heldForHydration(id) ? 'no complete poll yet — the device list is empty' : poolOutOrphanHeld(id, r?.sourceSn, (sn) => store.poolOutOrphanReleased(sn, r?.ts)) ? 'the pool-out tracker has neither raised nor seen a full dwell of healthy capacity across every slot since the restart, and holds no end of this alarm on file' : `${r?.sourceSn ?? 'source'} offline/stale`}; not a recovery)`);
       }
       for (const id of resolve) heldOrphanLogged.delete(id);
       for (const id of drop) {

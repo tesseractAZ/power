@@ -340,12 +340,19 @@ export interface Alert {
   shelvedUntilMs?: number;
   /**
    * v1.208.0 — this alert is pushed AT ONCE at any hour, at any severity: not held for the morning digest inside the
-   * notify quiet hours, not held by the push debounce, and tried again at every pass after a send that failed
-   * (alertMonitor reads it in those three places). The digest prints a title only, so a held alert arrives hours
-   * later with none of its detail. Set by one producer, from one policy function: `shp2-pool-out`, from poolOut.ts
+   * notify quiet hours, not held by the push debounce, and tried again after a send that failed, at waits that double
+   * from 20 s to 10 minutes (alertMonitor reads it in those three places). The digest prints a title only, so a held
+   * alert arrives hours later with none of its detail; for this one the digest never stands in for the push. Set by one producer, from one policy function: `shp2-pool-out`, from poolOut.ts
    * poolOutDelivery. It changes nothing about speech.
    */
   pushInQuietHours?: boolean;
+  /**
+   * v1.208.0 — what the broadcast reads after the title, in place of the first 200 characters of `detail`
+   * (ttsService.buildAlertMessage / buildAlertMessageEs). `detail` is written for the push and the card, and its lead
+   * can be longer than one spoken pass has time for: a critical says the title twice around it. Set by one producer,
+   * `shp2-pool-out` (poolOut.ts poolOutSpoken); every other alert is spoken from its detail as before.
+   */
+  spokenDetail?: string;
 }
 
 /** v1.187.0 — muteReason wordings shared by the alert producers and the monitor. */
@@ -2890,27 +2897,35 @@ function pushPoolOutAlerts(out: Alert[], devices: Record<string, DeviceSnapshot>
   if (!standing || standing.size === 0) return;
   const houseSn = poolOutHouseSn(devices);
   for (const [sn, parts] of standing) {
-    const panel = devices[sn];
-    // The id and the panel's name are the ones the store latched at the raise and keeps with the episode, so the
-    // alarm is in the set at the first pass after a restart even while no device list has arrived (a restart into a
-    // cloud outage), and under the same id whatever the house pin says by then. With neither a latch nor a listing
-    // (a state file from before the latch, for a panel not listed yet) there is no name to alert under; its pushed
-    // card is kept by the boot orphan hold.
-    const card = parts.card ?? null;
-    if (!panel && !card) continue;
-    out.push({
-      id: card?.id ?? poolOutAlertId(sn, sn === houseSn),
-      severity: parts.severity,
-      category: 'SHP2',
-      device: panel?.deviceName ?? (card as { device: string }).device,
-      sourceSn: sn,
-      title: parts.title,
-      fault: parts.fault,
-      detail: parts.detail,
-      facts: parts.facts,
-      // The delivery policy lives in poolOutDelivery and nowhere else: this asks it about the quiet hours.
-      ...(poolOutDelivery(parts.severity, true).pushNow ? { pushInQuietHours: true } : {}),
-    });
+    // CONTAINED per panel: computeAlerts builds the whole alert set, and an entry this cannot read (none is written by
+    // the store) must cost that one alarm and nothing else. Its pushed card is kept by the boot orphan hold.
+    try {
+      const panel = devices[sn];
+      // The id and the panel's name are the ones the store latched at the raise and keeps with the episode, so the
+      // alarm is in the set at the first pass after a restart even while no device list has arrived (a restart into a
+      // cloud outage), and under the same id whatever the house pin says by then. With neither a latch nor a listing
+      // (a state file from before the latch, for a panel not listed yet) there is no name to alert under; its pushed
+      // card is kept by the boot orphan hold.
+      const card = parts.card ?? null;
+      if (!panel && !card) continue;
+      out.push({
+        id: card?.id ?? poolOutAlertId(sn, sn === houseSn),
+        severity: parts.severity,
+        category: 'SHP2',
+        device: panel?.deviceName ?? (card as { device: string }).device,
+        sourceSn: sn,
+        title: parts.title,
+        fault: parts.fault,
+        detail: parts.detail,
+        // The one sentence the broadcast reads after the title (the detail's own lead is too long for a spoken pass).
+        ...(parts.spoken ? { spokenDetail: parts.spoken } : {}),
+        facts: parts.facts,
+        // The delivery policy lives in poolOutDelivery and nowhere else: this asks it about the quiet hours.
+        ...(poolOutDelivery(parts.severity, true).pushNow ? { pushInQuietHours: true } : {}),
+      });
+    } catch {
+      /* this panel's alarm could not be emitted on this pass; every other alert stands */
+    }
   }
 }
 

@@ -289,7 +289,7 @@ export function withPoolOutCards(fileText: string, cards: ReadonlyMap<string, Po
 /* ───────────────────────────── the event capture ───────────────────────────── */
 
 export type PoolEventKind = 'first-fault' | 'raised' | 'ended';
-/** Capture files kept; the oldest go first. */
+/** Capture files kept. Which go when there are more: poolEventsToDrop (the oldest first-fault ones first). */
 export const POOL_EVENT_KEEP = 20;
 /** The largest capture file, in bytes. */
 export const POOL_EVENT_MAX_BYTES = 64 * 1024;
