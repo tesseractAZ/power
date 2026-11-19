@@ -136,27 +136,30 @@ function spokenBudgetMs(): number {
  *  voice, and 8 s is twice that. The English voice in service is slower (a 173-character notice took 6.8 s with
  *  the voice resident), so a long English sentence rendered second can need more than the reserve alone. */
 const PASS_RESERVE_MS = 8000;
+/** v1.207.2 — the reserve is held only by a limit ABOVE this one: 12 s, the default since v1.47.5. At 12 s or
+ *  under an attempt is handed min(limit, what is left), which is what v1.207.1 handed it, on every path. */
+const PASS_RESERVE_ABOVE_MS = 12000;
 /** v1.207.2 — the least an attempt is handed while that much budget is left: the least the limit itself can be
  *  set to. On the same install a charge-level sentence rendered in 2.2 s after a change of voice. */
 const PASS_FLOOR_MS = 3000;
 /**
  * v1.207.2 — THE RESERVATION RULE: the limit handed to the engine for one attempt (a first try or the retry).
- * A pass may not use time that a pass still to render needs. With `remainingMs` (R) of the budget left and
- * `passesAfter` (m) spoken passes still to render after this one:
+ * A pass given a limit above 12 s may not use time that a pass still to render needs. With `remainingMs` (R) of
+ * the budget left, `passesAfter` (m) spoken passes still to render after this one and L = passTimeoutMs():
  *
- *     m = 0:   limit = min( passTimeoutMs(), R )                                          (the v1.47.5 rule)
- *     m > 0:   limit = min( passTimeoutMs(), R, max( R − m × PASS_RESERVE_MS, PASS_FLOOR_MS ) )
+ *     m = 0, or L ≤ 12000:   limit = min( L, R )                                          (the v1.47.5 rule)
+ *     m > 0 and L > 12000:   limit = min( L, R, max( R − m × PASS_RESERVE_MS, PASS_FLOOR_MS ) )
  *
  * - m = 0 is one language, the last pass and every terminator: nothing is behind them, and they are handed
  *   what v1.207.1 handed them.
- * - The defaults (12 s, 25 s) with two passes: a first try starts with the whole 25 s and 25 − 8 = 17 ≥ 12; a
- *   retry follows a failure of under 3 s and a 0.3 s pause, so at least 21.7 s are left and 21.7 − 8 = 13.7 ≥ 12.
- *   The reserve does not bind and the limit is the 12 s v1.207.1 handed (audioRendererBilingual.test.ts,
- *   INVARIANT 1). At the default it binds only where R − m × 8 s is under 12 s: with one pass behind, a try
- *   that starts with under 20 s left (a retry whose pause the host held up for more than 1.7 s, or a budget
- *   set under 20 s); with two or more behind, always (25 − 16 = 9; broadcast.ts builds one pass or two).
+ * - L ≤ 12000 is an install that has not set the option, and one that set it to 12 s or under: no reserve is
+ *   held, so every attempt is handed what v1.207.1 handed it (audioRendererBilingual.test.ts, INVARIANT 1).
+ *   Were the reserve held at 12 s it would not bind on a first try of two passes (25 − 8 = 17 ≥ 12), but it
+ *   would on a retry that starts with under 20 s left (its 0.3 s pause fired 1.7 s late or more), on a budget
+ *   set under 20 s, and with three passes: each a change for an install that set nothing.
  * - The limit at 20 s with two passes: the first-rendered pass has 17 s, and the other the 8 s or more that
- *   are left when it ends.
+ *   are left when it ends. A retry follows a failure of under 3 s and a 0.3 s pause: it has what is left less
+ *   the 8 s (13.8 s after a failure at 2.9 s).
  * - The floor. Where the reserve would leave under 3 s (R − m × 8000 < 3000: a budget nearly spent, or a small
  *   one) the attempt has 3 s all the same, or R when less than 3 s is left: a pass is tried in its turn rather
  *   than dropped for the sake of one behind it, and the later pass then has what remains, which may be under
@@ -168,8 +171,9 @@ const PASS_FLOOR_MS = 3000;
  */
 function attemptLimitMs(remainingMs: number, passesAfter: number): number {
   if (remainingMs <= 0) return 0;
-  const withinBudget = Math.min(passTimeoutMs(), remainingMs);
-  if (passesAfter <= 0) return withinBudget;
+  const limit = passTimeoutMs();
+  const withinBudget = Math.min(limit, remainingMs);
+  if (passesAfter <= 0 || limit <= PASS_RESERVE_ABOVE_MS) return withinBudget;
   return Math.min(withinBudget, Math.max(remainingMs - passesAfter * PASS_RESERVE_MS, PASS_FLOOR_MS));
 }
 /** A failure this fast is a socket/stream error, not a wedged server — retry it. */
@@ -761,7 +765,7 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
     if (renderedPcm.has(k) || failedKeys.has(k)) continue;
     // v1.207.2 — the passes still to render after this one: the distinct passes later in the render order that
     // have neither rendered nor failed (a repeat of this pass, or of one already tried, is not rendered again).
-    // Each holds PASS_RESERVE_MS of the budget back from this pass (attemptLimitMs).
+    // With the limit above 12 s, each holds PASS_RESERVE_MS of the budget back from this pass (attemptLimitMs).
     const passesAfter = new Set(renderOrder.slice(i + 1).map(passKey).filter((x) => x !== k && !renderedPcm.has(x) && !failedKeys.has(x))).size;
     const spokenText = spec.lang === 'es' ? verbalizeForTtsEs(spec.text) : verbalizeForTts(spec.text);
     const r = await renderWithinBudget(doRender, wyomingHost, wyomingPort, spokenText, spec.voice, spokenDeadline, log, `spoken pass (lang=${spec.lang} voice=${spec.voice ?? 'default'})`, passesAfter);
