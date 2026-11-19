@@ -129,6 +129,8 @@ has 12 seconds to render (`BROADCAST_TTS_PASS_TIMEOUT_MS`), and the spoken part 
 that is not ready in time is dropped: with two languages the other can still be spoken, and
 when no pass is ready the tones play alone. A longer limit keeps a long sentence on a slow
 voice, and makes the first sound of the alarm wait longer whenever the speech engine stalls.
+The option has no default, so the **Configuration** tab lists it under **Show unused optional
+configuration options**.
 
 **Priorities and their switches.** Every alarm has an ISA-18.2 priority: Critical (P1), High
 (P2), Medium (P3) or Low (P4). **Alerts → Alert Settings** has one switch per priority, also

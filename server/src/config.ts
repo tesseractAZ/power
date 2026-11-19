@@ -514,7 +514,7 @@ const ROWS: readonly OptionRow[] = [
 
   // ── Audible (v1.207.2): schema-only, exported under has_value — absent unless set, so unset = the 12 s default ──
   row({ name: 'BROADCAST_TTS_PASS_TIMEOUT_MS', source: 'option', exportForm: 'has_value', canonicalReader: 'audioRenderer.ts:passTimeoutMs',
-    doc: 'The longest one attempt at a spoken alarm pass (or a terminator) may take to render, in ms. A number in 3000..60000; absent, blank, not a number or outside the range reads as 12000 (nothing is clamped). Each attempt is also held to what is left of the 25 s spoken phase, and with two languages the pass rendered first leaves 8 s for the other.',
+    doc: 'The longest one attempt at a spoken alarm pass (or a terminator) may take to render, in ms. A number in 3000..60000; absent, blank, not a number or outside the range reads as 12000 (nothing is clamped). Each attempt is also held to what is left of the 25 s spoken phase, and with two languages and a limit above 12000 the pass rendered first leaves 8 s for the other.',
     parse: inRangeOr(12_000, 3000, 60_000) }),
 
   // ── Deployment constants (the image and the run script set these; never the user) ──

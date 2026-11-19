@@ -467,20 +467,20 @@ only then does the assembled announcement go to the outputs. Render time is alar
 |---|---|---|
 | The whole spoken phase (passes and terminators) | 25 s | `BROADCAST_TTS_TOTAL_BUDGET_MS`, environment only, 5000..120000 |
 | One attempt at a pass or a terminator | 12 s | the add-on option `BROADCAST_TTS_PASS_TIMEOUT_MS`, 3000..60000; unset, not a number or outside the range reads as 12000 |
-| The reserve for each pass still to render | 8 s | fixed (`PASS_RESERVE_MS`) |
+| The reserve for each pass still to render | 8 s | fixed (`PASS_RESERVE_MS`); held only by a limit above 12 s |
 
 With *R* of the budget left and *m* spoken passes still to render after the one in hand, an
-attempt is handed `min(limit, R)` when *m* is 0, and `min(limit, R, max(R − m × 8 s, 3 s))`
-otherwise (`attemptLimitMs`); the speech client's own timer runs on that figure. *m* is 0 for
-a one-language announcement, for the last pass and for every terminator. The 3 s floor (or
-*R*, when less is left) applies where the reserve exceeds what is left, so an attempt is never
-handed zero or a negative limit, and never more than the budget has. An item reached with the
-budget spent is not attempted.
+attempt is handed `min(limit, R)` when *m* is 0 or the limit is 12 s or under, and
+`min(limit, R, max(R − m × 8 s, 3 s))` otherwise (`attemptLimitMs`); the speech client's own
+timer runs on that figure. *m* is 0 for a one-language announcement, for the last pass and for
+every terminator. The 3 s floor (or *R*, when less is left) applies where the reserve would
+leave under 3 s, so while any budget is left an attempt is never handed zero or a negative
+limit, and never more than the budget has. An item reached with the budget spent is not
+attempted; a retry whose pause outlasted the budget is handed 0 and ends at once.
 
-With the limit at its default the reserve does not come into play for one pass or two: a first
-try starts with 25 s (25 − 8 = 17, above 12) and a retry with at least 21.7 s (13.7, above 12).
-It would for a retry whose pause the host held up by more than 1.7 s, for a budget set under
-20 s, or for three passes (the broadcast monitor builds one or two).
+At 12 s or under, which is the default and every install that has not set the option, no
+reserve is held: every attempt is handed `min(limit, R)`, the rule since v1.47.5, on every
+path. A limit above 12 s holds the reserve on a first try and on the retry alike.
 
 What happens when a pass is late or lost:
 
@@ -496,6 +496,11 @@ What happens when a pass is late or lost:
   17 s and the other the 8 s or more that are left: with neither returning, the tones play alone
   at 25 s; with the first lost and the second rendered, one language is spoken once the 17 s and
   the second's render time have passed.
+- **A terminator that never returns** holds the speech for its own limit as well, inside the
+  budget. After a pass ready at 1 s, the speech, without that terminator, is ready at 13 s by
+  default and at 21 s with the option at 20000. While no English voice is named (the shipped
+  default) its terminator is kept in memory only (section 4.3), so it is rendered again after
+  each start.
 - **A lost pass,** while another rendered, leaves an incomplete render (section 4.6). The
   announcement plays without that language, the delivery is recorded as completed, and the lost
   pass is not retried.
