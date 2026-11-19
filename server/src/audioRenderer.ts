@@ -144,10 +144,11 @@ const PASS_FLOOR_MS = 3000;
  * A pass may not use time that a pass still to render needs. With `remainingMs` (R) of the budget left and
  * `passesAfter` (m) spoken passes still to render after this one:
  *
- *     limit = min( passTimeoutMs(), R, max( R − m × PASS_RESERVE_MS, PASS_FLOOR_MS ) )
+ *     m = 0:   limit = min( passTimeoutMs(), R )                                          (the v1.47.5 rule)
+ *     m > 0:   limit = min( passTimeoutMs(), R, max( R − m × PASS_RESERVE_MS, PASS_FLOOR_MS ) )
  *
- * - m = 0 (one language, the last pass, every terminator): max(R, 3000) ≥ R, so this is min(limit, R), the
- *   v1.47.5 rule unchanged.
+ * - m = 0 is one language, the last pass and every terminator: nothing is behind them, and they are handed
+ *   what v1.207.1 handed them.
  * - The defaults (12 s, 25 s) with two passes: a first try starts with the whole 25 s and 25 − 8 = 17 ≥ 12; a
  *   retry follows a failure of under 3 s and a 0.3 s pause, so at least 21.7 s are left and 21.7 − 8 = 13.7 ≥ 12.
  *   The reserve does not bind and the limit is the 12 s v1.207.1 handed (audioRendererBilingual.test.ts,
@@ -160,15 +161,16 @@ const PASS_FLOOR_MS = 3000;
  *   one) the attempt has 3 s all the same, or R when less than 3 s is left: a pass is tried in its turn rather
  *   than dropped for the sake of one behind it, and the later pass then has what remains, which may be under
  *   its 8 s. With R > 0 the result lies in (0, R]: it is a minimum that includes R, so it never exceeds what is
- *   left; and each of its three terms is above zero (the limit ≥ 3000, R > 0, the maximum ≥ 3000), so it is never
- *   zero or negative.
+ *   left; and each term of that minimum is above zero (the limit ≥ 3000, R > 0, the maximum ≥ 3000), so it is
+ *   never zero or negative.
  * - R ≤ 0 reaches this function only from the retry, whose pause can outlast the budget: the result is then 0,
  *   as in v1.47.5 (the client ends that attempt at once). A first try is not made on a spent budget.
  */
 function attemptLimitMs(remainingMs: number, passesAfter: number): number {
   if (remainingMs <= 0) return 0;
-  const afterReserve = remainingMs - passesAfter * PASS_RESERVE_MS;
-  return Math.min(passTimeoutMs(), remainingMs, Math.max(afterReserve, PASS_FLOOR_MS));
+  const withinBudget = Math.min(passTimeoutMs(), remainingMs);
+  if (passesAfter <= 0) return withinBudget;
+  return Math.min(withinBudget, Math.max(remainingMs - passesAfter * PASS_RESERVE_MS, PASS_FLOOR_MS));
 }
 /** A failure this fast is a socket/stream error, not a wedged server — retry it. */
 const FAST_FAIL_MS = 3000;
