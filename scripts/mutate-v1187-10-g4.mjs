@@ -16,6 +16,8 @@
  *   C31  the first-sight line uses the resolved name; the pre-warm names its language   L-i..L-ii
  *   C32  request logging off through a LogController (no FSTDEP023)                    W-i
  *   C33  no device serial in a phone push (title, message, tag)                        S-i..S-iv
+ *   TTS  (v1.207.2) the limit of a spoken alarm pass: the 12 s default, the clamp to the budget,
+ *        the 8 s reserve for a pass still to render, its floor, the retry, the option's export  T-i..T-ix
  *
  * Not mutated: the startPollLoop wiring createFleetStatusDumper(store, log, debug) (a level, not an
  * emission: the compact line is pinned through createFleetStatusDumper itself); the worker's copy of
@@ -45,6 +47,7 @@ const WE = resolve(SERVER, 'src/weather.ts');
 const LH = resolve(SERVER, 'src/logHooks.ts');
 const NO = resolve(SERVER, 'src/notify.ts');
 const AR = resolve(SERVER, 'src/audioRenderer.ts');
+const RUN = resolve(REPO, 'rootfs/etc/services.d/ecoflow-panel/run');
 
 const SUBSET = [
   'test/degradationWindow.test.ts',
@@ -58,6 +61,7 @@ const SUBSET = [
   'test/ghiTickLog.test.ts',
   'test/firstSightName.test.ts',
   'test/audioRendererBilingual.test.ts',
+  'test/optionsEnvBridge.test.ts',
   'test/fastifyRequestLogging.test.ts',
   'test/pushSerialMask.test.ts',
 ];
@@ -346,12 +350,70 @@ const MUTANTS = [
     to: '  opts.log(`audioRenderer: terminator pre-warm /* MUTANT */ — ',
     why: 'The Spanish and English summaries are byte-identical again.',
   },
+  // ── TTS (v1.207.2) — the limit of a spoken pass ─────────────────────────────────────────────
+  // Each names the test in audioRendererBilingual.test.ts (T-ix: optionsEnvBridge.test.ts) that holds it.
   {
-    id: 'L-iii. ★★ v1.207.2 — a spoken pass is given 12 s again',
+    id: 'T-i. ★★★ the default limit of a spoken pass is 20 s',
     file: AR,
-    find: '  return Number.isFinite(v) && v >= 3000 && v <= 60000 ? v : 20000;',
-    to: '  return Number.isFinite(v) && v >= 3000 && v <= 60000 ? v : 12000; /* MUTANT */',
-    why: 'A long sentence on a slow voice loses its first-language pass again, as on 2026-11-17 at 21:13.',
+    find: '  return Number.isFinite(v) && v >= 3000 && v <= 60000 ? v : 12000;',
+    to: '  return Number.isFinite(v) && v >= 3000 && v <= 60000 ? v : 20000; /* MUTANT */',
+    why: 'An install that never set the option waits 20 s for the tones where it waited 12, and its second language keeps 8 s. Held by: INVARIANT 1 (with the option unset, every limit is v1.207.1\'s).',
+  },
+  {
+    id: 'T-ii. ★★★ an attempt is not held to what is left of the budget',
+    file: AR,
+    find: '  const withinBudget = Math.min(passTimeoutMs(), remainingMs);',
+    to: '  const withinBudget = passTimeoutMs(); /* MUTANT */',
+    why: 'A last pass or a terminator is handed the whole limit however little of the 25 s is left: the alarm waits past its bound. Held by: INVARIANT 1 (the second pass after an 18 s first: 7000; after a retry: 10100; the last terminator: 7000).',
+  },
+  {
+    id: 'T-iii. ★★★ no reserve: a pass with one behind it is handed the limit',
+    file: AR,
+    find: '  if (passesAfter <= 0) return withinBudget;',
+    to: '  if (true) return withinBudget; /* MUTANT */',
+    why: 'THE DEFECT of the first attempt: at 20 s a first pass that stalls leaves the other language 5 s. Held by: INVARIANT 2 (17000, then 8000).',
+  },
+  {
+    id: 'T-iv. ★★★ the reserve is 0 s',
+    file: AR,
+    find: 'const PASS_RESERVE_MS = 8000;',
+    to: 'const PASS_RESERVE_MS = 0; /* MUTANT */',
+    why: 'As T-iii, through the constant. Held by: INVARIANT 2 (17000, then 8000).',
+  },
+  {
+    id: 'T-v. ★★ the reserve has no floor',
+    file: AR,
+    find: '  return Math.min(withinBudget, Math.max(remainingMs - passesAfter * PASS_RESERVE_MS, PASS_FLOOR_MS));',
+    to: '  return Math.min(withinBudget, remainingMs - passesAfter * PASS_RESERVE_MS); /* MUTANT */',
+    why: 'Where the reserve exceeds what is left the engine is handed a negative limit: the pass in hand fails at once. Held by: the floor test (a 5 s budget: 3000, then 2000).',
+  },
+  {
+    id: 'T-vi. ★★★ the retry is not held to the reserve',
+    file: AR,
+    find: '      r = await render({ host, port, text, voice, timeoutMs: attemptLimitMs(remaining(), passesAfter) });',
+    to: '      r = await render({ host, port, text, voice, timeoutMs: attemptLimitMs(remaining(), 0) }); /* MUTANT */',
+    why: 'A socket drop then a stalled retry: at 20 s the retry takes 20 s and the other language has 2.1 s. Held by: the retry test (17000, 14100, 8000).',
+  },
+  {
+    id: 'T-vii. ★★★ the pass loop counts no pass behind the one in hand',
+    file: AR,
+    find: "`spoken pass (lang=${spec.lang} voice=${spec.voice ?? 'default'})`, passesAfter);",
+    to: "`spoken pass (lang=${spec.lang} voice=${spec.voice ?? 'default'})`, 0); /* MUTANT */",
+    why: 'The rule is in place and the renderer never applies it. Held by: INVARIANT 2 (17000, then 8000).',
+  },
+  {
+    id: 'T-viii. ★★ a terminator holds a reserve',
+    file: AR,
+    find: '`terminator (lang=${lang})`, 0);',
+    to: '`terminator (lang=${lang})`, 1); /* MUTANT */',
+    why: 'A terminator is cut 8 s before the budget ends, for a pass that does not exist. Held by: INVARIANT 1 (the terminator row: 12000, then 7000) and the terminator test at 20000 (16000).',
+  },
+  {
+    id: 'T-ix. ★★★ the run script does not export the option',
+    file: RUN,
+    find: "if bashio::config.has_value 'BROADCAST_TTS_PASS_TIMEOUT_MS'; then export BROADCAST_TTS_PASS_TIMEOUT_MS=\"$(bashio::config 'BROADCAST_TTS_PASS_TIMEOUT_MS')\"; fi",
+    to: '# /* MUTANT */ BROADCAST_TTS_PASS_TIMEOUT_MS is not exported',
+    why: 'The option is in the form, stored by the Supervisor, and never reaches the server: the limit stays 12 s whatever is entered. Held by: optionsEnvBridge.test.ts (every add-on option reaches the process; BROADCAST_TTS_PASS_TIMEOUT_MS reaches the process).',
   },
   // ── C32 — request logging ───────────────────────────────────────────────────────────────────
   {
