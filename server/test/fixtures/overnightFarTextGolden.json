@@ -383,7 +383,7 @@
    "shape": "charge",
    "push": {
     "title": "Night-charge: charging to ~32% Monday 12am–5am (~11.1 kWh)",
-    "body": "No charge is planned for tonight: the charge window opens Monday at 12:00 AM. Charging the backup pool to ~32% in that window, ~11.1 kWh of grid energy expected. Whole-house island projection (if the grid were lost): the low SoC after that window ~0% without this charge; with it ~22.1%; the floor+cushion line is 30.5%. Confidence: forecast. Solar from the panel's readings (7-day energy balance 0.9997, refused above 1.04). SUPERVISED: on Monday at 12:00 AM the add-on raises the backup reserve to 32% (bounded write; auto-restores after the charge window closes). Cancel from the night-charge card on the panel before then. The figures above are this evening's; a later evening run that arms the same window replaces this arm."
+    "body": "No charge is planned for tonight: the charge window opens Monday at 12:00 AM. Charging the backup pool to ~32% in that window, ~11.1 kWh of grid energy expected. Whole-house island projection (if the grid were lost): the low SoC after that window ~0% without this charge; with it ~22.1%; the floor+cushion line is 30.5%. Confidence: forecast. Solar from the panel's readings (7-day energy balance 0.9997, refused above 1.05). SUPERVISED: on Monday at 12:00 AM the add-on raises the backup reserve to 32% (bounded write; auto-restores after the charge window closes). Cancel from the night-charge card on the panel before then. The figures above are this evening's; a later evening run that arms the same window replaces this arm."
    },
    "spoken": {
     "en": "Night charge notice. Charging the backup pool to about 32 percent, about 11 kilowatt hours, in the charge window that opens on Monday at 12:00 AM. Cancel on the Power panel before then.",
@@ -391,7 +391,7 @@
    },
    "was": {
     "title": "Night-charge: charging to ~32% tonight (~11.1 kWh)",
-    "body": "Charging the backup pool to ~32% overnight, ~11.1 kWh of grid energy expected. Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~0% without this charge, ~22.1% with it; the floor+cushion line is 30.5%. Confidence: forecast. Solar from the panel's readings (7-day energy balance 0.9997, refused above 1.04). SUPERVISED: on Monday at 12:00 AM the add-on raises the backup reserve to 32% (bounded write; auto-restores after the charge window closes). Cancel from the night-charge card on the panel before then."
+    "body": "Charging the backup pool to ~32% overnight, ~11.1 kWh of grid energy expected. Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~0% without this charge, ~22.1% with it; the floor+cushion line is 30.5%. Confidence: forecast. Solar from the panel's readings (7-day energy balance 0.9997, refused above 1.05). SUPERVISED: on Monday at 12:00 AM the add-on raises the backup reserve to 32% (bounded write; auto-restores after the charge window closes). Cancel from the night-charge card on the panel before then."
    }
   },
   {

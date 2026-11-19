@@ -90,6 +90,8 @@ test('★★★ FW-3 the 21:30 push of a window a day or more out, shape by shap
     assert.deepEqual(a.spoken, g.spoken, `${c.name}: speech`);
     if (c.kind === 'far') {
       // `was` is v1.205.1's render of this case (captured at 8f4b6748). It is held to the code, not to the file: the same plan made
+      // (v1.207.1: the one panel-basis case's record carries the 1.05 line, and its `was` with it. That sentence prints the record's
+      // own threshold through panelPvSelection.ts, a file unchanged since 8f4b6748, so v1.205.1 renders this record the same way.)
       // 2.5 h before its window, with the same arm, refusal and mode, renders it word for word — but for the weekday on a force-charge
       // start ("~Mon 01:39" / "~01:39"), the one thing v1.205.1 read the plan's clock for. And the far words differ from it.
       const near = buildNightChargeMessage({ ...c.plan, generatedAt: c.plan.window!.startMs - 2.5 * H } as NightChargePlan, c.shape, c.supervised, c.armRefused, c.mode);
@@ -125,7 +127,7 @@ test('★★★ FW-3 the 21:30 push of a window a day or more out, shape by shap
     'so nothing is armed for it. (This confirms the evening job ran; the reserve floor is unchanged.)',
     // What a far push carries beside its lows, each where it stands: after the confidence tier, before the supervised sentence.
     'the low SoC after that window ~31.8% with or without this charge; the floor+cushion line is 23.4%. Confidence: forecast. Resilience needs no buy in that window — the pack already covers the outage cushion; this buy is economic (cost mode). SUPERVISED: on Monday at 12:00 AM ',
-    "the floor+cushion line is 30.5%. Confidence: forecast. Solar from the panel's readings (7-day energy balance 0.9997, refused above 1.04). SUPERVISED: on Monday at 12:00 AM ",
+    "the floor+cushion line is 30.5%. Confidence: forecast. Solar from the panel's readings (7-day energy balance 0.9997, refused above 1.05). SUPERVISED: on Monday at 12:00 AM ",
     'Confidence: forecast. PROVISIONAL SOLAR BAND: 9 of 14 calibration days scored, so the P10 PV this plan is sized on is widened ×1.05 (the next 24 h: ~26.2 → ~24.8 kWh) and the multi-day carry by ±52% per √day; the full band returns at 14 scored days. SUPERVISED: on Monday at 12:00 AM ',
     'no charge is expected — the pool should open the window near ~23.7% and stay at or above 22%. Outage cushion only; no solar basis (only 0 scored calibration day(s), need 4 (a provisional plan on a widened solar band from 4; the full band from 14)): the 20.5% line is the 10% reserve floor plus 4 h of islanded backup load at the window close, with no solar credited and no cost target. SUPERVISED: on Monday at 12:00 AM ',
   ]) assert.ok(far.some((p) => p.body.includes(s)), `no far case says: ${s}`);
@@ -497,7 +499,7 @@ test('★★★ FW-5 a far push carries exactly what its plan carries inside 24 
       const tail = a.tail.replace(/~(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat) (\d\d:\d\d)/g, '~$1');
       if (tail !== (r.v === 'armed' ? mapped(b.tail) + ESTIMATE : b.tail)) errs.push(`${at}: the tail: ${a.tail} | inside 24 h: ${b.tail}`);
       const shape = / reserve (?:held|hold) at /.test(r.title) ? 'reserveHold' : 'charge';
-      if (a.mid.includes(" Solar from the panel's readings (7-day energy balance 0.9997, refused above 1.04).")) carried.panelBasis[shape] += 1;
+      if (a.mid.includes(" Solar from the panel's readings (7-day energy balance 0.9997, refused above 1.05).")) carried.panelBasis[shape] += 1;
       if (a.mid.includes(' PROVISIONAL SOLAR BAND: ')) carried.provisionalBand[shape] += 1;
       if (/^(?:Outage cushion only; no solar basis|No solar basis) \(/.test(a.mid)) carried.cushionOnlyBasis[shape] += 1;
       if (a.mid.includes(' Resilience needs no buy in that window — the pack already covers the outage cushion; this ')) carried.economic[shape] += 1;
@@ -566,7 +568,7 @@ test('★★★ FW-7 a refusal reason and a basis sentence pass through a far pu
   assert.equal(farHold(provHolds), 'No charge is needed in the Monday 12am–5am window — even if the grid were lost from now on, the pack would close the charge window at ~50.5%, at or above the 23.4% floor+cushion line. Nothing is armed for it.'
     + ' PROVISIONAL SOLAR BAND: 9 of 14 calibration days scored, so the P10 PV this plan is sized on is widened ×1.05 (the next 24 h: ~37.7 → ~36.5 kWh) and the multi-day carry by ±39% per √day; the full band returns at 14 scored days.');
   assert.equal(farHold(onPanelBasis(computeNightChargePlan(buildNightChargeInputs(full)))), 'No charge is needed in the Monday 12am–5am window — even if the grid were lost from now on, the pack would close the charge window at ~55.5%, at or above the 23.4% floor+cushion line. Nothing is armed for it.'
-    + " Solar from the panel's readings (7-day energy balance 0.9997, refused above 1.04).");
+    + " Solar from the panel's readings (7-day energy balance 0.9997, refused above 1.05).");
 });
 
 test('★★★ FW-8 far is read from the plan\'s own clock (generatedAt), never the wall clock: the same plan made 2.5 h before its window reads "tonight"', () => {

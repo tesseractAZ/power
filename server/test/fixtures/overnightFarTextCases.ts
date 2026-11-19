@@ -75,9 +75,9 @@ function armed(plan: NightChargePlan, deps: NightChargeInputDeps, day: string, d
  * A plan with the PANEL-MEASURED solar basis on it (v1.204.0), as the evening job puts it on a plan sized on the planning band
  * (index.ts: withPvBasis(plan, pvBasisDecoration(...))) once the 7-day energy balance passes — the basis the plant plans on while
  * its Cores are dark and the balance holds. The selection is the real selector's on the inputs written out here: every connected
- * slot on the panel's own reading, the balance at 0.9997 against the 1.04 it is refused above (panelPvSelection.test.ts's passing
- * evening). Only the pvBasis* fields and the rationale's closing sentence are added; every figure of the plan is the planner's.
- * The push then says " Solar from the panel's readings (7-day energy balance 0.9997, refused above 1.04)." after its confidence tier.
+ * slot on the panel's own reading, the balance at 0.9997 against the 1.05 it is refused above (panelPvSelection.test.ts's passing
+ * evening; 1.04 until v1.207.1, and the record's threshold and blind band follow the line). Only the pvBasis* fields and the rationale's closing sentence are added; every figure of the plan is the planner's.
+ * The push then says " Solar from the panel's readings (7-day energy balance 0.9997, refused above 1.05)." after its confidence tier.
  */
 const PANEL_AS_OF = '2026-10-29';
 const PANEL_KEYS = ['P#1', 'P#2', 'P#3'];
@@ -85,8 +85,8 @@ const PANEL_SOURCES = [{ slot: 1, source: 'panel' }, { slot: 2, source: 'panel' 
 const PANEL_VERDICT: UcVerdict = {
   asOfDay: PANEL_AS_OF, state: 'pass', ok: true, reason: null, sources: PANEL_SOURCES, basis: 'panel',
   checks: {
-    asOfDay: PANEL_AS_OF, threshold: 1.04, ratio: 0.9997, balanceDaylightRatio: 0.9781, nightResidualKwhPerNight: -1.13, max7: 0.9997,
-    blindBandPct: 4, fieldDays: 8, newestFieldDay: '2026-10-28', fieldSlots: [1, 2, 3],
+    asOfDay: PANEL_AS_OF, threshold: 1.05, ratio: 0.9997, balanceDaylightRatio: 0.9781, nightResidualKwhPerNight: -1.13, max7: 0.9997,
+    blindBandPct: 5, fieldDays: 8, newestFieldDay: '2026-10-28', fieldSlots: [1, 2, 3],
     constants: { 1: { days: 51, chargeHours: 97 }, 2: { days: 51, chargeHours: 96 }, 3: { days: 51, chargeHours: 95 } },
     vendorDaysPresent: 14, vendorMaxDiffKwh: 0.17, nightMaxW: 0, frozenHours: 0,
   },

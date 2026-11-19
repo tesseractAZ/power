@@ -18,6 +18,12 @@
  * recompute reads the latch the evening wrote (pvLatchOf: its basis, E and the window). A replay may stand an earlier evening's latch
  * at the evening job (Saturday's, for the Monday window Saturday and Sunday share), withhold the night's planning report at an
  * instant, or plant a fault on the record itself, which the balance then sees as a real over-read is seen (F1, V2).
+ *
+ * v1.207.1 — the balance's line is 1.05 (1.04 from v1.204.0 through v1.207.0). The honest replay does not move. V2 and W1 measure
+ * what a planted over-read does at the line and, through the fixture's `threshold` knob, at 1.04, and assert both: the wider
+ * line accepts an over-read for as many nights or more, and on every accepted night only the cost fill is lower than the honest
+ * night's. W1 also measures the line change itself: a night 1.04 refused (decided at 22:30) and the line accepts (decided at
+ * 21:30) arms the same resilience write at either line but 11-02, which loses its 30.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -44,6 +50,8 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const INDEX = readFileSync(resolve(HERE, '../src/index.ts'), 'utf8');
 const DOC15_1 = readFileSync(resolve(HERE, '../../docs/reference/15-1-night-charge-planning.md'), 'utf8');
 const DOC_PERF = readFileSync(resolve(HERE, '../../docs/PERFORMANCE.md'), 'utf8');
+/** What the balance does with a fault planted on the record from 10-20, as the chapter and the performance record state it (V2 measures it). */
+const V2_SENTENCE = 'the balance refuses ×1.10 and ×1.25 from the first evening, ×1.05 after 2 accepted nights (1 at the 1.04 line of v1.204.0 to v1.207.0) and ×1.03 after 4';
 interface ReplayNight {
   plan_date: string; nowMs: number; socAt21: number | null; socAt2130: number | null; l50: number; l90: number; islandedKw: number;
   hours: Array<[number, number | null, number | null]>;
@@ -384,41 +392,63 @@ test('★★★ F1 (e), the evening job on the record: Sunday 11-01 with Saturda
   }
 });
 
-test('★★★ V2: a fault the balance sees (planted on the record from 10-20, the panel\'s daily total scaled alike) ×1.05, ×1.10 and ×1.25 is refused after 0–1 accepted nights, and every night it refuses is v1.203.0\'s own plan — the reserve write falls from 50 to 29–30% or none on every night but Friday 10-30, whose fill rises from 79.1 to the long-gap fill to 90; resilience 11-02 arms 30 where the panel plan armed nothing; the outage line never moves — and the reference chapter says so', () => {
+test('★★★ V2: a fault the balance sees (planted on the record from 10-20, the panel\'s daily total scaled alike) — ×1.10 and ×1.25 are refused from the first evening, ×1.05 after 2 accepted nights (10-28, 10-29; 1 at the 1.04 line of v1.204.0–v1.207.0) and ×1.03 after 4 (10-28..10-31, at either line) — and every night it refuses is v1.203.0\'s own plan: the reserve write falls from 50 to 29–30% or none on every night but Friday 10-30, whose fill rises from 79.1 to the long-gap fill to 90; resilience 11-02 arms 30 where the panel plan armed nothing; the outage line never moves — and the reference chapter says so', () => {
   const fmt = (x: { write: number | null; fc: number | null }): string => `${x.write ?? '—'}/${x.fc == null ? '—' : r2(x.fc)}`;
-  const costDiff = (accepted1028: string): string[] => [
-    `10-28 50/80.4->${accepted1028}`, '10-29 50/90->29/—', '10-30 50/79.1->50/90', '10-31 50/90->29/—', '11-01 50/71.7->30/—',
-    '11-02 50/71.6->30/—', '11-03 50/75.6->—/—', '11-04 50/67.7->—/—', '11-05 50/81.5->30/—',
-  ];
-  const want: Record<string, { diff: string[]; asV1203: number; accepted: number }> = {
-    'cost 1.05': { diff: costDiff('50/78.7'), asV1203: 20, accepted: 1 },
-    'cost 1.1': { diff: costDiff('30/—'), asV1203: 21, accepted: 0 },
-    'cost 1.25': { diff: costDiff('30/—'), asV1203: 21, accepted: 0 },
-    'resilience 1.05': { diff: ['11-02 —/—->30/—'], asV1203: 21, accepted: 1 },
+  const REFUSED = {
+    '10-29': '10-29 50/90->29/—', '10-30': '10-30 50/79.1->50/90', '10-31': '10-31 50/90->29/—', '11-01': '11-01 50/71.7->30/—',
+    '11-02': '11-02 50/71.6->30/—', '11-03': '11-03 50/75.6->—/—', '11-04': '11-04 50/67.7->—/—', '11-05': '11-05 50/81.5->30/—',
+  };
+  /** The cost nights that differ from the honest replay: the accepted nights' lower fills, then every refused night from `from`. */
+  const costDiff = (accepted: string[], from: keyof typeof REFUSED): string[] => [...accepted, ...Object.entries(REFUSED).filter(([d]) => d >= from).map(([, x]) => x)];
+  // [the nights that differ, the nights that arm what v1.203.0 arms, the accepted nights] at the line (1.05) and at 1.04.
+  type Want = { diff: string[]; asV1203: number; accepted: number };
+  const want: Record<string, Want> = {
+    // ×1.03: accepted 10-28..10-31 (the fills of 10-28 and 10-30 a point lower; 10-29 and 10-31 stay on the 90 ceiling), refused from
+    // 11-01, where the week to 10-31 reads 1.0555.
+    'cost 1.03': { diff: costDiff(['10-28 50/80.4->50/79.4', '10-30 50/79.1->50/78.2'], '11-01'), asV1203: 17, accepted: 4 },
+    // ×1.05: 10-29 is accepted too (its week reads 1.0497: over 1.04, under 1.05) and arms the honest 50/90, so it leaves the diff.
+    'cost 1.05': { diff: costDiff(['10-28 50/80.4->50/78.7'], '10-30'), asV1203: 19, accepted: 2 },
+    'cost 1.1': { diff: costDiff(['10-28 50/80.4->30/—'], '10-29'), asV1203: 21, accepted: 0 },
+    'cost 1.25': { diff: costDiff(['10-28 50/80.4->30/—'], '10-29'), asV1203: 21, accepted: 0 },
+    'resilience 1.03': { diff: ['11-02 —/—->30/—'], asV1203: 21, accepted: 4 },
+    'resilience 1.05': { diff: ['11-02 —/—->30/—'], asV1203: 21, accepted: 2 },
     'resilience 1.1': { diff: ['11-02 —/—->30/—'], asV1203: 21, accepted: 0 },
     'resilience 1.25': { diff: ['11-02 —/—->30/—'], asV1203: 21, accepted: 0 },
   };
+  /** The same at the 1.04 line (v1.204.0–v1.207.0), where it differs: ×1.05 was refused one night sooner. */
+  const was: Record<string, Want> = {
+    ...want,
+    'cost 1.05': { diff: costDiff(['10-28 50/80.4->50/78.7'], '10-29'), asV1203: 20, accepted: 1 },
+    'resilience 1.05': { diff: ['11-02 —/—->30/—'], asV1203: 21, accepted: 1 },
+  };
   for (const obj of ['cost', 'resilience'] as const) {
     const honest = obj === 'cost' ? COST : NIGHTS.map((n) => replay(n, obj, 1));
-    for (const scale of [1.05, 1.10, 1.25]) {
-      const real = NIGHTS.map((n) => replay(n, obj, scale, { ro: { fault: { scale, fromDay: '2026-10-20' } } }));
-      const got = {
-        diff: real.map((o, i) => [o, honest[i]] as const).filter(([o, h]) => fmt(o.b.arm) !== fmt(h.b.arm)).map(([o, h]) => `${o.date.slice(5)} ${fmt(h.b.arm)}->${fmt(o.b.arm)}`),
-        asV1203: real.filter((o) => fmt(o.b.arm) === fmt(o.a.arm)).length,
-        accepted: real.filter((o) => o.sel.use === 'planning').length,
-      };
-      assert.deepEqual(got, want[`${obj} ${scale}`], `${obj} ×${scale}`);
-      real.forEach((o, i) => {
-        assert.equal(o.b.plan.cushionLineSocPct, honest[i].b.plan.cushionLineSocPct, `${o.date} ×${scale} ${obj}: the line`);
-        if (o.sel.use !== 'planning') assert.equal(fmt(o.b.arm), fmt(o.a.arm), `${o.date} ×${scale} ${obj}: a refused night is v1.203.0's`);
-      });
+    for (const scale of [1.03, 1.05, 1.10, 1.25]) {
+      for (const threshold of [undefined, 1.04]) {
+        const real = NIGHTS.map((n) => replay(n, obj, scale, { ro: { fault: { scale, fromDay: '2026-10-20' }, threshold } }));
+        const got = {
+          diff: real.map((o, i) => [o, honest[i]] as const).filter(([o, h]) => fmt(o.b.arm) !== fmt(h.b.arm)).map(([o, h]) => `${o.date.slice(5)} ${fmt(h.b.arm)}->${fmt(o.b.arm)}`),
+          asV1203: real.filter((o) => fmt(o.b.arm) === fmt(o.a.arm)).length,
+          accepted: real.filter((o) => o.sel.use === 'planning').length,
+        };
+        assert.deepEqual(got, (threshold == null ? want : was)[`${obj} ${scale}`], `${obj} ×${scale} at ${threshold ?? 'the line'}`);
+        real.forEach((o, i) => {
+          assert.equal(o.b.plan.cushionLineSocPct, honest[i].b.plan.cushionLineSocPct, `${o.date} ×${scale} ${obj}: the line`);
+          if (o.sel.use !== 'planning') assert.equal(fmt(o.b.arm), fmt(o.a.arm), `${o.date} ×${scale} ${obj}: a refused night is v1.203.0's`);
+          // An accepted night's reserve write is the honest night's: the over-read lowers only the cost fill.
+          else assert.equal(o.b.arm.write, honest[i].b.arm.write, `${o.date} ×${scale} ${obj}: an accepted night's reserve write`);
+        });
+      }
     }
   }
+  // The honest record reads the same at either line: no window of it is above 1.04.
+  assert.deepEqual(NIGHTS.map((n) => replay(n, 'cost', 1, { ro: { threshold: 1.04 } })).map((o) => [o.sel.use, fmt(o.b.arm)]), COST.map((o) => [o.sel.use, fmt(o.b.arm)]));
   // The reference chapter states it so (the band alone, and the balance seeing it).
   assert.ok(DOC15_1.includes("On the planning band alone (the balance's verdict held), a reading ×1.05, ×1.10 or ×1.25 leaves every reserve write and every line as it is and only lowers the cost fill."));
-  assert.ok(DOC15_1.includes("Planted on the record itself from 10-20 (the panel's daily total scaled alike), the balance refuses it after 0–1 accepted nights, and each night it refuses is v1.203.0's plan"));
+  assert.ok(DOC15_1.includes(`Planted on the record itself from 10-20 (the panel's daily total scaled alike), ${V2_SENTENCE}, and each night it refuses is v1.203.0's plan`));
   assert.ok(DOC15_1.includes('the reserve write falls from 50 to 29–30% or none on every night but Friday 10-30, whose fill rises from 79.1 to the long-gap fill to 90'));
   assert.ok(!DOC15_1.includes('leaves every reserve write and every line as it is and only lowers the cost fill. On the resilience'));
+  for (const d of [DOC15_1, DOC_PERF]) assert.ok(!d.includes('the balance refuses it after 0–1 accepted nights'), 'the 1.04 figure is not stated as current');
 });
 
 test('★★★ W2: the band\'s provenance, on the record (cost) — a ±5% band moves each panel night\'s fill by up to about 2 points but the two on the 90 ceiling (10-29, and the superseded 10-31), which do not move; the reserve writes and the line do not move from ×0.95 through ×1.4; at ×1.5 three writes fall (11-01 and 11-02 to 49, 11-04 to none) and the line still does not move — and the chapter and the performance record say so', () => {
@@ -447,21 +477,84 @@ test('★★★ W2: the band\'s provenance, on the record (cost) — a ±5% band
   for (const d of [DOC15_1, DOC_PERF]) assert.ok(!d.includes('a ±5% band moves each fill about 2 points'), 'the unscoped clause is gone');
 });
 
-test('★★★ W1: a fault planted from another recorded evening — the starts that run longest (×1.05 from 10-30, ×1.10 from 10-28, ×1.25 from 10-29) are accepted on 6, 3 and 2 nights before the balance refuses it or the replay ends (11-05), every accepted write 50 and the line unmoved; the 24 starts 10-27..11-03 were measured by probe (the longest are these) — and the chapter and the performance record say so', () => {
+test('★★★ W1: a fault planted from another recorded evening, every start 10-27..11-03 measured here at the line and at 1.04 — ×1.03 is refused from none of them before the replay ends (11-05): accepted on up to 9 nights, each fill 0.8–1.4 points under the honest night\'s; ×1.05, ×1.10 and ×1.25 on up to 7, 4 and 2 nights before the balance refuses them or the replay ends (6, 3 and 2 at the 1.04 line; ×1.03 then up to 7, refused after 4 from the first two starts); every accepted write 50 and the line unmoved — and the chapter and the performance record say so', () => {
   const fmt = (x: { write: number | null; fc: number | null }): string => `${x.write ?? '—'}/${x.fc == null ? '—' : Math.round(x.fc * 10) / 10}`;
-  const want: Array<[number, string, string[]]> = [
-    [1.05, '2026-10-30', ['10-31 50/90', '11-01 50/69.4', '11-02 50/69.4', '11-03 50/73.7', '11-04 50/65.5', '11-05 50/80.1']],
-    [1.10, '2026-10-28', ['10-29 50/90', '10-30 50/76.2', '10-31 50/90']],
-    [1.25, '2026-10-29', ['10-30 50/71.8', '10-31 50/90']],
-  ];
-  for (const [scale, fromDay, accepted] of want) {
-    const real = NIGHTS.map((n) => replay(n, 'cost', scale, { ro: { fault: { scale, fromDay } } }));
-    const got = real.filter((o) => o.date > fromDay && o.sel.use === 'planning').map((o) => `${o.date.slice(5)} ${fmt(o.b.arm)}`);
-    assert.deepEqual(got, accepted, `×${scale} from ${fromDay}`);
+  const starts = ['2026-10-27', '2026-10-28', '2026-10-29', '2026-10-30', '2026-10-31', '2026-11-01', '2026-11-02', '2026-11-03'];
+  /** Per start: the accepted nights after it (with their arm), and whether a refusal followed inside the replay. */
+  const measure = (scale: number, threshold?: number) => starts.map((fromDay) => {
+    const real = NIGHTS.map((n) => replay(n, 'cost', scale, { ro: { fault: { scale, fromDay }, threshold } }));
+    const after = real.filter((o) => o.date > fromDay);
+    const accepted = after.filter((o) => o.sel.use === 'planning');
+    for (const o of accepted) assert.equal(o.b.arm.write, 50, `×${scale} from ${fromDay}, ${o.date}: every accepted write is 50`);
+    // A night the balance refuses arms v1.203.0's own plan, from every start and at either line (V2 asserts it from 10-20).
+    for (const o of real) if (o.sel.use !== 'planning') assert.equal(fmt(o.b.arm), fmt(o.a.arm), `×${scale} from ${fromDay}, ${o.date}: a refused night is v1.203.0's`);
     real.forEach((o, i) => assert.equal(o.b.plan.cushionLineSocPct, COST[i].b.plan.cushionLineSocPct, `${o.date} ×${scale} from ${fromDay}: the line`));
+    // What an accepted over-read costs: the points each fill falls under the honest night's (0 on a fill held at the 90 ceiling).
+    const drops = accepted.map((o) => Math.round((COST.find((h) => h.date === o.date)!.b.arm.fc! - o.b.arm.fc!) * 10) / 10);
+    return {
+      fromDay, nights: accepted.map((o) => `${o.date.slice(5)} ${fmt(o.b.arm)}`), refused: after.some((o) => o.sel.use !== 'planning'), drops,
+      arm: Object.fromEntries(after.map((o) => [o.date.slice(5), fmt(o.b.arm)])) as Record<string, string>,
+    };
+  });
+  // [scale, accepted nights per start at the line (1.05), the same at 1.04, the start that runs longest and its nights, and the
+  //  least and most points an accepted fill falls under the honest night's (the fills held at the 90 ceiling apart)]
+  const want: Array<[number, number[], number[], string, string[], [number, number]]> = [
+    [1.03, [9, 8, 7, 6, 5, 4, 3, 2], [4, 4, 7, 6, 5, 4, 3, 2], '2026-10-27',
+      ['10-28 50/79.4', '10-29 50/90', '10-30 50/78.2', '10-31 50/90', '11-01 50/70.3', '11-02 50/70.3', '11-03 50/74.5', '11-04 50/66.4', '11-05 50/80.7'], [0.8, 1.4]],
+    [1.05, [4, 4, 7, 6, 5, 4, 3, 2], [4, 3, 3, 6, 5, 4, 3, 2], '2026-10-29',
+      ['10-30 50/77.6', '10-31 50/90', '11-01 50/69.4', '11-02 50/69.4', '11-03 50/73.7', '11-04 50/65.5', '11-05 50/80.1'], [1.4, 2.3]],
+    [1.10, [4, 3, 3, 4, 3, 3, 2, 2], [2, 3, 2, 2, 1, 2, 2, 2], '2026-10-27', ['10-28 50/77', '10-29 50/90', '10-30 50/76.2', '10-31 50/90'], [2.9, 4.6]],
+    [1.25, [1, 1, 2, 1, 0, 2, 1, 1], [1, 1, 2, 1, 0, 1, 1, 0], '2026-10-29', ['10-30 50/71.8', '10-31 50/90'], [1.9, 11.2]],
+  ];
+  /** v1.207.0 pinned these two starts night by night (its longest at 1.04); each reads the same at either line. */
+  const pinned: Record<number, [string, string[]]> = {
+    1.05: ['2026-10-30', ['10-31 50/90', '11-01 50/69.4', '11-02 50/69.4', '11-03 50/73.7', '11-04 50/65.5', '11-05 50/80.1']],
+    1.1: ['2026-10-28', ['10-29 50/90', '10-30 50/76.2', '10-31 50/90']],
+  };
+  const longest: number[] = [];
+  /** The line change itself: the nights 1.04 refused and the line accepts (cost: what each armed), and those of them whose
+   *  reserve write differs on the resilience objective. */
+  const newly: string[] = [];
+  const lostWrite: string[] = [];
+  for (const [scale, n, n104, fromDay, nights, drop] of want) {
+    const got = measure(scale);
+    const was = measure(scale, 1.04);
+    assert.deepEqual(got.map((g) => g.nights.length), n, `×${scale}: accepted nights per start`);
+    assert.deepEqual(was.map((g) => g.nights.length), n104, `×${scale} at 1.04`);
+    n.forEach((x, i) => assert.ok(x >= n104[i], `×${scale} from ${starts[i]}: the wider line accepts as many nights or more`));
+    const pin = pinned[scale];
+    if (pin) for (const run of [got, was]) assert.deepEqual(run.find((g) => g.fromDay === pin[0])!.nights, pin[1], `×${scale} from ${pin[0]}`);
+    // A refused night is decided at 22:30 and an accepted one at 21:30, on the pool as it reads then: on the resilience objective
+    // a night the line newly accepts arms the write it armed at 1.04 but 11-02, whose 21:30 decision arms nothing where the 22:30
+    // one armed 30 (the decision-time test above shows it on honest readings).
+    got.forEach((g, i) => {
+      for (const day of Object.keys(g.arm).filter((d) => g.nights.some((x) => x.startsWith(d)) && !was[i].nights.some((x) => x.startsWith(d)))) {
+        const tag = `×${scale} from ${g.fromDay.slice(5)}: ${day}`;
+        newly.push(`${tag} ${was[i].arm[day]}->${g.arm[day]}`);
+        const night = NIGHTS.find((q) => q.plan_date.endsWith(day))!;
+        const [at104, atLine] = [1.04, undefined].map((threshold) => replay(night, 'resilience', scale, { ro: { fault: { scale, fromDay: g.fromDay }, threshold } }));
+        assert.deepEqual([at104.sel.use, at104.b.at, atLine.sel.use, atLine.b.at], ['published', '22:30', 'planning', '21:30'], tag);
+        if (at104.b.arm.write !== atLine.b.arm.write) lostWrite.push(`${tag} ${at104.b.arm.write ?? '—'}->${atLine.b.arm.write ?? '—'}`);
+      }
+    });
+    const top = got.reduce((a, g) => (g.nights.length > a.nights.length ? g : a));
+    assert.deepEqual([top.fromDay, top.nights], [fromDay, nights], `×${scale}: the start that runs longest (the first of equals)`);
+    longest.push(top.nights.length);
+    const off = got.flatMap((g) => g.drops).filter((d) => d !== 0);
+    assert.deepEqual([Math.min(...off), Math.max(...off)], drop, `×${scale}: the points an accepted fill falls`);
+    // ×1.03: no start is refused before the replay ends. The others: the starts the replay outruns are refused.
+    if (scale === 1.03) assert.deepEqual(got.map((g) => g.refused), starts.map(() => false));
   }
-  const sentence = 'it was accepted on up to 6, 3 and 2 nights (×1.05, ×1.10, ×1.25) before the balance refused it or the replay ended (11-05); every accepted write was 50 and the line never moved.';
+  assert.deepEqual(longest, [9, 7, 4, 2]);
+  // Over the 32 cases the line newly accepts 24 nights. In cost mode each arms 50 with a cost fill; 1.04 armed 29–30 or nothing
+  // on 23 of them and, on one Friday, the long-gap fill to 90 (a higher fill than the accepted night's).
+  assert.equal(newly.length, 24);
+  assert.deepEqual(newly.filter((x) => !/ (29|30|—)\/—->50\/[\d.]+$/.test(x)), ['×1.1 from 10-27: 10-30 50/90->50/76.2']);
+  // On the resilience objective five of the 24 lose the reserve write, all of them 11-02; the other 19 arm the same write.
+  assert.deepEqual(lostWrite, ['×1.03 from 10-27: 11-02 30->—', '×1.03 from 10-28: 11-02 30->—', '×1.05 from 10-29: 11-02 30->—', '×1.1 from 10-30: 11-02 30->—', '×1.1 from 10-31: 11-02 30->—']);
+  const sentence = 'it was accepted on up to 7, 4 and 2 nights (×1.05, ×1.10, ×1.25) before the balance refused it or the replay ended (11-05), and ×1.03 on every night to the replay\'s end from every start (up to 9); every accepted write was 50 and the line never moved.';
   assert.ok(DOC15_1.includes(`Planted from another recorded evening (each of 10-27..11-03), ${sentence}`));
   assert.ok(DOC_PERF.includes(`Planted from another recorded evening (each of 10-27 → 11-03), ${sentence}`));
-  assert.ok(DOC_PERF.includes('planted on the record itself from 10-20 (the panel\'s daily total scaled alike), the balance refuses it after 0–1 accepted nights'));
+  assert.ok(DOC_PERF.includes(`planted on the record itself from 10-20 (the panel's daily total scaled alike), ${V2_SENTENCE}`));
+  for (const d of [DOC15_1, DOC_PERF]) assert.ok(!d.includes('accepted on up to 6, 3 and 2 nights'), 'the 1.04 figure is not stated as current');
 });

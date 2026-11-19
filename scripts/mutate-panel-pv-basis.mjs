@@ -9,11 +9,11 @@
  * (R) THE RESOLVER: one source per slot-hour (G1 the Core's own meter with 3,500 s; G2, G3, the freeze detector, G11 for the field;
  * a gap is never 0 W). (K) THE CONSTANTS, per (slot, Core), on the panel's own capacity, ≥ 21 days and 20 charge hours. (U) THE UPPER
  * CHECK: field days only, the map of record, staleness, the judged-bad holds (G4, G6; M4, M5), G10, the night clip, the hysteresis,
- * the threshold 1.04 (owner). (A) ADMISSION: one predicate for the fit, bias, skill and ledger. (W) THE WORKER: the identity branch,
+ * the threshold 1.05 (owner; 1.04 until v1.207.1). (A) ADMISSION: one predicate for the fit, bias, skill and ledger. (W) THE WORKER: the identity branch,
  * the caches per E, the runway untouched, the planning skill a realized-GHI reader. (S) THE SELECTION: (a)/(b)/(c) with M2, the
  * clauses of (b) in L1's precedence, the transient class, the latch (M1, L2), never a shadow leg. (T) THE WORDS: figures only (M3),
  * every hold's end, G4's grid input and force-charge, en and es, the push, the card. (H) HOME ASSISTANT (L6). (L) THE LEDGER (L5)
- * and (G) THE GATE. (O) THE OWNER'S DECISIONS: the haircut 1.00, every connected slot resolves, the runway at zero sun, 1.040 strict.
+ * and (G) THE GATE. (O) THE OWNER'S DECISIONS: the haircut 1.00, every connected slot resolves, the runway at zero sun, 1.05 strict.
  *
  *   node scripts/mutate-panel-pv-basis.mjs [--only <id prefix>]
  *
@@ -162,18 +162,18 @@ const MUTANTS = [
 
   /* ── U: the upper check ── */
   {
-    id: 'PB-U-i. ★★★ the threshold 1.04 → 1.10',
+    id: 'PB-U-i. ★★★ the threshold 1.05 → 1.10',
     file: PB, tests: [T_UNIT, T_REC],
-    find: 'export const UC_THRESHOLD = 1.04;',
+    find: 'export const UC_THRESHOLD = 1.05;',
     to: 'export const UC_THRESHOLD = 1.10; /* MUTANT */',
-    why: 'A ×1.05 over-read passes every window.',
+    why: 'A ×1.05 over-read on every field day of the record passes every window (the largest reads 1.0799); at 1.05 it is refused from 10-30.',
   },
   {
-    id: 'PB-U-ii. ★★ (owner) 1.040 is strict: a window at the threshold passes',
+    id: 'PB-U-ii. ★★ (owner) 1.05 is strict: a window at the threshold passes',
     file: PB, tests: [T_UNIT, T_REC],
     find: '  if (worst.b.ratio > T) {',
     to: '  if (worst.b.ratio >= T) { /* MUTANT */',
-    why: 'The owner\'s rule is "refused above 1.04".',
+    why: 'The owner\'s rule is "refused above 1.05": a window reading exactly 1.05 (105,000 Wh on 100,000 Wh, panelPvBasis.test.ts) passes and is admitted.',
   },
   {
     id: 'PB-U-iii. ★★★ the ratio inverted',
@@ -339,6 +339,13 @@ const MUTANTS = [
     find: '    const bad = windowBalance(table, w, Fe).ratio > T;',
     to: '    const bad = (false as boolean) && windowBalance(table, w, Fe).ratio > T; /* MUTANT */',
     why: 'Admission no longer shrinks after a refusal.',
+  },
+  {
+    id: 'PB-A-iv. ★★ (owner) admission is strict as the verdict is: a window at the threshold admits its days',
+    file: PB, tests: [T_UNIT],
+    find: '    const bad = windowBalance(table, w, Fe).ratio > T;',
+    to: '    const bad = windowBalance(table, w, Fe).ratio >= T; /* MUTANT */',
+    why: 'A window reading exactly 1.05 (105,000 Wh on 100,000 Wh, panelPvBasis.test.ts) passes the verdict (PB-U-ii) and would admit none of its days: the verdict and admission read one rule.',
   },
 
   /* ── W: the worker ── */

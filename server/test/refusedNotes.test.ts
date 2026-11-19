@@ -480,8 +480,8 @@ test('★★★ RN-9 a refused cushion-only night (the plant\'s live shape, the 
 
 /** The 7-day balance's refusal of the panel's readings (panelPvSelection.test.ts BALANCE): the reason a cushion-only plan carries
  *  when the panel's own solar is refused — the plant's shape whenever the balance reads above its threshold. */
-const BALANCE_REFUSAL = { code: 'balance', windowEnd: '2026-11-05', ratio: 1.0523, daylightRatio: 1.0312, nightResidualKwhPerNight: -1.13, threshold: 1.04 };
-const PANEL_NOT_USED = ' Panel solar not used: the 7-day energy balance read 1.0523 on the week to 2026-11-05, above 1.04 (1.0312 on daylight '
+const BALANCE_REFUSAL = { code: 'balance', windowEnd: '2026-11-05', ratio: 1.0523, daylightRatio: 1.0312, nightResidualKwhPerNight: -1.13, threshold: 1.05 };
+const PANEL_NOT_USED = ' Panel solar not used: the 7-day energy balance read 1.0523 on the week to 2026-11-05, above 1.05 (1.0312 on daylight '
   + 'hours alone; its nights closed at −1.13 kWh a night against the measured constants); the readings are not used again before the weeks '
   + 'ending on 7 later whole days have all passed.';
 

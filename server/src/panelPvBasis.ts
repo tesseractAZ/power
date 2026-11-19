@@ -59,8 +59,26 @@ const H = 3_600_000;
 
 /** The 7-day energy balance refuses above this (strict). Measured on the specified basis (nameplate
  *  fullCap, the record-vouched days): 0 of the 45 Core-era windows (in sample, 0.9900–1.0291) and 0 of
- *  the dark evenings 10-28..11-07 (0.9882–1.0285) above it; a code constant, not an option. */
-export const UC_THRESHOLD = 1.04;
+ *  the dark evenings 10-28..11-07 (0.9882–1.0285) above it; a code constant, not an option.
+ *  v1.207.1 — 1.05, was 1.04 (v1.204.0 through v1.207.0). On the live plant the week to 2026-11-14 read 1.0273
+ *  (the largest of its last seven 1.0370) and the week to 2026-11-15 read 1.0410 and refused the readings:
+ *  1.0069 on its daylight hours alone, its nights closing at −1.10 kWh a night, so the margin over 1.04 was the
+ *  night term's. The week to 2026-11-16 read 1.0307; the worst-of-seven rule (UC_HYSTERESIS_WINDOWS) would have
+ *  held the refusal until seven later whole days had been judged, the evening of 2026-11-23 at the earliest.
+ *  ★ WHAT THE WIDER LINE GIVES UP (panelPvBasisRecord.test.ts, panelPvReplay.test.ts, each beside its figure at
+ *  1.04): the blind band (blindBandPct, T ÷ R − 1) is about a point wider on every evening — 2.5 % on the record's
+ *  evening of 11-01, 1.5 % at 1.04; a ×1.03 step on every slot is refused from none of eight starting evenings
+ *  by the record's end (from 2 at 1.04), ×1.05 from 5 (7), ×1.10 after 2–4 accepted nights (1–3), and ×1.10 on
+ *  one slot from 0–1 of 8 (3–5). ×1.03 on every field day is still refused (1.0555), on the same evening.
+ *  The line change also moves a decision time: a night the balance accepts is decided at 21:30, a refused night
+ *  (the Cores dark) at 22:30, on the pool as it reads then. In five of the 32 planted every-slot cases the night
+ *  the wider line newly accepts is the record's 11-02, where the resilience objective armed a 30 % reserve at 1.04
+ *  and nothing at 1.05, as the honest night does at either line (panelPvReplay.test.ts W1).
+ *  The outage line reads no solar (nightChargeAdvisor cushionLineKwh): a high reading never moves that line. It
+ *  lowers the cost fill, with it a cost-mode reserve write above the line's ask (on a night that arms, never below
+ *  that ask), and, where the walk to the window close crosses daylight (a window a day or more out), what that
+ *  walk asks of the reserve. */
+export const UC_THRESHOLD = 1.05;
 /** Field days in one balance window. */
 export const UC_WINDOW_DAYS = 7;
 /** A window's days lie within this many site days of its end (inclusive span e−13..e). */

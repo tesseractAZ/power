@@ -56,8 +56,8 @@ const E = '2026-10-29';
 const KEYS = ['P#1', 'P#2', 'P#3'];
 
 const checks = (o: Partial<UcChecks> = {}): UcChecks => ({
-  asOfDay: E, threshold: 1.04, ratio: 0.9997, balanceDaylightRatio: 0.9781, nightResidualKwhPerNight: -1.13, max7: 0.9997,
-  blindBandPct: 4, fieldDays: 8, newestFieldDay: '2026-10-28', fieldSlots: [1, 2, 3],
+  asOfDay: E, threshold: 1.05, ratio: 0.9997, balanceDaylightRatio: 0.9781, nightResidualKwhPerNight: -1.13, max7: 0.9997,
+  blindBandPct: 5, fieldDays: 8, newestFieldDay: '2026-10-28', fieldSlots: [1, 2, 3],
   constants: { 1: { days: 51, chargeHours: 97 }, 2: { days: 51, chargeHours: 96 }, 3: { days: 51, chargeHours: 95 } },
   vendorDaysPresent: 14, vendorMaxDiffKwh: 0.17, nightMaxW: 0, frozenHours: 0, ...o,
 });
@@ -82,7 +82,7 @@ const input = (o: Partial<PvSelectionInput> = {}): PvSelectionInput => ({
   ratioKnown: true,
   ...o,
 });
-const BALANCE: PvBasisReason = { code: 'balance', windowEnd: '2026-11-05', ratio: 1.0523, daylightRatio: 1.0312, nightResidualKwhPerNight: -1.13, threshold: 1.04 };
+const BALANCE: PvBasisReason = { code: 'balance', windowEnd: '2026-11-05', ratio: 1.0523, daylightRatio: 1.0312, nightResidualKwhPerNight: -1.13, threshold: 1.05 };
 
 /* ══ M1 / L2 — E and the latch ═══════════════════════════════════════════════════════════════════════════════════════════ */
 
@@ -687,7 +687,7 @@ test('★★★ L1: every reason has its words in English and in Spanish — fig
 
 test('★★★ M3: the balance refusal is figures only — the ratio, the week, the threshold, the daylight-only ratio and the nights\' residual — and asserts no cause (a planted ×1.10 reads the same way)', () => {
   const t = pvBasisReasonText(BALANCE);
-  assert.equal(t, 'the 7-day energy balance read 1.0523 on the week to 2026-11-05, above 1.04 (1.0312 on daylight hours alone; its nights closed at −1.13 kWh a night against the measured constants); the readings are not used again before the weeks ending on 7 later whole days have all passed');
+  assert.equal(t, 'the 7-day energy balance read 1.0523 on the week to 2026-11-05, above 1.05 (1.0312 on daylight hours alone; its nights closed at −1.13 kWh a night against the measured constants); the readings are not used again before the weeks ending on 7 later whole days have all passed');
   for (const w of [/so the plant/i, /cannot tell/i, /because/i, /drew more/i, /high solar reading/i, /plant drift/i]) assert.doesNotMatch(t, w);
   // A planted ×1.10 on every slot (daylight-only ratio above the honest dark range, nights as honest): the night clause names
   // its figure and nothing else.
@@ -695,7 +695,7 @@ test('★★★ M3: the balance refusal is figures only — the ratio, the week,
   assert.match(planted, /its nights closed at −0\.98 kWh a night against the measured constants\)/);
   assert.doesNotMatch(planted, /so |cannot|because|drew/);
   // Four decimals: a ratio a hair above the threshold never prints equal to it.
-  assert.match(pvBasisReasonText({ ...BALANCE, ratio: 1.04004 }), /read 1\.0400 on/);
+  assert.match(pvBasisReasonText({ ...BALANCE, ratio: 1.05004 }), /read 1\.0500 on/);
 });
 
 test('★★★ L1: every hold names the evening it is held through; G4 states the slot\'s grid input and the add-on\'s force-charge in that hour; a Core swap says the new Core needs 21 days of its own meter', () => {
@@ -723,16 +723,16 @@ test('★★★ L1: every hold names the evening it is held through; G4 states t
 
 test('★★★ L7: the accepted basis sentence — each slot\'s source is its E−1 daylight\'s; panel and mixed; the runway sentence true in both; the push and the card mirror it', () => {
   const panel = panelPvBasisText({ verdict: verdict('pass'), calScoredDays: 22, admittedDays: 13 });
-  assert.equal(panel, " SOLAR FROM THE PANEL'S READINGS: slots 1, 2 and 3 take their solar from the panel's own reading of each Core's chargers (their Cores did not report their own solar on 2026-10-28); the band is calibrated on 22 scored days (the panel's readings stand in on 13 of the last 30 days), and the 7-day energy balance reads 0.9997 on the week to 2026-10-28: the panel's solar against what the plant's own metered flows account for over 7 whole days, on constants measured against each Core's own solar meter (refused above 1.04). The runway alarm does not read these readings: it counts only the solar of Cores that report their own.");
+  assert.equal(panel, " SOLAR FROM THE PANEL'S READINGS: slots 1, 2 and 3 take their solar from the panel's own reading of each Core's chargers (their Cores did not report their own solar on 2026-10-28); the band is calibrated on 22 scored days (the panel's readings stand in on 13 of the last 30 days), and the 7-day energy balance reads 0.9997 on the week to 2026-10-28: the panel's solar against what the plant's own metered flows account for over 7 whole days, on constants measured against each Core's own solar meter (refused above 1.05). The runway alarm does not read these readings: it counts only the solar of Cores that report their own.");
   const mixed = panelPvBasisText({ verdict: verdict('pass', null, [{ slot: 1, source: 'panel' }, { slot: 2, source: 'core' }, { slot: 3, source: 'panel' }]), calScoredDays: 22, admittedDays: 13 });
   assert.match(mixed, /^ SOLAR FROM THE PANEL'S READINGS: slot 2 on its Core's own figure; slots 1 and 3 on the panel's own reading of their Cores' chargers \(their Cores did not report their own solar on 2026-10-28\);/);
   assert.match(panelPvBasisText({ verdict: verdict('pass'), calScoredDays: 22, admittedDays: 13 }, 'es'), /^ SOLAR DE LAS LECTURAS DEL PANEL: /);
-  assert.equal(pvBasisPushText({ pvBasis: 'panel', pvBasisChecks: checks(), pvBasisRefusedBy: null }), " Solar from the panel's readings (7-day energy balance 0.9997, refused above 1.04).");
+  assert.equal(pvBasisPushText({ pvBasis: 'panel', pvBasisChecks: checks(), pvBasisRefusedBy: null }), " Solar from the panel's readings (7-day energy balance 0.9997, refused above 1.05).");
   assert.equal(pvBasisPushText({ pvBasis: null, pvBasisChecks: null, pvBasisRefusedBy: BALANCE }), ` Panel solar not used: ${pvBasisReasonText(BALANCE)}.`);
   assert.equal(pvBasisPushText({ pvBasis: null, pvBasisChecks: null, pvBasisRefusedBy: null }), '', 'the transient class prints nothing');
   // The card's Basis stat.
-  assert.deepEqual(web.panelBasisStat({ pvBasis: 'panel', pvBasisChecks: { ratio: 0.9997, threshold: 1.04 } }), { value: 'panel solar', sub: 'balance 0.9997 ≤ 1.04' });
-  assert.deepEqual(web.panelBasisStat({ pvBasis: 'mixed', pvBasisChecks: { ratio: 1.01, threshold: 1.04 } }), { value: 'Cores + panel solar', sub: 'balance 1.0100 ≤ 1.04' });
+  assert.deepEqual(web.panelBasisStat({ pvBasis: 'panel', pvBasisChecks: { ratio: 0.9997, threshold: 1.05 } }), { value: 'panel solar', sub: 'balance 0.9997 ≤ 1.05' });
+  assert.deepEqual(web.panelBasisStat({ pvBasis: 'mixed', pvBasisChecks: { ratio: 1.01, threshold: 1.05 } }), { value: 'Cores + panel solar', sub: 'balance 1.0100 ≤ 1.05' });
   assert.deepEqual(web.panelBasisStat({ pvBasis: null, pvBasisRefusedBy: { code: 'balance' }, cushionOnly: {} }), { value: null, sub: 'no solar basis · panel solar refused' });
   assert.equal(web.panelBasisStat({}), null, 'a plan of the Cores\' band: nothing new on the card');
   // Through the real push: a charge plan and a hold sized on the planning band say so; the same plans unselected do not.
@@ -746,7 +746,7 @@ test('★★★ L7: the accepted basis sentence — each slot\'s source is its E
     const sized = withPvBasis(base, pvBasisDecoration({ sel, asOfDay: E, plan: { sized: true, cushionOnly: false }, calScoredDays: 22, admittedDays: 13 })) as NightChargePlan;
     const shape = want ? 'charge' : 'hold';
     const msg = buildNightChargeMessage(sized, shape, null, null, 'supervised');
-    assert.ok(msg.body.includes(" Solar from the panel's readings (7-day energy balance 0.9997, refused above 1.04)."), `${c.label} (${shape}): ${msg.body}`);
+    assert.ok(msg.body.includes(" Solar from the panel's readings (7-day energy balance 0.9997, refused above 1.05)."), `${c.label} (${shape}): ${msg.body}`);
     assert.ok(!buildNightChargeMessage(base, shape, null, null, 'supervised').body.includes('panel\'s readings'), `${c.label}: not on the Cores' band`);
   }
 });
