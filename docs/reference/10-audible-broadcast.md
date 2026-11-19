@@ -783,7 +783,7 @@ when that tone is deleted.
 #### 8.1 `buildAlertMessage(level, alerts)` → spoken English sentence
 
 - `green` → `"All clear. All stations report normal."`
-- `red`/`yellow` → picks a **primary alert** (`pickPrimaryAlert`: only alerts of the level's severity — critical for red, warning for yellow — then those with a location (`coreNum`), then category rank Battery > SHP2 > Solar > Grid > Thermal > Connectivity; never a non-annunciating or `audible: false` alert. The tick passes only the alerts the condition counts, `conditionNamePool`, v1.187.11) and builds:
+- `red`/`yellow` → picks a **primary alert** (`pickPrimaryAlert`: only alerts of the level's severity — critical for red, warning for yellow — then, since v1.208.0, any alert before `shp2-pool-out` (a Core out of the backup pool can stand for days, and yields the message to every other alert of its level), then those with a location (`coreNum`), then category rank Battery > SHP2 > Solar > Grid > Thermal > Connectivity; never a non-annunciating or `audible: false` alert. The tick passes only the alerts the condition counts, `conditionNamePool`, v1.187.11) and builds:
 
   ```
   <ISA priority prefix> <Category clause> <Location>. <Title>. <detail>[ Acknowledge at console.][ Repeat. <prefix> <Title>.]
@@ -832,7 +832,7 @@ Unit rules are number-anchored so device SNs (`XXX0015`), error codes, and prose
 `buildAlertMessageEs` mirrors the English builder with fully Spanish framing
 (`priorityAnnouncementPrefixEs`, `categoryEs`, `locationEs`, `numberWordEs`). The
 **title** is translated for broadcast-eligible families via `ES_TITLE_BY_ID_PREFIX`
-(an id-prefix map, longer prefixes first), else the English title is read; the
+(an id-prefix map, longer prefixes first; `shp2-pool-out` reads "Core fuera del respaldo" for every count and slot, v1.208.0), else the English title is read; the
 free-form **detail tail** falls back to the English original (verbalized) — by
 design, no translation API on the alarm path. `verbalizeForTtsEs` is the light
 Spanish normalizer (templates are authored spoken-ready, so it only converts

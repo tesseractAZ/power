@@ -576,6 +576,19 @@ export function houseSnOf(devices: Record<string, DeviceSnapshot>): string | und
 }
 
 /**
+ * v1.208.0 — the panel the pool-out alarm (alerts.ts, `shp2-pool-out`) treats as the house panel, for its id and its
+ * role label only: houseSnOf, else the ONLY panel on the plant. A lone panel is the house panel before its pin exists
+ * and while it has no projection (listed offline at a restart), so its alarm keeps the bare id through both. Two or
+ * more panels with no house panel resolved: none, and each panel's id carries its serial.
+ */
+export function poolOutHouseSn(devices: Record<string, DeviceSnapshot>): string | undefined {
+  const house = houseSnOf(devices);
+  if (house != null) return house;
+  const panels = shp2Panels(devices).sns;
+  return panels.length === 1 ? panels[0] : undefined;
+}
+
+/**
  * v1.188.1 (review) — each connected home Core ONCE, at the one panel listing that reads it. A Core
  * listed connected by two panels (one panel's source list is stale) is read at the listing on an
  * online panel whose reading is fresh (shp2ReadbackFresh), else on an online panel, else the first;

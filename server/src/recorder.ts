@@ -35,6 +35,7 @@ import {
 } from './energyBridge.js';
 // v1.207.0 — the energy bridge's capacity input: per-Core capacity ratios from a tracker of this thread's own.
 import { PoolEnergyBasisTracker, defaultPoolEnergyBasisPath, type CoreRatio } from './poolEnergyBasis.js';
+import { poolRecordMetrics } from './poolOutRecord.js';
 
 interface MetricSample {
   sn: string;
@@ -2552,6 +2553,8 @@ export function createRecorder(
   let recordedSamplesPeak = 0;
   let lastSampleLogAt = Date.now();
 
+  /** v1.208.0 — the pool-out series failed to form once already (extract says it once). */
+  let poolSeriesFailureSaid = false;
   function extract(
     snap: FleetSnapshot,
     nowMs: number = Date.now(),
@@ -2678,6 +2681,22 @@ export function createRecorder(
         }
         for (let i = 0; i < shp.sourceWatts.length; i++) {
           push(`src${i + 1}_w`, shp.sourceWatts[i]);
+        }
+        // v1.208.0 — the pool's capacity, each slot's capacity, flags, error code and control state, the panel's error
+        // lists and flags, and the pool-out tracker's verdicts (poolOutRecord.ts poolRecordMetrics lists them). None was
+        // recorded on 2026-11-14, when a Core left the pool: the capacity step and every flag of that hour are lost. Read
+        // from the store's side map (the reader's view of the newest REST body), under the same gate, cadence and
+        // retention as every row here: nothing during a stale shadow.
+        // A stand-in store with no side map (this module's own unit tests build one from an EventEmitter) has no pool series.
+        const pool = typeof store.poolRecord === 'function' ? store.poolRecord(d.sn) : null;
+        // CONTAINED: a failure to form these series must not cost this evaluation's rows for the whole fleet.
+        try {
+          if (pool) for (const [metric, value] of poolRecordMetrics({ servedFullWh: shp.backupFullCapWh, ...pool })) push(metric, value);
+        } catch (e: any) {
+          if (!poolSeriesFailureSaid) {
+            poolSeriesFailureSaid = true;
+            log(`recorder: the pool-out series could not be formed (${e?.message ?? e}) — every other series is written as usual; said once`);
+          }
         }
       } else {
         const g = p as GenericProjection;

@@ -61,6 +61,7 @@ import { isPriorityEnabled } from './alertSettings.js';
 import { priorityOf, priorityMeta, notifyBracketPriority } from './alertPriority.js';
 import * as haStateCache from './haStateCache.js';
 import { liveGridBackstop, livePoolGridBackstop, gridPresenceEntityId } from './gridState.js';
+import { POOL_OUT_ALERT_ID, type PoolObservation } from './poolOut.js';
 // v1.x — restart-persistent per-alert onset (first-seen) timestamps for the
 // ALM screen; see alertOnset.ts.
 import { syncAlertOnsets, getAlertOnset, restampAlertOnset } from './alertOnset.js';
@@ -971,6 +972,9 @@ export const ENERGY_STATE_FAMILIES: ReadonlySet<string> = new Set([
   'msg-rate-floor',
   'forecast-soc-dip',    // projected SoC dip — energy-state; was silenced same-day it last pushed
   'reserve-alarm-blind', // v1.8.0 F3 compensating alert — must never be eaten by its own monitor
+  // v1.208.0 — a Core out of the panel's backup pool stands for as long as the Core is out (44.5 h on 2026-11-14):
+  // the chronic-noise rule reads exactly that as noise and would silence the family after ten such episodes.
+  'shp2-pool-out',
 ]);
 
 /** v1.186.0 — one rule that fired, and what it does to a push. */
@@ -1794,6 +1798,12 @@ export function bootSeedNotified(p: {
   // seeded "already notified", and when the window ended it was never pushed, though the end push
   // said it would be. Seeded only on a delivery record, like a critical.
   if (p.heldByMaintenance === true) return p.alreadyNotified;
+  // v1.208.0 — NOR "CORE OUT OF THE BACKUP POOL". The store restores a standing episode from its own state file, so
+  // this alarm standing at the first pass does not mean it was announced before the restart: a restart inside the
+  // push debounce (the episode is saved at the raise, the push follows a minute later) left it on file with no
+  // notification anywhere, and the seed then kept it unpushed for the whole episode. Seeded only on a delivery
+  // record, like a critical: one that was pushed stays deduped, one that was not is pushed by this process.
+  if (p.alert.id === POOL_OUT_ALERT_ID || p.alert.id.startsWith(`${POOL_OUT_ALERT_ID}-`)) return p.alreadyNotified;
   return p.firstRun || p.alreadyNotified;
 }
 
@@ -2104,6 +2114,53 @@ export function idlePoolInputsFrom(
     poolCapacityBasis: p == null ? null : measured ? 'measured' : nameplate != null ? 'nameplate' : null,
     smartBackupMode: p?.strategy?.smartBackupMode ?? null,
   };
+}
+
+/**
+ * v1.208.0 — THE BOOT ORPHAN HOLD of "Core out of the backup pool".
+ *
+ * The boot sweep resolves a pushed alert that is absent ten minutes after a restart ("cleared while the add-on was
+ * restarting"). For this alarm absence proves nothing: its state file may be lost or unreadable, and the tracker
+ * needs ten to fifteen minutes of readings to raise again. So an id of this family is UNEVALUABLE until the tracker
+ * for its panel has, IN THIS PROCESS, either raised (the alert is then in the set and is no orphan) or seen one full
+ * clear dwell of healthy capacity against a roster of EVERY slot of the panel (the Core is demonstrably back; a roster
+ * that leaves a slot out, which is what a lost state file gives with a Core unplugged, proves nothing about that
+ * slot). Held past the sweep's deadline it is dropped without a "Resolved", like every held orphan. PURE.
+ *
+ * `sourceSn` is the notify record's (every pool-out push records its panel); a secondary panel's id also ends with
+ * its serial. With neither there is no tracker to ask, and the id is held.
+ */
+export function poolOutOrphanHeld(id: string, sourceSn: string | undefined, released: (panelSn: string) => boolean): boolean {
+  if (id !== POOL_OUT_ALERT_ID && !id.startsWith(`${POOL_OUT_ALERT_ID}-`)) return false;
+  const panelSn = sourceSn ?? (id.length > POOL_OUT_ALERT_ID.length + 1 ? id.slice(POOL_OUT_ALERT_ID.length + 1) : undefined);
+  return panelSn == null || !released(panelSn);
+}
+
+/**
+ * v1.208.0 — THE RETURN NOTICE: what the resolve push of "Core out of the backup pool" says, for that id and no other.
+ *
+ * Every other alert's resolve push repeats the alert's last detail with "(condition cleared)". For this alarm that
+ * detail is the shortfall ("reads 61.4 kWh … under the 92.2 kWh of its 3 slots"), false by the time it is sent, and
+ * the return is an event of its own: the pool percent steps (47 → 64 % on 2026-11-16) because a slot is counted
+ * again, which reads as charging unless it is said. `endNotice(panelSn)` is the store's (SnapshotStore
+ * .poolOutEndNotice): the tracker's newest end record, or null when none is on record — the usual text then stands.
+ * PURE.
+ */
+export function poolOutResolveText(
+  alert: Pick<Alert, 'id' | 'sourceSn'>,
+  endNotice: (panelSn: string) => { title: string; body: string } | null,
+): { title: string; body: string } | null {
+  if (alert.id !== POOL_OUT_ALERT_ID && !alert.id.startsWith(`${POOL_OUT_ALERT_ID}-`)) return null;
+  return alert.sourceSn == null ? null : endNotice(alert.sourceSn);
+}
+
+/**
+ * v1.208.0 — the add-on's grid verdict for ONE panel's pool, as the pool-out tracker takes it (its severity is
+ * critical only when the grid is KNOWN absent). `present` false with `presenceUnknown` true means nothing can be
+ * heard, which is not absence: both fields are handed over as the resolver gave them. PURE.
+ */
+export function poolOutGridVerdict(g: { present: boolean; presenceUnknown: boolean }): NonNullable<PoolObservation['grid']> {
+  return { present: g.present, presenceUnknown: g.presenceUnknown };
 }
 
 /** The whole falling-edge freeze decision, pure. True = the alert is UNEVALUABLE
@@ -2528,6 +2585,9 @@ export function startAlertMonitor(
   // event-set change, outage, carry limit at warn, recovery) through the monitor's sinks; every
   // caller used to pass no logger, so no storm-alert fetch ever reached the journal.
   setNwsLog(log, warn);
+  // v1.208.0 — the pool-out tracker (the store folds each panel body) reads this pool's own grid verdict at that
+  // body: the same resolver the reserve alarms read, on the store's live map.
+  store.setPoolOutGridSource((sn) => poolOutGridVerdict(livePoolGridBackstop(store.get().devices, sn)));
   let cfg = loadNotifyConfig();
   const send = deps.send ?? sendNotification;
   const channelConfigured = (): boolean => deps.send != null || isConfigured(cfg);
@@ -2907,7 +2967,10 @@ export function startAlertMonitor(
     // — RIVER 3 Plus pack 1" vs "… Delta 3 Plus pack 1"). Empty for system-wide
     // alerts, so their titles are unchanged.
     const loc = notifyLocator(alert);
-    const titleBody = loc ? `${alert.title} — ${loc}` : alert.title;
+    // v1.208.0 — the return notice of "Core out of the backup pool" (poolOutResolveText): its own title and body.
+    const returned = kind === 'resolved' ? poolOutResolveText(alert, (sn) => store.poolOutEndNotice(sn, Date.now())) : null;
+    const shownTitle = returned ? returned.title : alert.title;
+    const titleBody = loc ? `${shownTitle} — ${loc}` : shownTitle;
     // v0.94.0 (re-audit #1) — the HA notify title bracket must honour the alert's
     // EXPLICIT priority (see notifyBracketPriority): passing only { severity, source }
     // dropped alert.priority and mislabelled explicit-priority='medium' warnings (the
@@ -2920,7 +2983,7 @@ export function startAlertMonitor(
     try {
       await send(cfg, {
         title: `Power · ${title}`,
-        body: kind === 'resolved' ? `${alert.detail}\n\n(condition cleared)` : alert.detail,
+        body: returned ? returned.body : kind === 'resolved' ? `${alert.detail}\n\n(condition cleared)` : alert.detail,
         severity: kind === 'resolved' ? 'resolved' : effectiveSeverity,
         // v0.74.0 — per-subject card identity (same id for fire + its resolve)
         // so distinct subjects no longer overwrite one shared severity-keyed card
@@ -3376,6 +3439,8 @@ export function startAlertMonitor(
       mpptErrOnsetByKey: store.mpptErrOnsets(),
       // v1.187.20 (review) — a host-pressure episode carried across the restart, not resumed yet.
       hostPressureCarriedHeldAtMs: hostPressureCarryPendingHeldAt(),
+      // v1.208.0 — each panel's standing "Core out of the backup pool" alarm, from the store's tracker.
+      poolOutBySn: store.poolOutAlerts(Date.now()),
     };
 
     // v0.23.0 — grid-backstop context for the reserve/floor alerts: resolved from the live snapshot
@@ -3965,7 +4030,10 @@ export function startAlertMonitor(
       // pushes; only an anomaly that PERSISTS past BASELINE_LOAD_SUSTAIN_MS
       // surfaces. Critical still bypasses (these are never critical, but the
       // ordering keeps that invariant explicit).
-      const debounceMs = a.severity === 'critical' ? 0 : notifyDebounceMsFor(a);
+      // v1.208.0 — nor does an alert that is pushed at any hour (Alert.pushInQuietHours: shp2-pool-out) wait out the
+      // push debounce: its producer has already held it through a dwell of ten to fifteen minutes of readings, so the
+      // debounce could only delay it.
+      const debounceMs = a.severity === 'critical' || a.pushInQuietHours === true ? 0 : notifyDebounceMsFor(a);
       // v0.23.0 — re-notify when a PERSISTENT alert ESCALATES above the severity
       // it was last dispatched at. The motivating case: shp2-below-reserve flips
       // info→critical when the grid drops out at the reserve floor; without this
@@ -3989,12 +4057,19 @@ export function startAlertMonitor(
       // is opted in; default OFF ⇒ critical is also queued (surfaces at the
       // digest, still visible on-screen meanwhile) so nights stay quiet.
       const quiet = QUIET_WINDOW != null && inQuietWindow(nowDate, QUIET_WINDOW);
-      const breaksThrough = a.severity === 'critical' && CRITICAL_BREAKS_QUIET;
+      // v1.208.0 — or the alert itself is one that is pushed at any hour (Alert.pushInQuietHours: shp2-pool-out,
+      // by poolOut.ts poolOutDelivery). A push, not speech: the broadcast's quiet hours are untouched.
+      const breaksThrough = (a.severity === 'critical' && CRITICAL_BREAKS_QUIET) || a.pushInQuietHours === true;
       // v0.76.0 — decision extracted to the pure decideAlertDispatch() (tested).
       const action = decideAlertDispatch({
         qualifies: qualifies(a.severity, cfg.minSeverity),
         alreadyNotified: existing.notified,
-        alreadyQueued: existing.queued === true,
+        // v1.208.0 — `queued` also marks an alert whose push FAILED and was held for the digest (v1.171.1, below), and
+        // a queued alert is not eligible again: one failed send left it for the morning digest, which prints a title
+        // and nothing else. An alert that is pushed at any hour is never queued for quiet hours, so for it the flag
+        // can only mean that failure, and it stays eligible: tried again at every pass until a send succeeds (the
+        // success clears the flag, and the digest then leaves it out).
+        alreadyQueued: existing.queued === true && a.pushInQuietHours !== true,
         escalated,
         debounceElapsed: now - existing.dwellFrom >= escDebounceMs,
         inQuiet: quiet,
@@ -4038,6 +4113,9 @@ export function startAlertMonitor(
         //     set notifiedSeverity pre-send: advancing it on a failed escalation
         //     would make the next tick read critical<critical = not-escalated and
         //     silently swallow the retry of a CRITICAL break-through push.
+        // v1.208.0 — a retry of a push that failed: only an alert pushed at any hour is retried while held (above),
+        // and its hold for the digest is said once, not at every failed retry.
+        const heldBefore = existing.queued === true && a.pushInQuietHours === true;
         existing.queued = false;
         const outcome = await dispatch(a, 'new');
         if (outcome === 'failed') {
@@ -4051,7 +4129,7 @@ export function startAlertMonitor(
           const heldAt = quietQueue.findIndex((q) => q.id === a.id);
           if (heldAt >= 0) quietQueue[heldAt] = a; else quietQueue.push(a);
           persistDigestState();
-          log(`notify: held "${a.title}" for the morning digest — its push failed and the condition may clear before a retry`);
+          if (!heldBefore) log(`notify: held "${a.title}" for the morning digest — its push failed and the condition may clear before a retry`);
         }
         if (outcome !== 'failed') {
           existing.notified = true;
@@ -4311,7 +4389,7 @@ export function startAlertMonitor(
         // it became unobservable.
         unevaluable: (id, rec) => coldFeedOwns(id) || fallingEdgeFrozenByEvidence({
           id, deviceSns: deviceSnRoster, devices: snap.devices, nowMs: now, sourceSn: rec.sourceSn,
-        }) || heldForHydration(id),
+        }) || heldForHydration(id) || poolOutOrphanHeld(id, rec.sourceSn, (sn) => store.poolOutOrphanReleased(sn)),
       });
       // Re-run while anything is held; latching here would strand those records
       // and the fix would be invisible after the first tick.
@@ -4322,7 +4400,7 @@ export function startAlertMonitor(
         if (heldOrphanLogged.has(id)) continue;
         heldOrphanLogged.add(id);
         const r = persistedNotified.get(id);
-        log(`notify: orphan resolve HELD — "${r?.title ?? id}" (${coldFeedOwns(id) ? 'alert feeds not yet delivered' : heldForHydration(id) ? 'no complete poll yet — the device list is empty' : `${r?.sourceSn ?? 'source'} offline/stale`}; not a recovery)`);
+        log(`notify: orphan resolve HELD — "${r?.title ?? id}" (${coldFeedOwns(id) ? 'alert feeds not yet delivered' : heldForHydration(id) ? 'no complete poll yet — the device list is empty' : poolOutOrphanHeld(id, r?.sourceSn, (sn) => store.poolOutOrphanReleased(sn)) ? 'the pool-out tracker has neither raised nor seen a full dwell of healthy capacity across every slot since the restart' : `${r?.sourceSn ?? 'source'} offline/stale`}; not a recovery)`);
       }
       for (const id of resolve) heldOrphanLogged.delete(id);
       for (const id of drop) {
@@ -4338,10 +4416,14 @@ export function startAlertMonitor(
         // not leave a record behind that would eat a genuine re-fire within the 24 h TTL.
         persistedNotified.delete(id);
         const title = rec.title ?? id;
+        // v1.208.0 — "Core out of the backup pool" that ENDED on the tracker's evidence before the restart (its
+        // resolve was waiting for the quiet hours to end): the end record is on file, and the return notice is sent
+        // in place of "cleared while the add-on was restarting". Only an end at or after the push this resolves.
+        const returned = poolOutResolveText({ id, sourceSn: rec.sourceSn }, (sn) => store.poolOutEndNotice(sn, Date.now(), rec.ts));
         try {
           await send(cfg, {
-            title: `Power · Resolved: ${title}`,
-            body: `${title}\n\n(condition cleared while the add-on was restarting)`,
+            title: `Power · Resolved: ${returned ? returned.title : title}`,
+            body: returned ? returned.body : `${title}\n\n(condition cleared while the add-on was restarting)`,
             severity: 'resolved',
             dedupId: id, // === notifyDedupId(alert), so this dismisses the exact card it fired on
           });

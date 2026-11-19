@@ -67,8 +67,8 @@ power and an energy sensor for every Smart Home Panel 2 circuit; the energy coun
 Energy Dashboard), and opt-in **Home Assistant notifications** with companion-app push.
 
 Every change ships through the test suite, and a guard that a plausible refactor could silently
-disarm is held by a committed mutation harness: **153 harnesses** holding
-**5654 anchor-asserted mutants**. The harness, mutant, test and reference counts, the engine
+disarm is held by a committed mutation harness: **154 harnesses** holding
+**5966 anchor-asserted mutants**. The harness, mutant, test and reference counts, the engine
 floor and group counts, and every engine-index row's code anchor are checked against the tree in
 CI ([Quality & accuracy](#quality--accuracy)).
 
@@ -123,7 +123,7 @@ anchored identifier in code; a mention left in a comment or a string does not co
 | Forecasting | 8 | Per-hour least-squares irradiance→PV response with a recursive Bayesian posterior; recency-weighted load curves; a P10/P50/P90 solar and SoC band, narrowed (never widened) to its realized error, with 21 quantile paths for the reserve and full-charge probabilities; a forecast-skill hindcast with PV bias correction; EV-session mining and live-session detection; an ambient-coupled pack thermal forecast; a clear-sky physics ceiling (API) |
 | Battery & PV health | 17 | OLS fade regression to end of life; a two-state Kalman SoH filter and hierarchical Bayesian shrinkage (API); self-validating coulombic efficiency; round-trip efficiency; charge-curve fingerprint; internal-resistance trend; thermal-event counting; soiling, shade, clipping and SoC-saturation curtailment; MPPT and standby-floor drift; LFP OCV→SoC (API); a pack-risk heuristic and an online-trained logistic regression (API) |
 | Energy economics & arbitrage | 11 | The night-charge planner, its outcome scorer and its write-readiness gate; a reserve writer, a just-in-time force-charge controller and a Charge Now responder, each write-capable only behind options whose defaults never write; on-peak grid-to-battery and idle-pool detectors; energy-flow attribution with time-of-use cost accounting; greedy and dynamic-programming dispatch planners (API) |
-| Alarms & safety | 11 | The islanded runway and projected-SoC simulator; the backup-pool SoC ladder; grid-backstop evidence fusion; threshold, cell-spread and defective-pack alarms; runtime and cell-imbalance trend alarms; host health; a second panel's runway; a load-shed advisor (advisory) |
+| Alarms & safety | 12 | The islanded runway and projected-SoC simulator; the backup-pool SoC ladder; grid-backstop evidence fusion; threshold, cell-spread and defective-pack alarms; a tracker for a Core out of the panel's backup pool; runtime and cell-imbalance trend alarms; host health; a second panel's runway; a load-shed advisor (advisory) |
 | Learning & anomaly detection | 7 | Hour-of-day self-baselines (median/MAD); peer fade-rate and pack peer outliers; string mismatch; Mahalanobis pack novelty (API); an alarm-flood auto-tuner for pushes; the night-ledger calibration learners |
 | Telemetry integrity | 8 | A telemetry-blind detector with a remediate-first hold; a message-rate floor with a budgeted session self-heal; frozen cloud-payload and frozen-row detection; gap and outage detection; removed-pack detection; the dark-Core energy bridge; settings drift |
 
@@ -447,7 +447,7 @@ want to do, and the add-on's Configuration tab shows each one's help text.
 ## Development
 
 ```bash
-cd server && npm install && npm test     # 6,597 tests
+cd server && npm install && npm test     # 6,883 tests
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.json      # src
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.test.json # src + tests
 cd web    && npm install && npm run build

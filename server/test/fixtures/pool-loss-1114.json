@@ -1,0 +1,53 @@
+{
+ "note": "SYNTHETIC IN PART. \"rows\" are the recorder's 5-minute means of the panel's own series (UTC), verbatim, around the loss of Sat 2026-11-14 23:35 MST (2026-11-15T06:35:12Z). The recorder stored neither the pool capacity nor any flag, error code or circuit vector at that time. The builder (poolOutFixtures.ts) expands each row to five 60 s REST bodies and ADDS: the capacity keys from \"capacity\" below (the two instants are from Home Assistant history of the capacity sensor), a remainder computed from the percent, a deterministic MOVING twelve-circuit vector (so every body is new content and the shadow latch stays clear), the flags of the one raw sample on record (2026-11-17, after the return) and empty error lists. None of those added values was measured at these instants. Serials are placeholders.",
+ "source": "panel-series-5min-31d.csv, rows 2026-11-15T06:00Z to 07:10Z",
+ "panelSn": "HD31XXX00XXX0001",
+ "coreSns": [
+  "Y711XXX00XXX0001",
+  "Y711XXX00XXX0002",
+  "Y711XXX00XXX0003"
+ ],
+ "columns": [
+  "ts_iso_utc",
+  "backup_pct",
+  "backup_reserve",
+  "src1_pct",
+  "src2_pct",
+  "src3_pct",
+  "src1_w",
+  "src2_w",
+  "src3_w",
+  "src1_in_w",
+  "src2_in_w",
+  "src3_in_w",
+  "src1_pv_w",
+  "src2_pv_w",
+  "src3_pv_w",
+  "src1_temp",
+  "src2_temp",
+  "src3_temp"
+ ],
+ "capacity": {
+  "fullWh": 92160,
+  "shortWh": 61440,
+  "shortFromIso": "2026-11-15T06:35:12Z",
+  "shortUntilIso": "2026-11-17T03:08:03Z"
+ },
+ "rows": [
+  ["2026-11-15T06:00Z", 68, 16, 73, 67, 64, -522, -469.2, -445.8, 0, 0, 0, 0, 0, 0, 29, 28, 29.5],
+  ["2026-11-15T06:05Z", 68, 16, 73, 67, 64, -481.4, -433, -406.3, 0, 0, 0, 0, 0, 0, 29, 28, 29.3],
+  ["2026-11-15T06:10Z", 68, 16, 73, 66, 64, -509.1, -448.3, -427.8, 0, 0, 0, 0, 0, 0, 29, 28, 29.5],
+  ["2026-11-15T06:15Z", 67, 16, 72, 66, 64, -536.9, -476.6, -458.5, 0, 0, 0, 0, 0, 0, 29, 28, 29.3],
+  ["2026-11-15T06:20Z", 67, 16, 72, 66, 64, -466, -417.9, -400.4, 0, 0, 0, 0, 0, 0, 29, 28, 29.5],
+  ["2026-11-15T06:25Z", 67, 16, 72, 66, 64, -588.4, -528.4, -504.4, 0, 0, 0, 0, 0, 0, 29, 28, 29.5],
+  ["2026-11-15T06:30Z", 67, 16, 72, 66, 63, -710.3, -636.6, -600.9, 0, 0, 0, 0, 0, 0, 29, 28, 29.5],
+  ["2026-11-15T06:35Z", 64, 16, 72, 65.5, 63, 0, -1011, -962.2, 0, 0, 0, 0, 0, 0, 29, 28, 29.5],
+  ["2026-11-15T06:40Z", 64, 16, 72, 65, 63, 0, -1106.6, -1061.4, 0, 0, 0, 0, 0, 0, 29, 28, 29],
+  ["2026-11-15T06:45Z", 63.5, 16, 72, 65, 62.5, 0, -1082.9, -1030.1, 0, 0, 0, 0, 0, 0, 29, 28, 29.3],
+  ["2026-11-15T06:50Z", 63, 16, 72, 64, 62, 0, -1075.4, -1032.3, 0, 0, 0, 0, 0, 0, 29, 28, 29],
+  ["2026-11-15T06:55Z", 63, 16, 72, 64, 62, 0, -1007.9, -927.8, 0, 0, 0, 0, 0, 0, 29, 28, 29.5],
+  ["2026-11-15T07:00Z", 62.5, 16, 72, 63.5, 61.5, 0, -1102.5, -1056.7, 0, 0, 0, 0, 0, 0, 29, 28, 29.5],
+  ["2026-11-15T07:05Z", 62, 16, 72, 63, 61, 0, -1588.7, -1519.8, 0, 0, 0, 0, 0, 0, 29, 28, 29.5],
+  ["2026-11-15T07:10Z", 62, 16, 72, 63, 61, 0, -1120.3, -1070.4, 0, 0, 0, 0, 0, 0, 29, 28, 29]
+ ]
+}

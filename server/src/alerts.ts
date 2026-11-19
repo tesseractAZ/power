@@ -38,7 +38,8 @@ export function resetVdiffWarnHoldForTesting(): void {
   vdiffKneeByKey.clear(); // v1.187.0 — the end-of-charge knee state is per-pack vdiff state too
 }
 import { VOL_DIFF_CRIT_MV, VOL_DIFF_PLATEAU_SOC_PCT, VOL_DIFF_PLATEAU_QUIET_SOC_PCT, vdiffCritMvFor, plateauQuietWarnSpread } from './cellSpread.js';
-import { shp2ConnectedDpuSns, isExpectedOfflineSpare as isExpectedOfflineSpareShared, housePoolFallbackSoc, lastKnownHomeRoster, shp2Panels, findShp2, secondaryPanels, panelMeanSoc } from './shp2Membership.js';
+import { shp2ConnectedDpuSns, isExpectedOfflineSpare as isExpectedOfflineSpareShared, housePoolFallbackSoc, lastKnownHomeRoster, shp2Panels, findShp2, secondaryPanels, panelMeanSoc, poolOutHouseSn } from './shp2Membership.js';
+import { poolOutAlertId, poolOutDelivery, type PoolOutAlertParts } from './poolOut.js';
 import { coreNumber, isDpuProduct, isShp2Product } from './topology.js';
 import { MAINS_V, SOH_WARN_PCT, SOH_CRIT_PCT } from './hwSpec.js';
 import { liveHostPower } from './hostPower.js';
@@ -337,6 +338,14 @@ export interface Alert {
    * every other alert, policy-muted or not.
    */
   shelvedUntilMs?: number;
+  /**
+   * v1.208.0 — this alert is pushed AT ONCE at any hour, at any severity: not held for the morning digest inside the
+   * notify quiet hours, not held by the push debounce, and tried again at every pass after a send that failed
+   * (alertMonitor reads it in those three places). The digest prints a title only, so a held alert arrives hours
+   * later with none of its detail. Set by one producer, from one policy function: `shp2-pool-out`, from poolOut.ts
+   * poolOutDelivery. It changes nothing about speech.
+   */
+  pushInQuietHours?: boolean;
 }
 
 /** v1.187.0 — muteReason wordings shared by the alert producers and the monitor. */
@@ -1199,6 +1208,10 @@ export interface ConnectivityContext {
    *  producing test alone cannot reject — it was derived from sunset, where a
    *  shedding string makes no watts. */
   mpptErrOnsetByKey?: Map<string, { code: number; sinceMs: number }>;
+  /** v1.208.0 — each panel's standing "Core out of the backup pool" alarm, keyed by the panel's serial, as the
+   *  store's tracker holds it (SnapshotStore.poolOutAlerts). It is the STORE's state, not a reading of the
+   *  projection: the alarm stands while the panel is offline, shadowed or not yet projected after a restart. */
+  poolOutBySn?: ReadonlyMap<string, PoolOutAlertParts & { card?: { id: string; device: string } | null }>;
 }
 
 /** Format an age in ms as the most natural short human string. */
@@ -2849,8 +2862,56 @@ export function computeAlerts(
   }
 
   for (const panel of secondaryPanels(devices)) secondaryPanelAlerts(out, panel, devices, connectivity, poolGrid ? poolGrid(panel.sn) : grid, now);
+  // v1.208.0 — LAST, after every panel's reserve pair and every other panel alert. Which ONE alert the spoken message
+  // names is ttsService.pickPrimaryAlert's choice, and there this alarm yields to every other candidate of its level
+  // (its own clause: the order here would only break a tie inside one category). "Backup at or below reserve" is not
+  // in that choice at all: it has an announcer of its own and is left out of the pool the message names from.
+  pushPoolOutAlerts(out, devices, connectivity);
 
   return out.sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity] || a.category.localeCompare(b.category));
+}
+
+/**
+ * v1.208.0 — "Core out of the backup pool": one alert per panel whose tracker holds a standing episode (poolOut.ts;
+ * the store folds every REST body and hands its state over through the context).
+ *
+ * On 2026-11-14 23:35 the panel's pool capacity fell by one Core's 30.72 kWh; that slot delivered 0 W for 44.5 hours
+ * while the panel listed it as connected with no error code, and nothing alerted. The two slot rules above
+ * (`errorCodeNum`, `isConnect && !hwConnect`) cannot see that: the capacity can.
+ *
+ * NOT gated on the panel being online or projected: the episode is the store's, raised and cleared only on evidence,
+ * so it stands through an offline panel, a stale shadow and a restart. `sourceSn` is the panel, so the monitor holds a
+ * vanish while that panel has no fresh data. The id carries no Core serial (the off-panel roster mute cannot match
+ * it): `shp2-pool-out` for the house panel, with `-<panel serial>` for any other. Title and `fault` are latched by the
+ * tracker; the detail is rebuilt each pass.
+ */
+function pushPoolOutAlerts(out: Alert[], devices: Record<string, DeviceSnapshot>, connectivity: ConnectivityContext | undefined): void {
+  const standing = connectivity?.poolOutBySn;
+  if (!standing || standing.size === 0) return;
+  const houseSn = poolOutHouseSn(devices);
+  for (const [sn, parts] of standing) {
+    const panel = devices[sn];
+    // The id and the panel's name are the ones the store latched at the raise and keeps with the episode, so the
+    // alarm is in the set at the first pass after a restart even while no device list has arrived (a restart into a
+    // cloud outage), and under the same id whatever the house pin says by then. With neither a latch nor a listing
+    // (a state file from before the latch, for a panel not listed yet) there is no name to alert under; its pushed
+    // card is kept by the boot orphan hold.
+    const card = parts.card ?? null;
+    if (!panel && !card) continue;
+    out.push({
+      id: card?.id ?? poolOutAlertId(sn, sn === houseSn),
+      severity: parts.severity,
+      category: 'SHP2',
+      device: panel?.deviceName ?? (card as { device: string }).device,
+      sourceSn: sn,
+      title: parts.title,
+      fault: parts.fault,
+      detail: parts.detail,
+      facts: parts.facts,
+      // The delivery policy lives in poolOutDelivery and nowhere else: this asks it about the quiet hours.
+      ...(poolOutDelivery(parts.severity, true).pushNow ? { pushInQuietHours: true } : {}),
+    });
+  }
 }
 
 /**

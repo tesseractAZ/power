@@ -263,7 +263,9 @@ pushing only finite numbers. Metrics emitted per projection kind:
 - **SHP2**: `backup_pct`, `backup_reserve` (the reserve setpoint, v1.117.0), `backup_remain_min`, `backup_charge_min`, per-circuit
   `chN_w`, summed `panel_load`, `grid_home_w` (SHP2-metered home grid import),
   split-phase `pairN_w`, per-source `srcN_pct/temp/w` and the panel's per-slot PV and input
-  fields `srcN_pv_w/pv_hv_w/pv_lv_w/in_w` (the energy bridge's).
+  fields `srcN_pv_w/pv_hv_w/pv_lv_w/in_w` (the energy bridge's), and the pool series of v1.208.0:
+  `backup_full_wh`, `backup_full_raw_wh`, `backup_pct_raw`, per-source `srcN_full_wh/flags/err/ctrl`,
+  `err_backup_n`, `err_master_n`, `err_hall_n`, `panel_flags`, `pool_counted_slots` and `pool_out_mask`.
 - **Generic**: `soc`, `in_watts`, `out_watts`, `pv_watts`, `ac_in`, `ac_out`,
   `temp`.
 

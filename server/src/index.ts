@@ -152,7 +152,7 @@ import { startSshServer, loadOrCreateHostKey } from './console/server.js';
 import { authFromEnv, authConfigProblems, describeSshAuth } from './console/session.js';
 import { createTuiDataProvider } from './console/dataProvider.js';
 import { registerWsConsole } from './console/wsConsole.js';
-import { startMqttDiscovery, maintenanceStateFields } from './mqttDiscovery.js';
+import { startMqttDiscovery, maintenanceStateFields, poolCoreOutStateFields } from './mqttDiscovery.js';
 import { buildCalendarIcs } from './calendar.js';
 import { computeRepairIssues } from './repairIssues.js';
 import { getWeather, createGhiTickLogger } from './weather.js';
@@ -1116,6 +1116,14 @@ app.get<{ Querystring: { sn?: string } }>('/api/debug/raw', async (req, reply) =
   };
 });
 
+/**
+ * v1.208.0 — the pool-out tracker as it stands (poolOut.ts): per panel its reference, the four verdicts on the newest
+ * REST body with their inputs, the streak, the episode and the reader's view of that body; and the event captures on
+ * disk, by index. Panels are named by role, never by serial. It takes no parameter: no file is read by a name the
+ * request supplies.
+ */
+app.get('/api/debug/pool-out', async () => store.poolOutDebug(Date.now()));
+
 app.get('/api/debug/mqtt-summary', async () => {
   const list = Object.keys(store.get().devices);
   return list.map((sn) => ({
@@ -1875,6 +1883,8 @@ app.get('/api/ha-state', async (req, reply) => {
     learned_info_count: cnt('learned', 'info'),
     // v1.197.0 — the maintenance windows in force (as the MQTT state publishes them).
     ...maintenanceStateFields(maintenance.active(Date.now()), fmtSiteHm),
+    // v1.208.0 — whether a Core is out of a panel's backup pool (as the MQTT state publishes it).
+    ...poolCoreOutStateFields(store.poolOutSensorStatesSafe(Date.now())),
 
     // Runway — live off-grid projection (v0.5.0). v0.15.11 — null hours on a
     // net-charging horizon publish a sentinel (not bare null → HA 'unknown') so
