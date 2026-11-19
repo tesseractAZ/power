@@ -17,7 +17,8 @@
  *   C32  request logging off through a LogController (no FSTDEP023)                    W-i
  *   C33  no device serial in a phone push (title, message, tag)                        S-i..S-iv
  *   TTS  (v1.207.2) the limit of a spoken alarm pass: the 12 s default, the clamp to the budget,
- *        the 8 s reserve for a pass still to render, its floor, the retry, the option's export  T-i..T-ix
+ *        the 8 s reserve for a pass still to render (held only above 12 s), its floor, the retry
+ *        and its pause, which passes count as still to render, the option's export            T-i..T-xv
  *
  * Not mutated: the startPollLoop wiring createFleetStatusDumper(store, log, debug) (a level, not an
  * emission: the compact line is pinned through createFleetStatusDumper itself); the worker's copy of
@@ -352,6 +353,8 @@ const MUTANTS = [
   },
   // ── TTS (v1.207.2) — the limit of a spoken pass ─────────────────────────────────────────────
   // Each names the test in audioRendererBilingual.test.ts (T-ix: optionsEnvBridge.test.ts) that holds it.
+  // T-x..T-xv: the rule at the default, and the parts a review found no test held (the test clock did not
+  // move across the retry pause until then).
   {
     id: 'T-i. ★★★ the default limit of a spoken pass is 20 s',
     file: AR,
@@ -362,14 +365,14 @@ const MUTANTS = [
   {
     id: 'T-ii. ★★★ an attempt is not held to what is left of the budget',
     file: AR,
-    find: '  const withinBudget = Math.min(passTimeoutMs(), remainingMs);',
-    to: '  const withinBudget = passTimeoutMs(); /* MUTANT */',
-    why: 'A last pass or a terminator is handed the whole limit however little of the 25 s is left: the alarm waits past its bound. Held by: INVARIANT 1 (the second pass after an 18 s first: 7000; after a retry: 10100; the last terminator: 7000).',
+    find: '  const withinBudget = Math.min(limit, remainingMs);',
+    to: '  const withinBudget = limit; /* MUTANT */',
+    why: 'A last pass or a terminator is handed the whole limit however little of the 25 s is left: the alarm waits past its bound. Held by: INVARIANT 1 (the second pass after an 18 s first: 7000; after a retry: 9800; the last terminator: 7000).',
   },
   {
     id: 'T-iii. ★★★ no reserve: a pass with one behind it is handed the limit',
     file: AR,
-    find: '  if (passesAfter <= 0) return withinBudget;',
+    find: '  if (passesAfter <= 0 || limit <= PASS_RESERVE_ABOVE_MS) return withinBudget;',
     to: '  if (true) return withinBudget; /* MUTANT */',
     why: 'THE DEFECT the reserve exists for: at 20 s a first pass that stalls takes 20 s and leaves the other language 5 s. Held by: INVARIANT 2 (17000, then 8000).',
   },
@@ -385,14 +388,14 @@ const MUTANTS = [
     file: AR,
     find: '  return Math.min(withinBudget, Math.max(remainingMs - passesAfter * PASS_RESERVE_MS, PASS_FLOOR_MS));',
     to: '  return Math.min(withinBudget, remainingMs - passesAfter * PASS_RESERVE_MS); /* MUTANT */',
-    why: 'Where the reserve exceeds what is left the engine is handed a negative limit: the pass in hand fails at once. Held by: the floor test (a 5 s budget: 3000, then 2000).',
+    why: 'Where the reserve exceeds what is left the engine is handed a negative limit: the pass in hand fails at once. Held by: the floor test (a 5 s budget at 20000: 3000, then 2000).',
   },
   {
     id: 'T-vi. ★★★ the retry is not held to the reserve',
     file: AR,
     find: '      r = await render({ host, port, text, voice, timeoutMs: attemptLimitMs(remaining(), passesAfter) });',
     to: '      r = await render({ host, port, text, voice, timeoutMs: attemptLimitMs(remaining(), 0) }); /* MUTANT */',
-    why: 'A socket drop then a stalled retry: at 20 s the retry takes 20 s and the other language has 2.1 s. Held by: the retry test (17000, 14100, 8000).',
+    why: 'A socket drop then a stalled retry: at 20 s the retry takes 20 s and the other language has 1.8 s. Held by: the retry test (17000, 13800, 8000).',
   },
   {
     id: 'T-vii. ★★★ the pass loop counts no pass behind the one in hand',
@@ -406,7 +409,7 @@ const MUTANTS = [
     file: AR,
     find: '`terminator (lang=${lang})`, 0);',
     to: '`terminator (lang=${lang})`, 1); /* MUTANT */',
-    why: 'A terminator is cut 8 s before the budget ends, for a pass that does not exist. Held by: INVARIANT 1 (the terminator row: 12000, then 7000) and the terminator test at 20000 (16000).',
+    why: 'With the limit above 12 s a terminator is cut 8 s before the budget ends, for a pass that does not exist. Held by: the terminator test at 20000 (the first terminator: 16000; one language: 20000).',
   },
   {
     id: 'T-ix. ★★★ the run script does not export the option',
@@ -414,6 +417,48 @@ const MUTANTS = [
     find: "if bashio::config.has_value 'BROADCAST_TTS_PASS_TIMEOUT_MS'; then export BROADCAST_TTS_PASS_TIMEOUT_MS=\"$(bashio::config 'BROADCAST_TTS_PASS_TIMEOUT_MS')\"; fi",
     to: '# /* MUTANT */ BROADCAST_TTS_PASS_TIMEOUT_MS is not exported',
     why: 'The option is in the form, stored by the Supervisor, and never reaches the server: the limit stays 12 s whatever is entered. Held by: optionsEnvBridge.test.ts (every add-on option reaches the process; BROADCAST_TTS_PASS_TIMEOUT_MS reaches the process).',
+  },
+  {
+    id: 'T-x. ★★★ the reserve is held at the default limit too',
+    file: AR,
+    find: '  if (passesAfter <= 0 || limit <= PASS_RESERVE_ABOVE_MS) return withinBudget;',
+    to: '  if (passesAfter <= 0) return withinBudget; /* MUTANT */',
+    why: 'An install that never set the option is handed less than v1.207.1 handed it: a retry whose 0.3 s pause fired late has 11.6 s where it had 12, and an English pass ready at 11.9 s is lost. Held by: INVARIANT 1 (the 2.5 s pause: 12000, 12000, 7700; three passes: 12000, 12000, 1000).',
+  },
+  {
+    id: 'T-xi. ★★ one reserve is held however many passes are behind',
+    file: AR,
+    find: '  return Math.min(withinBudget, Math.max(remainingMs - passesAfter * PASS_RESERVE_MS, PASS_FLOOR_MS));',
+    to: '  return Math.min(withinBudget, Math.max(remainingMs - PASS_RESERVE_MS, PASS_FLOOR_MS)); /* MUTANT */',
+    why: 'With two passes behind, the first is handed 17 s of the 25 and the last has nothing. Held by: the three-pass test (9000, 8000, 8000).',
+  },
+  {
+    id: 'T-xii. ★★ a retry on a spent budget is handed what is left, a negative limit',
+    file: AR,
+    find: '  if (remainingMs <= 0) return 0;\n',
+    to: '  /* MUTANT */\n',
+    why: 'The pause before a retry can outlast the budget; v1.207.1 handed that retry 0. Held by: INVARIANT 1 (the pause that outlasts the budget: 12000, 0) and the spent-budget test at 20000 (17000, 0).',
+  },
+  {
+    id: 'T-xiii. ★★ a pass already rendered still counts as behind',
+    file: AR,
+    find: 'filter((x) => x !== k && !renderedPcm.has(x) && !failedKeys.has(x))',
+    to: 'filter((x) => x !== k) /* MUTANT */',
+    why: 'A pass gives up 8 s to one that will not be rendered again. Held by: the repeat test (English, Spanish, English: 17000, 20000).',
+  },
+  {
+    id: 'T-xiv. ★★ a repeat of the pass in hand counts as behind',
+    file: AR,
+    find: 'filter((x) => x !== k && !renderedPcm.has(x) && !failedKeys.has(x))',
+    to: 'filter((x) => !renderedPcm.has(x) && !failedKeys.has(x)) /* MUTANT */',
+    why: 'A pass listed twice is rendered once, and gives up 8 s to its own repeat. Held by: the repeat test (the same pass twice: 20000).',
+  },
+  {
+    id: 'T-xv. ★★ the pause before a retry is 5 s',
+    file: AR,
+    find: 'const PASS_RETRY_DELAY_MS = 300;',
+    to: 'const PASS_RETRY_DELAY_MS = 5000; /* MUTANT */',
+    why: 'A dropped socket costs 5 s of the budget before the retry: at the default the other language is left 5.1 s where it had 9.8. Held by: INVARIANT 1 (9800 after a retry) and the retry test (13800).',
   },
   // ── C32 — request logging ───────────────────────────────────────────────────────────────────
   {
