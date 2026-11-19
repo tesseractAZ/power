@@ -1,9 +1,10 @@
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync, utimesSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { renderAnnouncement, prewarmTerminatorCache, pruneRenderCache, _resetResidentVoiceForTest, _resetTerminatorCacheForTest } from '../src/audioRenderer.js';
+import { OPTIONS } from '../src/config.js';
 import { pcmToWav } from '../src/wyomingTts.js';
 import { generateAudioAssets } from '../src/audioAssets.js';
 
@@ -39,6 +40,80 @@ const baseOpts = (klaxonDir: string, cacheDir: string) => ({
   endOfMessage: false, // isolate the pass render order from terminators
   log: () => {},
 });
+
+/* ── v1.207.2 — a scripted speech engine on a mocked clock ─────────────────────────────────────────────────────
+ * Each step is one attempt: how long the engine needs for it and how it ends. An attempt that needs more than the
+ * limit it was handed ends the way the client ends it, with a timeout at that limit (`overrun` lets one run past
+ * its limit, for the clamp to the remaining budget). `given` is the limit handed to the engine for each attempt, in
+ * order: the figure these tests pin. Only Date is mocked, so the 300 ms pause before a retry is a real timer and
+ * the mocked clock does not move across it. */
+type Step = { takes: number | 'limit'; ends: 'ok' | 'timeout' | 'socket'; overrun?: boolean };
+interface Spoken { given: number[]; voices: string[]; ok: boolean; partial: boolean; elapsedMs: number }
+const EN_VOICE = 'en_US-lessac-medium';
+const ES_VOICE = 'es_MX-ald-medium';
+/** The bilingual announcement broadcast.ts builds: English, then Spanish in the second voice. */
+const TWO = {
+  message: 'Critical alarm.',
+  messages: [
+    { text: 'Critical alarm.', voice: EN_VOICE, lang: 'en' as const },
+    { text: 'Alarma critica.', voice: ES_VOICE, lang: 'es' as const },
+  ],
+};
+/** One language: the single `message` (BROADCAST_BILINGUAL off, the shipped default). */
+const ONE = { message: 'Critical alarm.', wyomingVoice: EN_VOICE };
+const TTS_ENV = ['BROADCAST_TTS_PASS_TIMEOUT_MS', 'BROADCAST_TTS_TOTAL_BUDGET_MS'] as const;
+
+/** Render one announcement against the scripted engine. `env` sets the two settings for this call only (a key
+ *  left out is unset, the state of an install that never set the option); `before` runs in the same directories
+ *  first, for a test that needs a voice left resident. */
+async function speak(
+  t: TestContext, opts: Record<string, unknown>, steps: Step[],
+  env: Partial<Record<(typeof TTS_ENV)[number], string>> = {},
+  before?: (klaxonDir: string, cacheDir: string) => Promise<void>,
+): Promise<Spoken> {
+  const saved = TTS_ENV.map((k) => [k, process.env[k]] as const);
+  for (const k of TTS_ENV) { if (env[k] === undefined) delete process.env[k]; else process.env[k] = env[k]; }
+  let out: Spoken | undefined;
+  try {
+    await withDirs(async (klaxonDir, cacheDir) => {
+      _resetResidentVoiceForTest();
+      _resetTerminatorCacheForTest();
+      if (before) await before(klaxonDir, cacheDir);
+      const t0 = Date.now();
+      t.mock.timers.enable({ apis: ['Date'], now: t0 });
+      try {
+        const given: number[] = [];
+        const voices: string[] = [];
+        const renderTts = async (o: { timeoutMs?: number; voice?: string }) => {
+          // An attempt past the end of the script runs to its limit, so `given` shows every attempt made.
+          const step: Step = steps[given.length] ?? { takes: 'limit', ends: 'timeout' };
+          const limit = o.timeoutMs ?? -1;
+          given.push(limit);
+          voices.push(o.voice === EN_VOICE ? 'en' : o.voice === ES_VOICE ? 'es' : String(o.voice));
+          const takes = step.takes === 'limit' ? limit : step.takes;
+          if (!step.overrun && takes > limit) {
+            t.mock.timers.tick(limit);
+            return { ok: false as const, error: `wyoming render timeout after ${limit}ms` };
+          }
+          t.mock.timers.tick(takes);
+          if (step.ends === 'ok') return { ok: true as const, wav: fakeWav(200), durationMs: takes };
+          if (step.ends === 'socket') return { ok: false as const, error: 'wyoming socket: read ECONNRESET' };
+          return { ok: false as const, error: `wyoming render timeout after ${limit}ms` };
+        };
+        const r = await renderAnnouncement({
+          level: 'critical', klaxonDir, cacheDir, wyomingHost: 'x', wyomingPort: 1, endOfMessage: false, log: () => {},
+          ...opts, renderTts,
+        } as any);
+        out = { given, voices, ok: r.ok, partial: !!r.filename?.includes('.partial.'), elapsedMs: Date.now() - t0 };
+      } finally {
+        t.mock.timers.reset();
+      }
+    });
+  } finally {
+    for (const [k, v] of saved) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  }
+  return out!;
+}
 
 test('v1.47.4 — a transient Spanish pass failure is retried and recovers (both pass)', async () => {
   await withDirs(async (klaxonDir, cacheDir) => {
@@ -102,39 +177,27 @@ test('v1.47.5 — a timeout is NOT retried (one attempt per pass when the server
       await new Promise((r) => setTimeout(r, Math.min(120, o.timeoutMs ?? 50)));
       return { ok: false as const, error: `wyoming render timeout after ${o.timeoutMs}ms` };
     };
-    const r = await renderAnnouncement({
-      ...baseOpts(klaxonDir, cacheDir), renderTts,
-      // Tiny budget so the test is fast; per-attempt timeout is clamped to it.
-    } as any);
+    // The limits are the defaults (12 s a pass, 25 s in all); the fake waits 120 ms and reports a timeout.
+    const r = await renderAnnouncement({ ...baseOpts(klaxonDir, cacheDir), renderTts } as any);
     assert.equal(r.ok, false, 'all passes failed → hard error (caller falls back to chime-only)');
     // TWO passes, ONE attempt each — no retry after a timeout.
     assert.equal(attempts, 2, `expected 1 attempt per pass, got ${attempts}`);
   });
 });
 
-test('v1.47.5 — the spoken phase is budget-bounded (alarm does not wait indefinitely)', async () => {
-  await withDirs(async (klaxonDir, cacheDir) => {
-    _resetResidentVoiceForTest();
-    process.env.BROADCAST_TTS_TOTAL_BUDGET_MS = '5000'; // floor of the accepted range
-    try {
-      let attempts = 0;
-      const renderTts = async (o: { timeoutMs?: number }) => {
-        attempts++;
-        await new Promise((r) => setTimeout(r, Math.max(1, Math.min(o.timeoutMs ?? 50, 1200))));
-        return { ok: false as const, error: 'wyoming render timeout' };
-      };
-      const t0 = Date.now();
-      const r = await renderAnnouncement({ ...baseOpts(klaxonDir, cacheDir), endOfMessage: true, renderTts } as any);
-      const elapsed = Date.now() - t0;
-      assert.equal(r.ok, false);
-      // Passes + terminators all fail, but the whole phase stays bounded — it must
-      // never approach the unbounded per-item sum that produced the 151 s alarm.
-      assert.ok(elapsed < 20000, `spoken phase took ${elapsed}ms — expected bounded`);
-      assert.ok(attempts <= 4, `expected attempts bounded by budget, got ${attempts}`);
-    } finally {
-      delete process.env.BROADCAST_TTS_TOTAL_BUDGET_MS;
-    }
-  });
+/* v1.207.2 — this test set BROADCAST_TTS_TOTAL_BUDGET_MS after the renderer was imported, where the value was
+ * already fixed, so it ran on the 25 s default and its two bounds (under 20 s, at most 4 attempts) held for any
+ * budget. The budget is read at each announcement now, and the test is exact: a 5 s budget, the clock mocked. */
+test('v1.47.5 — the spoken phase is budget-bounded: passes and terminators stop at BROADCAST_TTS_TOTAL_BUDGET_MS', async (t) => {
+  const o = await speak(t, { ...TWO, endOfMessage: true, endOfMessagePhraseEs: 'Fin del mensaje' }, [
+    { takes: 1_000, ends: 'ok' },          // English: of the 5 s, 3 s (the floor; Spanish is still to render)
+    { takes: 1_000, ends: 'ok' },          // Spanish: the 4 s that are left
+    { takes: 'limit', ends: 'timeout' },   // the first terminator runs through the last 3 s
+  ], { BROADCAST_TTS_TOTAL_BUDGET_MS: '5000' });
+  assert.deepEqual(o.given, [3_000, 4_000, 3_000], 'every limit is inside the 5 s budget; the second terminator is not attempted');
+  assert.equal(o.elapsedMs, 5_000, 'the spoken phase ends at its budget');
+  assert.equal(o.ok, true, 'both passes rendered');
+  assert.equal(o.partial, true, 'the terminators were lost to the budget: served, not cached as complete');
 });
 
 
@@ -332,41 +395,163 @@ test('v1.48.0 — pre-warm halts on the first failure (no follow-up request at a
   }
 });
 
-/* v1.207.2 — the per-pass limit is 20 s (it was 12 s since v1.47.5). On 2026-11-17 the one critical alarm of the
- * day lost its English pass: the voice in service rendered the sentence in more than 12 s, the pass timed out and
- * only the second language was spoken. The 25 s budget of the whole spoken phase is unchanged, so a later pass
- * gets the limit or what the budget has left, whichever is less, and a wedged server costs what it did before. */
-test('★★ v1.207.2 — a spoken pass is given 20 s, and the next pass what the 25 s budget has left', async (t) => {
-  await withDirs(async (klaxonDir, cacheDir) => {
-    _resetResidentVoiceForTest();
-    t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
-    const given: number[] = [];
-    // The first pass takes 18 s and still fails; the second is offered what is left of the 25 s.
-    const renderTts = async (o: { timeoutMs?: number }) => {
-      given.push(o.timeoutMs ?? -1);
-      if (given.length === 1) t.mock.timers.tick(18_000);
-      return { ok: false as const, error: `wyoming render timeout after ${o.timeoutMs}ms` };
-    };
-    const r = await renderAnnouncement({ ...baseOpts(klaxonDir, cacheDir), renderTts } as any);
-    assert.equal(r.ok, false);
-    assert.deepEqual(given, [20_000, 7_000], 'the limit first, then the remainder of the 25 s budget');
-  });
+/* ── v1.207.2 — the limit of a spoken pass is an add-on option, and a pass still to render keeps a reserve ───────
+ * On 2026-11-17 a critical alarm lost its English pass to the 12 s limit: the sentence took longer to render, so
+ * the tones and the Spanish pass were all that played. The limit (BROADCAST_TTS_PASS_TIMEOUT_MS, 3000..60000) is
+ * an option now and its default stays 12000. Nothing plays until the spoken phase ends, so a longer limit is a
+ * longer wait for the first sound when the engine stalls; and without a guard a long first pass would take the
+ * time the other language needs. The limit handed to the engine for an attempt, with m passes still to render
+ * after this one and R ms left of the 25 s budget, is
+ *       min(limit, R, max(R − m × 8000, 3000))
+ * (audioRenderer.ts attemptLimitMs). A terminator is rendered after the passes, with m = 0. */
+
+/** INVARIANT 1's table. `given` is what v1.207.1 hands the engine on each path: measured by driving this same
+ *  script against the v1.207.1 renderer (commit 1d8bd05d) before the renderer was changed. */
+const UNSET_CASES: Array<{ path: string; opts: Record<string, unknown>; steps: Step[]; want: Spoken }> = [
+  { path: 'two languages: every attempt runs to its limit', opts: TWO,
+    steps: [{ takes: 'limit', ends: 'timeout' }, { takes: 'limit', ends: 'timeout' }],
+    want: { given: [12_000, 12_000], voices: ['en', 'es'], ok: false, partial: false, elapsedMs: 24_000 } },
+  { path: 'two languages: the first returns late (OK at 11.9 s), the second OK at 4 s', opts: TWO,
+    steps: [{ takes: 11_900, ends: 'ok' }, { takes: 4_000, ends: 'ok' }],
+    want: { given: [12_000, 12_000], voices: ['en', 'es'], ok: true, partial: false, elapsedMs: 15_900 } },
+  { path: 'two languages: the first fails at 18 s, past its limit; the second has the 7 s the budget has left', opts: TWO,
+    steps: [{ takes: 18_000, ends: 'timeout', overrun: true }, { takes: 'limit', ends: 'timeout' }],
+    want: { given: [12_000, 7_000], voices: ['en', 'es'], ok: false, partial: false, elapsedMs: 25_000 } },
+  { path: 'two languages: a socket drop at 2.9 s, then the retry and the second run to their limits', opts: TWO,
+    steps: [{ takes: 2_900, ends: 'socket' }, { takes: 'limit', ends: 'timeout' }, { takes: 'limit', ends: 'timeout' }],
+    want: { given: [12_000, 12_000, 10_100], voices: ['en', 'en', 'es'], ok: false, partial: false, elapsedMs: 25_000 } },
+  { path: 'two languages: a socket drop at 2.9 s, the retry OK at 5 s, the second OK at 4 s', opts: TWO,
+    steps: [{ takes: 2_900, ends: 'socket' }, { takes: 5_000, ends: 'ok' }, { takes: 4_000, ends: 'ok' }],
+    want: { given: [12_000, 12_000, 12_000], voices: ['en', 'en', 'es'], ok: true, partial: false, elapsedMs: 11_900 } },
+  { path: 'two languages: the 2026-11-17 shape (English needs 14 s, Spanish 4 s): English is lost at 12 s, as it was', opts: TWO,
+    steps: [{ takes: 14_000, ends: 'ok' }, { takes: 4_000, ends: 'ok' }],
+    want: { given: [12_000, 12_000], voices: ['en', 'es'], ok: true, partial: true, elapsedMs: 16_000 } },
+  { path: 'two languages with terminators: passes OK at 5 s and 4 s, a terminator takes 9 s, the other has the 7 s left',
+    opts: { ...TWO, endOfMessage: true, endOfMessagePhraseEs: 'Fin del mensaje' },
+    steps: [{ takes: 5_000, ends: 'ok' }, { takes: 4_000, ends: 'ok' }, { takes: 9_000, ends: 'ok' }, { takes: 'limit', ends: 'timeout' }],
+    want: { given: [12_000, 12_000, 12_000, 7_000], voices: ['en', 'es', 'es', 'en'], ok: true, partial: true, elapsedMs: 25_000 } },
+  { path: 'one language: the attempt runs to its limit', opts: ONE,
+    steps: [{ takes: 'limit', ends: 'timeout' }],
+    want: { given: [12_000], voices: ['en'], ok: false, partial: false, elapsedMs: 12_000 } },
+  { path: 'one language with a terminator: the pass returns late (OK at 11.9 s), the terminator runs to its limit', opts: { ...ONE, endOfMessage: true },
+    steps: [{ takes: 11_900, ends: 'ok' }, { takes: 'limit', ends: 'timeout' }],
+    want: { given: [12_000, 12_000], voices: ['en', 'en'], ok: true, partial: true, elapsedMs: 23_900 } },
+  { path: 'one language: a socket drop at 2.9 s, then the retry runs to its limit', opts: ONE,
+    steps: [{ takes: 2_900, ends: 'socket' }, { takes: 'limit', ends: 'timeout' }],
+    want: { given: [12_000, 12_000], voices: ['en', 'en'], ok: false, partial: false, elapsedMs: 14_900 } },
+];
+
+test('★★★ v1.207.2 INVARIANT 1 — with the option unset, every limit handed to the speech engine is the one v1.207.1 handed it (one language and two, every path)', async (t) => {
+  const got: Record<string, Spoken> = {};
+  for (const c of UNSET_CASES) got[c.path] = await speak(t, c.opts, c.steps);
+  assert.deepEqual(got, Object.fromEntries(UNSET_CASES.map((c) => [c.path, c.want])));
 });
 
-test('★★ v1.207.2 — a server that uses every limit in full ends the spoken phase at 25 s: 20 s, then 5 s', async (t) => {
-  await withDirs(async (klaxonDir, cacheDir) => {
-    _resetResidentVoiceForTest();
-    const t0 = Date.now();
-    t.mock.timers.enable({ apis: ['Date'], now: t0 });
-    const given: number[] = [];
-    const renderTts = async (o: { timeoutMs?: number }) => {
-      given.push(o.timeoutMs ?? -1);
-      t.mock.timers.tick(o.timeoutMs ?? 0); // each attempt runs to its limit, then fails
-      return { ok: false as const, error: `wyoming render timeout after ${o.timeoutMs}ms` };
-    };
-    const r = await renderAnnouncement({ ...baseOpts(klaxonDir, cacheDir), renderTts } as any);
-    assert.equal(r.ok, false, 'no pass rendered: the caller falls back to the tones alone');
-    assert.deepEqual(given, [20_000, 5_000], 'one attempt a pass, the second clamped to the budget');
-    assert.equal(Date.now() - t0, 25_000, 'the spoken phase ends at its budget, as before the change (24 s then)');
-  });
+test('★★★ v1.207.2 — at 20000 the 2026-11-17 shape keeps both languages: English OK at 14 s inside a 17 s limit, Spanish OK at 4 s', async (t) => {
+  const o = await speak(t, TWO, [{ takes: 14_000, ends: 'ok' }, { takes: 4_000, ends: 'ok' }], { BROADCAST_TTS_PASS_TIMEOUT_MS: '20000' });
+  assert.deepEqual(o.given, [17_000, 11_000], 'the first-rendered pass: 25 s less the 8 s reserve; the second: what is left');
+  assert.deepEqual(o.voices, ['en', 'es']);
+  assert.equal(o.ok, true);
+  assert.equal(o.partial, false, 'both languages survive: a complete render, not a partial one');
+  assert.equal(o.elapsedMs, 18_000, 'the first sound waits 18 s for the speech');
+});
+
+test('★★★ v1.207.2 INVARIANT 2 — at 20000 with two languages the first-rendered pass is handed 17000 and the other keeps 8000, whichever language renders first', async (t) => {
+  const at20 = { BROADCAST_TTS_PASS_TIMEOUT_MS: '20000' };
+  // English never returns: it is cut at 17 s, Spanish has its 8 s and renders in 4. One language is spoken.
+  const lost = await speak(t, TWO, [{ takes: 'limit', ends: 'timeout' }, { takes: 4_000, ends: 'ok' }], at20);
+  assert.deepEqual(lost.given, [17_000, 8_000]);
+  assert.deepEqual(lost.voices, ['en', 'es']);
+  assert.equal(lost.ok, true, 'the announcement keeps one language');
+  assert.equal(lost.partial, true, 'a dropped pass: served, not cached as complete');
+  assert.equal(lost.elapsedMs, 21_000);
+  // Nothing returns: 17 s, then 8 s. The tones alone start at the 25 s budget.
+  const none = await speak(t, TWO, [{ takes: 'limit', ends: 'timeout' }, { takes: 'limit', ends: 'timeout' }], at20);
+  assert.deepEqual(none.given, [17_000, 8_000]);
+  assert.equal(none.ok, false, 'no pass rendered: the caller falls back to the tones alone');
+  assert.equal(none.elapsedMs, 25_000);
+  // The Spanish voice is resident (the last announcement ended on it), so Spanish renders first: the reserve is
+  // then the English pass's.
+  const esFirst = await speak(t, TWO, [{ takes: 'limit', ends: 'timeout' }, { takes: 'limit', ends: 'timeout' }], at20,
+    async (klaxonDir, cacheDir) => {
+      const r = await renderAnnouncement({
+        ...baseOpts(klaxonDir, cacheDir), message: 'Earlier.',
+        messages: [{ text: 'Earlier.', voice: EN_VOICE, lang: 'en' as const }, { text: 'Antes.', voice: ES_VOICE, lang: 'es' as const }],
+        renderTts: async () => ({ ok: true as const, wav: fakeWav(200), durationMs: 5 }),
+      } as any);
+      assert.equal(r.ok, true);
+    });
+  assert.deepEqual(esFirst.voices, ['es', 'en']);
+  assert.deepEqual(esFirst.given, [17_000, 8_000]);
+});
+
+test('★★★ v1.207.2 — at 20000 a socket drop then a stalled retry: the retry is handed 14100, and the other language still has its 8000', async (t) => {
+  const at20 = { BROADCAST_TTS_PASS_TIMEOUT_MS: '20000' };
+  const o = await speak(t, TWO, [{ takes: 2_900, ends: 'socket' }, { takes: 'limit', ends: 'timeout' }, { takes: 4_000, ends: 'ok' }], at20);
+  assert.deepEqual(o.given, [17_000, 14_100, 8_000], 'the retry: the 22.1 s left less the 8 s reserve');
+  assert.deepEqual(o.voices, ['en', 'en', 'es']);
+  assert.equal(o.ok, true, 'Spanish is spoken');
+  assert.equal(o.partial, true);
+  assert.equal(o.elapsedMs, 21_000);
+  // The retry returns: what it did not use goes to the other language.
+  const back = await speak(t, TWO, [{ takes: 2_900, ends: 'socket' }, { takes: 5_000, ends: 'ok' }, { takes: 4_000, ends: 'ok' }], at20);
+  assert.deepEqual(back.given, [17_000, 14_100, 17_100]);
+  assert.equal(back.partial, false);
+});
+
+test('★★ v1.207.2 — one language has nothing to reserve for: 20000 is handed 20000, and a limit above the budget the 25 s the budget has', async (t) => {
+  const twenty = await speak(t, ONE, [{ takes: 'limit', ends: 'timeout' }], { BROADCAST_TTS_PASS_TIMEOUT_MS: '20000' });
+  assert.deepEqual(twenty.given, [20_000]);
+  assert.equal(twenty.ok, false);
+  assert.equal(twenty.elapsedMs, 20_000, 'what the longer limit costs one language: the tones alone at 20 s, not 12');
+  const sixty = await speak(t, ONE, [{ takes: 'limit', ends: 'timeout' }], { BROADCAST_TTS_PASS_TIMEOUT_MS: '60000' });
+  assert.deepEqual(sixty.given, [25_000], 'clamped to the remaining budget');
+  assert.equal(sixty.elapsedMs, 25_000);
+  // A single entry in `messages` is one pass too.
+  const single = await speak(t, { message: 'Critical alarm.', messages: [TWO.messages[0]] }, [{ takes: 'limit', ends: 'timeout' }], { BROADCAST_TTS_PASS_TIMEOUT_MS: '20000' });
+  assert.deepEqual(single.given, [20_000]);
+});
+
+test('★★ v1.207.2 — a terminator has the limit or what is left, and no reserve is held for one (at 20000: 17000, 20000, 16000, 7000)', async (t) => {
+  const o = await speak(t, { ...TWO, endOfMessage: true, endOfMessagePhraseEs: 'Fin del mensaje' },
+    [{ takes: 5_000, ends: 'ok' }, { takes: 4_000, ends: 'ok' }, { takes: 9_000, ends: 'ok' }, { takes: 'limit', ends: 'timeout' }],
+    { BROADCAST_TTS_PASS_TIMEOUT_MS: '20000' });
+  assert.deepEqual(o.given, [17_000, 20_000, 16_000, 7_000]);
+  assert.deepEqual(o.voices, ['en', 'es', 'es', 'en']);
+  assert.equal(o.elapsedMs, 25_000);
+});
+
+test('★★ v1.207.2 — a value outside 3000..60000, or not a number, reads as 12000; the option row reads what the renderer reads', async (t) => {
+  // The budget is raised so that a limit up to 60000 is handed whole (one language: no reserve).
+  const handed = async (raw: string | undefined) => (await speak(t, ONE, [{ takes: 0, ends: 'timeout' }],
+    { BROADCAST_TTS_TOTAL_BUDGET_MS: '120000', ...(raw === undefined ? {} : { BROADCAST_TTS_PASS_TIMEOUT_MS: raw }) })).given;
+  const want: Array<[string | undefined, number]> = [
+    [undefined, 12_000], ['', 12_000], ['null', 12_000], ['abc', 12_000], ['12 s', 12_000], ['NaN', 12_000], ['Infinity', 12_000],
+    ['-20000', 12_000], ['0', 12_000], ['2999', 12_000], ['60001', 12_000], ['600000', 12_000],
+    ['3000', 3_000], ['12000', 12_000], ['20000', 20_000], ['60000', 60_000],
+  ];
+  for (const [raw, ms] of want) assert.deepEqual(await handed(raw), [ms], `${JSON.stringify(raw)} is handed to the engine as ${ms}`);
+  // config.ts registers the option with the same rule (the renderer reads the variable itself).
+  const row = OPTIONS.BROADCAST_TTS_PASS_TIMEOUT_MS;
+  assert.ok(row, 'BROADCAST_TTS_PASS_TIMEOUT_MS has an OPTIONS row');
+  for (const [raw, ms] of want) assert.equal(row.parse(raw, { get: () => undefined }), ms, `${JSON.stringify(raw)}: the option row`);
+});
+
+test('★★ v1.207.2 — the floor: when the reserve would leave a pass under 3 s it is handed 3 s, or what is left of the budget if that is less', async (t) => {
+  // A 5 s budget (the least the setting accepts), two languages: 5 − 8 is negative, so the first pass has the 3 s
+  // floor and the second the 2 s that are left.
+  const five = await speak(t, TWO, [{ takes: 'limit', ends: 'timeout' }, { takes: 'limit', ends: 'timeout' }], { BROADCAST_TTS_TOTAL_BUDGET_MS: '5000' });
+  assert.deepEqual(five.given, [3_000, 2_000]);
+  assert.equal(five.elapsedMs, 5_000, 'never past the budget');
+  // Three passes: the second has 2 s left and one pass after it. It is handed the 2 s, not the floor (the limit
+  // never exceeds what is left), and the third is not attempted on a spent budget.
+  const three = await speak(t, { message: 'Critical alarm.', messages: [...TWO.messages, { text: 'Third.', voice: 'third-voice', lang: 'en' as const }] },
+    [{ takes: 'limit', ends: 'timeout' }, { takes: 'limit', ends: 'timeout' }], { BROADCAST_TTS_TOTAL_BUDGET_MS: '5000' });
+  assert.deepEqual(three.given, [3_000, 2_000]);
+  assert.ok(three.given.every((ms) => ms > 0), 'no attempt is handed zero or less');
+  assert.equal(three.elapsedMs, 5_000);
+  // A 12 s budget: the reserve leaves the first pass 4 s and the second has its 8 s.
+  const twelve = await speak(t, TWO, [{ takes: 'limit', ends: 'timeout' }, { takes: 'limit', ends: 'timeout' }], { BROADCAST_TTS_TOTAL_BUDGET_MS: '12000' });
+  assert.deepEqual(twelve.given, [4_000, 8_000]);
+  assert.equal(twelve.elapsedMs, 12_000);
 });

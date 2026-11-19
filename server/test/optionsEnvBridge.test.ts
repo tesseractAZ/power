@@ -242,3 +242,41 @@ test('the config.yaml schema block carries one section heading per lane for the 
     assert.ok(CONFIG.includes(`# --- lane ${lane} ---`), `config.yaml schema: lacks the "# --- lane ${lane} ---" heading`);
   }
 });
+
+/* ── v1.207.2: the limit of a spoken alarm pass, bridged ─────────────────────────────────── */
+
+const PASS_LIMIT = 'BROADCAST_TTS_PASS_TIMEOUT_MS';
+
+test('★★ v1.207.2 — BROADCAST_TTS_PASS_TIMEOUT_MS reaches the process: schema-only int(3000,60000)?, exported only while set, an option row that reads 12000 when absent', () => {
+  // The renderer has read this variable since v1.47.5; until now no option set it, so on the add-on it was
+  // always absent. Each side of the bridge is named here, so that removing one of them fails by name.
+  assert.equal(bridge.schemaKeys(CONFIG).get(PASS_LIMIT), 'int(3000,60000)?', 'config.yaml schema');
+  assert.ok(!bridge.optionKeys(CONFIG).has(PASS_LIMIT), 'no options: default — while unset the variable is absent and the renderer keeps its 12 s');
+  assert.ok(RUN.split('\n').includes(bridge.hasValueLine(PASS_LIMIT)), 'the run script exports it on its one has_value line, at column 0');
+  assert.deepEqual(bridge.strayReferences(RUN, PASS_LIMIT), []);
+  assert.deepEqual(bridge.placementViolations(RUN, PASS_LIMIT), []);
+  const row = OPTIONS[PASS_LIMIT];
+  assert.ok(row, 'config.ts OPTIONS row');
+  assert.equal(row.source, 'option');
+  assert.equal(row.exportForm, 'has_value');
+  assert.equal(row.parse(undefined, { get: () => undefined }), 12_000, 'absent reads as the 12 s default');
+});
+
+test('★ v1.207.2 — the option is named and described in English and in Spanish: what it is, the 12-second default, what a longer limit costs', () => {
+  const entry = (lang: string) => {
+    const y = readFileSync(resolve(ROOT, `ecoflow_panel/translations/${lang}.yaml`), 'utf8');
+    const m = new RegExp(`^  ${PASS_LIMIT}:\\n    name: (.+)\\n    description: (.+)$`, 'm').exec(y);
+    assert.ok(m, `${lang}.yaml: ${PASS_LIMIT} has a name and a description`);
+    return { name: m[1], description: m[2] };
+  };
+  const en = entry('en');
+  const es = entry('es');
+  assert.match(en.description, /12 seconds/, 'en: the default');
+  assert.match(en.description, /3000 to 60000/, 'en: the range');
+  assert.match(en.description, /first sound of the alarm waits/, 'en: what a longer limit costs');
+  assert.match(es.description, /12 segundos/, 'es: the default');
+  assert.match(es.description, /de 3000 a 60000/, 'es: the range');
+  assert.match(es.description, /el primer sonido de la alarma espera/, 'es: what a longer limit costs');
+  assert.notEqual(es.name, en.name);
+  assert.doesNotMatch(es.description, /\b(the|seconds|with|limit)\b/i, 'es: Spanish, not a copy of the English');
+});
