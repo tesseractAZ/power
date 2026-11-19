@@ -331,3 +331,42 @@ test('v1.48.0 — pre-warm halts on the first failure (no follow-up request at a
     rmSync(cacheDir, { recursive: true, force: true });
   }
 });
+
+/* v1.207.2 — the per-pass limit is 20 s (it was 12 s since v1.47.5). On 2026-11-17 the one critical alarm of the
+ * day lost its English pass: the voice in service rendered the sentence in more than 12 s, the pass timed out and
+ * only the second language was spoken. The 25 s budget of the whole spoken phase is unchanged, so a later pass
+ * gets the limit or what the budget has left, whichever is less, and a wedged server costs what it did before. */
+test('★★ v1.207.2 — a spoken pass is given 20 s, and the next pass what the 25 s budget has left', async (t) => {
+  await withDirs(async (klaxonDir, cacheDir) => {
+    _resetResidentVoiceForTest();
+    t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+    const given: number[] = [];
+    // The first pass takes 18 s and still fails; the second is offered what is left of the 25 s.
+    const renderTts = async (o: { timeoutMs?: number }) => {
+      given.push(o.timeoutMs ?? -1);
+      if (given.length === 1) t.mock.timers.tick(18_000);
+      return { ok: false as const, error: `wyoming render timeout after ${o.timeoutMs}ms` };
+    };
+    const r = await renderAnnouncement({ ...baseOpts(klaxonDir, cacheDir), renderTts } as any);
+    assert.equal(r.ok, false);
+    assert.deepEqual(given, [20_000, 7_000], 'the limit first, then the remainder of the 25 s budget');
+  });
+});
+
+test('★★ v1.207.2 — a server that uses every limit in full ends the spoken phase at 25 s: 20 s, then 5 s', async (t) => {
+  await withDirs(async (klaxonDir, cacheDir) => {
+    _resetResidentVoiceForTest();
+    const t0 = Date.now();
+    t.mock.timers.enable({ apis: ['Date'], now: t0 });
+    const given: number[] = [];
+    const renderTts = async (o: { timeoutMs?: number }) => {
+      given.push(o.timeoutMs ?? -1);
+      t.mock.timers.tick(o.timeoutMs ?? 0); // each attempt runs to its limit, then fails
+      return { ok: false as const, error: `wyoming render timeout after ${o.timeoutMs}ms` };
+    };
+    const r = await renderAnnouncement({ ...baseOpts(klaxonDir, cacheDir), renderTts } as any);
+    assert.equal(r.ok, false, 'no pass rendered: the caller falls back to the tones alone');
+    assert.deepEqual(given, [20_000, 5_000], 'one attempt a pass, the second clamped to the budget');
+    assert.equal(Date.now() - t0, 25_000, 'the spoken phase ends at its budget, as before the change (24 s then)');
+  });
+});
