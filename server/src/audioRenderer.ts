@@ -114,21 +114,62 @@ export function _resetTtsHealthForTest(): void {
  *      wedged or starved — retrying just burns the budget a second time and
  *      adds another aborted socket, and aborted sockets are what crash Piper
  *      (observed: 55 BrokenPipeError, 3 "Server stopped" in one afternoon). */
-/** v1.207.2 — 20 s, was 12 s (v1.47.5). On 2026-11-17 a critical alarm lost its English pass to the 12 s limit:
- *  the voice in service rendered the sentence in more than 12 s, so only the second language was spoken. The
- *  whole spoken phase keeps its 25 s budget (SPOKEN_BUDGET_MS) and every attempt is clamped to what is left of
- *  it (renderWithinBudget), so a server that returns nothing delays the tones by 25 s, where it was 24 s.
- *  What the longer limit costs: when the first pass does not return, the next language is tried after 20 s,
- *  not 12, and has the 5 s that remain, not 12. */
-const PASS_TIMEOUT_MS = (() => {
+/** The limit one attempt at a spoken item (a pass or a terminator) is given, in ms: BROADCAST_TTS_PASS_TIMEOUT_MS
+ *  when it is a number in 3000..60000, else 12000 (v1.47.5).
+ *  v1.207.2 — an add-on option of the same name sets it, and the default stays 12 s. On 2026-11-17 a critical
+ *  alarm lost its English pass to this limit: the voice in service rendered the sentence in more than 12 s, so
+ *  the tones and the second language were all that played. Nothing plays until the spoken phase ends, so a
+ *  longer limit is a longer wait for the first sound whenever the engine stalls; an install chooses that trade.
+ *  Read at each attempt, not once at import, so a test can set it. */
+function passTimeoutMs(): number {
   const v = Number(process.env.BROADCAST_TTS_PASS_TIMEOUT_MS);
-  return Number.isFinite(v) && v >= 3000 && v <= 60000 ? v : 20000;
-})();
-/** Whole-spoken-phase budget (passes + terminators). Bounds alarm latency. */
-const SPOKEN_BUDGET_MS = (() => {
+  return Number.isFinite(v) && v >= 3000 && v <= 60000 ? v : 12000;
+}
+/** Whole-spoken-phase budget (passes + terminators), in ms: BROADCAST_TTS_TOTAL_BUDGET_MS when it is a number in
+ *  5000..120000, else 25000. Bounds alarm latency. Read once per announcement (v1.207.2; at import before). */
+function spokenBudgetMs(): number {
   const v = Number(process.env.BROADCAST_TTS_TOTAL_BUDGET_MS);
   return Number.isFinite(v) && v >= 5000 && v <= 120000 ? v : 25000;
-})();
+}
+/** v1.207.2 — the time held back from the attempt in hand for each spoken pass still to render. Measured on the
+ *  reference install (2026-11-18): the second-language voice rendered 23.2 s of audio in 4.0 s after a change of
+ *  voice, and 8 s is twice that. The English voice in service is slower (a 173-character notice took 6.8 s with
+ *  the voice resident), so a long English sentence rendered second can need more than the reserve alone. */
+const PASS_RESERVE_MS = 8000;
+/** v1.207.2 — the least an attempt is handed while that much budget is left: the least the limit itself can be
+ *  set to. On the same install a charge-level sentence rendered in 2.2–2.4 s after a change of voice. */
+const PASS_FLOOR_MS = 3000;
+/**
+ * v1.207.2 — THE RESERVATION RULE: the limit handed to the engine for one attempt (a first try or the retry).
+ * A pass may not use time that a pass still to render needs. With `remainingMs` (R) of the budget left and
+ * `passesAfter` (m) spoken passes still to render after this one:
+ *
+ *     limit = min( passTimeoutMs(), R, max( R − m × PASS_RESERVE_MS, PASS_FLOOR_MS ) )
+ *
+ * - m = 0 (one language, the last pass, every terminator): max(R, 3000) ≥ R, so this is min(limit, R), the
+ *   v1.47.5 rule unchanged.
+ * - The defaults (12 s, 25 s) with two passes: a first try starts with the whole 25 s and 25 − 8 = 17 ≥ 12; a
+ *   retry follows a failure of under 3 s and a 0.3 s pause, so at least 21.7 s are left and 21.7 − 8 = 13.7 ≥ 12.
+ *   The reserve does not bind and the limit is the 12 s v1.207.1 handed (audioRendererBilingual.test.ts,
+ *   INVARIANT 1). At the default it binds only where R − m × 8 s is under 12 s: with one pass behind, a try
+ *   that starts with under 20 s left (a retry whose pause the host held up for more than 1.7 s, or a budget
+ *   set under 20 s); with two or more behind, always (25 − 16 = 9; broadcast.ts builds one pass or two).
+ * - The limit at 20 s with two passes: the first-rendered pass has 17 s, and the other the 8 s or more that
+ *   are left when it ends.
+ * - The floor. Where the reserve would leave under 3 s (R − m × 8000 < 3000: a budget nearly spent, or a small
+ *   one) the attempt has 3 s all the same, or R when less than 3 s is left: a pass is tried in its turn rather
+ *   than dropped for the sake of one behind it, and the later pass then has what remains, which may be under
+ *   its 8 s. With R > 0 the result lies in (0, R]: it is a minimum that includes R, so it never exceeds what is
+ *   left; and each of its three terms is above zero (the limit ≥ 3000, R > 0, the maximum ≥ 3000), so it is never
+ *   zero or negative.
+ * - R ≤ 0 reaches this function only from the retry, whose pause can outlast the budget: the result is then 0,
+ *   as in v1.47.5 (the client ends that attempt at once). A first try is not made on a spent budget.
+ */
+function attemptLimitMs(remainingMs: number, passesAfter: number): number {
+  if (remainingMs <= 0) return 0;
+  const afterReserve = remainingMs - passesAfter * PASS_RESERVE_MS;
+  return Math.min(passTimeoutMs(), remainingMs, Math.max(afterReserve, PASS_FLOOR_MS));
+}
 /** A failure this fast is a socket/stream error, not a wedged server — retry it. */
 const FAST_FAIL_MS = 3000;
 const PASS_RETRY_DELAY_MS = 300;
@@ -150,19 +191,22 @@ function residentFirst<T extends { voice?: string }>(specs: T[]): T[] {
  * budget is already spent (caller drops the item without touching Piper).
  * Retries once ONLY when the first failure was fast (socket error) and budget
  * remains — never after a timeout.
+ * v1.207.2 — `passesAfter` is the number of spoken passes still to render after this item (0 for the last
+ * pass and for a terminator); both attempts take their limit from attemptLimitMs.
  */
 async function renderWithinBudget(
   render: typeof renderWyomingTts,
   host: string, port: number, text: string, voice: string | undefined,
-  deadline: number, log: (m: string) => void, label: string,
+  deadline: number, log: (m: string) => void, label: string, passesAfter: number,
 ) {
   const remaining = () => deadline - Date.now();
-  if (remaining() <= 0) {
+  const left = remaining();
+  if (left <= 0) {
     log(`audioRenderer: ${label} skipped — spoken-render budget spent (alarm latency bound)`);
     return null;
   }
   const t0 = Date.now();
-  let r = await render({ host, port, text, voice, timeoutMs: Math.min(PASS_TIMEOUT_MS, remaining()) });
+  let r = await render({ host, port, text, voice, timeoutMs: attemptLimitMs(left, passesAfter) });
   if (!r.ok || !r.wav) {
     const elapsed = Date.now() - t0;
     // A timeout is identified BOTH ways — by the wall clock and by the reported
@@ -173,7 +217,7 @@ async function renderWithinBudget(
     if (fastFail && remaining() > FAST_FAIL_MS) {
       log(`audioRenderer: ${label} failed fast (${r.error ?? 'unknown'}) after ${elapsed}ms — retrying once`);
       await new Promise((res) => setTimeout(res, PASS_RETRY_DELAY_MS));
-      r = await render({ host, port, text, voice, timeoutMs: Math.min(PASS_TIMEOUT_MS, Math.max(0, remaining())) });
+      r = await render({ host, port, text, voice, timeoutMs: attemptLimitMs(remaining(), passesAfter) });
     } else if (timedOut) {
       log(`audioRenderer: ${label} timed out after ${elapsed}ms — NOT retrying (server wedged/starved; retry would double the delay and abort another socket)`);
     }
@@ -250,7 +294,8 @@ async function terminatorPcm(opts: {
       }
     } catch { /* not cached yet — render it below */ }
   }
-  const r = await renderWithinBudget(render, host, port, spoken, voice, deadline, log, `terminator (lang=${lang})`);
+  // A terminator is rendered after every pass: nothing is held back for a pass behind it (passesAfter 0).
+  const r = await renderWithinBudget(render, host, port, spoken, voice, deadline, log, `terminator (lang=${lang})`, 0);
   if (r == null) return { pcm: null, dropped: true };
   if (!r.ok || !r.wav) {
     log(`audioRenderer: terminator render failed (${r.error ?? 'unknown'}) — omitting it (message still plays)`);
@@ -705,14 +750,19 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
   // v1.47.5 — ONE budget for the whole spoken phase (passes + terminators), so
   // a starved/wedged Piper can delay the alarm by at most this much before the
   // caller's chime-only fallback takes over.
-  const spokenDeadline = Date.now() + SPOKEN_BUDGET_MS;
+  const spokenDeadline = Date.now() + spokenBudgetMs();
   // v1.47.4 — render the resident voice first (playback order is unaffected —
   // it is driven by survivingSpecs/passSpecs below, so English still plays first).
-  for (const spec of residentFirst(passSpecs)) {
+  const renderOrder = residentFirst(passSpecs);
+  for (const [i, spec] of renderOrder.entries()) {
     const k = passKey(spec);
     if (renderedPcm.has(k) || failedKeys.has(k)) continue;
+    // v1.207.2 — the passes still to render after this one: the distinct passes later in the render order that
+    // have neither rendered nor failed (a repeat of this pass, or of one already tried, is not rendered again).
+    // Each holds PASS_RESERVE_MS of the budget back from this pass (attemptLimitMs).
+    const passesAfter = new Set(renderOrder.slice(i + 1).map(passKey).filter((x) => x !== k && !renderedPcm.has(x) && !failedKeys.has(x))).size;
     const spokenText = spec.lang === 'es' ? verbalizeForTtsEs(spec.text) : verbalizeForTts(spec.text);
-    const r = await renderWithinBudget(doRender, wyomingHost, wyomingPort, spokenText, spec.voice, spokenDeadline, log, `spoken pass (lang=${spec.lang} voice=${spec.voice ?? 'default'})`);
+    const r = await renderWithinBudget(doRender, wyomingHost, wyomingPort, spokenText, spec.voice, spokenDeadline, log, `spoken pass (lang=${spec.lang} voice=${spec.voice ?? 'default'})`, passesAfter);
     if (r == null) { failedKeys.add(k); lastFailReason ??= 'spoken-render budget spent'; continue; }
     if (!r.ok || !r.wav) {
       failedKeys.add(k);
