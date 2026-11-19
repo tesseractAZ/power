@@ -478,9 +478,9 @@ leave under 3 s, so while any budget is left an attempt is never handed zero or 
 limit, and never more than the budget has. An item reached with the budget spent is not
 attempted; a retry whose pause outlasted the budget is handed 0 and ends at once.
 
-At 12 s or under, which is the default and every install that has not set the option, no
-reserve is held: every attempt is handed `min(limit, R)`, the rule since v1.47.5, on every
-path. A limit above 12 s holds the reserve on a first try and on the retry alike.
+At a limit of 12 s or under no reserve is held: every attempt is handed `min(limit, R)`, the
+rule since v1.47.5, on every path. That is the default, and so every install that has not set
+the option. A limit above 12 s holds the reserve on a first try and on the retry alike.
 
 What happens when a pass is late or lost:
 
