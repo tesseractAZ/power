@@ -31,7 +31,7 @@ const lost = (o: Partial<SynthOpts>) => (seq: number): Body => lostBody(seq, o);
 const lostSlots = (slot1: Record<string, unknown>) => [{ pct: 72, w: 0, ...slot1 }, { pct: 65, w: -1107 }, { pct: 63, w: -1061 }];
 
 const LEAD = "The panel's backup capacity reads 61.4 kWh: 30.7 kWh, the capacity of 1 slot, under the 92.2 kWh of its 3 slots.";
-const SINCE = 'It first read under the sum of its slots at 23:00; the last reading at 92.2 kWh was at 22:59.';
+const SINCE = 'It first read under the sum of its slots at 23:00; the last reading at 92.2 kWh before that was at 22:59.';
 const OBSERVED = 'At 23:10 slot 1 delivered 0 W while slots 2 and 3 delivered 1,107 W and 1,061 W.';
 const SLOT1 = 'Slot 1 is listed as connected and reads 72%.';
 const NO_CODE = "The panel's cloud data carries no error code for slot 1 and three empty error lists.";
@@ -128,7 +128,7 @@ test('★ a time on another day carries its day: a 44-hour episode does not read
   const nextDay = at(10) + 30 * 60 * 60_000;
   assert.equal(detailAt(EP, nextDay), [
     LEAD,
-    'It first read under the sum of its slots at Sat 23:00; the last reading at 92.2 kWh was at Sat 22:59.',
+    'It first read under the sum of its slots at Sat 23:00; the last reading at 92.2 kWh before that was at Sat 22:59.',
     'At Sat 23:10 slot 1 delivered 0 W while slots 2 and 3 delivered 1,107 W and 1,061 W.',
     SLOT1, NO_CODE, CAUSE, NOW, GRID, 'No new panel reading since Sat 23:10.',
   ].join(' '));
@@ -258,11 +258,17 @@ test('★ "since when" names the first fault READING and the last full reading �
   assert.equal(sentences(detailAt(noRef))[1], 'It first read under the sum of its slots at 23:00; no earlier reading at the full capacity is on record.');
   // After a stale shadow the two times are far apart, and both are still true.
   const gap = fold(withReference(), [...minutes(0, 40, healthyBody, { latched: true }), ...minutes(40, 11, lostBody)]).state;
-  assert.equal(sentences(detailAt(gap))[1], 'It first read under the sum of its slots at 23:40; the last reading at 92.2 kWh was at 22:59.');
+  assert.equal(sentences(detailAt(gap))[1], 'It first read under the sum of its slots at 23:40; the last reading at 92.2 kWh before that was at 22:59.');
   // A flap raise: not "first", and not one continuous stretch.
   const flap = fold(withReference(), [...minutes(0, 2, lostBody), ...minutes(2, 3, healthyBody), ...minutes(5, 2, lostBody), ...minutes(7, 3, healthyBody), ...minutes(10, 2, lostBody)]).state;
   assert.equal(flap.episode?.how, 'flap');
-  assert.equal(sentences(detailAt(flap))[1], 'It has read under the sum of its slots 3 times since 23:00; the last reading at 92.2 kWh was at 23:09.');
+  // The whole reading it names is the one before the LAST of those dips (the capacity was whole between them).
+  assert.equal(sentences(detailAt(flap))[1], 'It has read under the sum of its slots 3 times since 23:00; the last reading at 92.2 kWh before the latest of them was at 23:09.');
+  // ★ While the clear is pending on ONE reading this sentence stands beside a newer reading at the same figure: it
+  // names the reading BEFORE the shortfall, so the two do not contradict each other ("the last reading at 92.2 kWh was
+  // at 22:59" under "One reading, at 23:11, has … 92.2 kWh" did).
+  const oneWhole = sentences(detailAt(after(healthyBody, 1)));
+  assert.deepEqual(oneWhole.slice(0, 2), ["One reading, at 23:11, has the panel's backup capacity at 92.2 kWh, the sum of its 3 slots.", SINCE]);
 });
 
 /* ───────────────────────────── sentence 2 (observed): which slot, by what ───────────────────────────── */
@@ -286,13 +292,44 @@ test('★ with no slot identified the detail says so, and says nothing about any
   const unnamed = fold(withReference(), minutes(0, 16, quietLostBody)).state;
   assert.equal(detailAt(unnamed), [
     LEAD, SINCE,
-    'Which slot is not established: the readings do not single out one slot.',
+    'Which slot is not established: no slot has been named by 6 readings over 10 minutes.',
     "The panel's cloud data carries no error code for any slot and three empty error lists.",
     CAUSE, 'Backup now: 36.9 kWh of 61.4 kWh counted (60%).', GRID,
   ].join(' '));
   const two = fold(withReference(), minutes(0, 16, (seq) => quietLostBody(seq, { capWh: SLOT_WH }))).state;
-  assert.equal(sentences(detailAt(two))[2], 'Which slots are not established: the readings do not single them out.');
+  assert.equal(sentences(detailAt(two))[2], 'Which slots are not established: no slot has been named by 6 readings over 10 minutes.');
   assert.equal(poolOutAlertParts(unnamed, { nowMs: at(15), timeZone: TZ })!.facts.find((f) => f.label === 'Out')?.value, 'not identified (1 slot)');
+});
+
+test('★★ the one push says what the readings POINT AT when they have named a slot for less than the naming dwell — never "the readings do not single out one slot"', () => {
+  // A flap raise: six fault readings in three dips, every one of them naming slot 1. Two of them are in the step that
+  // raised: not a dwell of naming readings, so the title names none. The detail says what those two point at.
+  const dip = (from: number) => [...minutes(from, 2, lostBody), ...minutes(from + 2, 3, healthyBody)];
+  const flap = fold(withReference(), [...dip(0), ...dip(5), ...minutes(10, 2, lostBody)]).state;
+  assert.deepEqual([flap.episode?.how, poolOutTitle(flap.episode!.k, flap.episode!.slots)], ['flap', 'Core out of the backup pool: slot not identified']);
+  assert.equal(sentences(detailAt(flap))[2], 'Which slot is not established: 2 readings since 23:10 point at slot 1, and a slot is named only from 6 such readings over 10 minutes.');
+  // A raise on the capacity dwell: five readings named slot 1 (minutes 0, 2, 4, 6, 8), eleven only counted.
+  const slow = fold(withReference(), Array.from({ length: 16 }, (_, m) => minutes(m, 1, m % 2 === 0 && m <= 8 ? lostBody : quietLostBody)).flat()).state;
+  assert.deepEqual([slow.episode?.how, slow.episode?.slots], ['slow', null]);
+  assert.equal(sentences(detailAt(slow))[2], 'Which slot is not established: 5 readings since 23:00 point at slot 1, and a slot is named only from 6 such readings over 10 minutes.');
+  // One naming reading; and two Cores.
+  const one = fold(fold(withReference(), minutes(0, 16, quietLostBody)).state, minutes(16, 1, lostBody)).state;
+  assert.equal(sentences(detailAt(one))[2], 'Which slot is not established: 1 reading since 23:16 points at slot 1, and a slot is named only from 6 such readings over 10 minutes.');
+  const twoOut = (seq: number): Body => synthBody({ seq, capWh: SLOT_WH, poolPct: 65, slots: [{ pct: 72, w: 0 }, { pct: 65, w: -2100 }, { pct: 40, w: 0 }] });
+  const two = fold(fold(withReference(), minutes(0, 16, (seq) => quietLostBody(seq, { capWh: SLOT_WH }))).state, minutes(16, 3, twoOut)).state;
+  assert.equal(sentences(detailAt(two))[2], 'Which slots are not established: 3 readings since 23:16 point at slots 1 and 3, and a slot is named only from 6 such readings over 10 minutes.');
+  // Readings that named DIFFERENT slots point at none: the plain sentence.
+  const power = (out: number) => (seq: number): Body => synthBody({ seq, capWh: 2 * SLOT_WH, poolPct: 60, slots: [1, 2, 3].map((n) => ({ pct: 60, w: n === out ? 0 : -900 })) });
+  const mixed = fold(fold(withReference(), minutes(0, 16, quietLostBody)).state, [...minutes(16, 1, power(1)), ...minutes(17, 1, power(2))]).state;
+  assert.equal(sentences(detailAt(mixed))[2], 'Which slot is not established: no slot has been named by 6 readings over 10 minutes.');
+  // A pending LARGER count is not a pointer at a slot of this alarm's count.
+  const larger = fold(fold(withReference(), minutes(0, 16, quietLostBody)).state, minutes(16, 2, twoOut)).state;
+  assert.deepEqual([larger.episode?.k, larger.episode?.change?.k], [1, 2], 'control');
+  assert.equal(sentences(detailAt(larger))[3], 'Which slot is not established: no slot has been named by 6 readings over 10 minutes.');
+  // Once the six readings span ten minutes the slot is in the title, and the sentence is the reading that named it.
+  const named = fold(flap, minutes(12, 9, lostBody)).state;
+  assert.equal(poolOutTitle(named.episode!.k, named.episode!.slots), 'Core out of the backup pool: slot 1');
+  assert.equal(sentences(detailAt(named))[2], 'At 23:20 slot 1 delivered 0 W while slots 2 and 3 delivered 1,107 W and 1,061 W.');
 });
 
 /* ───────────────────────────── sentence 3: the slot's state ───────────────────────────── */
@@ -417,13 +454,14 @@ test('★ the grid sentence: present, not known, or what the panel reported and 
   assert.equal(detailAt(once).endsWith(`${NOW} The panel reported no grid at 23:11.`), true);
 });
 
-test('★ a critical raised by the grid says so SECOND, so the spoken lead carries it', () => {
+test('★ a critical raised by the grid says so SECOND in the detail, and the spoken sentence carries it', () => {
   const noGrid = { grid: { present: false, presenceUnknown: false } };
   const crit = after(lost({ gridSta: 0 }), 3, noGrid);
   const parts = poolOutAlertParts(crit, { nowMs: at(13), timeZone: TZ })!;
   assert.equal(parts.severity, 'critical');
   assert.equal(parts.detail, [LEAD, 'The panel reported no grid at 23:13.', SINCE, OBSERVED, SLOT1, NO_CODE, CAUSE, NOW].join(' '));
   assert.equal(shortenDetail(parts.detail), `${LEAD} The panel reported no grid at 23:13.`);
+  assert.equal(parts.spoken, 'Backup capacity reads 61.4 of 92.2 kWh. No grid reported at 23:13.', 'what the voice reads: its own two short sentences, not that cut');
   assert.equal(parts.facts.find((f) => f.label === 'Grid')?.value, 'not detected');
   // While the grid's return is not yet confirmed (fewer than three readings), both facts are stated with their times.
   const back = fold(crit, minutes(14, 2, lost({ gridSta: 1 }))).state;
@@ -435,25 +473,41 @@ test('★ a critical raised by the grid says so SECOND, so the spoken lead carri
   assert.equal(sentences(detailAt(back))[1], 'The panel reported no grid at 23:13.');
 });
 
-/* ───────────────────────────── the spoken cut ───────────────────────────── */
+test('★★ the card fact says how many entries a list HOLDS, as the detail does — not how many of them the reader kept', () => {
+  // A list of a hundred non-empty entries: the reader keeps 64 of them and counts them all.
+  const noisy = (seq: number): Body => ({ ...lostBody(seq), 'pd303_mc.loadIncreInfo.hall1IncreInfo.errcode.errCode': Array.from({ length: 100 }, (_, i) => i + 1) });
+  const st = fold(withReference(), minutes(0, 11, noisy)).state;
+  assert.deepEqual([st.last?.errLists.hall?.count, st.last?.errLists.hall?.entries.length], [100, 64], 'control');
+  const parts = poolOutAlertParts(st, { nowMs: st.last!.atMs, timeZone: TZ })!;
+  assert.equal(parts.facts.find((x) => x.label === 'Panel codes')?.value, 'hall list 100');
+  assert.equal(parts.detail.includes('Its hall error list holds 100 entries'), true, 'control: the detail');
+});
 
-test('★ the spoken cut of every lead ends on a whole sentence and carries the capacity', () => {
+/* ───────────────────────────── what the voice reads ───────────────────────────── */
+
+test('★ the spoken sentence of every lead: the capacity in one short sentence of its own, never the 200-character cut of the detail', () => {
   assert.equal(SPOKEN_DETAIL_MAX_CHARS, 200);
   const twoOut = (seq: number): Body => synthBody({ seq, capWh: SLOT_WH, poolPct: 65, slots: [{ pct: 72, w: 0 }, { pct: 65, w: -2100 }, { pct: 40, w: 0 }] });
-  const cases: Array<[string, PoolOutState, string]> = [
-    ['one out', EP, LEAD],
-    ['two out', fold(withReference(), minutes(0, 11, twoOut)).state, "The panel's backup capacity reads 30.7 kWh: 61.4 kWh, the capacity of 2 slots, under the 92.2 kWh of its 3 slots."],
-    ['clear pending', after(healthyBody, 3), "The panel's backup capacity has read 92.2 kWh, the sum of its 3 slots, since 23:11; it first read under that sum at 23:00, 11 min earlier."],
-    ['one healthy reading', after(healthyBody, 1), `One reading, at 23:11, has the panel's backup capacity at 92.2 kWh, the sum of its 3 slots. ${SINCE}`],
-    ['capacity above its slots', after(lost({ capWh: FULL_WH + 5000 })), `The panel's backup capacity reads 97.2 kWh; its 3 slots add up to 92.2 kWh. ${SINCE}`],
-    ['no capacity', after((seq) => ({ ...lostBody(seq), 'backupIncreInfo.backupFullCap': undefined }), 6), `The panel's data carries no backup capacity right now. ${SINCE}`],
+  // Each case: the state, what the voice reads, and the cut of the detail it used to read (the push still starts so).
+  const cases: Array<[string, PoolOutState, string, string]> = [
+    ['one out', EP, 'Backup capacity reads 61.4 of 92.2 kWh.', LEAD],
+    ['two out', fold(withReference(), minutes(0, 11, twoOut)).state, 'Backup capacity reads 30.7 of 92.2 kWh.', "The panel's backup capacity reads 30.7 kWh: 61.4 kWh, the capacity of 2 slots, under the 92.2 kWh of its 3 slots."],
+    ['clear pending', after(healthyBody, 3), 'Backup capacity has read 92.2 of 92.2 kWh since 23:11.', "The panel's backup capacity has read 92.2 kWh, the sum of its 3 slots, since 23:11; it first read under that sum at 23:00, 11 min earlier."],
+    ['one healthy reading', after(healthyBody, 1), 'Backup capacity read 92.2 of 92.2 kWh at 23:11.', `One reading, at 23:11, has the panel's backup capacity at 92.2 kWh, the sum of its 3 slots. ${SINCE}`],
+    // The newest reading's capacity cannot be compared, or is absent: the newest SHORT reading, with its time.
+    ['capacity above its slots', after(lost({ capWh: FULL_WH + 5000 })), 'Backup capacity read 61.4 of 92.2 kWh at 23:10.', `The panel's backup capacity reads 97.2 kWh; its 3 slots add up to 92.2 kWh. ${SINCE}`],
+    ['no capacity', after((seq) => ({ ...lostBody(seq), 'backupIncreInfo.backupFullCap': undefined }), 6), 'Backup capacity read 61.4 of 92.2 kWh at 23:10.', `The panel's data carries no backup capacity right now. ${SINCE}`],
   ];
-  for (const [what, state, spoken] of cases) {
-    const cut = shortenDetail(detailAt(state));
-    assert.equal(cut, spoken, what);
+  for (const [what, state, spoken, cut] of cases) {
+    const parts = poolOutAlertParts(state, { nowMs: state.last?.atMs ?? at(10), timeZone: TZ })!;
+    assert.equal(parts.spoken, spoken, what);
+    assert.equal(spoken.length <= 60 && spoken.endsWith('.'), true, what);
+    // The detail is unchanged by it, and its own cut still ends on a whole sentence (the push begins with it).
+    assert.equal(shortenDetail(parts.detail), cut, what);
     assert.equal(cut.endsWith('.') && !cut.endsWith('...'), true, what);
     assert.equal(cut.length <= SPOKEN_DETAIL_MAX_CHARS, true, what);
   }
+  assert.equal(poolOutAlertParts(withReference(), { nowMs: at(0), timeZone: TZ }), null, 'no episode, nothing to say');
 });
 
 /* ───────────────────────────── the return notice ───────────────────────────── */

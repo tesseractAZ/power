@@ -131,7 +131,7 @@ test('★ the alert at 06:46Z, word for word', () => {
   assert.deepEqual([parts.severity, parts.title, parts.fault], ['warning', 'Core out of the backup pool: slot 1', 'out:1;k=1']);
   assert.equal(parts.detail, [
     "The panel's backup capacity reads 61.4 kWh: 30.7 kWh, the capacity of 1 slot, under the 92.2 kWh of its 3 slots.",
-    'It first read under the sum of its slots at 23:36; the last reading at 92.2 kWh was at 23:35.',
+    'It first read under the sum of its slots at 23:36; the last reading at 92.2 kWh before that was at 23:35.',
     'At 23:46 slot 1 delivered 0 W while slots 2 and 3 delivered 1,083 W and 1,030 W.',
     'Slot 1 is listed as connected and reads 72%.',
     "The panel's cloud data carries no error code for slot 1 and three empty error lists.",

@@ -72,7 +72,7 @@ const OFFLINE = [{ ...LISTED[0], online: 0 }] as any[];
 const RAISE_TITLE = 'Power · [High] Core out of the backup pool: slot 1 — Smart Home Panel 2';
 const RAISE_DETAIL = [
   "The panel's backup capacity reads 61.4 kWh: 30.7 kWh, the capacity of 1 slot, under the 92.2 kWh of its 3 slots.",
-  'It first read under the sum of its slots at 23:36; the last reading at 92.2 kWh was at 23:35.',
+  'It first read under the sum of its slots at 23:36; the last reading at 92.2 kWh before that was at 23:35.',
   'At 23:46 slot 1 delivered 0 W while slots 2 and 3 delivered 1,083 W and 1,030 W.',
   'Slot 1 is listed as connected and reads 72%.',
   "The panel's cloud data carries no error code for slot 1 and three empty error lists.",
@@ -334,29 +334,264 @@ test('★★★ the grid: two panel readings of "no grid" hold the warning; the 
 
 /* ══ a push that fails ══════════════════════════════════════════════════════════════════════════════ */
 
-test('★★★ the push of the raise FAILS once (Home Assistant unreachable at 23:46): it is tried again at the next pass and arrives with its whole detail — not at 07:00 as a title in the digest', async () => {
+const digests = (r: ReturnType<typeof alertRig>) => r.pushes.filter((p) => /Morning digest/.test(p.title));
+const digestFile = (r: ReturnType<typeof alertRig>): { queue: Array<{ id: string }> } => JSON.parse(readFileSync(join(ROOT, `${r.name}-digest.json`), 'utf8'));
+const notifyRecord = (name: string): any => JSON.parse(readFileSync(join(ROOT, `${name}-notify-state.json`), 'utf8'))['shp2-pool-out'];
+
+test('★★★ the push of the raise FAILS twice (Home Assistant unreachable at 23:46): it is tried again after 20 s and then after 40 s, and arrives with its whole detail — not at 07:00 as a title in the digest', async () => {
   const s = storeWith('fail');
   feedLoss(s, '2026-11-15T06:00:00Z', '2026-11-15T06:00:00Z');
   s.store.markFirstPollSettled();
   let failures = 0;
-  const r = alertRig(s.store, { send: (msg) => { if (/Core out of the backup pool/.test(msg.title) && failures < 1) { failures += 1; throw new Error('HA unreachable (test)'); } } });
+  const r = alertRig(s.store, { send: (msg) => { if (/Core out of the backup pool/.test(msg.title) && failures < 2) { failures += 1; throw new Error('HA unreachable (test)'); } } });
   feedLoss(s, '2026-11-15T06:01:00Z', '2026-11-15T06:46:00Z');
   const tries = () => r.attempts.filter((p) => /Core out of the backup pool/.test(p.title));
   await until(() => tries().length >= 1, 'the first attempt', r.logs);
-  assert.equal(r.logs.some((l) => l.startsWith('notify: WARNING — send failed for "[High] Core out of the backup pool: slot 1 — Smart Home Panel 2" — HA unreachable (test)')), true, 'control: the first send failed');
-  // No new body: the same standing alarm, the next passes of the monitor.
-  await until(() => r.poolPushes().length === 1, 'the retry delivered', r.logs);
-  assert.equal(tries().length, 2, '★ tried again, once, and delivered');
+  const firstAt = Date.now();
+  assert.equal(r.logs.some((l) => l === 'notify: WARNING — send failed for "[High] Core out of the backup pool: slot 1 — Smart Home Panel 2" — HA unreachable (test); it will be tried again, after 20 s and then at doubling waits up to 10 min'), true,
+    'control: the first send failed, and the line says what follows');
+  // No new body: the same standing alarm, the next passes of the monitor. Inside the wait nothing more is sent.
+  await r.morePasses(5);
+  assert.equal(tries().length, 1, '★ not tried again at every pass');
+  assert.deepEqual(digestFile(r).queue.map((q) => q.id), ['shp2-pool-out'], 'control: held for the digest meanwhile (the condition may clear before a retry)');
+  // Twenty seconds after the failure: the second try. It fails too, and the next wait is forty seconds.
+  setNow(firstAt + 20_000);
+  await until(() => tries().length === 2, 'the second attempt', r.logs);
+  const secondAt = Date.now();
+  await r.morePasses(3);
+  setNow(secondAt + 30_000);
+  await r.morePasses(3);
+  assert.equal(tries().length, 2, '★ 30 s after the second failure: still waiting');
+  setNow(secondAt + 40_000);
+  await until(() => r.poolPushes().length === 1, 'the third try delivered', r.logs);
+  assert.equal(tries().length, 3, '★ tried a third time, and delivered');
   assert.deepEqual(r.poolPushes(), [{ title: RAISE_TITLE, body: RAISE_DETAIL, severity: 'warning' }], '★ the full detail reached the phone, inside the quiet hours');
   await r.morePasses(3);
-  assert.equal(tries().length, 2, 'and it is not sent a third time');
-  assert.equal(r.logs.filter((l) => l.startsWith('notify: held "Core out of the backup pool: slot 1" for the morning digest')).length, 1, 'the hold for the digest is said once');
+  assert.equal(tries().length, 3, 'and it is not sent a fourth time');
+  assert.equal(r.logs.filter((l) => l.startsWith('notify: held "Core out of the backup pool: slot 1" for the morning digest')).length, 1, '★ the hold for the digest is said once, not at each failed try');
+  // Delivered: it is no longer owed to the digest, in memory or on file.
+  assert.equal(r.mon.stats().quietQueued, 0, '★ out of the digest queue');
+  assert.deepEqual(digestFile(r).queue, [], '★ and out of the file a restart would restore it from');
+  assert.deepEqual([notifyRecord(r.name).sent, notifyRecord(r.name).sourceSn], [true, PANEL_SN]);
   // 07:00 at the site, the alarm still standing: whatever the digest sends, it does not list this alarm again.
   s.feed({ atMs: iso('2026-11-15T14:00:30Z'), body: lostBody(6000) });
   await until(() => r.logs.some((l) => /morning digest/.test(l) && !/held "|queued for/.test(l)), 'the digest hour handled', r.logs);
   await r.morePasses(2);
   assert.deepEqual(r.pushes.filter((p) => /digest/i.test(p.title) && /Core out of the backup pool/.test(p.body)), [], '★ the digest does not carry it: it was delivered');
   assert.equal(r.poolPushes().length, 1);
+});
+
+test('★★★ a push that failed once and was then delivered is not in the 07:00 digest AFTER A RESTART either, and the record of it keeps its panel', async () => {
+  const s = storeWith('once');
+  feedLoss(s, '2026-11-15T06:00:00Z', '2026-11-15T06:00:00Z');
+  s.store.markFirstPollSettled();
+  let failures = 0;
+  const r = alertRig(s.store, { name: 'once-mon', send: (msg) => { if (/Core out of the backup pool/.test(msg.title) && failures < 1) { failures += 1; throw new Error('HA unreachable (test)'); } } });
+  feedLoss(s, '2026-11-15T06:01:00Z', '2026-11-15T06:46:00Z');
+  await until(() => r.attempts.some((p) => /Core out of the backup pool/.test(p.title)), 'the first attempt', r.logs);
+  // The next poll, a minute later: the retry is due and is delivered.
+  s.feed({ atMs: iso('2026-11-15T06:47:00Z'), body: lostBody(5001) });
+  await until(() => r.poolPushes().length === 1, 'the retry delivered', r.logs);
+  await r.morePasses(2);
+  assert.deepEqual(digestFile(r).queue, [], '★ the file a restart restores the digest queue from no longer lists it');
+  r.mon.stop();
+
+  // A restart at 02:00 (a deploy at any hour), the same files; the Core is still out.
+  setNow(iso('2026-11-15T09:00:00Z'));
+  const b = storeWith('once-b', { poolFile: s.poolFile });
+  b.feed({ atMs: iso('2026-11-15T09:00:00Z'), body: lostBody(7000) });
+  b.store.markFirstPollSettled();
+  const rb = alertRig(b.store, { name: 'once-mon' });
+  for (let m = 1; m <= 12; m++) { b.feed({ atMs: iso('2026-11-15T09:00:00Z') + m * MIN, body: lostBody(7000 + m) }); if (m % 4 === 0) await rb.morePasses(1); }
+  await rb.morePasses(2);
+  assert.equal(poolAlerts(b.store).length, 1, 'control: the alarm stands in the second process');
+  assert.deepEqual(rb.poolPushes(), [], 'control: and is not pushed again');
+  // 07:00: the digest hour.
+  b.feed({ atMs: iso('2026-11-15T14:00:30Z'), body: lostBody(8000) });
+  await until(() => rb.logs.some((l) => l.startsWith('notify: morning digest')), 'the digest hour handled', rb.logs);
+  await rb.morePasses(2);
+  assert.deepEqual(digests(rb), [], '★ no digest lists it as "held overnight": it was delivered at 23:47');
+  assert.equal(rb.logs.some((l) => l === 'notify: morning digest — queue empty, nothing held overnight; no digest sent'), true);
+  assert.deepEqual([notifyRecord('once-mon').sent, notifyRecord('once-mon').sourceSn], [true, PANEL_SN], '★ the record still names its panel (the boot sweep asks that panel\'s tracker)');
+});
+
+test('★★★ the push channel is DOWN for half an hour from the raise: a handful of tries at doubling waits — not one at every pass — and one delivery when it is back', async () => {
+  const s = storeWith('down');
+  feedLoss(s, '2026-11-15T06:00:00Z', '2026-11-15T06:00:00Z');
+  s.store.markFirstPollSettled();
+  let down = true;
+  const r = alertRig(s.store, { send: (msg) => { if (down && /Core out of the backup pool/.test(msg.title)) throw new Error('HA unreachable (test)'); } });
+  feedLoss(s, '2026-11-15T06:01:00Z', '2026-11-15T06:46:00Z');
+  const tries = () => r.attempts.filter((p) => /Core out of the backup pool/.test(p.title));
+  await until(() => tries().length >= 1, 'the first attempt', r.logs);
+  const p0 = r.passes();
+  // Thirty polls a minute apart, the channel down throughout, three or more passes of the monitor at each.
+  for (let m = 1; m <= 30; m++) { s.feed({ atMs: iso('2026-11-15T06:46:00Z') + m * MIN, body: lostBody(5000 + m) }); await r.morePasses(3); }
+  const passes = r.passes() - p0;
+  assert.equal(passes >= 90, true, `control: ${passes} passes`);
+  // The waits are 20 s, 40 s, 80 s, 160 s, 320 s and then 10 min: tries at about minutes 0, 1, 2, 4, 7, 13 and 23.
+  assert.equal(tries().length >= 6 && tries().length <= 8, true, `★ ${tries().length} tries in ${passes} passes (one a pass was ${passes + 1})`);
+  assert.equal(r.logs.filter((l) => /send failed for .*Core out of the backup pool/.test(l)).length, tries().length, 'one failure line a try');
+  assert.equal(r.logs.filter((l) => l.startsWith('notify: held "Core out of the backup pool: slot 1" for the morning digest')).length, 1);
+  assert.deepEqual(r.poolPushes(), [], 'control: nothing delivered yet');
+  // The channel is back; the next try is at most ten minutes away.
+  down = false;
+  const before = tries().length;
+  s.feed({ atMs: iso('2026-11-15T06:46:00Z') + 41 * MIN, body: lostBody(5041) });
+  await until(() => r.poolPushes().length === 1, 'the delivery once the channel is back', r.logs);
+  assert.equal(tries().length, before + 1, '★ delivered at the first try after it');
+  assert.equal(r.poolPushes()[0].body.includes('Backup now:'), true, 'with its whole detail');
+  for (let m = 42; m <= 46; m++) { s.feed({ atMs: iso('2026-11-15T06:46:00Z') + m * MIN, body: lostBody(5000 + m) }); await r.morePasses(2); }
+  assert.equal(tries().length, before + 1, 'and once');
+});
+
+test('★★★ the 07:00 digest goes out while this alarm\'s own push is still failing: the digest names it, and the push it is owed — the whole detail — follows at the next pass, not after the rest of its wait', async () => {
+  const s = storeWith('owed');
+  feedLoss(s, '2026-11-15T06:00:00Z', '2026-11-15T06:00:00Z');
+  s.store.markFirstPollSettled();
+  // Home Assistant refuses this alarm's push all night; the digest's own send goes through, and from then on so does everything.
+  let down = true;
+  const r = alertRig(s.store, { send: (msg) => { if (/Morning digest/.test(msg.title)) { down = false; return; } if (down && /Core out of the backup pool/.test(msg.title)) throw new Error('HA unreachable (test)'); } });
+  feedLoss(s, '2026-11-15T06:01:00Z', '2026-11-15T06:46:00Z');
+  await until(() => r.attempts.some((p) => /Core out of the backup pool/.test(p.title)), 'the first attempt', r.logs);
+  assert.deepEqual(r.poolPushes(), [], 'control: not delivered');
+  // 07:00 at the site, the alarm still standing.
+  s.feed({ atMs: iso('2026-11-15T14:00:30Z'), body: lostBody(6000) });
+  await until(() => digests(r).length === 1, 'the digest', r.logs);
+  assert.match(digests(r)[0].body, /Held during overnight quiet hours:\n\n• \[High\] Core out of the backup pool: slot 1 \(Smart Home Panel 2\)/, 'control: the digest lists it, a title and nothing else');
+  // The digest line does not stand in for the push: it follows at once.
+  await until(() => r.poolPushes().length === 1, 'the push it was owed', r.logs, 5_000);
+  assert.equal(r.poolPushes()[0].title, RAISE_TITLE);
+  assert.equal(r.poolPushes()[0].body.startsWith("The panel's backup capacity reads 61.4 kWh: 30.7 kWh, the capacity of 1 slot, under the 92.2 kWh of its 3 slots."), true, '★ with its detail');
+  await r.morePasses(3);
+  assert.equal(r.poolPushes().length, 1, 'once');
+  assert.deepEqual([notifyRecord(r.name).sent, notifyRecord(r.name).sourceSn], [true, PANEL_SN], '★ and the record of it names its panel');
+});
+
+test('★★ an ESCALATION whose push fails waits too: the critical is tried again after 20 s, not at every pass, and is delivered', async () => {
+  const s = storeWith('esc');
+  for (let m = -15; m < 0; m++) s.feed({ atMs: at(m), body: healthyBody(m) });
+  s.store.markFirstPollSettled();
+  let down = false;
+  const r = alertRig(s.store, { quietHours: '', send: (msg) => { if (down && /Core out of the backup pool/.test(msg.title)) throw new Error('HA unreachable (test)'); } });
+  for (let m = 0; m <= 10; m++) s.feed({ atMs: at(m), body: lostBody(m) });
+  await until(() => r.poolPushes().length === 1, 'the warning pushed', r.logs);
+  // The grid goes, and Home Assistant with it: three readings of "no grid" make the alarm critical.
+  down = true;
+  for (let m = 11; m <= 13; m++) s.feed({ atMs: at(m), body: lostBody(m, { gridSta: 0 }) });
+  const crit = () => r.attempts.filter((p) => /\[Critical\] Core out of the backup pool/.test(p.title));
+  await until(() => crit().length >= 1, 'the escalation tried', r.logs);
+  const firstAt = Date.now();
+  assert.equal(poolAlerts(s.store)[0].severity, 'critical', 'control');
+  await r.morePasses(6);
+  assert.equal(crit().length, 1, '★ not tried again at every pass');
+  down = false;
+  await r.morePasses(3);
+  assert.equal(crit().length, 1, 'still inside its wait, though the channel is back');
+  setNow(firstAt + 20_000);
+  await until(() => r.poolPushes().length === 2, 'the critical delivered', r.logs);
+  assert.deepEqual([crit().length, r.poolPushes()[1].title, r.poolPushes()[1].severity], [2, 'Power · [Critical] Core out of the backup pool: slot 1 — Smart Home Panel 2', 'critical']);
+  await r.morePasses(3);
+  assert.equal(crit().length, 2, 'once');
+});
+
+/* ══ a second loss ══════════════════════════════════════════════════════════════════════════════════ */
+
+/** Slot 2 out, the shape of slot 1's loss: one Core's capacity short, slot 2 at 0 W, the pool the mean of slots 1 and 3. */
+const slot2Out = (seq: number): Body => fx.synthBody({ seq, capWh: 2 * fx.SLOT_WH, slots: [{ pct: 70, w: -1100 }, { pct: 66, w: 0 }, { pct: 61, w: -1050 }], poolPct: 65.5 });
+
+test('★★★ a SECOND loss in one night: slot 1 out at 23:10 and back at 23:23 (its notice waiting for the quiet hours), slot 2 out at 01:00 — the second alarm is pushed, at night, as a new one', async () => {
+  const s = storeWith('again');
+  for (let m = -15; m < 0; m++) s.feed({ atMs: at(m), body: healthyBody(m) });
+  s.store.markFirstPollSettled();
+  const r = alertRig(s.store, { name: 'again-mon' }); // quiet hours 22-06
+  for (let m = 0; m <= 12; m++) s.feed({ atMs: at(m), body: lostBody(m) });
+  await until(() => r.poolPushes().length === 1, 'the first raise pushed', r.logs);
+  for (let m = 13; m <= 26; m++) s.feed({ atMs: at(m), body: healthyBody(m) });
+  await until(() => poolAlerts(s.store).length === 0, 'the first alarm ended', r.logs);
+  await r.morePasses(3);
+  assert.deepEqual(r.poolPushes().map((p) => p.title), [RAISE_TITLE], 'control: inside the quiet hours the return notice is not sent yet');
+  assert.equal(notifyRecord('again-mon').title, 'Core out of the backup pool: slot 1', 'control: and the record of the first push stands');
+
+  // 01:00: slot 2 goes out. Ten minutes of readings later the tracker raises a new alarm.
+  for (let m = 120; m <= 131; m++) { s.feed({ atMs: at(m), body: slot2Out(m) }); if (m % 4 === 0) await r.morePasses(1); }
+  await until(() => poolAlerts(s.store).length === 1, 'the second alarm in the set', r.logs);
+  assert.deepEqual(poolAlerts(s.store).map((a) => [a.id, a.title]), [['shp2-pool-out', 'Core out of the backup pool: slot 2']], 'control');
+  await until(() => r.poolPushes().length === 2, 'the second alarm pushed', r.logs);
+  assert.equal(r.poolPushes()[1].title, 'Power · [High] Core out of the backup pool: slot 2 — Smart Home Panel 2', '★ pushed at 01:10, naming slot 2');
+  assert.match(r.poolPushes()[1].body, /^The panel's backup capacity reads 61\.4 kWh: .* It first read under the sum of its slots at 01:00; the last reading at 92\.2 kWh before that was at Sat 23:26\. At 01:10 slot 2 delivered 0 W while slots 1 and 3 delivered 1,100 W and 1,050 W\./);
+  assert.equal(r.logs.some((l) => l === `notify: "Core out of the backup pool: slot 2" is a new alarm — the one on record ended at ${new Date(at(23)).toISOString()} (its notice was still waiting); this one is pushed`), true, r.logs.filter((l) => /new alarm/.test(l)).join('\n'));
+  await r.morePasses(3);
+  assert.equal(r.poolPushes().length, 2, 'once');
+  assert.equal(notifyRecord('again-mon').title, 'Core out of the backup pool: slot 2', 'the record is the second push\'s');
+  // 06:01: the quiet hours are over and the second alarm stands. No "Resolved" is sent for the first.
+  for (let m = 421; m <= 425; m++) { s.feed({ atMs: at(m), body: slot2Out(m) }); await r.morePasses(2); }
+  assert.deepEqual(r.poolPushes().map((p) => p.severity), ['warning', 'warning'], '★ nothing resolved while a Core is out');
+  // Slot 2 returns: its card is owed its dismissal, and gets the return notice.
+  for (let m = 426; m <= 437; m++) s.feed({ atMs: at(m), body: healthyBody(m) });
+  await until(() => r.poolPushes().length === 3, 'the return notice of the second alarm', r.logs);
+  assert.deepEqual([r.poolPushes()[2].title, r.poolPushes()[2].severity], ['Power · Resolved: Core back in the backup pool: slot 2 — Smart Home Panel 2', 'resolved']);
+});
+
+test('★★★ the same across a RESTART: the first alarm ended before it (its notice waiting), the second is raised after it — the record of the first push does not keep the second from being pushed', async () => {
+  const s = storeWith('again2');
+  for (let m = -15; m < 0; m++) s.feed({ atMs: at(m), body: healthyBody(m) });
+  s.store.markFirstPollSettled();
+  const r = alertRig(s.store, { name: 'again2-mon' }); // quiet hours 22-06
+  for (let m = 0; m <= 12; m++) s.feed({ atMs: at(m), body: lostBody(m) });
+  await until(() => r.poolPushes().length === 1, 'the first raise pushed', r.logs);
+  for (let m = 13; m <= 26; m++) s.feed({ atMs: at(m), body: healthyBody(m) });
+  await until(() => poolAlerts(s.store).length === 0, 'the first alarm ended', r.logs);
+  await r.morePasses(2);
+  r.mon.stop();
+
+  // A restart at 00:30, the same files. The pool is whole until 01:00, when slot 2 goes out.
+  setNow(at(90));
+  const b = storeWith('again2-b', { poolFile: s.poolFile });
+  b.store.setDeviceList(LISTED);
+  b.store.markFirstPollSettled();
+  const rb = alertRig(b.store, { name: 'again2-mon' });
+  for (let m = 91; m <= 119; m++) { b.feed({ atMs: at(m), body: healthyBody(m) }); if (m % 7 === 0) await rb.morePasses(1); }
+  await rb.morePasses(2);
+  assert.deepEqual(rb.poolPushes(), [], 'control: nothing is sent in the quiet hours (the boot sweep waits for them to end)');
+  assert.equal(notifyRecord('again2-mon').title, 'Core out of the backup pool: slot 1', 'control: the record of the first push is on file');
+  for (let m = 120; m <= 131; m++) { b.feed({ atMs: at(m), body: slot2Out(m) }); if (m % 4 === 0) await rb.morePasses(1); }
+  await until(() => poolAlerts(b.store).length === 1, 'the second alarm in the set', rb.logs);
+  await until(() => rb.poolPushes().length === 1, 'the second alarm pushed', rb.logs);
+  assert.equal(rb.poolPushes()[0].title, 'Power · [High] Core out of the backup pool: slot 2 — Smart Home Panel 2', '★ pushed by the process that did not see the first one end');
+  assert.equal(rb.logs.some((l) => /already has a notification on record/.test(l) && /backup pool/.test(l)), false);
+  await rb.morePasses(3);
+  assert.equal(rb.poolPushes().length, 1, 'once');
+  // 06:01 with the second alarm standing: the boot sweep finds no orphan to resolve.
+  for (let m = 421; m <= 425; m++) { b.feed({ atMs: at(m), body: slot2Out(m) }); await rb.morePasses(2); }
+  assert.equal(rb.pushes.some((p) => /Resolved/.test(p.title)), false, '★ no "Resolved" while a Core is out');
+});
+
+test('★★ the second alarm\'s own push never goes out (Home Assistant is down) and it ends: the card the FIRST alarm put on the phone is still owed its dismissal, and gets it', async () => {
+  const s = storeWith('card');
+  for (let m = -15; m < 0; m++) s.feed({ atMs: at(m), body: healthyBody(m) });
+  s.store.markFirstPollSettled();
+  let down = false;
+  const r = alertRig(s.store, { name: 'card-mon', send: (msg) => { if (down && /Core out of the backup pool/.test(msg.title)) throw new Error('HA unreachable (test)'); } }); // quiet hours 22-06
+  for (let m = 0; m <= 12; m++) s.feed({ atMs: at(m), body: lostBody(m) });
+  await until(() => r.poolPushes().length === 1, 'the first raise pushed', r.logs);
+  for (let m = 13; m <= 26; m++) s.feed({ atMs: at(m), body: healthyBody(m) });
+  await until(() => poolAlerts(s.store).length === 0, 'the first alarm ended', r.logs);
+  await r.morePasses(2);
+  // 01:00: slot 2 out, and Home Assistant refuses the push of it.
+  down = true;
+  for (let m = 120; m <= 131; m++) { s.feed({ atMs: at(m), body: slot2Out(m) }); if (m % 4 === 0) await r.morePasses(1); }
+  await until(() => r.attempts.some((p) => /slot 2/.test(p.title)), 'the second alarm tried', r.logs);
+  // 01:12: slot 2 is back; ten minutes later the second alarm ends, never delivered.
+  for (let m = 132; m <= 146; m++) { s.feed({ atMs: at(m), body: healthyBody(m) }); if (m % 4 === 0) await r.morePasses(1); }
+  await until(() => poolAlerts(s.store).length === 0, 'the second alarm ended', r.logs);
+  await r.morePasses(2);
+  assert.deepEqual(r.poolPushes().map((p) => p.title), [RAISE_TITLE], 'control: the only thing on the phone is the first alarm\'s card');
+  down = false;
+  // 06:01: the quiet hours are over.
+  for (let m = 421; m <= 425; m++) { s.feed({ atMs: at(m), body: healthyBody(m) }); await r.morePasses(2); }
+  await until(() => r.poolPushes().length === 2, 'the dismissal of the card', r.logs);
+  assert.deepEqual([r.poolPushes()[1].title, r.poolPushes()[1].severity], ['Power · Resolved: Core back in the backup pool: slot 2 — Smart Home Panel 2', 'resolved'], '★ resolved, with the return notice of the newest end');
 });
 
 /* ══ restarts ═══════════════════════════════════════════════════════════════════════════════════════ */
@@ -454,7 +689,7 @@ test('★★★ a restart with the state file LOST while the Core is still out: 
   assert.deepEqual(poolAlerts(b.store), [], 'control: still absent at the sweep');
   assert.equal(panelOf(b.store).online && Date.now() - panelOf(b.store).lastUpdated < 2 * MIN, true, 'control: the panel is online with fresh data, so the evidence gate alone would let the sweep resolve');
   assert.deepEqual(r.poolPushes(), [], '★ no "Resolved: Core out of the backup pool" on a lost file');
-  assert.equal(r.logs.some((l) => l === 'notify: orphan resolve HELD — "Core out of the backup pool: slot 1" (the pool-out tracker has neither raised nor seen a full dwell of healthy capacity across every slot since the restart; not a recovery)'), true,
+  assert.equal(r.logs.some((l) => l === 'notify: orphan resolve HELD — "Core out of the backup pool: slot 1" (the pool-out tracker has neither raised nor seen a full dwell of healthy capacity across every slot since the restart, and holds no end of this alarm on file; not a recovery)'), true,
     r.logs.filter((l) => l.includes('orphan')).join('\n'));
 
   // The dwell completes: six readings over ten minutes. The alarm is back, under the same id, and its card stands.
@@ -524,6 +759,83 @@ test('★★★ a restart while the return notice waits for the quiet hours to e
     severity: 'resolved',
   }], '★ the return notice, every figure with its day');
   assert.equal(rb.poolPushes()[0].body.includes('while the add-on was restarting'), false);
+});
+
+test('★★★ a panel with an EMPTY slot (two Cores in three), a restart while the return notice waits: its roster can never earn the clean dwell, and the end on file releases the hold — the return notice is sent, not dropped after six hours', async () => {
+  const twoCores = (seq: number): Body => fx.synthBody({ seq, capWh: 2 * fx.SLOT_WH, poolPct: 60, slots: [{ pct: 62, w: -800 }, { pct: 58, w: -760 }, { isConnect: 0, hwConnect: 0, fullCap: 0, pct: 0, w: 0 }] });
+  const oneOfTwo = (seq: number): Body => fx.synthBody({ seq, capWh: fx.SLOT_WH, poolPct: 58, slots: [{ pct: 62, w: 0 }, { pct: 58, w: -1560 }, { isConnect: 0, hwConnect: 0, fullCap: 0, pct: 0, w: 0 }] });
+  const s = storeWith('two');
+  for (let m = -15; m < 0; m++) s.feed({ atMs: at(m), body: twoCores(m) }); // 22:45–22:59 at the site
+  s.store.markFirstPollSettled();
+  const r = alertRig(s.store, { name: 'two-mon' }); // quiet hours 22-06
+  for (let m = 0; m <= 12; m++) s.feed({ atMs: at(m), body: oneOfTwo(m) });
+  await until(() => r.poolPushes().length === 1, 'the raise pushed (at night)', r.logs);
+  assert.equal(r.poolPushes()[0].title, RAISE_TITLE);
+  assert.equal(s.logs.some((l) => l === 'pool-out: reference adopted — slots 1 and 2, 61.4 kWh.'), true, 'control: a reference of two slots');
+  for (let m = 13; m <= 26; m++) s.feed({ atMs: at(m), body: twoCores(m) });
+  await until(() => poolAlerts(s.store).length === 0, 'the alarm ended', r.logs);
+  await r.morePasses(3);
+  assert.equal(r.poolPushes().length, 1, 'control: inside the quiet hours the resolve is not sent yet');
+  r.mon.stop();
+
+  // A restart at 02:00, the state file INTACT; the pool stays whole on its two Cores.
+  setNow(at(180));
+  const b = storeWith('two-b', { poolFile: s.poolFile });
+  b.store.setDeviceList(LISTED);
+  b.store.markFirstPollSettled();
+  const rb = alertRig(b.store, { name: 'two-mon' });
+  for (let m = 181; m <= 225; m++) { b.feed({ atMs: at(m), body: twoCores(m) }); if (m % 5 === 0) await rb.morePasses(1); }
+  await rb.morePasses(3);
+  assert.deepEqual(rb.poolPushes(), [], 'control: still inside the quiet hours');
+  assert.equal(b.store.poolOutOrphanReleased(PANEL_SN), false, 'control: forty-five minutes of whole capacity on two slots of three earn no clean dwell');
+  // 06:01 at the site: the quiet hours are over, and the boot sweep resolves the card with the return notice.
+  for (let m = 421; m <= 425; m++) { b.feed({ atMs: at(m), body: twoCores(m) }); await rb.morePasses(2); }
+  await until(() => rb.poolPushes().length === 1, 'the resolve after the quiet hours', rb.logs);
+  assert.deepEqual(rb.poolPushes(), [{
+    title: 'Power · Resolved: Core back in the backup pool: slot 1',
+    body: [
+      "The panel's backup capacity has read 61.4 kWh, the sum of its 2 slots, since Sat 23:13; it first read under that sum at Sat 23:00, 13 min earlier.",
+      'At Sat 23:13 slot 1 delivered 800 W and read 62%.',
+      'The pool percent read 58% at Sat 23:12 and 60% at Sat 23:13.',
+      'Backup at Sat 23:23: 36.9 kWh of 61.4 kWh counted (60%).',
+    ].join(' '),
+    severity: 'resolved',
+  }], '★ the return notice, from the end on file');
+  assert.equal(rb.logs.some((l) => /orphan resolve DROPPED/.test(l)), false);
+});
+
+test('★★ an end on file that is OLDER than the push being resolved is another episode\'s: the boot sweep holds for the clean dwell and then sends its own text, not that end\'s return notice', async () => {
+  const s = storeWith('older');
+  for (let m = -15; m < 0; m++) s.feed({ atMs: at(m), body: healthyBody(m) });
+  s.store.markFirstPollSettled();
+  const r = alertRig(s.store, { name: 'older-mon' }); // quiet hours 22-06
+  for (let m = 0; m <= 12; m++) s.feed({ atMs: at(m), body: lostBody(m) });
+  await until(() => r.poolPushes().length === 1, 'the raise pushed', r.logs);
+  for (let m = 13; m <= 26; m++) s.feed({ atMs: at(m), body: healthyBody(m) });
+  await until(() => poolAlerts(s.store).length === 0, 'the alarm ended', r.logs);
+  await r.morePasses(2);
+  r.mon.stop();
+  // The record on file is of a LATER push (23:40) than the end the tracker holds (23:23): the state file is older
+  // than the notify state — it was put back from a copy, and the alarm pushed at 23:40 is not in it.
+  const statePath = join(ROOT, 'older-mon-notify-state.json');
+  const state = JSON.parse(readFileSync(statePath, 'utf8'));
+  assert.equal(JSON.parse(readFileSync(s.poolFile, 'utf8')).panels[PANEL_SN].ends[0].atMs, at(23), 'control');
+  state['shp2-pool-out'].ts = at(40);
+  writeFileSync(statePath, JSON.stringify(state));
+
+  setNow(at(60));
+  const bootAt = at(60);
+  const b = storeWith('older-b', { poolFile: s.poolFile });
+  b.store.setDeviceList(LISTED);
+  b.store.markFirstPollSettled();
+  const rb = alertRig(b.store, { name: 'older-mon', quietHours: '' });
+  for (let m = 1; m <= 11; m++) b.feed({ atMs: bootAt + m * MIN, body: healthyBody(9100 + m) });
+  await until(() => rb.logs.some((l) => l.includes('orphan resolve HELD')), 'the hold', rb.logs);
+  assert.deepEqual(rb.poolPushes(), [], '★ held: the end on file does not answer for a push made after it');
+  for (let m = 12; m <= 31; m++) b.feed({ atMs: bootAt + m * MIN, body: healthyBody(9100 + m) });
+  await until(() => rb.poolPushes().length === 1, 'the stale card resolved', rb.logs);
+  assert.deepEqual(rb.poolPushes(), [{ title: 'Power · Resolved: Core out of the backup pool: slot 1', body: 'Core out of the backup pool: slot 1\n\n(condition cleared while the add-on was restarting)', severity: 'resolved' }],
+    '★ resolved on the clean dwell seen in this process, with the sweep\'s own text');
 });
 
 test('★★★ a restart with the state file LOST while the Core is UNPLUGGED (its slot no longer listed as connected): slots 2 and 3 read healthy against themselves, and the boot sweep still sends no "Resolved"', async () => {

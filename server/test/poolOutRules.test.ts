@@ -561,6 +561,120 @@ test('★★ a pending DECREASE (a Core back while another is still out) needs i
   assert.deepEqual([mixed.state.episode?.k, titleOf(mixed.state), poolOutSeverity(mixed.state), mixed.state.episode?.countedWh], [2, '2 Cores out of the backup pool: slots not identified', 'critical', SLOT_WH]);
 });
 
+/* ── lines the second review found unheld: each survived a probe mutant against every pool-out test file ── */
+
+/** Two slots the panel itself does not list as connected, everything idle: capacity alone, named by the panel's own listing. */
+const twoUnlisted = (seq: number): Body => synthBody({ seq, capWh: SLOT_WH, poolPct: 60, slots: [{ pct: 60, w: 0, isConnect: 0 }, { pct: 60, w: 0 }, { pct: 60, w: 0, isConnect: 0 }] });
+
+test('★★ a smaller count that takes the streak over does not inherit the larger count\'s names', () => {
+  // Fourteen readings two short, each naming slots 1 and 3 (the panel's own listing); then the capacity reads ONE short.
+  const f = fold(withReference(), [...minutes(0, 14, twoUnlisted), ...minutes(14, 2, quietLostBody)]);
+  assert.deepEqual([f.steps[13].signals?.cap.k, f.steps[13].signals?.named, f.steps[14].signals?.cap.k, f.steps[14].signals?.named], [2, [1, 3], 1, null], 'control');
+  assert.equal(raisedAt(f), at(15), 'control');
+  assert.deepEqual([f.state.episode?.k, f.state.episode?.slots], [1, null]);
+  assert.equal(titleOf(f.state), 'Core out of the backup pool: slot not identified', 'never "Core out …: slots 1 and 3"');
+  assert.equal(poolOutFault(1, f.state.episode!.slots), 'out:?;k=1');
+});
+
+test('★★ the naming run starts again when the count moves: one reading at the new count names nothing', () => {
+  // Ten readings two short naming slots 1 and 3 (minutes 0 to 9), ONE reading one short naming slot 1 at minute 10,
+  // then count-only readings. The run of ten is not slot 1's.
+  const f = fold(withReference(), [...minutes(0, 10, twoUnlisted), one(10, lostBody), ...minutes(11, 5, quietLostBody)]);
+  assert.deepEqual([f.steps[10].signals?.cap.k, f.steps[10].signals?.named], [1, [1]], 'control');
+  assert.equal(raisedAt(f), at(15), 'control');
+  assert.deepEqual([f.state.episode?.k, f.state.episode?.slots], [1, null], 'one reading named slot 1');
+});
+
+test('★★ a pending decrease is over after 15 minutes without a reading of it, and a reading dated before its last one starts it again', () => {
+  const two = fold(withReference(), minutes(0, 16, quietTwoShort)).state;
+  assert.deepEqual([two.episode?.k, poolOutSeverity(two)], [2, 'critical'], 'control');
+  // Eight readings one short (minutes 16 to 23); twenty minutes of bodies that cannot be used; seven more (44 to 50).
+  const torn = (seq: number): Body => quietLostBody(seq, { poolPct: 67, remainWh: Math.round(0.67 * FULL_WH) });
+  const f = fold(two, [...minutes(16, 8, quietLostBody), ...minutes(24, 20, torn), ...minutes(44, 7, quietLostBody)]);
+  assert.equal(f.steps[8].skip, 'incoherent', 'control: the bodies between are skipped');
+  assert.deepEqual([f.state.episode?.k, poolOutSeverity(f.state), f.state.episode?.less?.counted, f.state.episode?.less?.firstMs], [2, 'critical', 7, at(44)],
+    'fifteen readings one short, but not within 15 minutes of one another: still two Cores, critical');
+  // The host clock stepped back: a reading dated 30 seconds BEFORE the tally's last one does not carry it.
+  const back = fold(two, [...minutes(16, 5, quietLostBody), one(19.5, quietLostBody)]);
+  assert.deepEqual([back.state.episode?.less?.counted, back.state.episode?.less?.firstMs], [1, at(19.5)]);
+});
+
+test('★★ a pending decrease keeps the capacity of the readings AT its count, whichever reading completes its dwell', () => {
+  const all = fold(withReference(), minutes(0, 20, zeroBody)).state;
+  assert.equal(titleOf(all), '3 Cores out of the backup pool: slots 1, 2 and 3', 'control');
+  // Two short and one short by turns, the dwell completed by a reading ONE short: "at most two short", at 30.7 kWh.
+  const f = fold(all, Array.from({ length: 16 }, (_, i) => one(20 + i, i % 2 === 0 ? quietTwoShort : quietLostBody)));
+  assert.equal(f.steps[15].signals?.cap.k, 1, 'control: the completing reading is one short');
+  assert.deepEqual([f.state.episode?.k, f.state.episode?.countedWh, poolOutSeverity(f.state)], [2, SLOT_WH, 'critical']);
+});
+
+test('★★ a confirmed decrease ends a pending change with it: the name that was on its way belonged to the larger count', () => {
+  const two = fold(withReference(), minutes(0, 16, quietTwoShort)).state;
+  const pending = fold(two, [one(16, twoShort)]).state;
+  assert.deepEqual([pending.episode?.slots, pending.episode?.change?.k, pending.episode?.change?.slots], [null, 2, [1, 3]], 'control: one reading named slots 1 and 3');
+  const part = fold(pending, minutes(17, 16, quietLostBody));
+  assert.equal(part.steps[14].state.episode?.k, 2, 'minute 31: fifteen readings one short span fourteen minutes');
+  assert.notEqual(part.steps[14].state.episode?.change, null, 'control: the pending name is still on its way then');
+  assert.deepEqual([part.state.episode?.k, part.state.episode?.slots, part.state.episode?.change, part.state.episode?.less], [1, null, null, null]);
+});
+
+test('★★ readings that disagree inside an episode start the naming again; a slot named for a dwell afterwards is latched', () => {
+  const power = (out: number) => (seq: number): Body => synthBody({ seq, capWh: 2 * SLOT_WH, poolPct: 60, slots: [1, 2, 3].map((n) => ({ pct: 60, w: n === out ? 0 : -900 })) });
+  const unnamed = fold(withReference(), minutes(0, 16, quietLostBody)).state;
+  assert.equal(titleOf(unnamed), 'Core out of the backup pool: slot not identified', 'control');
+  const f = fold(unnamed, [one(16, power(1)), one(17, power(2)), ...minutes(18, 11, power(2))]);
+  assert.equal(titleOf(f.steps[11].state), 'Core out of the backup pool: slot not identified', 'minute 27: slot 2 is named since minute 17; the reading that disagreed is not counted from');
+  assert.equal(titleOf(f.state), 'Core out of the backup pool: slot 2', 'minute 28: named for ten minutes since the disagreement');
+});
+
+test('★★ a larger count confirmed inside an episode leaves a STILL larger one on its way: it is not dropped at the set change', () => {
+  // Slot 1 out (the alarm stands). From minute 11 the capacity reads two short; from minute 21 it reads zero: four
+  // such readings are skipped, and from the fifth (minute 25) they are read as every slot out.
+  const f = fold(withEpisode(), [...minutes(11, 10, quietTwoShort), ...minutes(21, 20, zeroBody)]);
+  assert.deepEqual([f.steps[13].skip, f.steps[14].converted, f.steps[14].signals?.cap.k], ['zero-capacity', 'all-out', 3], 'control');
+  // Minute 29: fifteen readings at least two short span eighteen minutes. Two Cores, and the three-slot tally goes on.
+  const at29 = f.steps[18].state.episode;
+  assert.deepEqual([at29?.k, at29?.change?.k, at29?.change?.counted, at29?.change?.firstMs], [2, 3, 5, at(25)]);
+  assert.equal(f.steps[28].state.episode?.k, 2, 'minute 39: fifteen readings three short span fourteen minutes');
+  assert.equal(titleOf(f.state), '3 Cores out of the backup pool: slots 1, 2 and 3', 'minute 40: their own dwell, counted from minute 25 — not from the set change at minute 29');
+});
+
+/* ── the name: pending between its readings, and contradicted by the latched one ── */
+
+test('★★ a pending name does not age out between its readings while the capacity stays short at the latched count', () => {
+  // The capacity alone raises at minute 15, unnamed. The slot that left is seen only while the pool discharges: two
+  // readings in every twenty minutes name slot 1, none names another, and the bursts are 18 minutes apart.
+  const f = fold(withReference(), Array.from({ length: 62 }, (_, m) => one(m, m >= 20 && m % 20 < 2 ? lostBody : quietLostBody)));
+  assert.equal(raisedAt(f), at(15), 'control');
+  assert.deepEqual([f.steps[41].state.episode?.change?.names?.n, f.steps[41].state.episode?.change?.names?.firstMs], [4, at(20)], 'minute 41: the second burst is counted with the first');
+  assert.equal(titleOf(f.steps[60].state), 'Core out of the backup pool: slot not identified', 'minute 60: five readings have named slot 1');
+  assert.equal(titleOf(f.steps[61].state), 'Core out of the backup pool: slot 1', '★ minute 61: the sixth');
+  assert.deepEqual(f.steps[61].events, [{ type: 'set-changed', atMs: at(61) }]);
+  // A gap in the readings themselves (an outage of more than 15 minutes) still ends it: the naming starts again.
+  const unnamed = fold(withReference(), minutes(0, 16, quietLostBody)).state;
+  const gap = fold(unnamed, [...minutes(16, 4, lostBody), ...minutes(36, 4, lostBody)]);
+  assert.deepEqual([titleOf(gap.state), gap.state.episode?.change?.names?.n, gap.state.episode?.change?.names?.firstMs], ['Core out of the backup pool: slot not identified', 4, at(36)]);
+});
+
+test('★★ readings that name the LATCHED slot end a pending rename: two slots named by turns never flip the title', () => {
+  const power = (out: number) => (seq: number): Body => synthBody({ seq, capWh: 2 * SLOT_WH, poolPct: 60, slots: [1, 2, 3].map((n) => ({ pct: 60, w: n === out ? 0 : -900 })) });
+  const ep1 = fold(withReference(), minutes(0, 11, power(1))).state;
+  assert.equal(titleOf(ep1), 'Core out of the backup pool: slot 1', 'control: latched on slot 1');
+  const turns = fold(ep1, Array.from({ length: 60 }, (_, i) => one(11 + i, power(i % 2 === 0 ? 2 : 1))));
+  assert.deepEqual([turns.steps[0].signals?.named, turns.steps[1].signals?.named], [[2], [1]], 'control');
+  assert.equal(events(turns).includes('set-changed'), false, '★ no set change in an hour of readings naming slot 2 and slot 1 by turns');
+  assert.equal(titleOf(turns.state), 'Core out of the backup pool: slot 1');
+  // An unbroken dwell of readings naming slot 2 IS a rename (six, spanning ten minutes), as before…
+  const moved = fold(ep1, minutes(11, 11, power(2)));
+  assert.equal(titleOf(moved.steps[9].state), 'Core out of the backup pool: slot 1', 'minute 20');
+  assert.equal(titleOf(moved.state), 'Core out of the backup pool: slot 2', 'minute 21');
+  // …and ONE reading naming the latched slot inside it starts that naming again.
+  const broken = fold(ep1, [...minutes(11, 9, power(2)), one(20, power(1)), ...minutes(21, 10, power(2))]);
+  assert.equal(broken.steps[9].state.episode?.change, null, 'minute 20: the pending rename is over');
+  assert.equal(titleOf(broken.state), 'Core out of the backup pool: slot 1', 'minute 30: slot 2 is named since minute 21');
+  assert.equal(titleOf(fold(broken.state, [one(31, power(2))]).state), 'Core out of the backup pool: slot 2', 'minute 31');
+});
+
 test('★ a gap of 15:00 between counted observations carries the streak; 15:01 starts it again — by data time, across a restart too', () => {
   const three = fold(withReference(), minutes(0, 3, lostBody)).state;
   for (const state of [three, restart(three)]) {
@@ -724,6 +838,81 @@ test('★ flap window: three steps whose first readings span 60:00 raise; at 60:
   assert.deepEqual(late.state.flaps, [at(30), at(60 + 1 / 60)]);
 });
 
+/* ───────────────────────────── a flap raise's capacity ───────────────────────────── */
+
+test('★★★ a FLAP raise has no dwell behind it: its capacity decides nothing until readings at its count have met a dwell of their own (strong)', () => {
+  // Two confirmed one-short steps, then a third step of two readings TWO slots short. On 07-02 and 08-20 the capacity
+  // read 30.7 kWh for a while with no Core leaving: two minutes of it must not be a critical pushed at any hour.
+  const f = fold(withReference(), [...step(0), ...step(5), ...minutes(10, 2, twoShort)]);
+  assert.deepEqual([raisedAt(f), f.state.episode?.how, f.state.episode?.k, f.state.episode?.countedWh], [at(11), 'flap', 2, SLOT_WH]);
+  assert.equal(poolOutSeverity(f.state), 'warning', '★ two readings at 30.7 kWh: a warning');
+  assert.deepEqual([f.state.episode?.unconfirmed?.counted, f.state.episode?.unconfirmed?.firstMs, f.state.episode?.unconfirmed?.more], [2, at(10), null]);
+  // The two-short readings go on: six STRONG readings spanning ten minutes, counted from minute 10, are met at minute 20.
+  const on = fold(f.state, minutes(12, 9, twoShort));
+  assert.equal(poolOutSeverity(on.steps[7].state), 'warning', 'minute 19: ten readings span nine minutes');
+  assert.deepEqual([poolOutSeverity(on.steps[8].state), on.steps[8].state.episode?.unconfirmed, on.steps[8].state.episode?.countedWh], ['critical', null, SLOT_WH]);
+  assert.deepEqual(on.steps[8].events.map((e) => e.type), ['set-changed', 'severity'], 'minute 20: the slots are named and the severity moves at the same reading');
+  assert.equal(on.steps[8].logs.find((l) => l.text.startsWith('pool-out: severity'))?.text, 'pool-out: severity warning → critical (the confirmed capacity is under half the reference).');
+  assert.equal(on.steps[8].logs.some((l) => l.level === 'info' && l.text.startsWith('pool-out: the capacity behind this alarm (30.7 kWh, raised by the flap rule) has now read 2 slots short or more for a full dwell — confirmed')), true);
+  // A restart keeps it unconfirmed. A file written before the field existed reads as confirmed, as every raise then was.
+  assert.equal(poolOutSeverity(restart(f.state)), 'warning');
+  assert.deepEqual(restart(f.state).episode?.unconfirmed, JSON.parse(JSON.stringify(f.state.episode?.unconfirmed)));
+  const older = JSON.parse(JSON.stringify(poolOutStateJson(f.state)));
+  delete older.episode.unconfirmed;
+  assert.equal(poolOutSeverity(poolOutStateFrom(older) as PoolOutState), 'critical');
+  // A raise by a DWELL is confirmed from the start (control: the rule above is the flap raise's alone).
+  const dwell = fold(withReference(), minutes(0, 11, twoShort)).state;
+  assert.deepEqual([dwell.episode?.how, dwell.episode?.unconfirmed, poolOutSeverity(dwell)], ['strong', null, 'critical']);
+});
+
+test('★★★ a flap raise on the capacity alone: a warning at its two readings, critical after fifteen readings spanning fifteen minutes at that count', () => {
+  const quietStep = (from: number, body: (seq: number) => Body = quietLostBody): PoolObservation[] => [...minutes(from, 2, body), ...minutes(from + 2, 3, healthyBody)];
+  const f = fold(withReference(), [...quietStep(0), ...quietStep(5), ...minutes(10, 2, quietTwoShort)]);
+  assert.deepEqual([f.state.episode?.how, titleOf(f.state), poolOutSeverity(f.state)], ['flap', '2 Cores out of the backup pool: slots not identified', 'warning']);
+  const on = fold(f.state, minutes(12, 14, quietTwoShort));
+  assert.equal(poolOutSeverity(on.steps[12].state), 'warning', 'minute 24: fifteen readings span fourteen minutes');
+  assert.equal(poolOutSeverity(on.steps[13].state), 'critical', 'minute 25');
+  assert.deepEqual(on.steps[13].events.map((e) => e.type), ['severity']);
+  // All three dips at 30.7 kWh, capacity alone: the same.
+  const all = fold(withReference(), [...quietStep(0, quietTwoShort), ...quietStep(5, quietTwoShort), ...minutes(10, 2, quietTwoShort)]);
+  assert.deepEqual([all.state.episode?.how, all.state.episode?.k, poolOutSeverity(all.state)], ['flap', 2, 'warning']);
+  // A flap raise ONE Core short is a warning before and after its capacity is confirmed (at minute 20).
+  const one1 = fold(withReference(), [...step(0), ...step(5), ...minutes(10, 12, lostBody)]);
+  assert.equal(one1.steps.some((x) => poolOutSeverity(x.state) === 'critical'), false);
+  assert.notEqual(one1.steps[19].state.episode?.unconfirmed, null, 'minute 19');
+  assert.deepEqual([one1.state.episode?.how, one1.steps[20].state.episode?.unconfirmed], ['flap', null]);
+});
+
+test('★★ the tally of a flap raise follows a streak\'s own rules: readings fewer slots short do not count, three healthy readings start it again, and so does a gap of more than 15 minutes', () => {
+  const raised = fold(withReference(), [...step(0), ...step(5), ...minutes(10, 2, twoShort)]).state;
+  // The flap goes on for an hour: three healthy readings, two readings two short. No dwell is ever met.
+  const flapping = fold(raised, Array.from({ length: 60 }, (_, i) => one(12 + i, i % 5 < 3 ? healthyBody : twoShort)));
+  assert.equal(flapping.steps.some((x) => poolOutSeverity(x.state) === 'critical'), false, '★ never critical on dips of two readings');
+  assert.notEqual(flapping.state.episode, null, 'control: the alarm stands');
+  assert.deepEqual([flapping.state.episode?.unconfirmed?.counted, flapping.state.episode?.unconfirmed?.firstMs], [2, at(70)], 'the tally holds the last dip alone');
+  // A gap of 15:00 carries the tally (six STRONG readings spanning ten minutes from minute 10: met at minute 29)…
+  const carried = fold(raised, minutes(26, 4, twoShort));
+  assert.deepEqual(carried.steps.map((x) => poolOutSeverity(x.state)), ['warning', 'warning', 'warning', 'critical']);
+  // …and after 16 minutes with no reading it starts again: the dwell is counted from minute 27, and met at minute 37.
+  const gap = fold(raised, minutes(27, 11, twoShort));
+  assert.equal(poolOutSeverity(gap.steps[9].state), 'warning', 'minute 36');
+  assert.equal(poolOutSeverity(gap.steps[10].state), 'critical', 'minute 37');
+  // Readings ONE slot short say the pool is not two short: they do not count toward the two-slot capacity.
+  const fewer = fold(raised, minutes(12, 8, lostBody));
+  assert.deepEqual([fewer.state.episode?.k, fewer.state.episode?.unconfirmed?.counted, poolOutSeverity(fewer.state)], [2, 2, 'warning']);
+  // A dwell of them is the partial return: a set change, which brings a capacity confirmed by that dwell.
+  const part = fold(raised, minutes(12, 11, lostBody));
+  assert.deepEqual([part.state.episode?.k, part.state.episode?.unconfirmed, poolOutSeverity(part.state)], [1, null, 'warning']);
+  // So does a LARGER count confirmed by a dwell of its own readings. A flap raise one short; two short at minutes
+  // 12–17; three healthy readings (the tally starts again); two short at 21 and 22, where the two-slot readings' own
+  // ten minutes are met.
+  const k1 = fold(withReference(), [...step(0), ...step(5), ...minutes(10, 2, lostBody)]).state;
+  assert.deepEqual([k1.episode?.how, k1.episode?.k, k1.episode?.unconfirmed?.counted], ['flap', 1, 2], 'control');
+  const more = fold(k1, [...minutes(12, 6, twoShort), ...minutes(18, 3, healthyBody), ...minutes(21, 2, twoShort)]);
+  assert.deepEqual([more.steps[9].state.episode?.k, more.steps[9].state.episode?.unconfirmed?.counted], [1, 1], 'minute 21: the tally has one reading since the healthy ones');
+  assert.deepEqual([more.state.episode?.k, more.state.episode?.unconfirmed, poolOutSeverity(more.state)], [2, null, 'critical']);
+});
+
 /* ───────────────────────────── no silent blindness ───────────────────────────── */
 
 const zeroBody = (seq: number): Body => synthBody({ seq, capWh: 0, poolPct: 0, remainWh: 0, slots: [0, 1, 2].map(() => ({ pct: 60, w: 0 })) });
@@ -807,7 +996,7 @@ test('★ blind for 30 minutes while the panel is fresh: one WARN line naming th
   const f = fold(withReference(), minutes(0, 90, torn));
   const warns = f.steps.map((s, i) => ({ i, w: s.logs.filter((l) => l.level === 'warn') })).filter((x) => x.w.length > 0);
   assert.deepEqual(warns.map((x) => x.i), [30]);
-  assert.match(warns[0].w[0].text, /no usable panel reading for 30 min while the panel is fresh \(incoherent\)/);
+  assert.equal(warns[0].w[0].text, 'pool-out: no capacity verdict for 30 min while the panel is fresh (incoherent); a Core leaving the pool cannot be seen until one arrives.');
   assert.deepEqual(f.steps[30].events, [{ type: 'blind', atMs: at(30), reason: 'incoherent' }]);
   assert.equal(f.steps[29].logs.length, 0, 'not at 29 minutes');
   // A stale shadow or an offline panel is not "fresh": the 30 minutes start again after it.
@@ -840,6 +1029,12 @@ test('★★ a reading that can be used but whose CAPACITY cannot be judged is b
   const torn = (seq: number): Body => quietLostBody(seq, { poolPct: 67, remainWh: Math.round(0.67 * FULL_WH) });
   const mixed = fold(emptyPoolOutState(), [...minutes(0, 20, torn), ...minutes(20, 15, noCap)]);
   assert.deepEqual(mixed.steps.map((x, i) => (x.logs.some((l) => l.level === 'warn') ? i : -1)).filter((i) => i >= 0), [30]);
+  // …and the line says the same thing whichever kind of body the thirtieth minute falls on. Ten usable readings and
+  // then skipped ones: "no usable panel reading for 30 min" was false of that half hour.
+  const usableFirst = fold(emptyPoolOutState(), [...minutes(0, 10, noCap), ...minutes(10, 25, torn)]);
+  assert.equal(usableFirst.steps[30].skip, 'incoherent', 'control: the thirtieth minute is a skipped body');
+  assert.equal(usableFirst.steps[30].logs.find((l) => l.level === 'warn')?.text, 'pool-out: no capacity verdict for 30 min while the panel is fresh (incoherent); a Core leaving the pool cannot be seen until one arrives.');
+  assert.equal(usableFirst.steps.flatMap((x) => x.logs).some((l) => /no usable panel reading/.test(l.text)), false);
   const healed = fold(emptyPoolOutState(), [...minutes(0, 20, noCap), one(20, quietBody), ...minutes(21, 29, noCap)]);
   assert.equal(healed.steps.flatMap((x) => x.logs).filter((l) => l.level === 'warn').length, 0);
 });
@@ -854,7 +1049,7 @@ test('★★ the blind clock runs only across bodies that follow one another: mi
   assert.deepEqual(after.steps[0].state.blind, { sinceMs: at(200), lastMs: at(200), warned: false });
   const warns = after.steps.map((x, i) => (x.logs.some((l) => l.level === 'warn') ? i : -1)).filter((i) => i >= 0);
   assert.deepEqual(warns, [30], 'thirty minutes of bodies after it');
-  assert.match(after.steps[30].logs[0].text, /no usable panel reading for 30 min while the panel is fresh/);
+  assert.match(after.steps[30].logs[0].text, /no capacity verdict for 30 min while the panel is fresh \(incoherent\)/);
   // A gap of 15:00 between two blind bodies carries the clock; 15:01 starts it again.
   assert.equal(fold(before, [one(34, torn)]).state.blind?.sinceMs, at(0));
   assert.equal(fold(before, [one(34 + 1 / 60, torn)]).state.blind?.sinceMs, at(34 + 1 / 60));
@@ -1231,6 +1426,26 @@ test('★ the grid flag is persisted, and it belongs to the episode', () => {
 
 /* ───────────────────────────── the sensor, the orphan hold, the id ───────────────────────────── */
 
+test('★★ the severity line says what moved: the grid, or the capacity the severity reads', () => {
+  const lines = (f: Folded): string[] => f.steps.flatMap((x) => x.logs).filter((l) => l.text.startsWith('pool-out: severity')).map((l) => l.text);
+  // Two Cores out and one back (a partial return): the count moved. The grid had nothing to do with it.
+  const two = fold(withReference(), minutes(0, 11, twoShort)).state;
+  assert.deepEqual(lines(fold(two, minutes(11, 16, quietLostBody))), ['pool-out: severity critical → warning (the confirmed capacity is no longer under half the reference).']);
+  // A second Core out.
+  assert.deepEqual(lines(fold(withEpisode(), minutes(11, 11, twoShort))), ['pool-out: severity warning → critical (the confirmed capacity is under half the reference).']);
+  // The grid, both ways.
+  const off = fold(withEpisode(), minutes(11, 3, gridBody(0), noGrid));
+  assert.deepEqual(lines(off), ['pool-out: severity warning → critical (the panel and the add-on both report no grid).']);
+  assert.deepEqual(lines(fold(off.state, minutes(14, 3, gridBody(1)))), ['pool-out: severity critical → warning (the grid reads present again).']);
+  // Critical by BOTH: the grid returning moves nothing and says nothing; the count going back to one then says the count.
+  const twoNoGrid = (seq: number): Body => twoShort(seq);
+  const both = fold(two, minutes(11, 3, (seq) => ({ ...twoNoGrid(seq), 'pd303_mc.masterIncreInfo.gridSta': 0 }), noGrid));
+  assert.deepEqual([both.state.episode?.gridCritical, poolOutSeverity(both.state), lines(both)], [true, 'critical', []]);
+  const gridBack = fold(both.state, minutes(14, 3, twoShort));
+  assert.deepEqual([gridBack.state.episode?.gridCritical, poolOutSeverity(gridBack.state), lines(gridBack)], [false, 'critical', []]);
+  assert.deepEqual(lines(fold(gridBack.state, minutes(17, 16, quietLostBody))), ['pool-out: severity critical → warning (the confirmed capacity is no longer under half the reference).']);
+});
+
 test('the Home Assistant sensor: ON during an episode; OFF only while the newest capacity verdict is at most 15 minutes old; else unknown', () => {
   assert.equal(poolOutSensorState(emptyPoolOutState(), at(0)), 'unknown');
   const ref = withReference();
@@ -1299,6 +1514,29 @@ test('★ the orphan hold is released only by what THIS process saw: a raise, or
   assert.equal(cleared.episode, null);
   assert.equal(poolOutOrphanHoldReleased(cleared), true);
   assert.equal(poolOutOrphanHoldReleased(restart(cleared)), false);
+  // AN END ON FILE releases it, when it is dated at or after the push being resolved: the alarm that was pushed ended
+  // on the tracker's own evidence, before the restart. Asked without that time, or with an end older than the push
+  // (another episode's), the file releases nothing.
+  const endAt = poolOutLatestEnd(cleared)!.atMs;
+  assert.equal(endAt, at(21), 'control');
+  assert.equal(poolOutOrphanHoldReleased(restart(cleared), at(10)), true, '★ pushed at 23:10, ended at 23:21');
+  assert.equal(poolOutOrphanHoldReleased(restart(cleared), endAt), true, 'an end in the instant of the push');
+  assert.equal(poolOutOrphanHoldReleased(restart(cleared), endAt + 1), false, '★ an end older than the push is another episode\'s');
+  assert.equal(poolOutOrphanHoldReleased(restart(cleared)), false, 'no push time, no release by the file');
+  // …and never while an alarm stands again (it is in the alert set, and no orphan).
+  const again = fold(cleared, minutes(22, 11, lostBody)).state;
+  assert.notEqual(again.episode, null, 'control');
+  assert.equal(poolOutOrphanHoldReleased(restart(again), at(10)), false);
+  // A panel with an EMPTY slot (two Cores in three): its roster can never earn the clean dwell, state file intact, so
+  // the end on file is the only release there is.
+  const twoCores = (seq: number): Body => synthBody({ seq, capWh: 2 * SLOT_WH, poolPct: 60, slots: [{ pct: 62, w: -800 }, { pct: 58, w: -760 }, { isConnect: 0, hwConnect: 0, fullCap: 0, pct: 0, w: 0 }] });
+  const oneOfTwo = (seq: number): Body => synthBody({ seq, capWh: SLOT_WH, poolPct: 58, slots: [{ pct: 62, w: 0 }, { pct: 58, w: -1560 }, { isConnect: 0, hwConnect: 0, fullCap: 0, pct: 0, w: 0 }] });
+  const endedTwo = fold(fold(fold(emptyPoolOutState(), minutes(-15, 15, twoCores)).state, minutes(0, 12, oneOfTwo)).state, minutes(12, 12, twoCores)).state;
+  assert.deepEqual([endedTwo.baseline?.roster, endedTwo.episode, poolOutLatestEnd(endedTwo)?.kind], [[1, 2], null, 'returned'], 'control: raised, and ended on evidence');
+  const sixHours = fold(restart(endedTwo), minutes(30, 360, twoCores)).state;
+  assert.deepEqual([sixHours.proc.cleanDwell, sixHours.proc.clean], [false, null], 'control: six hours of whole capacity earn no clean dwell on two slots of three');
+  assert.equal(poolOutOrphanHoldReleased(sixHours), false);
+  assert.equal(poolOutOrphanHoldReleased(sixHours, at(11)), true, '★ released by the end on file');
 });
 
 test('the alert id: the bare stem for the house panel, the stem and the panel\'s serial for a secondary panel — never a Core\'s serial', () => {
@@ -1334,6 +1572,7 @@ test('the state file round-trips every stage of an episode, and never holds the 
     ['a streak with a larger count behind it', fold(withReference(), [...minutes(0, 3, quietLostBody), one(3, twoShort)]).state, (st) => st.streak?.more],
     ['a pending change carrying a name and a larger count', fold(withReference(), [...minutes(0, 10, lostBody), one(10, (seq) => lostBody(seq, { capWh: SLOT_WH, poolPct: 65, slots: [{ pct: 72, w: 0 }, { pct: 65, w: -2100 }, { pct: 40, w: 0 }] }))]).state, (st) => [st.episode?.change?.names, st.episode?.change?.more]],
     ['a pending decrease', fold(fold(withReference(), minutes(0, 16, twoShort)).state, minutes(16, 3, quietLostBody)).state, (st) => st.episode?.less],
+    ['a flap raise whose capacity no dwell has confirmed', fold(withReference(), [...step(0), ...step(5), ...minutes(10, 2, twoShort)]).state, (st) => st.episode?.unconfirmed],
   ];
   for (const [what, st, part] of more) {
     const held = part(st);

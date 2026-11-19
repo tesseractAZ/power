@@ -10,6 +10,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { computeAlerts, debouncedOnsetsPending, type Alert, type ConnectivityContext } from '../src/alerts.js';
+import * as monitorModule from '../src/alertMonitor.js';
 import {
   ENERGY_STATE_FAMILIES, applySilencingRules, decideAlertDispatch, isDeviceDerivedAlertId, fallingEdgeFrozenByEvidence,
   poolOutOrphanHeld, poolOutResolveText, poolOutGridVerdict, notifyLocator, bootSeedNotified, type AlertActionStats,
@@ -17,11 +18,12 @@ import {
 import { familyOf } from '../src/alertOutcomes.js';
 import { MAINTENANCE_SHELVABLE_PREFIXES } from '../src/maintenanceWindow.js';
 import { SnapshotStore, type DeviceSnapshot } from '../src/snapshot.js';
-import { poolOutAlertParts, poolOutDelivery, poolOutAlertId, POOL_OUT_ALERT_ID, type PoolOutAlertParts } from '../src/poolOut.js';
-import { pickPrimaryAlert, buildAlertMessage, buildAlertMessageEs } from '../src/ttsService.js';
+import * as poolOutModule from '../src/poolOut.js';
+import { poolOutAlertParts, poolOutDelivery, poolOutAlertId, POOL_OUT_ALERT_ID, type PoolOutAlertParts, type PoolOutState } from '../src/poolOut.js';
+import { pickPrimaryAlert, buildAlertMessage, buildAlertMessageEs, verbalizeForTts } from '../src/ttsService.js';
 import { conditionNamePool, conditionFromAlerts } from '../src/broadcast.js';
 import { priorityOf } from '../src/alertPriority.js';
-import { PANEL_SN, CORE_SNS, at, healthyBody, lostBody, withEpisode, fold, minutes, type Body } from './fixtures/poolOutFixtures.js';
+import { PANEL_SN, CORE_SNS, SLOT_WH, FULL_WH, at, healthyBody, lostBody, quietBody, quietLostBody, synthBody, withEpisode, withReference, fold, minutes, type Body } from './fixtures/poolOutFixtures.js';
 
 const TZ = 'America/Phoenix';
 const OTHER_PANEL = 'HD31XXX00XXX0002';
@@ -69,6 +71,7 @@ test('★★★ the alert, field by field: id, category, device, source, the lat
     title: 'Core out of the backup pool: slot 1',
     fault: 'out:1;k=1',
     detail: WARNING.detail,
+    spokenDetail: 'Backup capacity reads 61.4 of 92.2 kWh.',
     facts: WARNING.facts,
     pushInQuietHours: true,
   });
@@ -160,12 +163,160 @@ test('★★★ the spoken message: "Backup at or below reserve" is not in the p
   assert.equal(pickPrimaryAlert([beside('Grid'), beside('Battery', { coreNum: 1 } as Partial<Alert>)], 'red')?.id, 'other-Battery');
 });
 
-test('★ what is spoken for a critical: the title and the one lead sentence, in English and in Spanish', () => {
+test('★ what is spoken for a critical: the title and ONE short sentence of its own (two when the grid made it critical), in English and in Spanish', () => {
   const [a] = poolOut(computeAlerts(devicesOf({ [PANEL_SN]: lostBody(10, { gridSta: 0 }) }), context(new Map([[PANEL_SN, CRITICAL]]))));
   assert.equal(buildAlertMessage('red', [a]),
-    "Critical alarm. Critical alarm. Smart panel. Core out of the backup pool: slot 1. The panel's backup capacity reads 61.4 kilowatt hours: 30.7 kilowatt hours, the capacity of 1 slot, under the 92.2 kilowatt hours of its 3 slots. The panel reported no grid at 23:13. Acknowledge at console. Repeat. Critical alarm. Critical alarm. Core out of the backup pool: slot 1.");
-  assert.match(buildAlertMessageEs('red', [a]), /Core fuera del respaldo\./);
+    'Critical alarm. Critical alarm. Smart panel. Core out of the backup pool: slot 1. Backup capacity reads 61.4 of 92.2 kilowatt hours. No grid reported at 23:13. Acknowledge at console. Repeat. Critical alarm. Critical alarm. Core out of the backup pool: slot 1.');
+  assert.equal(buildAlertMessageEs('red', [a]),
+    'Alarma crítica. Alarma crítica. Panel inteligente. Core fuera del respaldo. Backup capacity reads 61.4 of 92.2 kilowatt hours. No grid reported at 23:13. Confirme en la consola. Repito. Alarma crítica. Alarma crítica. Core fuera del respaldo.');
   assert.doesNotMatch(buildAlertMessageEs('red', [a]), /Core out of the backup pool/, 'the Spanish pass does not read the English title');
+  // The push and the card keep the WHOLE detail: only the voice reads the short sentence.
+  assert.equal(a.detail, CRITICAL.detail);
+  assert.equal(a.detail.startsWith("The panel's backup capacity reads 61.4 kWh: 30.7 kWh, the capacity of 1 slot, under the 92.2 kWh of its 3 slots. The panel reported no grid at 23:13."), true);
+  // Control (passes without this release): an alert with no sentence of its own is spoken from the cut of its detail.
+  const { spokenDetail: _own, ...plain } = a;
+  void _own;
+  assert.equal(buildAlertMessage('red', [plain as Alert]).includes("The panel's backup capacity reads 61.4 kilowatt hours: 30.7 kilowatt hours, the capacity of 1 slot, under the 92.2 kilowatt hours of its 3 slots. The panel reported no grid at 23:13."), true);
+});
+
+/* ── every shape the tracker can put in front of the voice, and how long each is ── */
+
+const noGridObs = { grid: { present: false, presenceUnknown: false } };
+const twoOut = (o: Record<string, unknown> = {}) => (seq: number): Body => synthBody({ seq, capWh: SLOT_WH, poolPct: 65, slots: [{ pct: 72, w: 0 }, { pct: 65, w: -2100 }, { pct: 40, w: 0 }], ...o });
+const twoQuiet = (o: Record<string, unknown> = {}) => (seq: number): Body => synthBody({ seq, capWh: SLOT_WH, poolPct: 60, slots: [0, 1, 2].map(() => ({ pct: 60, w: 0 })), ...o });
+/** Slot 1 named out, then a second Core out that nothing names (capacity alone, for its own dwell): "slot 1 and one not identified". */
+const ONE_NAMED: PoolOutState = fold(withEpisode(), minutes(11, 16, twoQuiet())).state;
+const ONE_NAMED_NO_GRID: PoolOutState = fold(ONE_NAMED, minutes(27, 3, twoQuiet({ gridSta: 0 }), noGridObs)).state;
+const allOut = (seq: number): Body => synthBody({ seq, capWh: 0, poolPct: 0, remainWh: 0, slots: [0, 1, 2].map(() => ({ pct: 60, w: 0 })) });
+const lostNoGrid = (seq: number): Body => lostBody(seq, { gridSta: 0 });
+const SHAPES: Array<[string, PoolOutState]> = [
+  ['one Core, slot 1', withEpisode()],
+  ['one Core, slot not identified', fold(withReference(quietBody), minutes(0, 20, quietLostBody)).state],
+  ['two Cores, slots 1 and 3', fold(withReference(), minutes(0, 16, twoOut())).state],
+  ['one Core, the grid absent', fold(withEpisode(), minutes(11, 3, lostNoGrid, noGridObs)).state],
+  ['two Cores, the grid absent', fold(fold(withReference(), minutes(0, 16, twoOut())).state, minutes(16, 3, twoOut({ gridSta: 0 }), noGridObs)).state],
+  ['every slot out', fold(withReference(), minutes(0, 20, allOut)).state],
+  ['two Cores, slots not identified', fold(withReference(quietBody), minutes(0, 20, twoQuiet())).state],
+  ['two Cores not identified, the grid absent', fold(fold(withReference(quietBody), minutes(0, 20, twoQuiet())).state, minutes(20, 3, twoQuiet({ gridSta: 0 }), noGridObs)).state],
+  ['two Cores, one named', ONE_NAMED],
+  ['two Cores, one named, the grid absent', ONE_NAMED_NO_GRID],
+  // The clear pending (the capacity whole again, the alarm standing until that has held), on one reading and on three.
+  ['two Cores, one named, the grid absent, ONE whole reading', fold(ONE_NAMED_NO_GRID, minutes(30, 1, (seq) => healthyBody(seq, { gridSta: 0 }), noGridObs)).state],
+  ['two Cores, one named, the grid absent, the clear pending', fold(ONE_NAMED_NO_GRID, minutes(30, 3, (seq) => healthyBody(seq, { gridSta: 0 }), noGridObs)).state],
+  // The newest reading's capacity cannot be compared (it reads above the sum of the slots): the newest SHORT reading is said.
+  ['one Core, the grid absent, the newest capacity not comparable', fold(fold(withEpisode(), minutes(11, 3, lostNoGrid, noGridObs)).state, minutes(14, 1, (seq) => lostBody(seq, { gridSta: 0, capWh: FULL_WH + 5000 }), noGridObs)).state],
+];
+/** The alert as computeAlerts emits it for one tracker state, and the English message the renderer hands the voice. */
+function spokenFor(state: PoolOutState, nowMs: number): { alert: Alert; en: string; es: string } {
+  const parts = poolOutAlertParts(state, { nowMs, timeZone: TZ })!;
+  const [alert] = poolOut(computeAlerts(devicesOf({ [PANEL_SN]: lostBody(10) }), context(new Map([[PANEL_SN, parts]])), GRID_PRESENT));
+  const level = alert.severity === 'critical' ? 'red' : 'yellow';
+  // audioRenderer.renderAnnouncement verbalizes the whole message once more before the engine (idempotent).
+  return { alert, en: verbalizeForTts(buildAlertMessage(level, [alert])), es: buildAlertMessageEs(level, [alert]) };
+}
+
+test('★★★ the spoken sentence of every shape, word for word: what the panel reads, in the tense of the reading, and the grid when it made the alarm critical', () => {
+  const said = Object.fromEntries(SHAPES.map(([name, state]) => [name, spokenFor(state, state.last!.atMs).alert.spokenDetail]));
+  assert.deepEqual(said, {
+    'one Core, slot 1': 'Backup capacity reads 61.4 of 92.2 kWh.',
+    'one Core, slot not identified': 'Backup capacity reads 61.4 of 92.2 kWh.',
+    'two Cores, slots 1 and 3': 'Backup capacity reads 30.7 of 92.2 kWh.',
+    'one Core, the grid absent': 'Backup capacity reads 61.4 of 92.2 kWh. No grid reported at 23:13.',
+    'two Cores, the grid absent': 'Backup capacity reads 30.7 of 92.2 kWh. No grid reported at 23:18.',
+    'every slot out': 'Backup capacity reads 0.0 of 92.2 kWh.',
+    'two Cores, slots not identified': 'Backup capacity reads 30.7 of 92.2 kWh.',
+    'two Cores not identified, the grid absent': 'Backup capacity reads 30.7 of 92.2 kWh. No grid reported at 23:22.',
+    'two Cores, one named': 'Backup capacity reads 30.7 of 92.2 kWh.',
+    'two Cores, one named, the grid absent': 'Backup capacity reads 30.7 of 92.2 kWh. No grid reported at 23:29.',
+    'two Cores, one named, the grid absent, ONE whole reading': 'Backup capacity read 92.2 of 92.2 kWh at 23:30. No grid reported at 23:29.',
+    'two Cores, one named, the grid absent, the clear pending': 'Backup capacity has read 92.2 of 92.2 kWh since 23:30. No grid reported at 23:29.',
+    'one Core, the grid absent, the newest capacity not comparable': 'Backup capacity read 61.4 of 92.2 kWh at 23:13. No grid reported at 23:13.',
+  });
+  // An episode restored with no newest reading: the newest SHORT reading on file, in the past tense.
+  const ep = withEpisode();
+  const restored = { ...structuredClone({ ...ep, proc: undefined }), proc: ep.proc, last: null } as unknown as PoolOutState;
+  assert.equal(poolOutAlertParts(restored, { nowMs: at(12), timeZone: TZ })!.spoken, 'Backup capacity read 61.4 of 92.2 kWh at 23:10.');
+  // A time on another day carries its day, as in the detail.
+  const [, grid] = SHAPES[3];
+  assert.equal(poolOutAlertParts(grid, { nowMs: at(13) + 30 * 3600_000, timeZone: TZ })!.spoken, 'Backup capacity reads 61.4 of 92.2 kWh. No grid reported at Sat 23:13.');
+});
+
+test('★★★ the spoken message of EVERY critical shape fits one spoken pass: at most 345 characters, said on any later day too (the detail\'s own lead ran them to 349–446)', () => {
+  const MAX = (poolOutModule as Record<string, unknown>).POOL_OUT_SPOKEN_MESSAGE_MAX_CHARS as number;
+  assert.equal(MAX, 345);
+  // The measure behind the figure: 318 characters rendered in 12.8 to 13.9 s on the install it was measured on, a
+  // change of voice costs about 1.5 s, and the first of two spoken passes has 17 s. At the slow end 345 take 16.6 s.
+  assert.equal(MAX * (13.9 / 318) + 1.5 < 17, true);
+  const lengths: Array<[string, string, number]> = [];
+  for (const [name, state] of SHAPES) {
+    for (const [day, nowMs] of [['the same day', state.last!.atMs], ['the next day', state.last!.atMs + 30 * 3600_000], ['eight days on', state.last!.atMs + 8 * 24 * 3600_000]] as Array<[string, number]>) {
+      const { alert, en } = spokenFor(state, nowMs);
+      if (alert.severity !== 'critical') continue;
+      lengths.push([name, day, en.length]);
+      assert.equal(en.length <= MAX, true, `${name}, ${day}: ${en.length} characters — ${en}`);
+      assert.equal(en.endsWith(`Critical alarm. Critical alarm. ${alert.title}.`), true, 'control: the critical frame says the title twice');
+    }
+  }
+  assert.equal(lengths.filter(([, day]) => day === 'the same day').length, 11, 'control: eleven of the thirteen shapes are critical');
+  assert.equal(spokenFor(ONE_NAMED, ONE_NAMED.last!.atMs).alert.title, '2 Cores out of the backup pool: slot 1 and one not identified', 'control: the longest title is among them');
+  // On the day of the alarm: 253 characters (two Cores, both named) to 327 (the longest title, "slot 1 and one not
+  // identified", with the clear pending and the grid absent); the same one eight days on, both its times dated, is the
+  // longest of all. The shapes of 2026-11-14 with the grid absent or a second Core out are 260 and 253.
+  const sameDay = lengths.filter(([, day]) => day === 'the same day').map(([, , n]) => n).sort((x, y) => x - y);
+  assert.deepEqual([sameDay[0], sameDay[sameDay.length - 1]], [253, 327]);
+  assert.equal(Math.max(...lengths.map(([, , n]) => n)), 341);
+  assert.deepEqual(lengths.filter(([name, day]) => day === 'the same day' && /^(one Core, the grid absent|two Cores, slots 1 and 3)$/.test(name)).map(([, , n]) => n), [253, 260]);
+  // Control: the SAME shapes spoken from the cut of the detail (as every other alert is) do not fit.
+  const fromDetail = SHAPES.map(([, state]) => {
+    const { alert } = spokenFor(state, state.last!.atMs);
+    const { spokenDetail: _own, ...plain } = alert;
+    void _own;
+    return alert.severity === 'critical' ? verbalizeForTts(buildAlertMessage('red', [plain as Alert])).length : 0;
+  });
+  assert.equal(Math.max(...fromDetail) > 400, true, `control: ${Math.max(...fromDetail)} characters from the detail's lead`);
+  assert.equal(fromDetail.filter((n) => n > MAX).length >= 9, true, 'control: nine or more of the shapes ran over');
+});
+
+test('★★ the Spanish title says how many: "Core fuera del respaldo" for one, the latched count in front of the plural for two or three', () => {
+  const titleEs = (state: PoolOutState): string => /Panel inteligente\. ([^.]*)\./.exec(spokenFor(state, state.last!.atMs).es)![1];
+  const by = Object.fromEntries(SHAPES.map(([name, state]) => [name, titleEs(state)]));
+  assert.equal(by['one Core, slot 1'], 'Core fuera del respaldo');
+  assert.equal(by['one Core, slot not identified'], 'Core fuera del respaldo');
+  assert.equal(by['one Core, the grid absent'], 'Core fuera del respaldo');
+  assert.equal(by['two Cores, slots 1 and 3'], '2 Cores fuera del respaldo');
+  assert.equal(by['two Cores, slots not identified'], '2 Cores fuera del respaldo', 'the count is the fault token\'s, named or not');
+  assert.equal(by['two Cores, one named'], '2 Cores fuera del respaldo');
+  assert.equal(by['every slot out'], '3 Cores fuera del respaldo');
+  // The repeat says the same title.
+  const es = spokenFor(SHAPES[2][1], SHAPES[2][1].last!.atMs).es;
+  assert.equal(es.endsWith('Repito. Alarma crítica. Alarma crítica. 2 Cores fuera del respaldo.'), true, es);
+  // A secondary panel's alarm too; an alert of another family with a count-shaped token keeps its own title.
+  const [a] = poolOut(computeAlerts(devicesOf({ [PANEL_SN]: lostBody(10) }), context(new Map([[PANEL_SN, poolOutAlertParts(SHAPES[2][1], { nowMs: at(15), timeZone: TZ })!]])), GRID_PRESENT));
+  assert.match(buildAlertMessageEs('red', [{ ...a, id: `shp2-pool-out-${OTHER_PANEL}` }]), /Panel inteligente\. 2 Cores fuera del respaldo\./);
+  assert.match(buildAlertMessageEs('red', [{ ...a, id: 'shp2-src-err-1', fault: 'out:1+3;k=2' }]), /Panel inteligente\. Error en una fuente de energía\./);
+  assert.match(buildAlertMessageEs('red', [{ ...a, fault: undefined }]), /Panel inteligente\. Core fuera del respaldo\./, 'no token: the plain title');
+});
+
+test('★ only THIS alert yields the voice: an id that merely starts with the same letters is ranked as any other', () => {
+  const crit = (id: string, category: string): Alert => ({ id, severity: 'critical', category, device: 'Smart Home Panel 2', title: id, detail: 'd' } as Alert);
+  const grid = crit('grid-thing', 'Grid');
+  // The house panel's id and a secondary panel's yield to a Grid critical…
+  assert.equal(pickPrimaryAlert([crit('shp2-pool-out', 'SHP2'), grid], 'red')?.id, 'grid-thing');
+  assert.equal(pickPrimaryAlert([crit(`shp2-pool-out-${OTHER_PANEL}`, 'SHP2'), grid], 'red')?.id, 'grid-thing');
+  // …and another SHP2 family whose id only begins the same way does not: SHP2 outranks Grid, as ever.
+  for (const id of ['shp2-pool-outage', 'shp2-pool-outlet-2', 'shp2-pool-out2']) {
+    assert.equal(pickPrimaryAlert([crit(id, 'SHP2'), grid], 'red')?.id, id, id);
+    assert.equal(pickPrimaryAlert([grid, crit(id, 'SHP2')], 'red')?.id, id, id);
+  }
+});
+
+test('★★ one panel\'s entry that cannot be read costs that one alarm, never the alert set: every other alert, and the other panel\'s alarm, are emitted', () => {
+  const devices = devicesOf({ [PANEL_SN]: lostBody(10, { poolPct: 12 }), [OTHER_PANEL]: lostBody(11) }, { house: PANEL_SN });
+  const broken = new Map<string, any>([[PANEL_SN, null], [OTHER_PANEL, WARNING]]);
+  let alerts: Alert[] = [];
+  assert.doesNotThrow(() => { alerts = computeAlerts(devices, context(broken as any), undefined, () => GRID_PRESENT); });
+  assert.deepEqual(poolOut(alerts).map((a) => a.id), [`shp2-pool-out-${OTHER_PANEL}`], '★ the readable panel\'s alarm stands');
+  assert.equal(alerts.some((a) => a.id === 'shp2-below-reserve'), true, '★ and so does the reserve alarm of the panel whose entry could not be read');
 });
 
 /* ══ the family ═════════════════════════════════════════════════════════════════════════════════════ */
@@ -260,14 +411,27 @@ test('★★★ in quiet hours the flag dispatches where every other warning —
   const monitor = readFileSync(new URL('../src/alertMonitor.ts', import.meta.url), 'utf8');
   assert.equal(monitor.includes("      const breaksThrough = (a.severity === 'critical' && CRITICAL_BREAKS_QUIET) || a.pushInQuietHours === true;"), true, 'the quiet hours');
   assert.equal(monitor.includes("      const debounceMs = a.severity === 'critical' || a.pushInQuietHours === true ? 0 : notifyDebounceMsFor(a);"), true, 'the push debounce');
-  assert.equal(monitor.includes('        alreadyQueued: existing.queued === true && a.pushInQuietHours !== true,'), true, 'the hold after a failed send');
-  // (A fourth read is logging only: the hold for the digest is said once for this alarm, not at each failed retry.)
+  assert.equal(monitor.includes('        alreadyQueued: existing.queued === true && (a.pushInQuietHours !== true || waitingToRetry),'), true, 'the hold after a failed send, and the wait before the next try');
+  assert.equal(monitor.includes('        escalated: escalated && !waitingToRetry,'), true, 'the same wait for an escalation whose send failed');
+  // The other reads follow from that one and decide nothing about WHETHER it is pushed: the hold for the digest said
+  // once, the wait set at a failure, the queue entry dropped at a delivery, the digest leaving its push owed, and the
+  // failure line's wording.
   assert.equal(monitor.includes('        const heldBefore = existing.queued === true && a.pushInQuietHours === true;'), true);
-  assert.equal(monitor.split('a.pushInQuietHours').length - 1, 4, 'and no other read');
+  assert.deepEqual(monitor.split('\n').filter((l) => /\b(a|qa|alert)\.pushInQuietHours\b/.test(l) && !/^\s*(\/\/|\*)/.test(l)).map((l) => l.trim()), [
+    ": alert.pushInQuietHours === true ? `it will be tried again, after ${PUSH_RETRY_FIRST_MS / 1000} s and then at doubling waits up to ${PUSH_RETRY_MAX_MS / 60_000} min`",
+    'if (qa.pushInQuietHours === true) {',
+    "const debounceMs = a.severity === 'critical' || a.pushInQuietHours === true ? 0 : notifyDebounceMsFor(a);",
+    "const breaksThrough = (a.severity === 'critical' && CRITICAL_BREAKS_QUIET) || a.pushInQuietHours === true;",
+    'const waitingToRetry = a.pushInQuietHours === true && now < (existing.retryAtMs ?? 0);',
+    'alreadyQueued: existing.queued === true && (a.pushInQuietHours !== true || waitingToRetry),',
+    'const heldBefore = existing.queued === true && a.pushInQuietHours === true;',
+    'if (a.pushInQuietHours === true) { existing.failedSends = (existing.failedSends ?? 0) + 1; existing.retryAtMs = now + pushRetryDelayMs(existing.failedSends); }',
+    'if (a.pushInQuietHours === true) dropDeliveredHold(existing, a.id);',
+  ], 'and no other read');
   // A failed send leaves the alert held for the digest (`queued`); for every other alert that hold ends its retries.
   const held = { qualifies: true, alreadyNotified: false, escalated: false, debounceElapsed: true, inQuiet: true, breaksThrough: true };
   assert.equal(decideAlertDispatch({ ...held, alreadyQueued: true }), 'none', 'control: a held alert is not tried again');
-  assert.equal(decideAlertDispatch({ ...held, alreadyQueued: false }), 'dispatch', '★ this alarm is never "already queued", so the next pass sends it');
+  assert.equal(decideAlertDispatch({ ...held, alreadyQueued: false }), 'dispatch', '★ this alarm is "already queued" only while it waits out its retry, so a later pass sends it');
   const producers = readFileSync(new URL('../src/alerts.ts', import.meta.url), 'utf8');
   assert.equal(producers.split('pushInQuietHours: true').length - 1, 1, 'one producer');
   assert.equal(producers.includes('...(poolOutDelivery(parts.severity, true).pushNow ? { pushInQuietHours: true } : {}),'), true, 'and it asks the delivery function');
@@ -289,7 +453,36 @@ test('★★★ the orphan hold: a pool-out id is unevaluable until ITS panel\'s
     assert.equal(poolOutOrphanHeld(id, PANEL_SN, () => { throw new Error('not asked'); }), false, id);
   }
   const monitor = readFileSync(new URL('../src/alertMonitor.ts', import.meta.url), 'utf8');
-  assert.equal(monitor.includes('        }) || heldForHydration(id) || poolOutOrphanHeld(id, rec.sourceSn, (sn) => store.poolOutOrphanReleased(sn)),'), true, 'the boot sweep\'s unevaluable leg reads it');
+  assert.equal(monitor.includes('        }) || heldForHydration(id) || poolOutOrphanHeld(id, rec.sourceSn, (sn) => store.poolOutOrphanReleased(sn, rec.ts)),'), true, 'the boot sweep\'s unevaluable leg reads it, and asks with the time of the push it would resolve');
+});
+
+/* ══ a push that failed, and an alarm raised again ══════════════════════════════════════════════════ */
+
+test('★★ the wait before the next try of a push that failed: 20 s, doubling, never more than 10 minutes', () => {
+  const delay = (monitorModule as Record<string, unknown>).pushRetryDelayMs as (failedSends: number) => number;
+  assert.deepEqual([1, 2, 3, 4, 5, 6, 7, 50, 5000].map(delay), [20_000, 40_000, 80_000, 160_000, 320_000, 600_000, 600_000, 600_000, 600_000]);
+  assert.equal(delay(0), 20_000, 'never less than the first wait');
+  // A channel down for a day: 6 tries in the first 21 minutes, then one every 10 — not one every 20 seconds (4,320).
+  let t = 0;
+  let tries = 0;
+  for (let n = 1; t < 24 * 3600_000; n++) { t += delay(n); tries += 1; }
+  assert.equal(tries, 148);
+});
+
+test('★★★ the notification on record is an EARLIER episode\'s when the tracker holds an end at or after it: only for this alert, only with its panel', () => {
+  const endedAt = (monitorModule as Record<string, unknown>).poolOutEndedEpisodeAt as (a: { id: string; sourceSn?: string }, rec: { ts: number } | undefined, endedSince: (sn: string, pushedAtMs: number) => number | null) => number | null;
+  const asked: Array<[string, number]> = [];
+  const store = (answer: number | null) => (sn: string, pushedAtMs: number): number | null => { asked.push([sn, pushedAtMs]); return answer; };
+  assert.equal(endedAt({ id: 'shp2-pool-out', sourceSn: PANEL_SN }, { ts: at(10) }, store(at(23))), at(23), '★ the alarm pushed at 23:10 ended at 23:23: the one standing is new');
+  assert.equal(endedAt({ id: `shp2-pool-out-${OTHER_PANEL}`, sourceSn: OTHER_PANEL }, { ts: at(10) }, store(at(23))), at(23));
+  assert.deepEqual(asked, [[PANEL_SN, at(10)], [OTHER_PANEL, at(10)]], 'the store is asked for THAT panel, with the time of the push on record');
+  assert.equal(endedAt({ id: 'shp2-pool-out', sourceSn: PANEL_SN }, { ts: at(10) }, store(null)), null, 'no end on file: the record is this alarm\'s own');
+  const never = (): number | null => { throw new Error('not asked'); };
+  assert.equal(endedAt({ id: 'shp2-pool-out', sourceSn: PANEL_SN }, undefined, never), null, 'nothing on record');
+  assert.equal(endedAt({ id: 'shp2-pool-out' }, { ts: at(10) }, never), null, 'no panel to ask');
+  for (const id of ['shp2-below-reserve', 'shp2-src-hw-1', 'shp2-pool-outage', 'reserve-alarm-blind']) {
+    assert.equal(endedAt({ id, sourceSn: PANEL_SN }, { ts: at(10) }, never), null, `${id}: its record is untouched`);
+  }
 });
 
 /* ══ a restart between the raise and its push ═══════════════════════════════════════════════════════ */

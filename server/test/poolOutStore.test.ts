@@ -101,7 +101,7 @@ test('★★★ the 2026-11-14 loss through the store: no alarm at the 06:45Z bo
   assert.deepEqual([parts.severity, parts.title, parts.fault], ['warning', 'Core out of the backup pool: slot 1', 'out:1;k=1']);
   assert.equal(parts.detail, [
     "The panel's backup capacity reads 61.4 kWh: 30.7 kWh, the capacity of 1 slot, under the 92.2 kWh of its 3 slots.",
-    'It first read under the sum of its slots at 23:36; the last reading at 92.2 kWh was at 23:35.',
+    'It first read under the sum of its slots at 23:36; the last reading at 92.2 kWh before that was at 23:35.',
     'At 23:46 slot 1 delivered 0 W while slots 2 and 3 delivered 1,083 W and 1,030 W.',
     'Slot 1 is listed as connected and reads 72%.',
     "The panel's cloud data carries no error code for slot 1 and three empty error lists.",
@@ -302,7 +302,7 @@ test('★★★ the body is stamped with ITS time (the store\'s data clock), nev
   for (let m = -15; m < 0; m++) r.feed(at(m), healthyBody(m));
   for (let m = 0; m <= 10; m++) r.feed(at(m), lostBody(m));
   const parts = r.store.poolOutAlerts(at(10)).get(PANEL_SN)!;
-  assert.match(parts.detail, /It first read under the sum of its slots at 23:00; the last reading at 92\.2 kWh was at 22:59\./, '★ the body\'s minutes, not the wall clock\'s');
+  assert.match(parts.detail, /It first read under the sum of its slots at 23:00; the last reading at 92\.2 kWh before that was at 22:59\./, '★ the body\'s minutes, not the wall clock\'s');
   const st = parsePoolOutFile(readFileSync(r.file, 'utf8')).panels.get(PANEL_SN)!;
   assert.deepEqual([st.episode?.sinceMs, st.episode?.raisedAtMs, st.lastUsableMs], [at(0), at(10), at(10)]);
 });
@@ -599,6 +599,7 @@ test('★★★ a value in the state file that cannot be restored never stops th
     'pool-out: the state file could not be restored (Invalid time value) — every panel starts with no reference and no alarm.',
     'pool-out: the file as it was read is kept as unrestorable.json.unread; the next save replaces unrestorable.json.',
   ]);
+  assert.deepEqual(r.warns.filter((l) => l.startsWith('pool-out:')), ['pool-out: the state file could not be restored (Invalid time value) — every panel starts with no reference and no alarm.'], '★ what could not be restored: at warn');
   // And the store works: the same loss raises again after its dwell.
   feedAll(r, lossBodies.map((b) => ({ atMs: b.atMs + 24 * 60 * MIN, body: { ...b.body, 'loadInfo.hall1Watt': fx.movingCircuits(Math.round(b.atMs / MIN) + 7000) } })));
   assert.equal(r.store.poolOutAlerts(r.clock.ms).size, 1);
@@ -616,6 +617,7 @@ test('★★ a state file in a folder that cannot be written is not believed (it
     const r = rig({ file });
     assert.equal(r.store.poolOutAlerts(first.clock.ms).size, 0, '★ the alarm on file is not restored');
     assert.equal(r.lines.filter((l) => l.startsWith('pool-out: the state file is not restored')).length, 1);
+    assert.equal(r.warns.filter((l) => l.startsWith('pool-out: the state file is not restored')).length, 1, '★ at warn');
     // A save that fails is said once at warn; the alarm itself still works in memory.
     feedAll(r, lossBodies.map((b) => ({ atMs: b.atMs + 24 * 60 * MIN, body: { ...b.body, 'loadInfo.hall1Watt': fx.movingCircuits(Math.round(b.atMs / MIN) + 5000) } })));
     assert.equal(r.warns.filter((l) => l.startsWith("pool-out: could not save the tracker's state")).length, 1, r.warns.join('\n'));
@@ -698,6 +700,7 @@ test('★★★ a standing alarm whose text cannot be built still stands, under 
   assert.deepEqual(parts!.get(PANEL_SN), {
     severity: 'warning', title: 'Core out of the backup pool: slot 1', fault: 'out:1;k=1',
     detail: "The panel's backup capacity has read under the sum of its slots. The readings behind this alarm could not be worded; the add-on's log has them.",
+    spoken: "The panel's backup capacity has read under the sum of its slots.",
     facts: [],
     card: { id: 'shp2-pool-out', device: 'Smart Home Panel 2' },
   }, '★ same id-forming fields (title, fault, severity) and the same latched id: the monitor sees the same alarm, not a new one');
@@ -710,6 +713,153 @@ test('★★★ a standing alarm whose text cannot be built still stands, under 
   assert.doesNotThrow(() => r.store.poolOutEndNotice(PANEL_SN, r.clock.ms));
   assert.equal(r.store.poolOutEndNotice(PANEL_SN, r.clock.ms), null, '★ the resolve push then carries the usual text');
   assert.deepEqual(r.store.poolOutSensorStatesSafe(r.clock.ms), ['unknown'], '★ and Home Assistant reads unknown, never OFF');
+});
+
+test('★★ a state file that could NOT be restored is said at WARN: with a Core out it is the only line that says why the alarm is gone', () => {
+  const first = rig();
+  feedAll(first, lossBodies);
+  assert.equal(first.store.poolOutAlerts(first.clock.ms).size, 1, 'control: an alarm stands, and is on file');
+  const file = join(ROOT, 'truncated.json');
+  writeFileSync(file, readFileSync(first.file, 'utf8').slice(0, 200));
+  // Wired as the poll loop wires them: the logger, then the warn sink.
+  const store = new SnapshotStore({ poolOutPath: file, poolEventsDir: null });
+  const info: string[] = [];
+  const warns: string[] = [];
+  store.setLogger((m) => info.push(m));
+  assert.equal(info.length, 0, 'the line that could not be restored waits for the warn sink, and holds the lines after it in their order');
+  store.setWarnLogger((m) => warns.push(m));
+  assert.deepEqual(warns, ['pool-out: 1 entry of the state file could not be read and is left out — that panel starts with no reference and no alarm.'], '★ at warn');
+  assert.deepEqual(info, ['pool-out: the file as it was read is kept as truncated.json.unread; the next save replaces truncated.json.'], 'where it is kept: at info, after it');
+  // Each is said once.
+  store.setLogger((m) => info.push(m));
+  store.setWarnLogger((m) => warns.push(m));
+  assert.deepEqual([info.length, warns.length], [1, 1]);
+  // A half-valid file: what was left out at warn, what was restored at info.
+  const good = JSON.parse(readFileSync(first.file, 'utf8'));
+  const half = join(ROOT, 'half-warn.json');
+  writeFileSync(half, JSON.stringify({ v: 1, panels: { [PANEL_SN]: good.panels[PANEL_SN], [OTHER_PANEL]: { v: 1, episode: { k: 0 } } }, diag: good.diag }));
+  const h = rig({ file: half, panels: [PANEL_SN, OTHER_PANEL] });
+  assert.deepEqual(h.warns.filter((l) => l.startsWith('pool-out:')), ['pool-out: 1 entry of the state file could not be read and is left out — that panel starts with no reference and no alarm.']);
+  assert.equal(h.lines.filter((l) => l.startsWith('pool-out: state restored for 1 panel')).length, 1);
+  assert.equal(h.warns.some((l) => l.startsWith('pool-out: state restored')), false);
+  // A store whose warn sink is never wired still says it: at the first panel reading, through the logger.
+  const lone = new SnapshotStore({ poolOutPath: file, poolEventsDir: null });
+  const said: string[] = [];
+  let ms = 0;
+  lone.setClock(() => ms);
+  lone.setLogger((m) => said.push(m));
+  lone.setDeviceList(listed(PANEL_SN));
+  assert.deepEqual(said.filter((l) => l.startsWith('pool-out:')), []);
+  ms = at(0);
+  lone.setDeviceQuota(PANEL_SN, healthyBody(0));
+  assert.deepEqual(said.filter((l) => l.startsWith('pool-out:')).slice(0, 2), [
+    'pool-out: 1 entry of the state file could not be read and is left out — that panel starts with no reference and no alarm.',
+    'pool-out: the file as it was read is kept as truncated.json.unread; the next save replaces truncated.json.',
+  ]);
+  // A file that restores whole says so at info, and nothing at warn.
+  const whole = rig({ file: first.file });
+  assert.deepEqual(whole.warns.filter((l) => l.startsWith('pool-out:')), []);
+  assert.equal(whole.lines.filter((l) => l.startsWith('pool-out: state restored for 1 panel')).length, 1);
+});
+
+test('★★ after a state file that could not be restored, the sensor does not read OFF on a reference that leaves out a slot the panel\'s data holds: unknown, until a start that restores a file', () => {
+  // The Core in slot 1 is out with its slot no longer listed as connected: slots 2 and 3 add up to the capacity.
+  const unplugged = (seq: number): Body => fx.synthBody({ seq, capWh: 2 * fx.SLOT_WH, slots: [{ pct: 72, w: 0, isConnect: 0 }, { pct: 65, w: -1107 }, { pct: 63, w: -1061 }], poolPct: 64 });
+  const first = rig();
+  for (let m = -15; m < 0; m++) first.feed(at(m), healthyBody(m));
+  for (let m = 0; m <= 16; m++) first.feed(at(m), unplugged(m));
+  assert.deepEqual([first.store.poolOutAlerts(first.clock.ms).get(PANEL_SN)?.title, first.store.poolOutSensorStates(first.clock.ms)], ['Core out of the backup pool: slot 1', ['on']], 'control: raised against the reference of three slots');
+  // The file cannot be read at the restart.
+  const broken = join(ROOT, 'unplugged-broken.json');
+  writeFileSync(broken, '{"v":1,"panels":');
+  const r = rig({ file: broken });
+  for (let m = 30; m <= 75; m++) r.feed(at(m), unplugged(m));
+  assert.equal(r.store.poolOutAlerts(r.clock.ms).size, 0, 'control: with no reference on file the alarm is not raised again in this shape');
+  assert.equal(r.lines.some((l) => l === 'pool-out: reference adopted — slots 2 and 3, 61.4 kWh.'), true, 'control: the smaller reference');
+  assert.deepEqual(r.store.poolOutSensorStates(r.clock.ms), ['unknown'], '★ unknown, not OFF: the file that held the alarm is gone and slot 1 is outside the reference');
+  // From the first minutes, before any reference is adopted.
+  const early = rig({ file: (() => { const f = join(ROOT, 'unplugged-broken-2.json'); writeFileSync(f, '{"v":1,"panels":'); return f; })() });
+  for (let m = 30; m <= 35; m++) early.feed(at(m), unplugged(m));
+  assert.deepEqual(early.store.poolOutSensorStates(early.clock.ms), ['unknown']);
+  // The next start restores the file this process wrote (the two-slot reference): OFF, as a first start would read.
+  const next = rig({ file: broken });
+  for (let m = 80; m <= 82; m++) next.feed(at(m), unplugged(m));
+  assert.deepEqual(next.store.poolOutSensorStates(next.clock.ms), ['off']);
+  // Control: with NO file at all (a first start cannot be told from a lost file) it reads OFF — the published limit.
+  const none = rig();
+  for (let m = 30; m <= 45; m++) none.feed(at(m), unplugged(m));
+  assert.deepEqual(none.store.poolOutSensorStates(none.clock.ms), ['off']);
+  // Control: a file that could not be restored and EVERY slot in the reference: OFF on a whole capacity, as ever.
+  const full = rig({ file: (() => { const f = join(ROOT, 'full-broken.json'); writeFileSync(f, '{"v":1,"panels":'); return f; })() });
+  for (let m = 30; m <= 45; m++) full.feed(at(m), healthyBody(m));
+  assert.deepEqual(full.store.poolOutSensorStates(full.clock.ms), ['off']);
+});
+
+test('★★★ the store\'s answers to the monitor about an END on file: the boot sweep\'s hold is released by one at or after the push, the alarm standing is a new one when it has one — and neither call can throw', () => {
+  const r = rig();
+  for (let m = -15; m < 0; m++) r.feed(at(m), healthyBody(m));
+  for (let m = 0; m <= 10; m++) r.feed(at(m), lostBody(m));
+  assert.equal(r.store.poolOutEndedSince(PANEL_SN, at(10)), null, 'the alarm pushed at 23:10 stands: no end');
+  for (let m = 11; m <= 21; m++) r.feed(at(m), healthyBody(m));
+  assert.equal(r.store.poolOutAlerts(r.clock.ms).size, 0, 'control: ended at minute 21');
+  assert.equal(r.store.poolOutEndedSince(PANEL_SN, at(10)), at(21), '★ the alarm pushed at 23:10 ended at 23:21');
+  assert.equal(r.store.poolOutEndedSince(PANEL_SN, at(21)), at(21));
+  assert.equal(r.store.poolOutEndedSince(PANEL_SN, at(21) + 1), null, 'an end older than the push is another episode\'s');
+  assert.equal(r.store.poolOutEndedSince(OTHER_PANEL, at(10)), null, 'a panel with no state');
+  // A restart on that file: nothing was seen in this process, and the end on file releases the hold for a push it follows.
+  const b = rig({ file: r.file });
+  assert.equal(b.store.poolOutOrphanReleased(PANEL_SN), false, 'asked without the time of the push');
+  assert.equal(b.store.poolOutOrphanReleased(PANEL_SN, at(10)), true, '★ pushed at 23:10, ended at 23:21: released');
+  assert.equal(b.store.poolOutOrphanReleased(PANEL_SN, at(21) + 1), false);
+  // A second alarm stands (slot 1 out again from minute 30): still "ended since 23:10" — which is how the monitor knows
+  // the one standing is new — and the hold is no question while it stands.
+  for (let m = 30; m <= 40; m++) r.feed(at(m), lostBody(m));
+  assert.equal(r.store.poolOutAlerts(r.clock.ms).size, 1, 'control');
+  assert.equal(r.store.poolOutEndedSince(PANEL_SN, at(10)), at(21), '★ the end of the FIRST alarm, with the second standing');
+  assert.equal(r.store.poolOutEndedSince(PANEL_SN, at(40)), null, 'and none since the second was pushed');
+  // The host clock is set BACK between an end and the next raise: the end is then dated after the push of the alarm
+  // that followed it. That push is the standing alarm's own (it follows its raise), so the alarm is not taken for new —
+  // the monitor would otherwise close it and push it again at every pass until the clock caught up.
+  const back = rig();
+  for (let m = -15; m < 0; m++) back.feed(at(m), healthyBody(m));
+  for (let m = 0; m <= 10; m++) back.feed(at(m), lostBody(m));
+  for (let m = 11; m <= 21; m++) back.feed(at(m), healthyBody(m));
+  assert.equal(back.store.poolOutEndedSince(PANEL_SN, at(10)), at(21), 'control: ended at minute 21');
+  for (let m = 5; m <= 15; m++) back.feed(at(m), lostBody(9000 + m)); // the clock now reads sixteen minutes earlier
+  const again = parsePoolOutFile(readFileSync(back.file, 'utf8')).panels.get(PANEL_SN)!;
+  assert.deepEqual([again.episode?.raisedAtMs, again.ends.map((e) => e.atMs)], [at(15), [at(21)]], 'control: a second alarm, raised at a time before the first one\'s end');
+  assert.equal(back.store.poolOutEndedSince(PANEL_SN, at(15) + 20_000), null, '★ pushed twenty seconds after its own raise: this alarm\'s push');
+  assert.equal(back.store.poolOutEndedSince(PANEL_SN, at(10)), at(21), 'the push of the first alarm (before this one was raised) is still the earlier episode\'s');
+  // CONTAINED: a state this cannot read is held / not ended, said once at warn, never a throw inside the monitor's pass.
+  for (const bad of [{ episode: null, ends: [] }, {}, new Proxy({}, { get() { throw new Error('no state'); } })]) {
+    (r.store as any).poolOutBySn.set(PANEL_SN, bad);
+    assert.doesNotThrow(() => r.store.poolOutOrphanReleased(PANEL_SN, at(10)));
+    assert.equal(r.store.poolOutOrphanReleased(PANEL_SN, at(10)), false, '★ held');
+    assert.doesNotThrow(() => r.store.poolOutEndedSince(PANEL_SN, at(10)));
+    assert.equal(r.store.poolOutEndedSince(PANEL_SN, at(10)), null);
+  }
+  assert.equal(r.warns.filter((l) => l.startsWith('pool-out: the hold of the boot sweep could not be read')).length >= 1, true, r.warns.join('\n'));
+  assert.equal(r.warns.filter((l) => l.startsWith('pool-out: the end on file could not be read')).length >= 1, true, r.warns.join('\n'));
+});
+
+test('★★ an id and a name latched AFTER the raise (a file from before the latch) are saved with the next reading of ANY panel, not when that panel next reports', () => {
+  // Two panels; the first has an alarm standing. Its card is removed from the file, as a file from before the latch has it.
+  const a = rig({ panels: [PANEL_SN, OTHER_PANEL] });
+  a.store.pinHousePanel(PANEL_SN);
+  for (let m = -15; m < 0; m++) { a.feed(at(m), healthyBody(m), PANEL_SN); a.feed(at(m), healthyBody(m + 4000), OTHER_PANEL); }
+  for (let m = 0; m <= 10; m++) { a.feed(at(m), lostBody(m), PANEL_SN); a.feed(at(m), healthyBody(m + 4000), OTHER_PANEL); }
+  const old = JSON.parse(readFileSync(a.file, 'utf8'));
+  assert.deepEqual(Object.keys(old.cards), [PANEL_SN], 'control');
+  delete old.cards;
+  const bare = join(ROOT, 'no-card-one-alarm.json');
+  writeFileSync(bare, JSON.stringify(old));
+  const c = rig({ file: bare, panels: [PANEL_SN, OTHER_PANEL] });
+  c.store.pinHousePanel(PANEL_SN);
+  assert.deepEqual(c.store.poolOutAlerts(at(11)).get(PANEL_SN)?.card, { id: 'shp2-pool-out', device: 'Smart Home Panel 2' }, 'latched at the first pass that has the device list');
+  assert.equal(JSON.parse(readFileSync(bare, 'utf8')).cards, undefined, 'control: not on file yet');
+  // The OTHER panel reports (no streak, no alarm, nothing of its own to save).
+  c.feed(at(11), healthyBody(4011), OTHER_PANEL);
+  assert.deepEqual(JSON.parse(readFileSync(bare, 'utf8')).cards, { [PANEL_SN]: { id: 'shp2-pool-out', device: 'Smart Home Panel 2' } }, '★ on file');
 });
 
 /* ══ what the store serves ══════════════════════════════════════════════════════════════════════════ */

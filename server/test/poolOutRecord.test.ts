@@ -102,6 +102,15 @@ test('★ what is not known is not written: a skipped body has no counted-slots 
   assert.deepEqual(none, [['backup_full_wh', 61440], ['pool_counted_slots', null], ['pool_out_mask', 0]]);
 });
 
+test('★★ err_*_n records how many entries a list HOLDS, not how many of them the reader kept', () => {
+  // A hundred non-empty entries in the hall list: 64 are kept, all are counted, and the count is what is recorded.
+  const noisy = { ...lostBody(1), 'pd303_mc.loadIncreInfo.hall1IncreInfo.errcode.errCode': Array.from({ length: 100 }, (_, i) => i + 1) };
+  const d = poolDiagFromRaw(noisy);
+  assert.deepEqual([d.errHall?.count, d.errHall?.entries.length], [100, 64], 'control');
+  const m = metricsOf(poolRecordMetrics({ servedFullWh: null, diag: d, signals: null, state: null }));
+  assert.deepEqual([m.err_hall_n, m.err_backup_n, m.err_master_n], [100, 0, 0]);
+});
+
 test('★ pool_out_mask is the ALARM\'s latched set: a bit per named slot, and 128 when a slot out is not identified', () => {
   const ep = withEpisode();
   const mask = (slots: number[] | null, k: number): number | null =>
