@@ -810,8 +810,8 @@ when that tone is deleted.
   the English message ran to 349–446 characters, more than the first of two
   passes has time for at a 20 s pass limit (17 s; about 354 characters at the
   rate measured for v1.207.2: 318 characters in 12.8 to 13.9 s, about 1.5 s
-  more after a change of voice). The shapes the tests build are 253 to
-  341 characters, and `poolOutAlert.test.ts` holds every one at or under
+  more after a change of voice). The critical shapes the tests build are 253
+  to 341 characters, and `poolOutAlert.test.ts` holds every one at or under
   `POOL_OUT_SPOKEN_MESSAGE_MAX_CHARS` (345). At the default 12 s limit a
   critical of this alarm can still lose its English pass on a slow engine:
   the frame alone, with the title twice, is 182 to 234 characters.
