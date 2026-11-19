@@ -114,6 +114,11 @@ export const intClampedNum = (d: number, lo: number, hi: number) => (raw: string
   if (!Number.isFinite(v)) return d;
   return Math.min(hi, Math.max(lo, Math.round(v)));
 };
+/** A finite number inside [lo, hi], else the default: nothing is clamped (the spoken-pass limit's rule since v1.47.5). */
+export const inRangeOr = (d: number, lo: number, hi: number) => (raw: string | undefined): number => {
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= lo && n <= hi ? n : d;
+};
 /** A finite number ≥ 0, else the default (the EV plateau rule). */
 export const nonNegativeOr = (d: number) => (raw: string | undefined): number => {
   const n = Number(raw);
@@ -507,6 +512,11 @@ const ROWS: readonly OptionRow[] = [
     doc: 'Display names by serial, as a JSON object; merged over <dataRoot>/device-aliases.json, which is merged over the image file. Unreadable JSON is skipped and raises a repair item. Unset or blank: the files alone.',
     parse: trimmedOrNull() }),
 
+  // ── Audible (v1.207.2): schema-only, exported under has_value — absent unless set, so unset = the 12 s default ──
+  row({ name: 'BROADCAST_TTS_PASS_TIMEOUT_MS', source: 'option', exportForm: 'has_value', canonicalReader: 'audioRenderer.ts:passTimeoutMs',
+    doc: 'The longest one attempt at a spoken alarm pass (or a terminator) may take to render, in ms. A number in 3000..60000; absent, blank, not a number or outside the range reads as 12000 (nothing is clamped). Each attempt is also held to what is left of the 25 s spoken phase, and with two languages and a limit above 12000 the pass rendered first leaves 8 s for the other.',
+    parse: inRangeOr(12_000, 3000, 60_000) }),
+
   // ── Deployment constants (the image and the run script set these; never the user) ──
   row({ name: 'PORT', source: 'deploy', canonicalReader: 'config.ts:port', doc: 'HTTP port (8787; ingress needs it).', parse: numOr(8787) }),
   row({ name: 'HOST', source: 'deploy', canonicalReader: 'config.ts:host', doc: "Bind address; '::' listens dual-stack.", parse: str('::') }),
@@ -586,6 +596,7 @@ export const DECLARED_DIVERGENCES: readonly DeclaredDivergence[] = [
   { key: 'LOAD_SHEDDING_SHED_ENTITIES', kind: 'null', code: "'null'", yaml: '""', reason: `${NULL_LITERAL}; loadShedRegistry drops the entry because it has no dot` },
   { key: 'ECOFLOW_DEVICE_REACHABILITY', kind: 'null', code: "'null'", yaml: '""', reason: `${NULL_LITERAL}; deviceLink.ts parses JSON null as an empty map` },
   { key: 'WRITE_DEBUG_TOKEN', kind: 'null', code: "'null'", yaml: '""', reason: `${NULL_LITERAL}; the debug write endpoint unlocks with that token` },
+  { key: 'BROADCAST_TTS_PASS_TIMEOUT_MS', kind: 'clamp', code: '3000..60000, else 12000', yaml: 'int(3000,60000)?', reason: 'the renderer accepts the same range but does not clamp to it: a hand-set value outside 3000..60000 falls back to the 12000 default (the v1.47.5 rule, kept as it is); Home Assistant validates the form' },
   // Schema ranges the code does not enforce (HA validates the form; a hand-set environment is not clamped).
   ...(['FORECAST_LAT', 'FORECAST_LON', 'ARB_OUTAGE_CUSHION_PCT', 'ARB_OUTAGE_CUSHION_HOURS', 'ARB_ISLANDED_LOAD_SAFETY', 'ARB_COST_MAX_SOC_PCT',
     'ARB_MIN_BUY_KWH', 'ARB_CHARGE_CAP_KW', 'ARB_GRID_INPUT_CAP_KW', 'ARB_LOAD_P90_FACTOR', 'LOAD_SHEDDING_RUNWAY_THRESHOLD_H', 'LOAD_SHEDDING_RESTORE_MARGIN_H'] as const)

@@ -457,6 +457,63 @@ A pass whose TTS fails, or whose WAV format doesn't match the klaxon
 (rate/width/channels), is **dropped** — non-fatal; the other passes still play.
 `≥1` pass must survive or the render is a hard error.
 
+##### Time limits of the spoken phase
+
+Nothing plays until the spoken phase ends: every pass and terminator is rendered first, and
+only then does the assembled announcement go to the outputs. Render time is alarm delay, so
+`audioRenderer.ts` bounds it three ways:
+
+| Limit | Default | Set by |
+|---|---|---|
+| The whole spoken phase (passes and terminators) | 25 s | `BROADCAST_TTS_TOTAL_BUDGET_MS`, environment only, 5000..120000 |
+| One attempt at a pass or a terminator | 12 s | the add-on option `BROADCAST_TTS_PASS_TIMEOUT_MS`, 3000..60000; unset, not a number or outside the range reads as 12000 |
+| The reserve for each pass still to render | 8 s | fixed (`PASS_RESERVE_MS`); held only by a limit above 12 s |
+
+With *R* of the budget left and *m* spoken passes still to render after the one in hand, an
+attempt is handed `min(limit, R)` when *m* is 0 or the limit is 12 s or under, and
+`min(limit, R, max(R − m × 8 s, 3 s))` otherwise (`attemptLimitMs`); the speech client's own
+timer runs on that figure. *m* is 0 for a one-language announcement, for the last pass and for
+every terminator. The 3 s floor (or *R*, when less is left) applies where the reserve would
+leave under 3 s, so while any budget is left an attempt is never handed zero or a negative
+limit, and never more than the budget has. An item reached with the budget spent is not
+attempted; a retry whose pause outlasted the budget is handed 0 and ends at once.
+
+At a limit of 12 s or under no reserve is held: every attempt is handed `min(limit, R)`, the
+rule since v1.47.5, on every path. That is the default, and so every install that has not set
+the option. A limit above 12 s holds the reserve on a first try and on the retry alike.
+
+What happens when a pass is late or lost:
+
+- **An attempt that reaches its limit, or fails after 3 s or more,** is dropped and not retried:
+  the server is wedged or starved, and a second attempt would double the delay. An attempt that
+  fails in under 3 s without a timeout (a dropped socket) is retried once after 0.3 s, while
+  more than 3 s of budget are left, under the same rule.
+- **One language** (the shipped default). The tones wait for the pass. If it never returns, the
+  render fails at the limit and the tones play alone (the chime-only fallback in section 4.7):
+  at 12 s by default, at 20 s with the option at 20000, and at 25 s from 25000 up.
+- **Two languages.** Passes render resident-voice-first. By default each has 12 s; with neither
+  returning, the tones play alone at 24 s. With the option at 20000 the pass rendered first has
+  17 s and the other the 8 s or more that are left: with neither returning, the tones play alone
+  at 25 s; with the first lost and the second rendered, one language is spoken once the 17 s and
+  the second's render time have passed.
+- **A terminator that never returns** holds the speech for its own limit as well, inside the
+  budget. After a pass ready at 1 s, the speech, without that terminator, is ready at 13 s by
+  default and at 21 s with the option at 20000. While no English voice is named (the shipped
+  default) its terminator is kept in memory only (section 4.3), so it is rendered again after
+  each start.
+- **A lost pass,** while another rendered, leaves an incomplete render (section 4.6). The
+  announcement plays without that language, the delivery is recorded as completed, and the lost
+  pass is not retried.
+
+Measured on the reference install on 2026-11-18 (silent renders, the voices in service): with
+its voice resident the English voice took 0.67 to 0.80 s to render each second of audio, over
+six renders. A 318-character critical (18.4 s of audio) took 12.8 and 13.9 s, a 289-character
+critical 11.2 s, a 173-character notice 6.8 s, and a charge-level sentence 0.85 s, or 2.2 s
+after a change of voice. The Spanish voice rendered about 23 s of audio in 2.9 s resident and
+in 4.0 s after a change of voice. Both renders of the 318-character critical exceed 12 s, so
+at the default its English pass is lost (seen in service on 2026-11-17: the tones and the
+Spanish pass played); 20000 leaves it 17 s.
+
 #### 4.3 "End of message" terminator (per-language)
 
 When enabled, a terminator utterance ("End of message" / "Fin del mensaje")
@@ -901,6 +958,8 @@ enabled/volume). Booleans accept `true`/`1`.
 | `BROADCAST_END_OF_MESSAGE_PHRASE` | `End of message` | English terminator (blank disables). |
 | `BROADCAST_END_OF_MESSAGE_PHRASE_ES` | `Fin del mensaje` | Spanish terminator. |
 | `BROADCAST_END_OF_MESSAGE_GAP_MS` | `700` | Pre-terminator gap, clamped 0..5000. |
+| `BROADCAST_TTS_PASS_TIMEOUT_MS` | unset (`12000`) | The longest one attempt at a spoken pass or a terminator may take, 3000..60000 ms; an add-on option, read by `audioRenderer.ts` at each attempt. Outside the range or not a number: 12000 ([time limits](#time-limits-of-the-spoken-phase)). |
+| `BROADCAST_TTS_TOTAL_BUDGET_MS` | unset (`25000`) | The budget of the whole spoken phase, 5000..120000 ms; environment only, read by `audioRenderer.ts` once per announcement. |
 | `BROADCAST_BOOT_WARMUP_MS` | `600000` (10 min) | Restart-continuation + boot phantom-red + red-replay window. |
 | `BROADCAST_RED_REPLAY_MIN_GAP_MS` | unset (`Infinity`, v1.78.0) | Unset: an unchanged, verifiably announced standing red never replays at boot. A positive value restores the v1.64.0 timed reminder (that many ms of silence per announcement). A changed or new fault, or an escalation, ignores it. |
 | `BROADCAST_RED_REPLAY_STATE_PATH` | `<db>/../broadcast-red-replay.json` | Persisted `{lastRedAnnouncedAtMs, voicedFingerprint, activeFingerprints, lastPlayedLevel}` — the only channel the gate has across a restart. |

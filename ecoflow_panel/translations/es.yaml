@@ -377,3 +377,6 @@ configuration:
   BATTERY_SOC_LADDER:
     name: Niveles de alarma del SoC de la batería
     description: 'Los niveles de estado de carga que la alarma de la batería anuncia al bajar, como entradas porcentaje:prioridad separadas por comas, por ejemplo 50:low,30:medium,15:critical. La prioridad es low, medium, high o critical. Déjelo vacío para 50, 40 y 30 (low), 20 y 15 (medium), y 10, 8, 4 y 2 (critical).'
+  BROADCAST_TTS_PASS_TIMEOUT_MS:
+    name: Límite de generación de cada pase hablado (ms)
+    description: 'Tiempo máximo, en milisegundos, que el motor de voz (Piper) puede tardar en convertir en audio un pase hablado de una alarma. Déjelo vacío para usar el valor predeterminado de 12 segundos (12000); se aceptan valores de 3000 a 60000. El pase que no está listo a tiempo se descarta: con dos idiomas, el otro todavía puede anunciarse, y si ningún pase queda listo suenan solo los tonos. Nada suena hasta que la voz está lista, así que un límite más largo cuesta tiempo cada vez que el motor va lento o se atasca: el primer sonido de la alarma espera a la voz, hasta este límite cuando un pase se atasca y nunca más de 25 segundos en total. Con dos idiomas y un límite superior a 12 segundos, el pase que se genera primero se corta a tiempo para dejarle 8 segundos al otro. Súbalo solo si las frases largas de alarma pierden un idioma con una voz lenta.'

@@ -378,3 +378,6 @@ configuration:
   BATTERY_SOC_LADDER:
     name: Battery SoC Alarm Levels
     description: 'The state-of-charge levels the battery alarm announces on the way down, as percent:priority entries separated by commas, for example 50:low,30:medium,15:critical. The priority is low, medium, high or critical. Leave empty for 50, 40 and 30 (low), 20 and 15 (medium), and 10, 8, 4 and 2 (critical).'
+  BROADCAST_TTS_PASS_TIMEOUT_MS:
+    name: Spoken Pass Render Limit (ms)
+    description: 'The longest the speech engine (Piper) may take to turn one spoken pass of an alarm into audio, in milliseconds. Leave empty for the default of 12 seconds (12000); 3000 to 60000 is accepted. A pass that is not ready in time is dropped: with two languages the other can still be spoken, and when no pass is ready the tones play alone. Nothing sounds until the speech is ready, so a longer limit costs time whenever the engine is slow or stalled: the first sound of the alarm waits for the speech, up to this limit for a pass that stalls and never more than 25 seconds in all. With two languages and a limit above 12 seconds, the pass rendered first is cut off in time to leave the other 8 seconds. Raise it only if long alarm sentences lose a language on a slow voice.'

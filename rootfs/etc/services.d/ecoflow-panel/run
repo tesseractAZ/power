@@ -284,6 +284,10 @@ if bashio::config.has_value 'CYCLING_BASE_WEAR_USD_PER_KWH'; then export CYCLING
 if bashio::config.has_value 'OPPORTUNISTIC_LOADS'; then export OPPORTUNISTIC_LOADS="$(bashio::config 'OPPORTUNISTIC_LOADS')"; fi
 if bashio::config.has_value 'BATTERY_SOC_LADDER'; then export BATTERY_SOC_LADDER="$(bashio::config 'BATTERY_SOC_LADDER')"; fi
 
+# --- lane audible --- (v1.207.2) schema-only optional key: exported only when set, so an unset key
+# leaves the variable absent and a spoken alarm pass keeps its 12 s limit.
+if bashio::config.has_value 'BROADCAST_TTS_PASS_TIMEOUT_MS'; then export BROADCAST_TTS_PASS_TIMEOUT_MS="$(bashio::config 'BROADCAST_TTS_PASS_TIMEOUT_MS')"; fi
+
 # --- lane devices --- (v1.191.0) schema-only optional keys: exported only when set, so an unset key
 # leaves the variable absent and the server keeps the built-in spare list and the image's aliases.
 if bashio::config.has_value 'BENCH_SPARE_SNS'; then export BENCH_SPARE_SNS="$(bashio::config 'BENCH_SPARE_SNS')"; fi

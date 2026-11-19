@@ -124,6 +124,14 @@ When the grid is carrying the house, the near-empty levels are spoken as a calm 
 runway alarm stays silent; if the grid then drops while the pool is still low, the true priority
 is announced.
 
+**When speech is slow.** Nothing sounds until the words have been rendered. Each spoken pass
+has 12 seconds to render (`BROADCAST_TTS_PASS_TIMEOUT_MS`), and the spoken part as a whole 25. A pass
+that is not ready in time is dropped: with two languages the other can still be spoken, and
+when no pass is ready the tones play alone. A longer limit keeps a long sentence on a slow
+voice, and makes the first sound of the alarm wait longer whenever the speech engine stalls.
+The option has no default, so the **Configuration** tab lists it under **Show unused optional
+configuration options**.
+
 **Priorities and their switches.** Every alarm has an ISA-18.2 priority: Critical (P1), High
 (P2), Medium (P3) or Low (P4). **Alerts → Alert Settings** has one switch per priority, also
 published as Home Assistant switches. Off silences that priority's pushes, speech and chime; the
@@ -292,7 +300,7 @@ Set them on the **Configuration** tab.
 | Site and forecasts | `FORECAST_LAT` and `FORECAST_LON`, or `SITE_LOCATION_FROM_HA`; `SITE_TIMEZONE`; `PV_*` |
 | Grid-aware alarms | `GRID_AVAILABLE`, `GRID_PRESENCE_ENTITY`, `GRID_FLOOR_SLACK_PCT` |
 | Phone alerts | `NOTIFY_CHANNEL`, `NOTIFY_HA_PUSH_TARGETS`, `NOTIFY_MIN_SEVERITY`, `NOTIFY_CRITICAL_BYPASS_DND`, `NOTIFY_RESOLVED` |
-| Spoken alarms | `BROADCAST_ENABLED`, `BROADCAST_TARGETS`, `BROADCAST_SIP_TARGETS`, `BROADCAST_MIN_SEVERITY`, `BROADCAST_VOLUME`, `BROADCAST_WYOMING_*`, `BROADCAST_BILINGUAL` |
+| Spoken alarms | `BROADCAST_ENABLED`, `BROADCAST_TARGETS`, `BROADCAST_SIP_TARGETS`, `BROADCAST_MIN_SEVERITY`, `BROADCAST_VOLUME`, `BROADCAST_WYOMING_*`, `BROADCAST_BILINGUAL`, `BROADCAST_TTS_PASS_TIMEOUT_MS` |
 | Quiet nights | `NOTIFY_QUIET_HOURS`, `BROADCAST_QUIET_HOURS`, `NOTIFY_DIGEST_HOUR`, `CRITICAL_BREAKS_QUIET_HOURS` |
 | Alarm engines | `BATTERY_SOC_ALARM_ENABLED`, `BATTERY_SOC_LADDER`, `BATTERY_RUNWAY_ALARM_ENABLED`, `BATTERY_RUNWAY_ALARM_REANNOUNCE_MIN`; `RUNWAY_*` with fewer than three Cores |
 | Night charge | `NIGHT_CHARGE_MODE`, `ARB_OBJECTIVE`, `ARB_COST_MAX_SOC_PCT`, `ARB_OUTAGE_CUSHION_HOURS`, `ARB_GRID_INPUT_CAP_KW`, `FORCE_CHARGE_KW_PER_CORE`, `NIGHT_CHARGE_CHEAP_PERIOD`, `NIGHT_CHARGE_NOTIFY_HOUR` |
