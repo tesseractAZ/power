@@ -1,3 +1,19 @@
+## 1.207.2
+
+### A spoken alarm pass is given 20 seconds to render; it was 12
+
+**Audible alarms**
+
+- **What changed.** One default. Each spoken pass of an announcement (one for each language) was abandoned when the speech engine had not returned it in 12 s. The limit is 20 s. The budget of the whole spoken phase is still 25 s and every attempt is still clamped to what is left of it, so the longest an alarm waits on speech before its tones play alone is 25 s, where it was 24 s.
+- **Why.** On the reference install the speech engine's English voice was replaced on 2026-11-17 with one that renders several times slower. That evening the day's one critical alarm lost its English pass: the render passed 12 s and was dropped, and the speakers played the tones and the second language's pass alone. The announcement was recorded as completed. Shorter texts still fitted the limit.
+- **What it costs.** When the first pass does not return at all, the next language is tried after 20 s, not 12, and has the 5 s that remain, not 12.
+- **Not in this release.** A dropped pass is still recorded as a completed announcement and is not retried. Only the first pass's render time is logged. The limit stays an environment setting (`BROADCAST_TTS_PASS_TIMEOUT_MS`, 3 to 60 s) and is not an add-on option.
+
+**Tests**
+
+- Failing first: `audioRendererBilingual.test.ts` reads the limit handed to the speech engine, with the clock mocked. The first pass is given 20 s and, after a first pass of 18 s, the next is given the 7 s left of the budget; a server that uses every limit in full is tried twice (20 s, 5 s) and the spoken phase ends at 25 s. On v1.207.1 both tests fail on their first figure, 12 s.
+- Harness: `mutate-v1187-10-g4.mjs` gains `L-iii` (the limit back at 12 s); 45 mutants.
+
 ## 1.207.1
 
 ### The 7-day energy balance refuses the panel's solar readings above 1.05; the line was 1.04

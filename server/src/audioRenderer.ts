@@ -114,9 +114,15 @@ export function _resetTtsHealthForTest(): void {
  *      wedged or starved — retrying just burns the budget a second time and
  *      adds another aborted socket, and aborted sockets are what crash Piper
  *      (observed: 55 BrokenPipeError, 3 "Server stopped" in one afternoon). */
+/** v1.207.2 — 20 s, was 12 s (v1.47.5). On 2026-11-17 a critical alarm lost its English pass to the 12 s limit:
+ *  the voice in service rendered the sentence in more than 12 s, so only the second language was spoken. The
+ *  whole spoken phase keeps its 25 s budget (SPOKEN_BUDGET_MS) and every attempt is clamped to what is left of
+ *  it (renderWithinBudget), so a server that returns nothing delays the tones by 25 s, where it was 24 s.
+ *  What the longer limit costs: when the first pass does not return, the next language is tried after 20 s,
+ *  not 12, and has the 5 s that remain, not 12. */
 const PASS_TIMEOUT_MS = (() => {
   const v = Number(process.env.BROADCAST_TTS_PASS_TIMEOUT_MS);
-  return Number.isFinite(v) && v >= 3000 && v <= 60000 ? v : 12000;
+  return Number.isFinite(v) && v >= 3000 && v <= 60000 ? v : 20000;
 })();
 /** Whole-spoken-phase budget (passes + terminators). Bounds alarm latency. */
 const SPOKEN_BUDGET_MS = (() => {

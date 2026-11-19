@@ -346,6 +346,13 @@ const MUTANTS = [
     to: '  opts.log(`audioRenderer: terminator pre-warm /* MUTANT */ — ',
     why: 'The Spanish and English summaries are byte-identical again.',
   },
+  {
+    id: 'L-iii. ★★ v1.207.2 — a spoken pass is given 12 s again',
+    file: AR,
+    find: '  return Number.isFinite(v) && v >= 3000 && v <= 60000 ? v : 20000;',
+    to: '  return Number.isFinite(v) && v >= 3000 && v <= 60000 ? v : 12000; /* MUTANT */',
+    why: 'A long sentence on a slow voice loses its first-language pass again, as on 2026-11-17 at 21:13.',
+  },
   // ── C32 — request logging ───────────────────────────────────────────────────────────────────
   {
     id: 'W-i. ★★★ request logging is on',
