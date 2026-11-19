@@ -352,3 +352,7 @@ schema:
   CYCLING_BASE_WEAR_USD_PER_KWH: "float?"
   OPPORTUNISTIC_LOADS: "str?"
   BATTERY_SOC_LADDER: "str?"
+  # --- lane audible --- (BROADCAST_TTS_PASS_TIMEOUT_MS)
+  # The longest one spoken pass of an alarm may take to render, in ms. Unset, the renderer keeps its
+  # 12000. The renderer does not clamp: outside the range it falls back to 12000.
+  BROADCAST_TTS_PASS_TIMEOUT_MS: "int(3000,60000)?"

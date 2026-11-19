@@ -1025,7 +1025,7 @@ proxies `/api` + `/ws` back to this process.
 ### 10. Configuration reference (`config.ts` + env)
 
 `config.ts` holds the option table, `OPTIONS` (v1.191.0): a row for every `config.yaml` option
-(85 with a default and 38 schema-only, 123 in all), every environment knob and every
+(83 with a default and 39 schema-only, 122 in all), every environment knob and every
 deployment constant, each with the parse rule its reader applies (four truthiness conventions,
 the blank and `null` rules and the clamps are kept per key). `option(name)` reads a value
 through its row. A schema-only key has no default and the run script exports it only when it
