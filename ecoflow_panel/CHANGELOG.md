@@ -1,18 +1,26 @@
 ## 1.207.2
 
-### A spoken alarm pass is given 20 seconds to render; it was 12
+### The limit of a spoken alarm pass is an option; a pass leaves time for the other language
 
 **Audible alarms**
 
-- **What changed.** One default. Each spoken pass of an announcement (one for each language) was abandoned when the speech engine had not returned it in 12 s. The limit is 20 s. The budget of the whole spoken phase is still 25 s and every attempt is still clamped to what is left of it, so the longest an alarm waits on speech before its tones play alone is 25 s, where it was 24 s.
-- **Why.** On the reference install the speech engine's English voice was replaced on 2026-11-17 with one that renders several times slower. That evening the day's one critical alarm lost its English pass: the render passed 12 s and was dropped, and the speakers played the tones and the second language's pass alone. The announcement was recorded as completed. Shorter texts still fitted the limit.
-- **What it costs.** When the first pass does not return at all, the next language is tried after 20 s, not 12, and has the 5 s that remain, not 12.
-- **Not in this release.** A dropped pass is still recorded as a completed announcement and is not retried. Only the first pass's render time is logged. The limit stays an environment setting (`BROADCAST_TTS_PASS_TIMEOUT_MS`, 3 to 60 s) and is not an add-on option.
+- **What changed.**
+  - **An option.** The time one spoken pass may take to render, 12 s since v1.47.5, can be set per install: `BROADCAST_TTS_PASS_TIMEOUT_MS`, 3000 to 60000 ms. Unset, it is 12000.
+  - **A guard.** A pass may not use time that a pass still to render needs. With *m* passes still to render after it and *R* left of the 25 s spoken phase, an attempt (a first try, or the one retry after a failure of under 3 s) is handed min(limit, *R*, max(*R* − *m* × 8 s, 3 s)). One language, the last pass and every terminator have nothing behind them and keep min(limit, *R*).
+- **An install that does not set the option is unchanged.** The default is 12 s, and the option is not passed to the server while it is unset. At 12 s the guard does not come into play for one language or two: a first try starts with 25 s (25 − 8 = 17) and a retry with at least 21.7 s (13.7). The test "INVARIANT 1" in `audioRendererBilingual.test.ts` holds the limits handed to the speech engine on ten paths (one language and two; every attempt runs out; the first returns late; a dropped socket, then a retry; with terminators) to the figures measured on v1.207.1. At 12 s the guard would come into play for a retry whose 0.3 s pause the host held up by more than 1.7 s, or with the phase's budget set under 20 s in the environment.
+- **Why.** Measured on the reference install on 2026-11-18 (silent renders, the voices in service): with its voice resident the English voice took 0.67 to 0.80 s per second of audio. A 318-character critical (18.4 s of audio) rendered in 12.8 and 13.9 s, a 289-character critical in 11.2 s, a 173-character notice in 6.8 s, and a charge-level sentence in 0.85 s, or 2.2 s after a change of voice. The Spanish voice rendered about 23 s of audio in 2.9 s, or 4.0 s after a change of voice. At 12 s the English pass of that 318-character critical is lost: on 2026-11-17 it was, and the tones and the Spanish pass played.
+- **What a longer limit costs.** Nothing plays until the spoken phase ends, so render time is alarm delay.
+  - **One language** (the shipped default). A pass that never returns holds the tones for the limit: 12 s by default, 20 s at 20000, 25 s from 25000 up.
+  - **Two languages, the first pass late.** With an English pass ready at 14 s and a Spanish pass in 4 s: at 20000 both are spoken, the speech ready at 18 s; at 12 s the English pass is dropped, the speech ready at 16 s.
+  - **Two languages, the first pass lost.** At 20000 it is cut at 17 s and the other has 8 s: one language after the 17 s and its own render time, or the tones alone at 25 s. By default the figures are 12 s, 12 s and 24 s. After a dropped socket, the retry has what is left less 8 s.
+  - The reserve is a fixed 8 s. The measured Spanish pass fits in it; a long English sentence rendered second can need more.
+- **Not in this release.** Tones before speech. A per-sentence audio cache. A dropped pass is still recorded as a completed announcement and is not retried.
 
 **Tests**
 
-- Failing first: `audioRendererBilingual.test.ts` reads the limit handed to the speech engine, with the clock mocked. The first pass is given 20 s and, after a first pass of 18 s, the next is given the 7 s left of the budget; a server that uses every limit in full is tried twice (20 s, 5 s) and the spoken phase ends at 25 s. On v1.207.1 both tests fail on their first figure, 12 s.
-- Harness: `mutate-v1187-10-g4.mjs` gains `L-iii` (the limit back at 12 s); 45 mutants.
+- `audioRendererBilingual.test.ts` scripts the speech engine on a mocked clock: the ten paths; at 20000, the 2026-11-17 shape, a first pass that never returns (17 s, then 8 s, whichever language renders first), a dropped socket then a stalled retry (17, 14.1 and 8 s), one language and terminators; the fallback to 12000; the 3 s floor. The budget test set its 5 s after the setting had been read; both settings are read when used, and the test is exact. On v1.207.1's renderer the ten-path test passes and the eight others fail.
+- `optionsEnvBridge.test.ts`: the option's schema, export line, row and translations.
+- Harness: `mutate-v1187-10-g4.mjs` gains `T-i` to `T-ix`; 53 mutants.
 
 ## 1.207.1
 
