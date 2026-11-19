@@ -137,7 +137,7 @@ function spokenBudgetMs(): number {
  *  the voice resident), so a long English sentence rendered second can need more than the reserve alone. */
 const PASS_RESERVE_MS = 8000;
 /** v1.207.2 — the least an attempt is handed while that much budget is left: the least the limit itself can be
- *  set to. On the same install a charge-level sentence rendered in 2.2–2.4 s after a change of voice. */
+ *  set to. On the same install a charge-level sentence rendered in 2.2 s after a change of voice. */
 const PASS_FLOOR_MS = 3000;
 /**
  * v1.207.2 — THE RESERVATION RULE: the limit handed to the engine for one attempt (a first try or the retry).
