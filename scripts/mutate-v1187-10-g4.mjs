@@ -371,7 +371,7 @@ const MUTANTS = [
     file: AR,
     find: '  if (passesAfter <= 0) return withinBudget;',
     to: '  if (true) return withinBudget; /* MUTANT */',
-    why: 'THE DEFECT of the first attempt: at 20 s a first pass that stalls leaves the other language 5 s. Held by: INVARIANT 2 (17000, then 8000).',
+    why: 'THE DEFECT the reserve exists for: at 20 s a first pass that stalls takes 20 s and leaves the other language 5 s. Held by: INVARIANT 2 (17000, then 8000).',
   },
   {
     id: 'T-iv. ★★★ the reserve is 0 s',
