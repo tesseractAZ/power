@@ -671,12 +671,19 @@ build to `gh release create`. Jobs:
    is `success` and the file is non-empty, and the .pdf is rendered only from a .docx whose
    build succeeded: an immutable Release never seals a truncated asset. The images are pushed
    by `build` before this job starts. CI's `docs-docx` job (a hard PR gate) is bounded the same way,
-   with a 40-min job limit above its steps' bounds. `server/test/workflowTimeouts.test.ts` holds
-   these bounds. The CI job also drops the runners' first apt mirror (`azure.archive.ubuntu.com`)
-   from `/etc/apt/apt-mirrors.txt` when another one is listed, and installs pandoc 3.7.0.2 from the
-   upstream release `.deb`, checked against a pinned SHA-256, with apt as the fallback (a 12-min
-   step): that mirror served the 29 MB package at about 39 kB/s on several runs. The release job
-   still installs pandoc with apt.
+   with a 45-min job limit at least 5 min above the sum of its steps' bounds (38 min).
+   `server/test/workflowTimeouts.test.ts` holds these bounds. The CI job also drops the runner's
+   regional apt mirror from `/etc/apt/apt-mirrors.txt`: the first entry, which the runner's cloud
+   decides (`azure.archive.ubuntu.com` on Azure, `<region>.ec2.archive.ubuntu.com` on AWS). Any
+   `*.archive.ubuntu.com` entry is dropped, and only while `archive.ubuntu.com` stays listed;
+   apt leaves a mirror only when it fails, never when it is slow. The Azure mirror served the
+   29 MB pandoc package at about 39 kB/s on several runs, and the AWS one took 1-2 min for
+   LibreOffice's 100 MB, against 3-12 s from `archive.ubuntu.com`. The job installs pandoc 3.7.0.2
+   from the upstream release `.deb`, checked against a pinned SHA-256, with apt as the fallback
+   and a warning in the log when it ran. Each apt install downloads under its own bound first and
+   then installs from the local cache, so a bound fires only during the download, never while
+   dpkg unpacks, and both steps wait up to 60 s for the dpkg lock. The test runs the mirror step's
+   own script against both clouds' lists. The release job still installs pandoc with apt.
 
 First-time-only: toggle the two new GHCR packages from Private → Public so HA can pull anonymously.
 

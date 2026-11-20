@@ -397,7 +397,8 @@ const MUTANTS = [
   {
     id: 'xlvii. ★★ the PR docs gate is unbounded',
     file: CI,
-    find: '    timeout-minutes: 40\n',
+    // 2026-11-19: the job bound went 40 → 45 (its steps' bounds now sum to 38 min).
+    find: '    timeout-minutes: 45\n',
     to: '    # MUTANT\n',
     why: 'A mirror stall holds a pull request\'s check for six hours.',
   },
