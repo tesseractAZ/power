@@ -178,6 +178,7 @@ The alert families you are most likely to see:
 | Alert | Means | Do this |
 |---|---|---|
 | Below or near the reserve floor | The pool is at or approaching the panel's backup reserve. | Shed load unless the grid carries the house. |
+| A Core out of the backup pool | The panel counts one Core less (or more) in its backup capacity than its source slots hold. Pushed at once, at night too, with the slot, its percent and any code the panel reports; critical when the grid is down or more than half the pool is gone. | Check that Core and its cable at the panel. The alert ends by itself once the capacity has read whole again, and a notice says so. A Core you removed on purpose keeps it standing. |
 | Running off-grid | No grid is present; the house runs on solar and batteries. Shown on the dashboard, not pushed. | Watch the runway: the battery alarms are now graded with no grid. |
 | Device offline, cloud session stale, reserve alarm blind | A Core or the panel stopped reporting, or the EcoFlow session went stale, so an alarm cannot see. Blind while off-grid is critical. | Check the device's Wi-Fi and the EcoFlow app. |
 | Cell voltage spread | A pack's cells have drifted apart. A warning is pushed, not spoken; a critical is spoken. | Watch it; a critical one needs EcoFlow support. |

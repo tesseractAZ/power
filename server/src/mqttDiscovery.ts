@@ -44,6 +44,7 @@ import { systemOutageFields } from './alerts.js';
 import { getBroadcastHealth, audibleStatus } from './broadcastHealth.js';
 import { publishReadiness, withholdUnready } from './publishReadiness.js';
 import { pollHealth } from './telemetryBlind.js';
+import { poolCoreOutState } from './poolOutRecord.js';
 
 /**
  * MQTT Discovery publisher for Home Assistant (v0.7.5).
@@ -238,6 +239,19 @@ export function maintenanceStateFields(
     maintenance_active: windows.length > 0,
     maintenance_count: windows.length,
     maintenance_summary: windows.map((w) => `${w.label} until ${fmtClock(w.untilMs)}`),
+  };
+}
+
+/**
+ * v1.208.0 — the pool-out state key, from each panel's own sensor state (SnapshotStore.poolOutSensorStates): "ON"
+ * while any panel has a "Core out of the backup pool" alarm standing; "OFF" only while every panel's newest capacity
+ * verdict is at most 15 minutes old and none stands; null (unknown in Home Assistant) in every other case — no
+ * panel, no usable reading yet, a stale shadow, a restart. Never OFF on silence. Spread into buildState and
+ * /api/ha-state alike (poolOutRecord.ts poolCoreOutState holds the rule).
+ */
+export function poolCoreOutStateFields(panels: ReadonlyArray<'on' | 'off' | 'unknown'>): { pool_core_out: 'ON' | 'OFF' | null } {
+  return {
+    pool_core_out: poolCoreOutState(panels),
   };
 }
 
@@ -897,6 +911,11 @@ export const BINARY_SENSORS: BinarySensorConfig[] = [
   // gaps and drops the instant the utility is lost. `unknown` (no template value) when the
   // SHP2 is cloud-offline or the field is absent — do NOT infer a grid state from unknown.
   { unique_id: 'ecoflow_shp2_grid_connected', name: 'SHP2 Grid Connected', icon: 'mdi:transmission-tower', value_template: '{{ value_json.shp2_grid_connected }}' },
+  // v1.208.0 — ON while a Core is out of a panel's backup pool (the `shp2-pool-out` alarm stands). device_class
+  // problem: ON is the problem. The payload is "ON", "OFF" or null: null renders "None", which Home Assistant reads as
+  // unknown — the state before a usable reading, during a stale shadow and after 15 minutes without a capacity verdict.
+  // An automation must not read unknown as OFF.
+  { unique_id: 'ecoflow_pool_core_out', name: 'Core Out of Backup Pool', device_class: 'problem', icon: 'mdi:battery-alert-variant', value_template: '{{ value_json.pool_core_out }}' },
   // v0.59.0 — ON when the runway / projected-low-SoC numbers only apply to the
   // ISLANDED case (the grid is actively backstopping the load now). Gate HA
   // "runway < threshold" automations on this so a 0% / low-hour projection during
@@ -1636,6 +1655,9 @@ export async function startMqttDiscovery(
       })(),
       // v1.197.0 — the maintenance windows in force (false / 0 / [] when none, or not wired).
       ...maintenanceStateFields(maintenance?.active() ?? [], maintenance?.fmtClock ?? ((ms) => new Date(ms).toISOString())),
+      // v1.208.0 — whether a Core is out of a panel's backup pool ("ON", "OFF", or null for unknown).
+      // (A stand-in store with no tracker — this module's own unit tests — reads unknown.)
+      ...poolCoreOutStateFields(typeof store.poolOutSensorStatesSafe === 'function' ? store.poolOutSensorStatesSafe(Date.now()) : []),
       alert_critical_count: cnt('threshold', 'critical'),
       alert_warning_count: cnt('threshold', 'warning'),
       learned_warning_count: cnt('learned', 'warning'),

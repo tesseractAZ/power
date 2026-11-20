@@ -1,10 +1,10 @@
 import { EventEmitter } from 'node:events';
-import { readFileSync, writeFileSync, renameSync, unlinkSync, accessSync, constants as fsConstants } from 'node:fs';
-import { resolve, dirname } from 'node:path';
+import { readFileSync, writeFileSync, renameSync, unlinkSync, accessSync, readdirSync, mkdirSync, constants as fsConstants } from 'node:fs';
+import { resolve, dirname, basename } from 'node:path';
 import { sanitizeDisplayName } from './logSanitize.js';
 import { ecoflow, DeviceListItem } from './ecoflow/rest.js';
 import { projectByProduct, Projection, backupPoolWithGraceHold, type BackupPoolHold, type DpuProjection } from './ecoflow/project.js';
-import { shp2Panels, resolveHousePanel } from './shp2Membership.js';
+import { shp2Panels, resolveHousePanel, poolOutHouseSn } from './shp2Membership.js';
 import { prunePhantomPacks, freshPackSlotHistory, parsePackGhosts, packFrozenPhrase, type PackSlotHistory, type PackGhost } from './packPresence.js';
 import { mpptProducing } from './mppt.js';
 import { shp2ContentWitness, advanceContentFreshness, isContentStale, advanceShadowLatch, advanceBodySeen, SHP2_SHADOW_CLEAR_DISTINCT } from './shp2Shadow.js';
@@ -12,6 +12,19 @@ import type { Alert } from './alerts.js';
 import { notePollOk, notePollFailed, notePollHealth } from './telemetryBlind.js';
 import { config } from './config.js';
 import { deviceAliases as loadedDeviceAliases, disambiguateFallbackNames, slotOfDpu, isDpuProduct, isShp2Product } from './topology.js';
+import { atomicWriteFileSync } from './atomicWrite.js';
+import { siteTimeZone } from './siteTime.js';
+import { poolDiagFromRaw, type PoolDiag } from './ecoflow/poolDiag.js';
+import {
+  advancePoolOut, emptyPoolOutState, parsePoolOutFile, serializePoolOutFile, poolOutAlertParts, poolOutLatestEnd, poolOutEndText,
+  poolOutSensorState, poolOutOrphanHoldReleased, poolOutTitle, poolOutFault, poolOutSeverity, poolVerdictsText, poolOutAlertId, POOL_OUT_ALERT_ID,
+  poolRoster, poolReferenceLeavesOut,
+  type PoolOutState, type PoolSignals, type PoolSkipReason, type PoolOutAlertParts, type PoolObservation,
+} from './poolOut.js';
+import {
+  poolDiagChanges, parsePoolDiagSigs, withPoolDiagSigs, parsePoolOutCards, withPoolOutCards, poolEventCapture, poolEventFileName, poolOutDebugView,
+  poolEventsToDrop, POOL_EVENT_FILE, type PoolDiagSig, type PoolEventKind, type PoolOutCard,
+} from './poolOutRecord.js';
 
 /**
  * Local SN→name overrides. v1.191.0 (S8, 3.11) — topology.ts merges three layers: the DEVICE_ALIASES
@@ -186,6 +199,8 @@ const PACK_FLOW_KEY_RE = /^hs_yj751_bms_slave_addr\.\d+\.(inputWatts|outputWatts
 export const STREAM_FLOW_WINDOW_MS = 150_000;
 /** v1.185.0 — consecutive device lists a panel must be absent from before it is off the account. */
 export const PANEL_ABSENT_LISTS = 3;
+/** v1.208.0 — the pool-out state file's last-reading stamp is refreshed at most this often (and only while a streak or an alarm stands). */
+export const POOL_OUT_PERSIST_EVERY_MS = 60_000;
 /** v1.185.0 — consecutive device lists a lone panel must stand alone before the FIRST pin. */
 export const FIRST_PIN_LISTS = 2;
 /** v1.187.1 (log review) — how often a pack-ghosts.json save that is pending only from an earlier
@@ -284,8 +299,22 @@ export function dpuContentWitness(p: Projection | undefined): string | null {
   return [d.acInWatts, d.acOutWatts, d.pvTotalWatts, d.soc, d.batVol, d.batAmp, packs].map((v) => v ?? '').join('|');
 }
 
+/** v1.208.0 — one panel's standing pool-out alarm as the store hands it to the alert set: the tracker's parts, and the
+ *  id and panel name LATCHED at the raise (null only for an alarm restored from a file that held none, for a panel
+ *  this process has not listed yet). */
+export type PoolOutStanding = PoolOutAlertParts & { card: PoolOutCard | null };
+
+/** v1.208.0 — what a caller may say about where the store keeps the pool-out tracker's files. Production passes
+ *  nothing (the add-on's data folder); a test names its own, so no two stores share a file. */
+export interface SnapshotStoreOptions {
+  /** The pool-out state file. Omitted: `pool-out.json` beside the database inside the add-on, nowhere elsewhere. null: none. */
+  poolOutPath?: string | null;
+  /** The folder of pool-out event captures. Omitted: `pool-events` beside the database inside the add-on, nowhere elsewhere. null: none. */
+  poolEventsDir?: string | null;
+}
+
 export class SnapshotStore extends EventEmitter {
-  constructor() {
+  constructor(opts: SnapshotStoreOptions = {}) {
     super();
     // v1.180.0 — at construction, not first sight: a restart with the cloud unreachable never
     // reaches setDeviceList (refreshAll throws at listDevices), and that is the outage case.
@@ -293,6 +322,9 @@ export class SnapshotStore extends EventEmitter {
     // v1.187.4 — and the pool-unknown onsets: a panel not projected yet still has its entry pending
     // (poolUnknownCarryPending).
     this.loadPoolUnknown();
+    // v1.208.0 — and the pool-out tracker: a standing "Core out of the backup pool" is in the alert set at the first
+    // pass after a restart, not re-detected ten minutes later.
+    this.loadPoolOut(opts);
   }
 
   private snap: FleetSnapshot = { generatedAt: 0, devices: {} };
@@ -452,11 +484,15 @@ export class SnapshotStore extends EventEmitter {
       log(this.poolUnknownLoadNote);
       this.poolUnknownLoadNote = null;
     }
+    // v1.208.0 — and what the pool-out tracker restored (loadPoolOut). What it could NOT restore waits for the warn
+    // sink (wired next, by setWarnLogger), or is said here when that one is wired already.
+    this.sayPoolOutLoadNotes();
   }
 
   /** v1.187.10 — wired by `startPollLoop` to its `warn` sink. */
   setWarnLogger(warn: (msg: string) => void) {
     this.warnLogger = warn;
+    this.sayPoolOutLoadNotes();
   }
 
   /** v1.187.1 — load the persisted ghost slots (absent or corrupt: start without, the v1.172.0
@@ -1176,6 +1212,433 @@ export class SnapshotStore extends EventEmitter {
     return new Map(this.mpptErrOnsetByKey);
   }
 
+  /* ───────────── v1.208.0 — a Core out of the panel's backup pool (poolOut.ts) ─────────────
+   *
+   * Sat 2026-11-14 23:35 the panel's pool capacity fell by one Core's 30.72 kWh and nothing was logged, alerted or
+   * recorded for 44.5 hours. The tracker (poolOut.ts advancePoolOut) folds every REST body of a panel; this store
+   * holds its state per panel, persists it, logs what it says, and serves the alert, the return notice, the recorder
+   * and the debug view from it.
+   *
+   * The reader's output is kept HERE, beside the raw map, and never on the projection: the projection is cloned to the
+   * analytics worker and served to every client.
+   */
+  /** What the reader took from each panel's newest REST body, and when that body arrived. */
+  private poolDiagBySn = new Map<string, { diag: PoolDiag; atMs: number }>();
+  /** The tracker's state per panel. A panel with no entry has had no body folded and none restored. */
+  private poolOutBySn = new Map<string, PoolOutState>();
+  /** The tracker's verdicts on each panel's newest REST body (null signals: that body was skipped, for `skip`). */
+  private poolOutLastBySn = new Map<string, { atMs: number; signals: PoolSignals | null; skip: PoolSkipReason | null }>();
+  /** The last value logged for every field of the change log, per panel (poolOutRecord.ts); persisted with the state. */
+  private poolDiagSigBySn = new Map<string, PoolDiagSig>();
+  /** The alert id and the panel's name each standing alarm is shown under, latched at its raise and persisted with the
+   *  state: a restart into a cloud outage has no device list to take a name from, and a house pin that moves between
+   *  two panels must not move a standing alarm to another id (the monitor would resolve one card and push another). */
+  private poolOutCardBySn = new Map<string, PoolOutCard>();
+  private poolOutPath: string | null = null;
+  private poolEventsDir: string | null = null;
+  /** DATA time of the last save attempt (the body that caused it), never the wall clock. */
+  private poolOutLastWriteMs = -Infinity;
+  private poolOutDirty = false;
+  private poolOutWriteWarned = false;
+  private poolEventsWarned = false;
+  /** Failures of the pool-out wiring already said at warn (poolOutFailed). */
+  private poolOutFailuresSaid = new Set<string>();
+  /** What loadPoolOut found: the constructor runs before the loggers are wired, so they are said once when they are
+   *  (sayPoolOutLoadNotes). A file that could NOT be restored is said at warn: with a Core out, it is the only line
+   *  that says why the alarm is gone. */
+  private poolOutLoadNotes: Array<{ level: 'info' | 'warn'; text: string }> = [];
+  /** The state file was on disk at this start and could not be restored, in whole or in part: this process cannot
+   *  say what it held (poolOutSensorStates reads it). Never persisted. */
+  private poolOutLoadLost = false;
+  /** The add-on's grid verdict for one panel's pool (the alert monitor wires gridState's); unset: not known. */
+  private poolOutGridSource: ((sn: string) => PoolObservation['grid']) | null = null;
+
+  /** v1.208.0 — load the tracker's state (absent or unreadable: every panel starts empty, and nothing is invented). */
+  private loadPoolOut(opts: SnapshotStoreOptions): void {
+    this.poolOutPath = opts.poolOutPath !== undefined ? opts.poolOutPath : config.isAddon ? config.dataFile('pool-out.json') : null;
+    this.poolEventsDir = opts.poolEventsDir !== undefined ? opts.poolEventsDir : config.isAddon ? resolve(config.dataRoot, 'pool-events') : null;
+    if (!this.poolOutPath) return;
+    let fileText: string;
+    try {
+      fileText = readFileSync(this.poolOutPath, 'utf8');
+    } catch {
+      return; // no file: nothing to restore
+    }
+    // A file in a folder this process cannot write is not believed (the pool-unknown rule): a failed save removes the
+    // file, and where even that fails it may hold an alarm that ended after its last save.
+    if (!poolUnknownDirWritable(this.poolOutPath)) {
+      this.poolOutLoadLost = true;
+      this.poolOutLoadNotes.push({ level: 'warn', text: `pool-out: the state file is not restored — ${dirname(this.poolOutPath)} cannot be written (read-only?), so the file may be older than the pool it describes; every panel starts with no reference and no alarm.` });
+      return;
+    }
+    // CONTAINED: this runs in the constructor, before anything can log. Whatever the file holds, the store is built:
+    // a value that cannot be restored starts every panel empty and says so, like a file that cannot be parsed.
+    let rejected = 0;
+    try {
+      const parsed = parsePoolOutFile(fileText);
+      rejected = parsed.rejected;
+      const { panels } = parsed;
+      const sigs = parsePoolDiagSigs(fileText);
+      const cards = parsePoolOutCards(fileText, POOL_OUT_ALERT_ID);
+      const standing = [...panels.values()].filter((st) => st.episode != null);
+      const notes: Array<{ level: 'info' | 'warn'; text: string }> = [];
+      if (rejected > 0) notes.push({ level: 'warn', text: `pool-out: ${rejected} entr${rejected === 1 ? 'y' : 'ies'} of the state file could not be read and ${rejected === 1 ? 'is' : 'are'} left out — ${rejected === 1 ? 'that panel starts' : 'those panels start'} with no reference and no alarm.` });
+      if (panels.size > 0) {
+        notes.push({ level: 'info', text: `pool-out: state restored for ${panels.size} panel${panels.size === 1 ? '' : 's'} — ${standing.length === 0 ? 'no alarm standing' : standing.map((st) => `"${poolOutTitle(st.episode!.k, st.episode!.slots)}" standing since ${new Date(st.episode!.sinceMs).toISOString()}`).join('; ')}${[...panels.values()].some((st) => st.streak != null) ? '; a streak is on file and is carried only if the next reading comes within 15 min of its last' : ''}.` });
+      }
+      this.poolOutBySn = panels;
+      this.poolDiagSigBySn = sigs;
+      // A card is kept only for a panel whose alarm stands.
+      this.poolOutCardBySn = new Map([...cards].filter(([sn]) => panels.get(sn)?.episode != null));
+      this.poolOutLoadNotes.push(...notes);
+    } catch (e) {
+      this.poolOutBySn = new Map();
+      this.poolDiagSigBySn = new Map();
+      this.poolOutCardBySn = new Map();
+      rejected = Math.max(rejected, 1);
+      this.poolOutLoadNotes.push({ level: 'warn', text: `pool-out: the state file could not be restored (${(e as Error)?.message ?? e}) — every panel starts with no reference and no alarm.` });
+    }
+    // What could not be read is KEPT beside the file: the first save replaces the file itself, and a file written by
+    // a newer version (after a rollback) or damaged in a way worth reading back would otherwise be gone for good.
+    if (rejected > 0) {
+      this.poolOutLoadLost = true;
+      const kept = `${basename(this.poolOutPath)}.unread`;
+      try {
+        atomicWriteFileSync(`${this.poolOutPath}.unread`, fileText);
+        this.poolOutLoadNotes.push({ level: 'info', text: `pool-out: the file as it was read is kept as ${kept}; the next save replaces ${basename(this.poolOutPath)}.` });
+      } catch (e) {
+        this.poolOutLoadNotes.push({ level: 'warn', text: `pool-out: the file as it was read could not be kept as ${kept} (${(e as Error)?.message ?? e}); the next save replaces it.` });
+      }
+    }
+  }
+
+  /** Say what loadPoolOut found, each line once and in the order found: an INFO line as soon as the logger is wired; a
+   *  WARN line through the warn sink, so it waits for that sink and holds back the lines after it (the poll loop wires
+   *  the two one after the other). At the first panel reading whatever is still unsaid goes to the sink there is. */
+  private sayPoolOutLoadNotes(force = false): void {
+    while (this.poolOutLoadNotes.length > 0) {
+      const note = this.poolOutLoadNotes[0];
+      const sink = note.level === 'warn' ? this.warnLogger ?? (force ? this.logger : null) : this.logger;
+      if (sink == null) return;
+      this.poolOutLoadNotes.shift();
+      try { sink(note.text); } catch { /* the log itself failed: nothing more can be said */ }
+    }
+  }
+
+  /** v1.208.0 — atomic. On a failure the file is REMOVED (a file the save could not replace may hold an alarm that has
+   *  since ended, and a restart would restore it), the failure is logged once, and the save is retried at most once a
+   *  minute. `atMs` is the body's time. */
+  private writePoolOut(atMs: number): void {
+    const path = this.poolOutPath;
+    if (!path) return;
+    this.poolOutLastWriteMs = atMs;
+    try {
+      atomicWriteFileSync(path, withPoolOutCards(withPoolDiagSigs(serializePoolOutFile(this.poolOutBySn), this.poolDiagSigBySn), this.poolOutCardBySn));
+      this.poolOutDirty = false;
+    } catch (e) {
+      this.poolOutDirty = true;
+      let removed: string;
+      try {
+        unlinkSync(path);
+        removed = 'the file is removed, so a restart starts every panel with no reference and no alarm';
+      } catch (u) {
+        removed = (u as NodeJS.ErrnoException)?.code === 'ENOENT'
+          ? 'there is no file, so a restart starts every panel with no reference and no alarm'
+          : `the file could not be removed either (${(u as Error)?.message ?? u}) — a restart may restore what it holds`;
+      }
+      if (!this.poolOutWriteWarned) {
+        this.poolOutWriteWarned = true;
+        (this.warnLogger ?? this.logger)(`pool-out: could not save the tracker's state (${(e as Error)?.message ?? e}) — ${removed}; retrying at most once a minute`);
+      }
+    }
+  }
+
+  /** v1.208.0 — a panel's ROLE, for a log line, a capture file and the debug view: never its serial. The house panel
+   *  is index 0; any other panel is its position among the panels by serial, counted from 2. */
+  private poolOutRole(sn: string): { index: number; label: string } {
+    const house = poolOutHouseSn(this.snap.devices);
+    if (house === sn) return { index: 0, label: 'house panel' };
+    const others = shp2Panels(this.snap.devices).sns.filter((x) => x !== house).sort();
+    const at = others.indexOf(sn);
+    const index = at < 0 ? 9 : Math.min(9, at + 2);
+    return { index, label: `panel ${index}` };
+  }
+
+  /** v1.208.0 — the id and the name one panel's standing alarm is shown under: the ones latched for it, else latched
+   *  NOW from the device list (the house panel takes the bare id unless another panel's standing alarm holds it). Null
+   *  when nothing is latched and this process has not listed the panel: there is no name to show it under. */
+  private poolOutCard(sn: string): PoolOutCard | null {
+    const have = this.poolOutCardBySn.get(sn);
+    if (have) return have;
+    const dev = this.snap.devices[sn];
+    if (!dev) return null;
+    const taken = [...this.poolOutCardBySn].some(([other, c]) => other !== sn && c.id === POOL_OUT_ALERT_ID);
+    const card: PoolOutCard = { id: poolOutAlertId(sn, poolOutHouseSn(this.snap.devices) === sn && !taken), device: dev.deviceName };
+    this.poolOutCardBySn.set(sn, card);
+    this.poolOutDirty = true; // written with the next save
+    return card;
+  }
+
+  /** v1.208.0 — the alert monitor wires the add-on's grid verdict for one panel's pool (gridState.ts). Until it does,
+   *  and whenever the source fails, the grid reads NOT KNOWN: never absent. */
+  setPoolOutGridSource(fn: ((sn: string) => PoolObservation['grid']) | null): void {
+    this.poolOutGridSource = fn;
+  }
+
+  /** CONTAINED: nothing in the tracker, its log lines, its capture or its save may stop the store from taking the
+   *  panel's body (the alarms, the recorder and every reader depend on that). A failure is said at warn, once per
+   *  distinct message, and the body is taken as usual. */
+  private foldPoolOut(sn: string, cur: DeviceSnapshot, raw: Record<string, unknown>, atMs: number, witness: string | null, latched: boolean): void {
+    try {
+      this.foldPoolOutBody(sn, cur, raw, atMs, witness, latched);
+    } catch (e) {
+      this.poolOutFailed('the tracker failed on a panel reading', e, 'the reading itself is taken as usual; the pool-out alarm may have missed it');
+    }
+  }
+
+  /** One WARN line per distinct failure (at most eight are remembered). Never throws. */
+  private poolOutFailed(what: string, e: unknown, consequence: string): void {
+    const message = `${what} (${(e as Error)?.message ?? e})`;
+    if (this.poolOutFailuresSaid.has(message) || this.poolOutFailuresSaid.size >= 8) return;
+    this.poolOutFailuresSaid.add(message);
+    try {
+      (this.warnLogger ?? this.logger)(`pool-out: ${message} — ${consequence}.`);
+    } catch {
+      /* the log itself failed: nothing more can be said */
+    }
+  }
+
+  /** Fold one REST body of a panel into its tracker, log what the tracker says and what changed in the panel's own
+   *  fields, capture the body at a tracker event, and save. `atMs` is the body's time. */
+  private foldPoolOutBody(sn: string, cur: DeviceSnapshot, raw: Record<string, unknown>, atMs: number, witness: string | null, latched: boolean): void {
+    if (this.poolOutLoadNotes.length > 0) this.sayPoolOutLoadNotes(true);
+    const diag = poolDiagFromRaw(raw);
+    this.poolDiagBySn.set(sn, { diag, atMs });
+    let grid: PoolObservation['grid'] = null;
+    try {
+      grid = this.poolOutGridSource ? this.poolOutGridSource(sn) : null;
+    } catch {
+      grid = null; // a verdict that could not be formed is not known
+    }
+    const step = advancePoolOut(this.poolOutBySn.get(sn) ?? emptyPoolOutState(), { atMs, online: cur.online === true, witness, latched, diag, grid });
+    this.poolOutBySn.set(sn, step.state);
+    this.poolOutLastBySn.set(sn, { atMs, signals: step.signals, skip: step.skip });
+    const role = this.poolOutRole(sn);
+    // Two panels: each line names its panel by role. One panel: the lines are as the tracker wrote them.
+    const tagged = (line: string): string => (shp2Panels(this.snap.devices).sns.length > 1 ? line.replace(/^(pool-(?:out|diag))/, `$1 [${role.label}]`) : line);
+    const kinds: PoolEventKind[] = [];
+    for (const e of step.events) {
+      if (e.type === 'first-fault') kinds.push('first-fault');
+      else if (e.type === 'raised') kinds.push('raised');
+      else if (e.type === 'cleared') kinds.push('ended');
+    }
+    // The alarm's id and its panel's name are latched AT the raise and let go at the end (both saved with the state
+    // below: a raise and an end are each "changed").
+    if (kinds.includes('ended')) this.poolOutCardBySn.delete(sn);
+    if (kinds.includes('raised')) this.poolOutCard(sn);
+    // The change log reads only a body that is NEW content: not an offline panel's, not a replayed or shadowed one
+    // (the tracker's own ring decides), so a cloud serving an old body between two new ones invents no transition.
+    let sigChanged = false;
+    let changeLines: string[] = [];
+    if (step.skip !== 'offline' && step.skip !== 'no-witness' && step.skip !== 'latched' && step.skip !== 'replayed') {
+      const ch = poolDiagChanges(this.poolDiagSigBySn.get(sn) ?? null, diag, kinds.length > 0);
+      changeLines = ch.lines;
+      if (ch.changed) {
+        this.poolDiagSigBySn.set(sn, ch.sig);
+        sigChanged = true;
+      }
+    }
+    // FIRST the save, so that nothing after it (a log sink, a capture) can cost a raise its place on disk. Saved at
+    // once on a change; otherwise the last-reading stamp is refreshed at most once a minute, and only while a streak
+    // or an alarm stands (or an earlier save failed).
+    const sinceWrite = atMs - this.poolOutLastWriteMs;
+    const standing = step.state.streak != null || step.state.episode != null;
+    if (step.changed || sigChanged || ((standing || this.poolOutDirty) && (sinceWrite >= POOL_OUT_PERSIST_EVERY_MS || sinceWrite < 0))) this.writePoolOut(atMs);
+    // Then the log: what the panel's fields did, before what the tracker made of this body.
+    for (const line of changeLines) this.logger(tagged(line));
+    for (const l of step.logs) (l.level === 'warn' ? this.warnLogger ?? this.logger : this.logger)(tagged(l.text));
+    for (const kind of kinds) this.writePoolEvent(kind, atMs, role, raw, step.signals, tagged);
+  }
+
+  /** One capture file: the allowlisted keys of this body (poolOutRecord.ts). POOL_EVENT_KEEP are kept, and the oldest
+   *  first-fault captures go first (poolEventsToDrop), so they are not simply the newest. The
+   *  name is built from the instant, the kind and the panel's role only. A failure is logged once and costs nothing else. */
+  private writePoolEvent(kind: PoolEventKind, atMs: number, role: { index: number; label: string }, raw: Record<string, unknown>, signals: PoolSignals | null, tagged: (line: string) => string): void {
+    const dir = this.poolEventsDir;
+    if (!dir) return;
+    try {
+      mkdirSync(dir, { recursive: true });
+      atomicWriteFileSync(resolve(dir, poolEventFileName(kind, atMs, role.index)), poolEventCapture({ kind, atMs, panel: role.label, verdicts: signals ? poolVerdictsText(signals) : null, raw }));
+      const names = readdirSync(dir).filter((n) => POOL_EVENT_FILE.test(n));
+      // Too many: the oldest first-fault captures go first, so a run of streak starts cannot push a raise's capture out.
+      const drop = poolEventsToDrop(names);
+      for (const old of drop) unlinkSync(resolve(dir, old));
+      const kept = names.length - drop.length;
+      this.logger(tagged(`pool-out: captured the panel's keys at "${kind}" (${kept} capture${kept === 1 ? '' : 's'} kept).`));
+    } catch (e) {
+      if (!this.poolEventsWarned) {
+        this.poolEventsWarned = true;
+        (this.warnLogger ?? this.logger)(tagged(`pool-out: could not write an event capture (${(e as Error)?.message ?? e}) — the alarm and the log are unaffected.`));
+      }
+    }
+  }
+
+  /** v1.208.0 — the capture files on disk, oldest first (the debug view lists them by index; none is served by name). */
+  poolEventNames(): string[] {
+    if (!this.poolEventsDir) return [];
+    try {
+      return readdirSync(this.poolEventsDir).filter((n) => POOL_EVENT_FILE.test(n)).sort();
+    } catch {
+      return [];
+    }
+  }
+
+  /** v1.208.0 — every panel's standing "Core out of the backup pool" alarm, by serial, for the ConnectivityContext
+   *  (alerts.ts computeAlerts). From the STORE's state, not from a projection: an alarm stands through an offline
+   *  panel, a stale shadow and a restart. Title and fault are latched; the detail is rebuilt here with the newest
+   *  reading. */
+  poolOutAlerts(nowMs: number): Map<string, PoolOutStanding> {
+    const out = new Map<string, PoolOutStanding>();
+    for (const [sn, st] of this.poolOutBySn) {
+      let card: PoolOutCard | null = null;
+      try {
+        card = st.episode != null ? this.poolOutCard(sn) : null;
+      } catch {
+        card = null; // the alert set then names it from the device list, as far as it can
+      }
+      // CONTAINED: the alert monitor calls this inside every pass, before computeAlerts. A failure to word one
+      // panel's alarm must not cost the pass (every other alarm), nor the alarm itself: it stands under its latched
+      // title, with a detail that says its readings could not be worded.
+      try {
+        const parts = poolOutAlertParts(st, { nowMs, timeZone: siteTimeZone() });
+        if (parts) out.set(sn, { ...parts, card });
+      } catch (e) {
+        this.poolOutFailed("a standing alarm's text could not be built", e, 'the alarm stands under its title, without its readings');
+        try {
+          const ep = st.episode;
+          if (ep) {
+            out.set(sn, {
+              severity: poolOutSeverity(st) ?? 'warning',
+              title: poolOutTitle(ep.k, ep.slots),
+              fault: poolOutFault(ep.k, ep.slots),
+              detail: "The panel's backup capacity has read under the sum of its slots. The readings behind this alarm could not be worded; the add-on's log has them.",
+              spoken: "The panel's backup capacity has read under the sum of its slots.",
+              facts: [],
+              card,
+            });
+          }
+        } catch {
+          /* not even the latched title can be read: nothing to show for this panel */
+        }
+      }
+    }
+    return out;
+  }
+
+  /** v1.208.0 — the return notice for a panel whose alarm has ended: the newest end record, worded at `nowMs`. Null
+   *  while an alarm stands for it, or when no end is on record (the monitor then sends its usual resolve text). */
+  poolOutEndNotice(sn: string, nowMs: number, notBeforeMs?: number): { title: string; body: string } | null {
+    // CONTAINED: asked inside the monitor's resolve dispatch, which retries on a failure.
+    try {
+      const st = this.poolOutBySn.get(sn);
+      if (!st || st.episode != null) return null;
+      const end = poolOutLatestEnd(st);
+      // `notBeforeMs` (the boot sweep: the time of the push being resolved): an end older than that push is another
+      // episode's, and says nothing about this one.
+      if (end && notBeforeMs != null && end.atMs < notBeforeMs) return null;
+      return end ? poolOutEndText(end, { nowMs, timeZone: siteTimeZone() }) : null;
+    } catch (e) {
+      this.poolOutFailed('the return notice could not be built', e, 'the resolve push carries the usual text');
+      return null;
+    }
+  }
+
+  /** v1.208.0 — when the alarm that was pushed at `pushedAtMs` ENDED on the tracker's evidence: the newest end record
+   *  on file, when it is dated at or after that push — whether or not another alarm stands now. Null when there is
+   *  none (the alarm pushed then still stands, or the file that held its end is lost). And null when the alarm
+   *  standing now was raised at or before that push: a push follows its own alarm's raise, so that push is this
+   *  alarm's, whatever an end record's date says (a host clock set back between an end and the next raise dates the
+   *  end AFTER the push of the alarm that followed it, and the monitor would take that alarm for new at every pass).
+   *  CONTAINED. */
+  poolOutEndedSince(sn: string, pushedAtMs: number): number | null {
+    try {
+      const st = this.poolOutBySn.get(sn);
+      const end = st ? poolOutLatestEnd(st) : null;
+      if (st == null || end == null || end.atMs < pushedAtMs) return null;
+      return st.episode != null && st.episode.raisedAtMs <= pushedAtMs ? null : end.atMs;
+    } catch (e) {
+      this.poolOutFailed('the end on file could not be read', e, 'the alarm standing is taken as the one already announced');
+      return null;
+    }
+  }
+
+  /** v1.208.0 — may the boot orphan sweep resolve this panel's pool-out alert? Only once its tracker has, IN THIS
+   *  PROCESS, raised or seen a full clear dwell of healthy capacity, or holds the END of that alarm on file: an end
+   *  record at or after `pushedAtMs`, the time of the push being resolved (poolOut.ts poolOutOrphanHoldReleased). A
+   *  panel with no tracker state has none of them. CONTAINED: the sweep calls this inside the monitor's pass, and a
+   *  state it cannot read is held, never a throw. */
+  poolOutOrphanReleased(sn: string, pushedAtMs?: number): boolean {
+    try {
+      const st = this.poolOutBySn.get(sn);
+      return st != null && poolOutOrphanHoldReleased(st, pushedAtMs);
+    } catch (e) {
+      this.poolOutFailed('the hold of the boot sweep could not be read', e, 'the Resolved of this alert stays held');
+      return false;
+    }
+  }
+
+  /** v1.208.0 — each panel's sensor state (poolOut.ts poolOutSensorState): one per panel ON THE ACCOUNT (a panel
+   *  absent from PANEL_ABSENT_LISTS device lists no longer holds the plant's state at unknown), and one per panel with
+   *  an alarm standing wherever it is listed (a missing panel does not end an alarm). A panel with no tracker state
+   *  reads unknown. */
+  poolOutSensorStates(nowMs: number): Array<'on' | 'off' | 'unknown'> {
+    const standing = [...this.poolOutBySn].filter(([, st]) => st.episode != null).map(([sn]) => sn);
+    return [...new Set([...this.accountPanels(), ...standing])].sort().map((sn) => {
+      const st = this.poolOutBySn.get(sn);
+      const state = st ? poolOutSensorState(st, nowMs) : 'unknown';
+      // The state file was on disk at this start and could not be restored: what it held for this panel (an alarm, a
+      // reference of every slot) is gone. OFF then, on a roster that leaves out a slot the panel's data holds, says
+      // only that the remaining slots add up; a Core that was out with its slot no longer listed as connected reads
+      // exactly so. Unknown until a start that restores a file. (With no file at all a first start cannot be told
+      // from a lost one, and a panel with an empty slot would never read off: that case is in Known limits.)
+      if (state === 'off' && st && this.poolOutLoadLost) {
+        const diag = this.poolDiagBySn.get(sn)?.diag;
+        if (diag && poolReferenceLeavesOut(diag, poolRoster(diag, st.baseline)).length > 0) return 'unknown';
+      }
+      return state;
+    });
+  }
+
+  /** v1.208.0 — poolOutSensorStates for the two Home Assistant payload builders, CONTAINED: a failure here must not
+   *  cost the whole state publish. It reads as one unknown panel (the plant's state is then unknown, never OFF). */
+  poolOutSensorStatesSafe(nowMs: number): Array<'on' | 'off' | 'unknown'> {
+    try {
+      return this.poolOutSensorStates(nowMs);
+    } catch (e) {
+      this.poolOutFailed('the sensor state could not be read', e, 'Home Assistant reads unknown');
+      return ['unknown'];
+    }
+  }
+
+  /** v1.208.0 — what the recorder writes for one panel (poolOutRecord.ts poolRecordMetrics): the reader's view of the
+   *  newest REST body, the tracker's verdicts on it and the tracker's state. */
+  poolRecord(sn: string): { diag: PoolDiag | null; signals: PoolSignals | null; state: PoolOutState | null } {
+    return { diag: this.poolDiagBySn.get(sn)?.diag ?? null, signals: this.poolOutLastBySn.get(sn)?.signals ?? null, state: this.poolOutBySn.get(sn) ?? null };
+  }
+
+  /** v1.208.0 — GET /api/debug/pool-out. Panels by role; no serial. */
+  poolOutDebug(nowMs: number): Record<string, unknown> {
+    const sns = [...new Set([...shp2Panels(this.snap.devices).sns, ...this.poolOutBySn.keys()])].sort();
+    return poolOutDebugView(sns.map((sn) => ({
+      panel: this.snap.devices[sn] ? this.poolOutRole(sn).label : 'a panel not in the device list',
+      state: this.poolOutBySn.get(sn) ?? null,
+      diag: this.poolDiagBySn.get(sn)?.diag ?? null,
+      diagAtMs: this.poolDiagBySn.get(sn)?.atMs ?? null,
+      signals: this.poolOutLastBySn.get(sn)?.signals ?? null,
+      skip: this.poolOutLastBySn.get(sn)?.skip ?? null,
+    })), this.poolEventNames(), nowMs);
+  }
+
   /** Replace the full raw quota for a device (called after a REST refresh). */
   setDeviceQuota(sn: string, raw: Record<string, unknown>, source: 'rest' | 'mqtt' = 'rest') {
     const cur = this.snap.devices[sn];
@@ -1247,6 +1710,9 @@ export class SnapshotStore extends EventEmitter {
       this.bodySeen.set(sn, body.seen);
       if (body.isNew) cur.contentNewAtMs = nowQ;
     }
+    // v1.208.0 — the pool-out tracker reads this body: the RAW map (never the projection's held trio), stamped with
+    // the body's own time, with the latch as it stands after this poll.
+    if (source === 'rest' && cur.projection?.kind === 'shp2') this.foldPoolOut(sn, cur, raw, nowQ, witness, latched);
     if (latched !== wasStale) {
       // v1.187.10 (log review) — the latch SETTING is the root condition (grid presence UNKNOWN, the
       // telemetry-blind verdict) and goes to the warn sink; its parallel symptoms (msg-rate-floor,

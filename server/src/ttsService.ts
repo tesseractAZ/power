@@ -63,7 +63,9 @@ export function buildAlertMessage(level: 'red' | 'yellow' | 'green', alerts: Ale
   const cat = ttsifyCategory(primary.category);
   const loc = ttsifyLocation(primary.coreNum, primary.packNum);
   const title = verbalizeForTts(primary.title);
-  const detail = verbalizeForTts(shortenDetail(primary.detail));
+  // v1.208.0 — an alert that carries its own spoken sentence (Alert.spokenDetail) is read with it; every other with
+  // the cut of its detail, as before.
+  const detail = verbalizeForTts(primary.spokenDetail ?? shortenDetail(primary.detail));
 
   const head = loc
     ? `${prefix} ${cat} ${loc}. ${title}.`
@@ -78,6 +80,12 @@ export function buildAlertMessage(level: 'red' | 'yellow' | 'green', alerts: Ale
   }
   return `${head}${body}`;
 }
+
+/** v1.208.0 — the id stem of the one alert that yields the spoken message to every other (see pickPrimaryAlert). */
+const YIELDS_THE_VOICE = 'shp2-pool-out';
+/** That alert on the house panel (the bare stem) or on any other panel (the stem, "-", the panel's serial): the same
+ *  two forms every other reader of the id tests, never a bare prefix another family's id could start with. */
+const yieldsTheVoice = (id: string): boolean => id === YIELDS_THE_VOICE || id.startsWith(`${YIELDS_THE_VOICE}-`);
 
 /** Pick the most important alert to feature in the spoken message.
  *  Prefer critical over warning, then prefer ones with location, then
@@ -104,6 +112,14 @@ export function pickPrimaryAlert(alerts: Alert[], level: 'red' | 'yellow'): Aler
     Battery: 1, SHP2: 2, Solar: 3, Grid: 4, Thermal: 5, Connectivity: 6,
   };
   candidates.sort((a, b) => {
+    // v1.208.0 — "Core out of the backup pool" (shp2-pool-out) yields to every other candidate of its level. It can
+    // stand for days (a Core out, the grid absent for a whole outage), and as an SHP2 alert it would outrank every
+    // Grid, Thermal and Connectivity alert for all that time — "Reserve alarm blind" among them — so that one raised
+    // beside it was counted and pushed but never named aloud. It is pushed at once at any hour with its whole detail;
+    // the voice names it when it is the only alert of its level.
+    const yieldA = yieldsTheVoice(a.id) ? 1 : 0;
+    const yieldB = yieldsTheVoice(b.id) ? 1 : 0;
+    if (yieldA !== yieldB) return yieldA - yieldB;
     const locA = (a.coreNum != null) ? 0 : 1;
     const locB = (b.coreNum != null) ? 0 : 1;
     if (locA !== locB) return locA - locB;
@@ -429,6 +445,7 @@ const ES_TITLE_BY_ID_PREFIX: ReadonlyArray<readonly [string, string]> = [
   ['dpu-err', 'Código de error del inversor'],
   ['shp2-src-err', 'Error en una fuente de energía'],
   ['shp2-src-hw', 'Problema de enlace en una fuente'],
+  ['shp2-pool-out', 'Core fuera del respaldo'], // v1.208.0 — a Core out of the panel's backup pool (esTitleOf reads the count in front of it when it is more than one)
   ['shp2-below-reserve', 'Respaldo en o por debajo de la reserva'], // v1.17.0 F14 — inclusive floor: 'at or below', not strictly below
   ['shp2-near-reserve', 'Respaldo acercándose a la reserva'],
   ['circuit-overload', 'Circuito cerca del límite del disyuntor'],
@@ -442,6 +459,16 @@ function esTitleFor(id: string): string | null {
     if (id === prefix || id.startsWith(prefix + '-')) return es;
   }
   return null;
+}
+
+/** v1.208.0 — the Spanish title of one alert. "Core fuera del respaldo" says ONE Core, and it is the only title heard
+ *  when the English pass is lost: with two or three out, the count latched in the alert's `fault` token
+ *  (`out:<slots>;k=<count>`, poolOut.ts poolOutFault) is read in front of the plural. Every other family: its title. */
+function esTitleOf(alert: Pick<Alert, 'id' | 'fault'>): string | null {
+  const es = esTitleFor(alert.id);
+  if (es == null || !yieldsTheVoice(alert.id)) return es;
+  const k = Number(/;k=(\d+)$/.exec(alert.fault ?? '')?.[1] ?? 1);
+  return k > 1 ? `${k} Cores fuera del respaldo` : es;
 }
 
 /**
@@ -471,9 +498,9 @@ export function buildAlertMessageEs(level: 'red' | 'yellow' | 'green', alerts: A
   const cat = categoryEs(primary.category);
   const loc = locationEs(primary.coreNum, primary.packNum);
   // Spanish title when the family is known; otherwise the English title (verbalized).
-  const title = esTitleFor(primary.id) ?? verbalizeForTts(primary.title);
+  const title = esTitleOf(primary) ?? verbalizeForTts(primary.title);
   // Detail tail falls back to the English original (verbalized) — by design.
-  const detail = verbalizeForTts(shortenDetail(primary.detail));
+  const detail = verbalizeForTts(primary.spokenDetail ?? shortenDetail(primary.detail));
 
   const head = loc
     ? `${prefix} ${cat} ${loc}. ${title}.`

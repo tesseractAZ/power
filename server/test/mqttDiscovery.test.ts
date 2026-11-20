@@ -459,6 +459,12 @@ test('mqtt-discovery: every value_json key a sensor references is emitted by bui
   assert.ok(mtStart > 0, 'could not locate maintenanceStateFields return block');
   for (const m of src.slice(mtStart, src.indexOf('};', mtStart)).matchAll(/^\s+([a-z][a-z0-9_]*):/gm)) emitted.add(m[1]);
   assert.ok(src.includes('      ...maintenanceStateFields(maintenance?.active() ?? []'), 'buildState spreads the maintenance fields');
+  // v1.208.0 — … plus poolCoreOutStateFields() (this file): whether a Core is out of a panel's backup pool,
+  // spread into buildState and /api/ha-state alike.
+  const poStart = src.indexOf('return {', src.indexOf('export function poolCoreOutStateFields'));
+  assert.ok(poStart > 0, 'could not locate poolCoreOutStateFields return block');
+  for (const m of src.slice(poStart, src.indexOf('};', poStart)).matchAll(/^\s+([a-z][a-z0-9_]*):/gm)) emitted.add(m[1]);
+  assert.ok(src.includes('      ...poolCoreOutStateFields(typeof store.poolOutSensorStates'), 'buildState spreads the pool-out field');
 
   const missing = referenced.filter((k) => !emitted.has(k)).sort();
   assert.deepEqual(missing, [], `Sensors reference value_json keys buildState never emits: ${missing.join(', ')}`);

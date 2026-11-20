@@ -84,7 +84,7 @@ ecoflow_panel/availability                  (online/offline; LWT = offline)
 
 #### Entity categories
 
-`SENSORS[]` (88) and `BINARY_SENSORS[]` (12), plus the four alarm-priority switches, the End All
+`SENSORS[]` (88) and `BINARY_SENSORS[]` (13), plus the four alarm-priority switches, the End All
 Maintenance button (v1.197.0) and two dynamic sensors per SHP2 circuit (energy and power; 24 on a
 12-channel panel). Selected groups:
 
@@ -314,7 +314,7 @@ all. So:
 |---|---|---|
 | availability `online` | **reconnects only**, first (v1.187.10) | a retained LWT `offline` holds every entity unavailable regardless of what follows (live: 9+ h, 2026-07-12). On the process's first connect it is asserted by the state cycle, right after the fresh payload (see Availability + expiry) |
 | `clearLegacyDiscovery()` | **no — once** | empty payloads to *retired* config topics need saying once; repeating them forever is traffic that never stops |
-| `publishDiscovery()` | yes | 105 retained publishes of unchanged payloads (88 sensors, 12 binary sensors, 4 switches, 1 button); HA re-processes them as no-ops |
+| `publishDiscovery()` | yes | 106 retained publishes of unchanged payloads (88 sensors, 13 binary sensors, 4 switches, 1 button); HA re-processes them as no-ops |
 | invalidate circuit signature | yes | the per-circuit configs are retained on the same broker and vanish with the same store |
 | `publishedCircuitChannels` | **never reset** | not a latch — it is the *orphan ledger*, the memory of which circuits to clear a config topic for. Reset it and a removed circuit's retained config sits on the broker forever with nothing left to remove it |
 | switch subscriptions | yes | MQTT subscriptions do not survive a clean-session reconnect |
@@ -412,6 +412,7 @@ first); surfaced at **`GET /api/writes/log`**.
 | `/api/ha-state` | GET | none | flat HA-facing payload (power flow, backup pool, forecast, degradation, alerts, runway, RTE, clipping, curtailment, self-consumption, lifetime) |
 | `/api/panel-info` | GET | none | `{ writeAuthRequired:true, sameOriginOk:true, ingressOk:true, tokenHeader:'X-Panel-Write-Token', tokenPath }` |
 | `/api/debug/raw?sn=` | GET | none | `{ sn, raw, mqtt (by cmdId), mqttFlat, source, lastMqttAt, mqttMsgCount }` |
+| `/api/debug/pool-out` | GET | none | the pool-out tracker per panel, by role and never by serial (the reference, the four verdicts on the newest body with their inputs, the streak, the episode, the reader's view of that body) and the event capture files by index; it takes no parameter (v1.208.0) |
 | `/api/debug/mqtt-summary` | GET | none | per-SN msg counts + cmdIds seen |
 | `/api/version` | GET | none | `{ version, builtAt, ref }` (build-time env) |
 | `/api/device/refresh-cloud/:sn` | POST | write | no-op cloud-presence refresh |

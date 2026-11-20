@@ -783,7 +783,7 @@ when that tone is deleted.
 #### 8.1 `buildAlertMessage(level, alerts)` → spoken English sentence
 
 - `green` → `"All clear. All stations report normal."`
-- `red`/`yellow` → picks a **primary alert** (`pickPrimaryAlert`: only alerts of the level's severity — critical for red, warning for yellow — then those with a location (`coreNum`), then category rank Battery > SHP2 > Solar > Grid > Thermal > Connectivity; never a non-annunciating or `audible: false` alert. The tick passes only the alerts the condition counts, `conditionNamePool`, v1.187.11) and builds:
+- `red`/`yellow` → picks a **primary alert** (`pickPrimaryAlert`: only alerts of the level's severity — critical for red, warning for yellow — then, since v1.208.0, any alert before `shp2-pool-out` (a Core out of the backup pool can stand for days, and yields the message to every other alert of its level; the test is the exact id, or the id, `-` and a panel serial, never a bare prefix), then those with a location (`coreNum`), then category rank Battery > SHP2 > Solar > Grid > Thermal > Connectivity; never a non-annunciating or `audible: false` alert. The tick passes only the alerts the condition counts, `conditionNamePool`, v1.187.11) and builds:
 
   ```
   <ISA priority prefix> <Category clause> <Location>. <Title>. <detail>[ Acknowledge at console.][ Repeat. <prefix> <Title>.]
@@ -800,6 +800,21 @@ when that tone is deleted.
   figure was cut short ("about $2." for $2.19 on every spoken `peak-grid-draw`
   with confirmed rates; "load1 6." for 6.37 on host pressure). A no-primary
   fallback derives the prefix from the level's severity.
+
+  **An alert's own spoken sentence (v1.208.0).** An alert that carries
+  `spokenDetail` is read with it in place of that cut, in both languages. One
+  producer sets it: `shp2-pool-out` (`poolOut.ts` `poolOutSpoken`), "Backup
+  capacity reads 61.4 of 92.2 kWh." and, when the grid made the alarm critical,
+  "No grid reported at 23:13." Its detail is written for the push and the card,
+  and a critical says the title twice around the detail: with the detail's lead
+  the English message ran to 349–446 characters, more than the first of two
+  passes has time for at a 20 s pass limit (17 s; about 354 characters at the
+  rate measured for v1.207.2: 318 characters in 12.8 to 13.9 s, about 1.5 s
+  more after a change of voice). The critical shapes the tests build are 253
+  to 341 characters, and `poolOutAlert.test.ts` holds every one at or under
+  `POOL_OUT_SPOKEN_MESSAGE_MAX_CHARS` (345). At the default 12 s limit a
+  critical of this alarm can still lose its English pass on a slow engine:
+  the frame alone, with the title twice, is 182 to 234 characters.
 
 #### 8.2 `verbalizeForTts(s)` — the normalizer
 
@@ -832,7 +847,7 @@ Unit rules are number-anchored so device SNs (`XXX0015`), error codes, and prose
 `buildAlertMessageEs` mirrors the English builder with fully Spanish framing
 (`priorityAnnouncementPrefixEs`, `categoryEs`, `locationEs`, `numberWordEs`). The
 **title** is translated for broadcast-eligible families via `ES_TITLE_BY_ID_PREFIX`
-(an id-prefix map, longer prefixes first), else the English title is read; the
+(an id-prefix map, longer prefixes first; `shp2-pool-out` reads "Core fuera del respaldo", and with two or three Cores out the count latched in its `fault` token is read in front of the plural, "2 Cores fuera del respaldo", v1.208.0), else the English title is read; the
 free-form **detail tail** falls back to the English original (verbalized) — by
 design, no translation API on the alarm path. `verbalizeForTtsEs` is the light
 Spanish normalizer (templates are authored spoken-ready, so it only converts
