@@ -305,8 +305,10 @@ const MUTANTS = [
   {
     id: 'xxxiv. ★★★ the release job is unbounded',
     file: IMG,
-    find: '    timeout-minutes: 45\n',
-    to: '    # MUTANT\n',
+    // 2026-11-19: anchored with the comment above it, since ci.yml's docs job bound (xlvii) is now
+    // 45 too, and check-mutant-anchors.mjs counts an anchor across every file the harness targets.
+    find: '    # takes ~2 min.\n    timeout-minutes: 45\n',
+    to: '    # takes ~2 min.\n    # MUTANT\n',
     why: 'A stall anywhere runs the job to the 6 h limit and cancels the Release (v1.187.1).',
   },
   {
@@ -397,9 +399,11 @@ const MUTANTS = [
   {
     id: 'xlvii. ★★ the PR docs gate is unbounded',
     file: CI,
-    // 2026-11-19: the job bound went 40 → 45 (its steps' bounds now sum to 38 min).
-    find: '    timeout-minutes: 45\n',
-    to: '    # MUTANT\n',
+    // 2026-11-19: the job bound went 40 → 45 (its steps' bounds now sum to 38 min). Anchored with
+    // the comment above it: the release job's bound in images.yml (xxxiv) is also 45, and
+    // check-mutant-anchors.mjs counts an anchor across every file the harness targets.
+    find: "    # checkout and the upload, as the release job's rule.\n    timeout-minutes: 45\n",
+    to: "    # checkout and the upload, as the release job's rule.\n    # MUTANT\n",
     why: 'A mirror stall holds a pull request\'s check for six hours.',
   },
   {
