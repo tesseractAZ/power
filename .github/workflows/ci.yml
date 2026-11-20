@@ -247,19 +247,30 @@ jobs:
     # release run for the 6 h platform limit. On the PR this job is a hard gate, so a stall
     # now ends as a red check in minutes rather than a check held for six hours.
     # 2026-10-26: 40 — the job bound stays above its steps' bounds (12 + 5 + 10 + 5 min).
-    timeout-minutes: 40
+    # 2026-11-19: 45 — the steps' bounds now sum to 38 min (1 + 14 + 5 + 13 + 5), plus 5 for the
+    # checkout and the upload, as the release job's rule.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Prefer the main Ubuntu archive
         # 2026-10-26: the runners' first apt mirror (azure.archive.ubuntu.com) served packages at
         # ~39 kB/s on several runs, timing out the pandoc and LibreOffice installs; apt's fallback,
-        # archive.ubuntu.com, was fast. The first entry is dropped when another one is listed.
+        # archive.ubuntu.com, was fast.
+        # 2026-11-19: the first mirror is regional, and the runner's cloud decides it: an AWS runner
+        # lists <region>.ec2.archive.ubuntu.com, which the azure-only filter kept (LibreOffice's 100 MB
+        # took 1-2 min there, against 3-12 s from archive.ubuntu.com on the Azure runners). apt leaves
+        # a mirror only when it fails, never when it is slow. Every regional *.archive.ubuntu.com
+        # mirror is dropped, and only while archive.ubuntu.com stays listed. grep and cp, not sed -i,
+        # so the script behaves the same under GNU and BSD tools (the test runs it).
         timeout-minutes: 1
         run: |
           f=/etc/apt/apt-mirrors.txt
-          if [ -f "$f" ] && grep -qv 'azure\.archive\.ubuntu\.com' "$f"; then
-            sudo sed -i '/azure\.archive\.ubuntu\.com/d' "$f"
+          regional='://[^/]+\.archive\.ubuntu\.com/'
+          if [ -f "$f" ] && grep -q '://archive\.ubuntu\.com/' "$f"; then
+            grep -E "$regional" "$f" | sed 's/^/dropped: /' || true
+            grep -vE "$regional" "$f" > "$RUNNER_TEMP/apt-mirrors.txt"
+            sudo cp "$RUNNER_TEMP/apt-mirrors.txt" "$f"
           fi
           cat "$f" 2>/dev/null || true
 
@@ -267,18 +278,25 @@ jobs:
         # 2026-10-26: the runners' azure apt mirror trickled the 29 MB package at ~39 kB/s (7 min, then
         # killed mid-unpack, which left the dpkg lock held for the retry). The pinned upstream .deb from
         # GitHub, checksummed, comes first; apt stays the fallback.
-        timeout-minutes: 12
+        # 2026-11-19: the fallback says when it ran, so a pin that stopped matching cannot pass as a
+        # green check with apt doing the work. Like every apt install in this job, it downloads under
+        # its own bound first and only then installs from the local cache: a bound can then fire only
+        # while packages download, never while dpkg unpacks them.
+        timeout-minutes: 14
         env:
           APT_OPTS: -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o DPkg::Lock::Timeout=60
           PANDOC_DEB_URL: https://github.com/jgm/pandoc/releases/download/3.7.0.2/pandoc-3.7.0.2-1-amd64.deb
           PANDOC_DEB_SHA256: 4db8bad3d9f8451a3d52171664f3c58b08af6450fbd54a28dd05f6b00b0bbb04
         run: |
           command -v pandoc >/dev/null || {
-            { curl -fsSL --retry 3 --max-time 120 -o /tmp/pandoc.deb "$PANDOC_DEB_URL" &&
+            { curl -fsSL --retry 2 --max-time 60 -o /tmp/pandoc.deb "$PANDOC_DEB_URL" &&
               echo "$PANDOC_DEB_SHA256  /tmp/pandoc.deb" | sha256sum -c - &&
-              sudo timeout -k 10 120 dpkg -i /tmp/pandoc.deb; } ||
-            { sudo timeout -k 10 120 apt-get $APT_OPTS update &&
-              sudo timeout -k 10 420 apt-get $APT_OPTS install -y pandoc; }
+              sudo timeout -k 10 60 dpkg -i /tmp/pandoc.deb &&
+              echo "pandoc: installed from the pinned upstream .deb"; } ||
+            { echo "::warning::The pinned pandoc .deb did not install; installing pandoc with apt." &&
+              sudo timeout -k 10 120 apt-get $APT_OPTS update &&
+              sudo timeout -k 10 300 apt-get $APT_OPTS install -y --download-only pandoc &&
+              sudo timeout -k 10 120 apt-get $APT_OPTS install -y pandoc; }
           }
           pandoc --version | head -1
 
@@ -294,14 +312,17 @@ jobs:
       # PR this is a HARD gate (if-no-files-found: error below): a documentation or
       # toolchain change that can't produce a PDF fails the check rather than
       # silently shipping a release without one.
+      # 2026-11-19: download first, then install from the cache (see Ensure pandoc), and the same dpkg
+      # lock wait as the pandoc step, for a dpkg its fallback left running.
       - name: Ensure LibreOffice (docx → pdf)
-        timeout-minutes: 10
+        timeout-minutes: 13
         env:
-          APT_OPTS: -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
+          APT_OPTS: -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o DPkg::Lock::Timeout=60
         run: |
           command -v libreoffice >/dev/null || {
             sudo timeout -k 10 120 apt-get $APT_OPTS update &&
-            sudo timeout -k 10 420 apt-get $APT_OPTS install -y --no-install-recommends libreoffice-writer
+            sudo timeout -k 10 420 apt-get $APT_OPTS install -y --download-only --no-install-recommends libreoffice-writer &&
+            sudo timeout -k 10 180 apt-get $APT_OPTS install -y --no-install-recommends libreoffice-writer
           }
           libreoffice --version | head -1
 

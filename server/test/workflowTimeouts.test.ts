@@ -262,3 +262,125 @@ test('★★ "highest" counts strict vX.Y.Z tags only, compared as numbers (sort
   // Only non-strict tags: no strict highest, so GitHub decides.
   assert.ok(!releaseArgs(['v1.2.3-rc1']).some((a) => a.startsWith('--latest')));
 });
+
+/* ── 2026-11-19: the PR docs job leaves the runner's regional apt mirror, on either cloud ── */
+// The runner's /etc/apt/apt-mirrors.txt lists a regional mirror first and the cloud picks it:
+// azure.archive.ubuntu.com on an Azure runner, <region>.ec2.archive.ubuntu.com on an AWS one. apt
+// leaves a mirror only when it fails, never when it is slow, and the 10-26 filter matched only the
+// Azure name: on AWS runners LibreOffice's 100 MB took 1-2 min, against 3-12 s from the main archive.
+
+const MIRROR_STEP = stepNamed(DOCS_CI, 'Prefer the main Ubuntu archive');
+const MAIN_ARCHIVE = 'https://archive.ubuntu.com/ubuntu/\tpriority:2\n';
+const SECURITY_ARCHIVE = 'https://security.ubuntu.com/ubuntu/\tpriority:3\n';
+const AZURE_FIRST = 'http://azure.archive.ubuntu.com/ubuntu/\tpriority:1\n';
+const AWS_FIRST = 'http://us-east-2.ec2.archive.ubuntu.com/ubuntu/\tpriority:1\n';
+
+/** Runs the mirror step's own script against a mirror list (null: the runner has none). */
+function mirrorStep(list: string | null): { left: string | null; out: string } {
+  const LIST = '/etc/apt/apt-mirrors.txt';
+  const script = runBlock(MIRROR_STEP);
+  assert.ok(script.includes(LIST), `the step no longer edits ${LIST}`);
+  const dir = mkdtempSync(join(tmpdir(), 'ef-mirror-step-'));
+  try {
+    const bin = join(dir, 'bin');
+    const runnerTemp = join(dir, 'runner-temp');
+    mkdirSync(bin);
+    mkdirSync(runnerTemp);
+    // `sudo` runs its command as the test's user; the list itself is a temp file.
+    writeFileSync(join(bin, 'sudo'), '#!/bin/sh\nexec "$@"\n');
+    chmodSync(join(bin, 'sudo'), 0o755);
+    const f = join(dir, 'apt-mirrors.txt');
+    if (list != null) writeFileSync(f, list);
+    writeFileSync(join(dir, 'step.sh'), script.split(LIST).join(f));
+    // The runner's shell for `run:` is bash -e -o pipefail.
+    const r = spawnSync('bash', ['-e', '-o', 'pipefail', join(dir, 'step.sh')], {
+      cwd: dir, env: { PATH: `${bin}:${process.env.PATH}`, RUNNER_TEMP: runnerTemp }, encoding: 'utf8',
+    });
+    assert.equal(r.status, 0, `the step failed: ${r.stderr}`);
+    return { left: list == null ? null : readFileSync(f, 'utf8'), out: r.stdout };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('★★★ the regional mirror is dropped on either cloud, the main and security archives kept', () => {
+  for (const first of [AZURE_FIRST, AWS_FIRST]) {
+    const { left, out } = mirrorStep(first + MAIN_ARCHIVE + SECURITY_ARCHIVE);
+    assert.equal(left, MAIN_ARCHIVE + SECURITY_ARCHIVE, `left after dropping ${first.trim()}`);
+    assert.ok(out.includes(`dropped: ${first.trim()}`), `the log names what was dropped: ${out}`);
+  }
+});
+
+test('★★★ nothing is dropped unless the main archive stays listed, and a list without a regional mirror is left as it is', () => {
+  // Dropping the regional mirror here would leave apt only the security pocket.
+  const noMain = AZURE_FIRST + SECURITY_ARCHIVE;
+  assert.equal(mirrorStep(noMain).left, noMain);
+  const noRegional = MAIN_ARCHIVE + SECURITY_ARCHIVE;
+  const r = mirrorStep(noRegional);
+  assert.equal(r.left, noRegional);
+  assert.ok(!r.out.includes('dropped:'), r.out);
+  // A runner image with no mirror list at all: the step passes and changes nothing.
+  assert.equal(mirrorStep(null).left, null);
+});
+
+test('★★ the mirror step runs before any package is fetched', () => {
+  const at = DOCS_CI.steps.indexOf(MIRROR_STEP);
+  for (const s of DOCS_CI.steps.filter((x) => /apt-get|dpkg|curl/.test(x.text))) {
+    assert.ok(DOCS_CI.steps.indexOf(s) > at, `${s.name} fetches before the mirror list is fixed`);
+  }
+});
+
+/** A step's commands, one per line, continuation-free (the docs job's are `&&`-chained per line). */
+const commands = (s: Step) => runBlock(s).split('\n').map((l) => l.trim()).filter(Boolean);
+
+test('★★ every apt install in the docs job downloads under its bound first, then installs from the cache', () => {
+  // A bound that fires while dpkg unpacks leaves a half-configured package and a dpkg holding
+  // the lock (10-26). Downloading first puts the long, network-bound part where a kill is harmless.
+  let installs = 0;
+  for (const s of DOCS_CI.steps.filter((x) => /^ {8}run: \|$/m.test(x.text))) {
+    const pending = new Set<string>();
+    for (const c of commands(s)) {
+      const m = /apt-get \$APT_OPTS install -y( --download-only)?( --no-install-recommends)? ([^&;]+?)(?: &&|;|$)/.exec(c);
+      if (!m) continue;
+      if (m[1]) { pending.add(m[3]); continue; }
+      assert.ok(pending.delete(m[3]), `${s.name}: ${m[3]} installs without a bounded download first`);
+      installs++;
+    }
+    assert.equal(pending.size, 0, `${s.name}: downloaded but never installed: ${[...pending]}`);
+  }
+  assert.equal(installs, 2, 'pandoc (fallback) and LibreOffice');
+});
+
+test('★★ every docs-job apt step waits for the dpkg lock', () => {
+  for (const s of DOCS_CI.steps.filter((x) => /apt-get/.test(x.text))) {
+    assert.match(s.text, /APT_OPTS: .*-o DPkg::Lock::Timeout=\d+/, `${s.name}: apt fails at once on a held dpkg lock`);
+  }
+});
+
+test('★★★ pandoc is the pinned upstream .deb, checked before it is installed; the apt fallback says when it ran', () => {
+  const s = stepNamed(DOCS_CI, 'Ensure pandoc');
+  const url = /PANDOC_DEB_URL: (\S+)/.exec(s.text)?.[1] ?? '';
+  const m = /^https:\/\/github\.com\/jgm\/pandoc\/releases\/download\/([0-9.]+)\/pandoc-\1-1-amd64\.deb$/.exec(url);
+  assert.ok(m, `PANDOC_DEB_URL ${url}`);
+  // The version Ubuntu 26.04 packages, so the apt fallback builds the same manual.
+  assert.equal(m![1], '3.7.0.2');
+  assert.match(s.text, /PANDOC_DEB_SHA256: [0-9a-f]{64}\n/);
+  const run = runBlock(s);
+  const check = run.indexOf('| sha256sum -c - &&');
+  assert.ok(check >= 0 && check < run.indexOf('dpkg -i'), 'the .deb is installed only after its checksum matched');
+  const warn = run.indexOf('::warning::');
+  assert.ok(warn >= 0 && warn < run.indexOf('apt-get'), 'a pin that stopped matching must not pass silently as an apt install');
+});
+
+test('★★ each docs-job step\'s bound covers its commands\' bounds, and the job\'s covers the steps\' + 5', () => {
+  let sum = 0;
+  for (const s of DOCS_CI.steps) {
+    const t = Number(key(s, 'timeout-minutes') ?? 0);
+    sum += t;
+    let need = 0;
+    for (const b of s.text.matchAll(/timeout -k (\d+) (\d+) /g)) need += Number(b[1]) + Number(b[2]);
+    for (const c of s.text.matchAll(/curl [^\n]*--retry (\d+) --max-time (\d+) /g)) need += (Number(c[1]) + 1) * Number(c[2]);
+    if (need > 0) assert.ok(need <= t * 60, `${s.name}: commands bounded at ${need} s, step at ${t} min`);
+  }
+  assert.ok(DOCS_CI.timeout! >= sum + 5, `docs-docx job ${DOCS_CI.timeout} min vs Σ steps ${sum} min (+5 for checkout and the upload)`);
+});
