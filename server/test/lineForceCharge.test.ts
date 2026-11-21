@@ -1513,7 +1513,8 @@ test('★★ T12 (review) the line-night surfaces are wired: the ON\'s mode stam
   const tick = INDEX.slice(INDEX.indexOf('async function runForceChargeTick('), INDEX.indexOf('async function escalateForceChargeStuck('));
   assert.ok(tick.includes('const onStamp = forceChargeOnStamp(state, nowMs, action.slots, forceChargeGatesOn(legRoleOf(state)));\n'));
   assert.ok(tick.includes('    const onMode = onStamp.forceChargeMode;\n'));
-  assert.ok(tick.includes('    persistNightActuation({ ...nightActuationMem, ...onStamp });\n'));
+  // v1.209.0 — the same persist also stamps the slots the ON is not sent to (forceChargeLeftOutSlots).
+  assert.ok(tick.includes('    persistNightActuation({ ...nightActuationMem, ...onStamp, forceChargeLeftOutSlots: pool.leftOut.length > 0 ? [...pool.leftOut] : null });\n'));
   assert.ok(tick.includes('stampLegOutcome(state, { force_charge_on_at_ms: nowMs, force_charge_mode: onMode });'));
   const stamped = nfc.forceChargeOnStamp(night(), WIN_END - H, [1, 2, 3], { cost: false, line: true });
   assert.equal(stamped.forceChargeMode, 'line');

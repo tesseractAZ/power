@@ -583,8 +583,10 @@ export function computeNightChargeReadiness(
   // the physics the plan disclosed — a strike, fail-closed. With no close reading, the realized verdict as for any row
   // (the lowest pool after the close where it holds, else the stored flag). The owner's cancel after the apply is not
   // told apart (the ledger records no cancel: actuation_reverted_at_ms is every early restore's), so such a night is
-  // struck as a carried one is; a cancel before the apply is not actuated. An ON sent that never took is not seen here
-  // (no ON-verified column): the ON-failure push is its run-time word. Any other disclosed row stays exempt.
+  // struck as a carried one is; a cancel before the apply is not actuated. An ON sent that never took is not seen here:
+  // the ON-failure push is its run-time word. (v1.209.0 — the ledger now records the ON's fate, force_charge_on_verified_at_ms
+  // and the columns beside it, and this gate does not READ them: "it ran" is still force_charge_on_at_ms, an ON that was
+  // sent. The rule is unchanged.) Any other disclosed row stays exempt.
   // v1.200.0 (Fix9 review 1) — the night's reserve write never held a line it armed (lineWriteNeverHeld): a write the cloud accepted
   // and the panel never took (actuated 0, applyFailed) or one that never went or was never confirmed (the missed push's disposition,
   // on a record with a line ask), with no force-charge of ours on. A run-time refusal, graded like any actuated night; a night

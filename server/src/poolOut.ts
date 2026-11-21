@@ -1257,6 +1257,46 @@ export function poolOutSensorState(state: PoolOutState, nowMs: number): 'on' | '
   return 'off';
 }
 
+/** v1.209.0 — what the STANDING alarm says of this panel's slots, for a caller that decides with it (the force-charge's
+ *  rate and its ON targets: nightForceCharge.ts forceChargePoolSlots). */
+export interface PoolOutRead {
+  /** The slots the standing alarm names (its title's slots): ascending integers 1..SHP2_SOURCE_SLOTS, a COPY; [] with none. */
+  named: number[];
+  /** The latched count of slots out, named or not; 0 with no episode. */
+  count: number;
+  /** The capacity reads whole again and the clear dwell is running: the alarm still stands and still names its slots. */
+  returning: boolean;
+  /** DATA time of the newest usable observation; null with none. */
+  asOfMs: number | null;
+}
+
+/**
+ * v1.209.0 — the standing alarm's verdict on the panel's slots. PURE.
+ *
+ * Built from the LATCHED fields only — `episode.k`, `episode.slots`, `episode.clear` — and `lastUsableMs`: the two the
+ * alarm's title and fault token are built from (poolOutTitle, poolOutFault), so the slots named here are the slots the
+ * title names. Never from one reading's verdicts (PoolSignals), a streak before its raise, or a set still on its way
+ * through a dwell (`episode.change`): none of those has been confirmed, and this output decides which slots a
+ * force-charge is sent to. For the same reason every slot and the count are checked again here, whatever the state
+ * holds: a slot that is not an integer in 1..SHP2_SOURCE_SLOTS is left out, and a count that is not a non-negative
+ * integer is 0.
+ *
+ * No clock argument: the title has none, and the tracker's rule is that age ends no alarm. A caller that must not act
+ * on an old verdict reads `asOfMs` (forceChargePoolSlots does, for the slots it leaves out of an ON).
+ *
+ * No state, or no episode standing: nothing named, nothing counted.
+ */
+export function poolOutRead(state: PoolOutState | null | undefined): PoolOutRead {
+  const asOfMs = state?.lastUsableMs ?? null;
+  const ep = state?.episode;
+  if (ep == null) return { named: [], count: 0, returning: false, asOfMs };
+  const slots: unknown[] = Array.isArray(ep.slots) ? ep.slots : [];
+  const named = [...new Set(slots.filter((n): n is number => typeof n === 'number' && Number.isInteger(n) && n >= 1 && n <= SHP2_SOURCE_SLOTS))]
+    .sort((a, b) => a - b);
+  const count = typeof ep.k === 'number' && Number.isInteger(ep.k) && ep.k >= 0 ? ep.k : 0;
+  return { named, count, returning: ep.clear != null, asOfMs };
+}
+
 /** The boot orphan sweep may resolve this alert only once the tracker has, IN THIS PROCESS, raised or seen a full clear
  *  dwell of healthy capacity — or when the END of that alarm is on file: no episode standing, and an end record dated
  *  at or after the push being resolved (`pushedAtMs`). A lost state file must not push a "Resolved" that nothing

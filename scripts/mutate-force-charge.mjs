@@ -519,7 +519,9 @@ const MUTANTS = [
     id: 'lxvi. ★★ index.ts never passes the connected count',
     file: IDX,
     // v1.191.0 — the slot range is hwSpec's SHP2_SOURCE_SLOTS (lane E), the same three.
-    find: '    slotCount: connectedSlots.filter((n) => n >= 1 && n <= SHP2_SOURCE_SLOTS).length,',
+    // v1.209.0 — anchor moved: the count is forceChargePoolSlots' rateCount (the connected slots of that range, less the
+    // slots the pool alarm counts out; with no alarm standing, the connected count as before). Same mutant: no count passed.
+    find: '    slotCount: pool.rateCount,',
     to: '    /* MUTANT */',
     why: 'The bound exists and never runs.',
   },
