@@ -7279,6 +7279,13 @@ function sendRestoreSummary(state: ChargeLegState, restore: RestoreSummaryKind, 
       closeReadLate: lineNight != null && lineCloseReadingLate(state, nowMs),
       // (Fix10 review 1) A write the panel never read back is not told as raised. A night with no line keeps its words.
       writeUnread: lineNight != null && state.applyVerifiedAtMs == null,
+      // ★★★ v1.209.0 — a night with no line: where the pool closed against the level the evening notice named, what switched the
+      // force-charge off, and whether its ON was re-issued (notify.ts costNightAccount). The reading is the panel's own, now, as a
+      // line night's is; a night whose record carries a line keeps its own account.
+      cost: lineNight == null ? {
+        announcedLevelPct: state.announcedLevelPct, poolPct: freshPoolSocPct(nowMs), readLate: lineCloseReadingLate(state, nowMs),
+        offReason: state.forceChargeOffReason, offAtMs: state.forceChargeOffAtMs, onReissues: state.forceChargeOnRetries,
+      } : null,
     })).catch((e: any) => {
       app.log.debug(`night-charge: morning summary notify failed (${e?.message ?? e})`);
     });
