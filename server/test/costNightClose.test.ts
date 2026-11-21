@@ -933,12 +933,14 @@ test('★★★ C6 the reserve\'s own words and the expected figure ride the clo
 
 /* ══ C7 — the wiring (index.ts is not importable: its source is checked) ═══════════════════════════════ */
 
-test('★★★ C7 index.ts sendRestoreSummary passes `cost` only where the record carries no line: six fields, from the record and the live reading', () => {
+test('★★★ C7 index.ts sendRestoreSummary passes `cost` only where the record carries no line: seven fields, from the record and the live reading', () => {
   const restore = sliceOf(INDEX, 'function sendRestoreSummary(');
   assert.ok(restore.includes(
     '      cost: lineNight == null ? {\n'
     + '        announcedLevelPct: state.announcedLevelPct, poolPct: freshPoolSocPct(nowMs), readLate: lineCloseReadingLate(state, nowMs),\n'
     + '        offReason: state.forceChargeOffReason, offAtMs: state.forceChargeOffAtMs, onReissues: state.forceChargeOnRetries,\n'
+    // The slots the ON was not sent to, from the record's own field (stamped in the ON's write-ahead persist).
+    + '        leftOutSlots: state.forceChargeLeftOutSlots, // v1.209.0 — the slots the ON was not sent to (the pool alarm named their Core out of the pool)\n'
     + '      } : null,\n'), restore);
   // The line is the record's own, read once; a night that carries one keeps its close account (the lines of v1.200.0, unchanged).
   assert.ok(restore.includes('  const lineNight = forceChargeLineNightPct(state);\n'));
