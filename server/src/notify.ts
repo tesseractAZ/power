@@ -879,6 +879,9 @@ export interface NightChargeCostClose {
   offAtMs: number | null;
   /** The ON re-issues made (the record's forceChargeOnRetries). */
   onReissues: number;
+  /** The slots the ON was not sent to because the pool alarm named their Core out of the backup pool (the record's
+   *  forceChargeLeftOutSlots). null/omitted/[] = none. */
+  leftOutSlots?: number[] | null;
 }
 
 /**
@@ -1087,7 +1090,7 @@ export function buildNightChargeMorningSummary(o: {
     // ★★★ v1.209.0 — a night with no line states its close too, and says what ended its force-charge. Separate statements, so
     // every line above reads as it did; with no `cost` passed, or a line on the record, nothing here runs.
     const costAccount = linePct == null && line == null
-      ? costNightAccount(o.cost, fc, { reserve, toward, note, restored, failedOn, gridLost: o.gridLost === true }) : null;
+      ? costNightAccount(o.cost, fc, { reserve, toward, note, restored, gridLost: o.gridLost === true }) : null;
     if (costAccount != null) {
       night = costAccount.night;
       flagged = costAccount.flagged;
@@ -1614,6 +1617,9 @@ export function buildLineForceChargeAtRisk(o: {
   };
 }
 
+/** The largest magnitude a Date holds, in ms: beyond it the clock formatter throws. */
+const MAX_DATE_MS = 8.64e15;
+
 /**
  * ★★★ v1.209.0 — PURE. The morning account of a COST night whose force-charge rode it (buildNightChargeMorningSummary; `fc` is never
  * 'none'), or null where v1.208.0's words stand: no `cost` passed, no stop on the outcome, or a force-charge that never started on
@@ -1621,19 +1627,24 @@ export function buildLineForceChargeAtRisk(o: {
  *  - The force-charge, by what the record holds. Its OFF reason is 'target' only where the add-on read the pool at the stop
  *    (nightForceCharge offReason), so "reached ~S% at <clock> and was switched off there" is a reading, with or without a
  *    verified ON: a short top-up two slots finish before the third's readback check is not "never confirmed". An OFF at the
- *    window end "ran toward ~S% until the window close"; any other OFF names its clock and its cause. A re-issue of the ON is
- *    counted where one was made, and its absence said on a night the ON did not take effect.
+ *    window end "ran toward ~S% until the window close"; any other OFF names its clock and its cause, on a night whose ON
+ *    failed or was never confirmed too. A re-issue of the ON is counted where one was made, its absence said on a night
+ *    the ON did not take effect, and nothing said of it where the count on the record is not a count.
+ *  - A slot the ON was not sent to (the pool alarm named its Core out of the backup pool) is named.
  *  - The close: the pool as read when this account goes, beside the level the evening notice named. Two figures and no verdict —
  *    a whole-percent reading against a one-decimal level supports none (57% read against ~56.7%). A reading taken too long after
  *    the close is told as "reads now"; no reading is said so.
  *  - `flagged`: the lead and title of a night whose force-charge did not run, did not take effect, or was never confirmed short of
- *    its stop. null ⇒ "completed" and the restore's title, as before. A failure on some slots is "not applied on every slot",
- *    never "applied in part": a slot left out of the failed list may have been excused at the panel's ceiling, not charged.
+ *    its stop. null ⇒ "completed" and the restore's title, as before. A force-charge that never started with the pool read at or
+ *    above its stop at the close is not flagged: decideForceCharge declines a start there, and the record keeps no reason for a
+ *    start that never came. A failure on some slots is "not applied on every slot", never "applied in part": a slot left out of
+ *    the failed list may have been excused at the panel's ceiling, not charged. An empty slot list names nothing: every slot.
+ *  - A time the clock cannot print (a damaged record) is no time: the account goes without it, never throws.
  */
 function costNightAccount(
   cost: NightChargeCostClose | null | undefined,
   fc: Exclude<ForceChargeNightOutcome, { kind: 'none' }>,
-  w: { reserve: string; toward: string; note: string; restored: string; failedOn: string; gridLost: boolean },
+  w: { reserve: string; toward: string; note: string; restored: string; gridLost: boolean },
 ): { night: string; flagged: { lead: string; title: string } | null } | null {
   if (cost == null || fc.stopPct == null || !Number.isFinite(fc.stopPct)) return null;
   const stop = round1(fc.stopPct);
@@ -1641,48 +1652,70 @@ function costNightAccount(
   // The evening notice names the stop as the level only where it expects a start (nightChargeAdvisor chargeLevelPct).
   const startAnnounced = announced != null && announced === stop;
   if (fc.kind === 'neverStarted' && !startAnnounced) return null;
-  const read = cost.poolPct != null && Number.isFinite(cost.poolPct) ? round1(cost.poolPct) : null;
+  const poolRead = cost.poolPct != null && Number.isFinite(cost.poolPct) ? cost.poolPct : null;
+  const read = poolRead != null ? round1(poolRead) : null;
   const namedAfter = announced != null ? `; the evening notice named ~${announced}%` : '';
   const close = read == null ? `; the pool was not read at the close (no fresh panel reading)${namedAfter}`
     : cost.readLate === true ? `; the pool reads ${read}% now, past the window close${namedAfter}`
       : `; the pool read ${read}% at the close${announced != null ? `, against the ~${announced}% the evening notice named` : ''}`;
-  const offAt = cost.offAtMs != null && Number.isFinite(cost.offAtMs) ? cost.offAtMs : null;
-  const reached = cost.offReason === 'target' && offAt != null
-    ? `reached ~${stop}% at ${phxShortClock(offAt)} and was switched off there` : null;
-  const reissues = Number.isInteger(cost.onReissues) && cost.onReissues > 0 ? cost.onReissues : 0;
+  const offClock = cost.offAtMs != null && Number.isFinite(cost.offAtMs) && Math.abs(cost.offAtMs) <= MAX_DATE_MS
+    ? phxShortClock(cost.offAtMs) : null;
+  const atStop = cost.offReason === 'target';
+  // An OFF that ended the force-charge before the window did, for a cause other than its stop.
+  const earlyOff = cost.offReason != null && cost.offReason !== 'windowEnd' && !atStop
+    ? ` ${offClock != null ? `at ${offClock}` : 'before the window close'} (${forceChargeOffWords(cost.offReason)})` : null;
+  const reissuesKnown = Number.isInteger(cost.onReissues) && cost.onReissues >= 0;
+  const reissues = reissuesKnown ? cost.onReissues : 0;
   const reissueWords = reissues === 1 ? 'one re-issue of the ON' : `${reissues} re-issues of the ON`;
+  const afterReissue = reissues > 0 ? `, after ${reissueWords}` : '';
+  const leftOut = Array.isArray(cost.leftOutSlots) ? cost.leftOutSlots.filter((n) => Number.isInteger(n) && n >= 1) : [];
+  const leftOutWords = leftOut.length > 0
+    ? `; slot(s) ${leftOut.join(', ')} not switched on (named out of the backup pool by the pool alarm)` : '';
+  const reachedWords = `reached ~${stop}%${offClock != null ? ` at ${offClock}` : ''} and was switched off there`;
   if (fc.kind === 'ran') {
-    const ran = reached
-      ?? (cost.offReason == null ? `ran${w.toward}`
-        : cost.offReason === 'windowEnd' ? `ran${w.toward} until the window close`
-          : `ran${w.toward} until ${offAt != null ? phxShortClock(offAt) : 'before the window close'} (switched off: ${forceChargeOffWords(cost.offReason)})`);
+    // The expected figure rides the charge's own phrase, as before; on an early OFF it comes ahead of the OFF's bracket.
+    const ran = atStop ? `${reachedWords}${afterReissue}${w.note}`
+      : cost.offReason == null ? `ran${w.toward}${afterReissue}${w.note}`
+        : earlyOff == null ? `ran${w.toward} until the window close${afterReissue}${w.note}`
+          : `ran${w.toward}${w.note} and was switched off${earlyOff}${afterReissue}`;
     return {
-      night: `${w.reserve}, and force-charge ${ran}${reissues > 0 ? ` (after ${reissueWords})` : ''}${close}${w.note}; ${w.restored}`,
+      night: `${w.reserve}, and force-charge ${ran}${leftOutWords}${close}; ${w.restored}`,
       flagged: null,
     };
   }
   if (fc.kind === 'neverStarted') {
+    // The reading as read, not rounded, against the stop: decideForceCharge's own "already at the target" comparison.
+    const notNeeded = poolRead != null && cost.readLate !== true && poolRead >= fc.stopPct;
     return {
       night: `${w.reserve}${w.note}; force-charge${w.toward} never started${w.gridLost ? ' (the grid read as lost)' : ''}${close}; ${w.restored}`,
-      flagged: { lead: 'closed without its force-charge', title: 'force-charge did not run' },
+      flagged: notNeeded ? null : { lead: 'closed without its force-charge', title: 'force-charge did not run' },
     };
   }
   if (fc.kind === 'failed') {
+    const partial = fc.partialSlots != null && fc.partialSlots.length > 0;
+    const failedWords = partial
+      ? `was switched ON but did not take effect on slot(s) ${fc.partialSlots!.join(', ')} (the buy above the reserve did not happen on those slot(s))`
+      : 'was switched ON but did not take effect';
+    const reissueFact = !reissuesKnown ? '' : reissues > 0 ? `, after ${reissueWords}` : ', with no re-issue of the ON';
+    const ended = atStop ? `; the pool read ~${stop}%${offClock != null ? ` at ${offClock}` : ''} and the force-charge was switched off there`
+      : earlyOff != null ? `; it was switched off${earlyOff}` : '';
     return {
-      night: `${w.reserve}${w.note}; force-charge${w.toward} ${w.failedOn}, ${reissues > 0 ? `after ${reissueWords}` : 'with no re-issue of the ON'}${close}; ${w.restored}`,
-      flagged: fc.partialSlots != null
-        ? { lead: 'closed with its force-charge not applied on every slot', title: `force-charge not applied on slot(s) ${fc.partialSlots.join(', ')}` }
-        : { lead: 'closed without its force-charge', title: 'force-charge did not take effect' },
+      night: `${w.reserve}${w.note}; force-charge${w.toward} ${failedWords}${reissueFact}${ended}${leftOutWords}${close}; ${w.restored}`,
+      flagged: partial
+        ? { lead: 'closed with its force-charge not applied on every slot', title: `force-charge not applied on slot(s) ${fc.partialSlots!.join(', ')}` }
+        : atStop
+          ? { lead: 'closed with its force-charge ON not confirmed', title: 'force-charge ON not confirmed' }
+          : { lead: 'closed without its force-charge', title: 'force-charge did not take effect' },
     };
   }
-  if (reached != null) {
+  if (atStop) {
     return {
-      night: `${w.reserve}${w.note}; force-charge ${reached}, with no readback showing every slot ON${close}; ${w.restored}`,
+      night: `${w.reserve}${w.note}; force-charge ${reachedWords}, with no readback showing every slot ON${afterReissue}${leftOutWords}${close}; ${w.restored}`,
       flagged: null,
     };
   }
   return {
-    night: `${w.reserve}${w.note}; force-charge${w.toward} was switched ON but the panel never confirmed it${reissues > 0 ? `, after ${reissueWords}` : ''}${close}; ${w.restored}`,
+    night: `${w.reserve}${w.note}; force-charge${w.toward} was switched ON but the panel never confirmed it${afterReissue}${earlyOff != null ? `; it was switched off${earlyOff}` : ''}${leftOutWords}${close}; ${w.restored}`,
     flagged: { lead: 'closed with its force-charge unconfirmed', title: 'force-charge not confirmed' },
   };
 }
