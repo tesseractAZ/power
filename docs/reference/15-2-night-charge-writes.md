@@ -58,8 +58,10 @@ When `NIGHT_CHARGE_MODE` is `supervised` (or `auto`), each charge night runs one
    (`buildNightChargeMorningSummary`) state the expected figure read back from the armed day's
    ledger row (`expected_buy_kwh`, `ledgerExpectedBuyKwh`) — "(~34.9 kWh expected)" — or, a row
    with none, no kWh at all. The morning push states what the force-charge did, from the
-   actuation record (`forceChargeNightOutcome`): "reserve raised to 50%, and force-charge ran
-   toward ~80% (~34.9 kWh expected); the reserve is restored to 16%" when a readback proved the
+   actuation record (`forceChargeNightOutcome`). On a night with no outage line the close account
+   (the next paragraph) completes each outcome; these are the outcome's words without it:
+   "reserve raised to 50%, and force-charge ran toward ~80% (~34.9 kWh expected); the reserve is
+   restored to 16%" when a readback proved the
    ON (`forceChargeOnVerifiedAtMs`, a late apply included); "force-charge toward ~80% was switched
    ON but did not take effect" (`forceChargeOnFailedAtMs`) — or, when the failure covered only
    some of our slots (`forceChargeOnFailedSlots`, the slots the ON-failure warning named, fewer
@@ -96,10 +98,59 @@ When `NIGHT_CHARGE_MODE` is `supervised` (or `auto`), each charge night runs one
    expected to charge nothing reads "the reserve was held at 50% overnight as a floor (no charge
    was expected)", and the apply-failure warning calls it a reserve hold. A restore that ended the night early is not reported as completed: an owner
    cancel after the write ("Night-charge: cancelled — reserve restored to 16%") and a grid-loss
-   abort ("Night-charge: stopped (grid lost) — …") say so, with no figure. The armed record's
+   abort ("Night-charge: stopped (grid lost) — …") say so, with no figure; nor is a night with no
+   outage line whose force-charge did not run, did not take effect or was never confirmed short
+   of its stop (the close account's lead and title, below). The armed record's
    `buyKwh` is the worst case and is never pushed;
    only the log lines name it, labelled (`buyFiguresLogText`).
    Harness: `scripts/mutate-actuation-readback.mjs` (5 mutants).
+
+   **The close account of a night with no outage line** (`costNightAccount`). The overnight
+   summary of a night the window ended, whose record carries no outage line and whose
+   force-charge rode it, also says what ended the force-charge and gives the pool reading beside
+   the level the evening notice named. `sendRestoreSummary` passes the inputs as `cost`
+   (`NightChargeCostClose`) where `forceChargeLineNightPct` is null, and null otherwise:
+   `announcedLevelPct` (stamped at the arm from `chargeLevelPct`: the force-charge stop where the
+   notice expects a start, the written reserve where it expects none); `poolPct` (the panel's
+   pool when the summary is sent, `freshPoolSocPct`: a fresh, coherent readback, else null);
+   `readLate` (`lineCloseReadingLate`: more than 15 minutes after the add-on's close);
+   `offReason` and `offAtMs` (`forceChargeOffReason`, `forceChargeOffAtMs`); `onReissues`
+   (`forceChargeOnRetries`). A start was announced when the announced level equals the outcome's
+   stop, both at one decimal.
+   - **The force-charge, by the record.** An OFF with reason `target` and its time reads
+     "reached ~56.7% at 3:12am and was switched off there". That reason is stamped only on a pool
+     reading at or above the stop, so it stands where the ON was never verified too, as "…, with no
+     readback showing every slot ON" under the normal lead: a short top-up reaches its stop
+     before the ON's readback check, 15 minutes after the ON. OFF reason `windowEnd`: "ran toward
+     ~56.7% until the window close". No OFF reason: "ran toward ~56.7%". Any other OFF: "ran toward
+     ~56.7% until 2:30am (switched off: the run backstop)" (`forceChargeOffWords`), with "until
+     before the window close" where the record has no OFF time. A verified night with a re-issue
+     adds " (after one re-issue of the ON)". A failed night keeps its failure words and adds
+     ", with no re-issue of the ON" or ", after one re-issue of the ON"; an unconfirmed one adds
+     the second where one was made.
+   - **The close.** "; the pool read 49% at the close, against the ~56.7% the evening notice
+     named". With `readLate`: "; the pool reads 61% now, past the window close; the evening notice
+     named ~56.7%". With no reading: "; the pool was not read at the close (no fresh panel
+     reading); the evening notice named ~56.7%". With no announced level on the record the
+     "against" or "named" part is dropped. It states two figures and no verdict: the reading is a
+     whole percent, taken when the summary goes, beside a one-decimal level. The expected figure,
+     beside a force-charge that ran, follows the close.
+   - **The lead and the title.** Four outcomes take a lead other than "completed" and a title
+     that puts a flag before the restore's: "Night-charge: force-charge did not run — reserve
+     restored to 16%", or, with no readback yet, "… — reserve restore to 16% sent". Never started
+     with a start announced: lead "closed without its force-charge", flag "force-charge did not
+     run". Failed on every slot: the same lead, flag "force-charge did not take effect". Failed on
+     some slots: lead "closed with its force-charge not applied on every slot", flag "force-charge
+     not applied on slot(s) 2, 3"; never "applied in part", because a slot left out of the failed
+     list may have been excused at the panel's ceiling, not charged. Unconfirmed without a
+     `target` OFF and its time: lead "closed with its force-charge unconfirmed", flag
+     "force-charge not confirmed". Every other outcome keeps "completed" and the restore's title.
+   - **Where the account is not given.** The summary keeps the outcome's words alone with no
+     `cost` (null or omitted), with no finite stop on the outcome, and for a force-charge that
+     never started on a night whose evening notice named a level other than the stop: that notice
+     expected no start. `cost` is not read on a reserve-only night, on a night a cancel or a grid
+     loss ended, or where the input or the outcome carries a line. The mid-day summary and a
+     stood night's close take none.
 
 3. **Revert (at the window close, or immediately on a post-apply cancel or a grid loss).** v1.187.0: `REVERT_LAG_MS` is 0 (it was 5 min): a pack still under its target at the close kept grid-charging at the off-peak rate until the restore. The revert readback verification and the settling grace (`REVERT_VERIFY_AFTER_MS`, `REVERT_READBACK_GRACE_MS`) are measured from the revert itself and do not move. **Force-charge's OFF goes first on that tick** (`actuationStepOrder`, nightForceCharge.ts): whenever a force-charge OFF is due on the night's own record — window closed, no window, cancelled, or reserve already reverted (`forceChargeOffDueNow`) — the tick runs the force-charge step before the reserve step; otherwise the reserve step runs first, so the START still rides the reserve it just verified. Each step runs in its own try (`runActuationSteps`), in either order. Without this the OFF waited behind the revert PUT (writes carry no timeout of their own; undici's 300 s default applies) and the morning summary while the Cores kept grid-charging at 16–19 kW. Both are OFF-direction writes, so neither order can raise a charge. The restore stamps `actuation_reverted_at_ms` on the ledger row (the delivered-energy span's end, §7). The prior reserve value is restored. The revert path is mode-independent — it runs even if the owner flips the option back to advisory mid-night — and refuses an invalid restore value. After `REVERT_ESCALATE_AFTER = 3` consecutive CLOUD-REJECTED writes it annunciates a critical (audible + HA notification) once and keeps retrying; the floor/runway/SoC alarm spine is fully independent throughout. A successful revert sends a morning summary notification — not awaited (v1.187.0): an info push (5 s headers + 10 s body per target) never holds the tick. **v1.189.0 (review):** the summary no longer goes on the restore's cloud ACK, where it said "reserve restored to 16%" and a restore that then did not read back was paged critical half an hour later, both cards standing. It goes once (`restoreSummaryDue`, stamped `restoreSummaryAtMs` before it is sent): on the tick the restore reads back (`revertVerifiedAtMs`), in the words above ("restored"); or, when the restore's readback grace (`REVERT_VERIFY_AFTER_MS`, 5 min from the ACK) runs with no readback, saying the restore was sent and acknowledged and the panel has not read it back yet ("Night-charge: reserve restore to 16% sent"), with no "restored" anywhere. After a restart with no reading yet, the owed summary first waits for this process's first reserve reading, at most `REVERT_DEADLINE_HOLD_MAX_MS` (10 min; `restoreSummaryAwaitsFirstReading`, stamped `restoreSummaryHeldAtMs`, v1.190.1), so a restore that reading confirms gets one "restored" card. A grid-loss abort is kept on the record with the restore (`revertGridLossAbort`), so the later summary still says the grid was lost. A record from before the field reads back as already summarised (its summary went on the ACK), so an update never sends a second one.
 
@@ -407,7 +458,7 @@ written.
   unless a re-ON after it took (`forceChargeLineReOnAppliedAtMs`) or a slot read ON again; with the last
   re-ON taking on no slot and none reading ON after it, Charge Now "read off" before the close. The close reading follows, "under the 55.6% outage line"
   when under, "the pool was not read at the close" with no fresh reading; over 15 minutes late, the pool "now", no verdict (`lineCloseReadingLate`); a grid loss or cancel gives the reading then. A write never read back is told so, not "raised", there and on the banner (`lineWriteUnreadStatus`). A night with nothing to restore (no write, a foreign reserve) has its own account at the close (`lineCloseAccountDue`), a stood night the summary's. A night with no line ask
-  reads as v1.199.1, word for word (`fixtures/lineNightCostTexts.v1199.json`).
+  whose force-charge rode it has the close account of the nightly flow, item 2 (`costNightAccount`): what ended its force-charge, the pool reading beside the level the evening notice named, and a lead and title of its own where the force-charge did not run, did not take effect or was never confirmed short of its stop. It gives no verdict. With no `cost` input the summary of a night with no line ask reads as v1.199.1, word for word (`fixtures/lineNightCostTexts.v1199.json`).
 - **Strikes.** A carried night whose sizing held (`cushion_shortfall` = 0) is clean at or above its line and
   a strike, fail-closed, under it (a run-time refusal, an ON that never took, a slow pack, a late load taking
   the grid cap, below). A row with `cushion_shortfall` = 1 (disclosed, or carried with its caps note) is

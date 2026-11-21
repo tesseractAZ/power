@@ -1,3 +1,24 @@
+## 1.209.0
+
+### The morning summary of a cost night states how the night closed
+
+- **What changed.** The morning summary of a night with no outage line whose force-charge rode it now states what ended the force-charge, the pool as read when the summary is sent, and the level the evening notice named. A night whose force-charge did not run, did not take effect, or was never confirmed short of its stop no longer goes under "completed" and the plain restore title.
+  - A force-charge that ran: "reserve raised to 50%, and force-charge reached ~56.7% at 3:12am and was switched off there; the pool read 57% at the close, against the ~56.7% the evening notice named". An OFF at the window end reads "ran toward ~56.7% until the window close"; any other OFF gives its time and cause, "until 2:30am (switched off: the run backstop)". A re-issue of the ON is counted: "(after one re-issue of the ON)".
+  - A night like 2026-11-16: title "Night-charge: force-charge not applied on slot(s) 2, 3 — reserve restored to 16%", lead "closed with its force-charge not applied on every slot", and in the body "did not take effect on slot(s) 2, 3 (the buy above the reserve did not happen on those slot(s)), with no re-issue of the ON; the pool read 49% at the close, against the ~56.7% the evening notice named".
+  - The other titles: "force-charge did not run" and "force-charge did not take effect" (both under the lead "closed without its force-charge"), and "force-charge not confirmed".
+  - A reading taken over 15 minutes after the close reads "the pool reads 61% now, past the window close"; with none, "the pool was not read at the close (no fresh panel reading)".
+- **Why.** On 2026-11-16 a top-up that no slot applied closed at 49% against an announced 56.7% under the title "reserve restored" and the lead "completed". A short top-up that reaches its stop before the ON's readback check read "the panel never confirmed it"; it now reads "reached ~56.7% at 12:20am and was switched off there, with no readback showing every slot ON".
+- **What does not change.** No write, no timing, no plan figure. A night whose record carries an outage line, a reserve-only night, a night that ended early (a cancel or a grid loss) and the mid-day summary read as before. The old words also stand where the record gives no force-charge stop, and for a force-charge that never started on a night whose evening notice named a level other than that stop.
+- **Known limits.**
+  - The pool figure is the panel's reading when the summary is sent, a minute or more after the close, and is a whole percent beside a one-decimal level, so no verdict word is used.
+  - A re-issued slot is not named: the record keeps the count only.
+  - On a failure the slots listed are those still off at the check; a slot left out may have been excused at the panel's ceiling, not charged.
+  - A top-up needing under about 22 minutes of charge still switches on too late for a re-issue of its ON: the check comes 15 minutes after the ON, and no re-issue is made in the last 20 minutes of the window. The start rule is unchanged in this release.
+
+### Verification
+
+VERIFICATION-TO-BE-FILLED
+
 ## 1.208.0
 
 ### An alarm when a Core leaves the panel's backup pool, and a notice when it returns
