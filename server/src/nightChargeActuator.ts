@@ -563,6 +563,12 @@ export interface NightActuationState {
    *  (nightForceCharge.partialForceChargeOnFailureSlots), and the morning push says "on those
    *  slot(s)", as the warning did. null = no failure, or a record from before it was kept. */
   forceChargeOnFailedSlots: number[] | null;
+  /** v1.209.0 — the connected slots the ON was NOT sent to because the pool alarm named their Core out of the
+   *  panel's backup pool (nightForceCharge.forceChargePoolSlots `leftOut`), stamped with the ON in the same
+   *  write-ahead persist. They are not in `forceChargeSlots`: nothing of ours was switched on there. The morning
+   *  summary names them. null = none left out, no ON, or a record from before the field; never an empty list.
+   *  Not carried to the next night (armFromPlan starts from the empty record). */
+  forceChargeLeftOutSlots: number[] | null;
   forceChargeOffAtMs: number | null;
   forceChargeOffReason: string | null;
   forceChargeOffLastAttemptMs: number | null;
@@ -745,6 +751,7 @@ export function emptyActuationState(): NightActuationState {
     forceChargeOnAtMs: null, forceChargeSlots: null,
     forceChargeOnVerifiedAtMs: null, forceChargeOnLastAttemptMs: null, forceChargeOnRetries: 0,
     forceChargeOnFailedAtMs: null, forceChargeOnFailedSlots: null,
+    forceChargeLeftOutSlots: null,
     forceChargeOffAtMs: null,
     forceChargeOffReason: null, forceChargeOffLastAttemptMs: null, forceChargeOffRetries: 0,
     forceChargeOffVerifiedAtMs: null, forceChargeOffEscalated: false, forceChargeOffDeadlinePagedAtMs: null,
@@ -829,6 +836,9 @@ export function coerceActuationState(raw: unknown): NightActuationState {
     forceChargeOnFailedSlots: Array.isArray(o.forceChargeOnFailedSlots)
       ? o.forceChargeOnFailedSlots.filter((n): n is number => Number.isInteger(n) && (n as number) >= 1 && (n as number) <= SHP2_SOURCE_SLOTS)
       : null,
+    // v1.209.0 — as the slots above (1-3 integers, else dropped, never guessed); a list with none left is null,
+    // as the ON stamps it: the field never holds an empty list.
+    forceChargeLeftOutSlots: nonEmptySlotList(o.forceChargeLeftOutSlots),
     forceChargeOffAtMs: num(o.forceChargeOffAtMs),
     forceChargeOffReason: str(o.forceChargeOffReason),
     forceChargeOffLastAttemptMs: num(o.forceChargeOffLastAttemptMs),
@@ -912,6 +922,13 @@ function slotList(v: unknown): number[] | null {
   return Array.isArray(v)
     ? v.filter((n): n is number => Number.isInteger(n) && (n as number) >= 1 && (n as number) <= SHP2_SOURCE_SLOTS)
     : null;
+}
+
+/** v1.209.0 — a slot list whose empty form is null (forceChargeLeftOutSlots: null = none): slotList's integers,
+ *  or null when none is left. PURE. */
+function nonEmptySlotList(v: unknown): number[] | null {
+  const slots = slotList(v);
+  return slots != null && slots.length > 0 ? slots : null;
 }
 
 /** v1.200.0 (review 2) — the line night's pool trail as the record keeps it: the finite {pct, atMs} pairs, in
