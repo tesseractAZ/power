@@ -141,8 +141,12 @@ When `NIGHT_CHARGE_MODE` is `supervised` (or `auto`), each charge night runs one
      (the run backstop), after one re-issue of the ON".
    - **An ON that failed.** "was switched ON but did not take effect", with "on slot(s) 2, 3 (the
      buy above the reserve did not happen on those slot(s))" where the failed-slot list is not
-     empty (a null or empty list is every slot). Then ", after one re-issue of the ON" or ", with
-     no re-issue of the ON", and neither where the count is not usable. Then what switched the
+     empty (a null or empty list is every slot). On every slot and at its stop the opening words
+     are instead "was switched ON and its readback check failed": the pool read its stop, which
+     it does not do overnight with no force-charge at all, and a slot that applied late leaves
+     the same record, so the body says what is on record and not that the charge did not happen.
+     Then ", after one re-issue of the ON" or ", with no re-issue of the ON", and neither where
+     the count is not usable. Then what switched the
      force-charge off: at its stop, "; the pool read ~56.7% at 12:20am and the force-charge was
      switched off there"; on an early OFF, "; it was switched off at 2:30am (the run backstop)",
      or "; it was switched off before the window close (the run backstop)" with no clock; nothing

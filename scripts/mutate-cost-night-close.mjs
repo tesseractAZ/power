@@ -125,6 +125,7 @@ const NEVER_NIGHT = "      night: `${w.reserve}${w.note}; force-charge${w.toward
 const NEVER_FLAG = "      flagged: notNeeded ? null : { lead: 'closed without its force-charge', title: 'force-charge did not run' },";
 const KIND_FAILED = "  if (fc.kind === 'failed') {";
 const PARTIAL = "    const partial = fc.partialSlots != null && fc.partialSlots.length > 0;";
+const FAILED_WORDS_STOP = "    const failedWords = !partial && atStop ? 'was switched ON and its readback check failed' : partial";
 const FAILED_WORDS_SOME = "      ? `was switched ON but did not take effect on slot(s) ${fc.partialSlots!.join(', ')} (the buy above the reserve did not happen on those slot(s))`";
 const FAILED_WORDS_ALL = "      : 'was switched ON but did not take effect';";
 const REISSUE_FACT = "    const reissueFact = !reissuesKnown ? '' : reissues > 0 ? `, after ${reissueWords}` : ', with no re-issue of the ON';";
@@ -1216,6 +1217,27 @@ const MUTANTS = [
     find: FAILED_WORDS_SOME + NL + FAILED_WORDS_ALL,
     to: FAILED_WORDS_SOME + NL + "      : ''; /* MUTANT */",
     why: '"force-charge toward ~56.7% , with no re-issue of the ON": the failure itself goes unsaid.',
+  },
+  {
+    id: 'CNC-K-xviii. ★★★ a failure on every slot, switched off at its stop, is told as a charge that did not happen',
+    file: NOTIFY,
+    find: FAILED_WORDS_STOP,
+    to: '    const failedWords = partial /* MUTANT */',
+    why: 'Under the lead "ON not confirmed" the body says "was switched ON but did not take effect" and then that the pool read its stop: the body states as fact what the lead declines to state.',
+  },
+  {
+    id: 'CNC-K-xix. ★★★ a failure on some slots, switched off at its stop, loses its slots to the failed-check words',
+    file: NOTIFY,
+    find: FAILED_WORDS_STOP,
+    to: swap(FAILED_WORDS_STOP, '!partial && atStop', 'atStop'),
+    why: 'A failure on slots 2 and 3 that was switched off at its stop reads "its readback check failed", with no slot named and the buy that did not happen there unsaid.',
+  },
+  {
+    id: 'CNC-K-xx. ★★★ a failure on every slot away from its stop is told as a failed check only',
+    file: NOTIFY,
+    find: FAILED_WORDS_STOP,
+    to: swap(FAILED_WORDS_STOP, '!partial && atStop', '!partial'),
+    why: 'A force-charge that took on no slot and never reached its stop reads "its readback check failed": that it did not take effect goes unsaid.',
   },
 
   /* ── P: the failed-slot list ── */

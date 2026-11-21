@@ -1693,7 +1693,10 @@ function costNightAccount(
   }
   if (fc.kind === 'failed') {
     const partial = fc.partialSlots != null && fc.partialSlots.length > 0;
-    const failedWords = partial
+    // On every slot AND at its stop, the body does not state as fact what the lead declines to state. A slot that applied
+    // late and was never seen ON with the others leaves this same record, and a pool does not reach its stop overnight
+    // with no force-charge at all: what is on record is that the readback check failed, and that is what is said.
+    const failedWords = !partial && atStop ? 'was switched ON and its readback check failed' : partial
       ? `was switched ON but did not take effect on slot(s) ${fc.partialSlots!.join(', ')} (the buy above the reserve did not happen on those slot(s))`
       : 'was switched ON but did not take effect';
     const reissueFact = !reissuesKnown ? '' : reissues > 0 ? `, after ${reissueWords}` : ', with no re-issue of the ON';

@@ -130,6 +130,8 @@ const T_NOT_CONFIRMED = 'Night-charge: force-charge not confirmed — reserve re
 const T_ON_NOT_CONFIRMED = 'Night-charge: force-charge ON not confirmed — reserve restored to 16%';
 
 const FAILED_ALL_WORDS = 'reserve raised to 50%; force-charge toward ~56.7% was switched ON but did not take effect';
+// On every slot AND at its stop the body says what is on record (the check failed), not that the charge did not happen.
+const FAILED_AT_STOP_WORDS = 'reserve raised to 50%; force-charge toward ~56.7% was switched ON and its readback check failed';
 const FAILED_SOME_WORDS = 'reserve raised to 50%; force-charge toward ~56.7% was switched ON but did not take effect on slot(s) 2, 3 '
   + '(the buy above the reserve did not happen on those slot(s))';
 const UNCONFIRMED_WORDS = 'reserve raised to 50%; force-charge toward ~56.7% was switched ON but the panel never confirmed it';
@@ -1160,22 +1162,32 @@ test('★★★ C9 failed on every slot with a target OFF: the pool read the sto
     dedupId: 'night_charge_actuation',
     title: 'Night-charge: force-charge ON not confirmed — reserve restored to 16%',
     body: 'Supervised night charge for 2026-11-16 closed with its force-charge ON not confirmed: reserve raised to 50%; '
-      + 'force-charge toward ~56.7% was switched ON but did not take effect, with no re-issue of the ON; '
+      + 'force-charge toward ~56.7% was switched ON and its readback check failed, with no re-issue of the ON; '
       + 'the pool read ~56.7% at 3:12am and the force-charge was switched off there; '
       + 'the pool read 57% at the close, against the ~56.7% the evening notice named; the reserve is restored to 16%. '
       + "Delivery vs plan scores in the ledger at tomorrow evening's update.",
   });
   // With no OFF time on the record: the same, less the clock.
   assert.deepEqual(msg(night(failedAll, close({ offReason: 'target', offAtMs: null, poolPct: 57 }))), whole(T_ON_NOT_CONFIRMED, ON_NOT_CONFIRMED,
-    `${FAILED_ALL_WORDS}, with no re-issue of the ON; the pool read ~56.7% and the force-charge was switched off there${AT_57}`));
+    `${FAILED_AT_STOP_WORDS}, with no re-issue of the ON; the pool read ~56.7% and the force-charge was switched off there${AT_57}`));
   // A re-issue is said ahead of the stop.
   assert.deepEqual(msg(night(failedAll, close({ offReason: 'target', offAtMs: OFF_312, poolPct: 57, onReissues: 1 }))), whole(T_ON_NOT_CONFIRMED, ON_NOT_CONFIRMED,
-    `${FAILED_ALL_WORDS}, after one re-issue of the ON; the pool read ~56.7% at 3:12am and the force-charge was switched off there${AT_57}`));
+    `${FAILED_AT_STOP_WORDS}, after one re-issue of the ON; the pool read ~56.7% at 3:12am and the force-charge was switched off there${AT_57}`));
   // The flag is the stop reason's, whatever the close reads.
   assert.deepEqual(msg(night(failedAll, close({ offReason: 'target', offAtMs: OFF_312 }))), whole(T_ON_NOT_CONFIRMED, ON_NOT_CONFIRMED,
-    `${FAILED_ALL_WORDS}, with no re-issue of the ON; the pool read ~56.7% at 3:12am and the force-charge was switched off there${AT_49}`));
+    `${FAILED_AT_STOP_WORDS}, with no re-issue of the ON; the pool read ~56.7% at 3:12am and the force-charge was switched off there${AT_49}`));
   // No expected figure, and never "reached" or "completed" of an ON no readback showed.
   assert.doesNotMatch(`${m.title} ${m.body}`, /kWh expected|reached|completed/);
+  // Nor "did not take effect": the pool read its stop, so the body says only that the check failed. On SOME slots the
+  // slots' own words stand at the stop too, and away from the stop the every-slot words are the plain ones.
+  assert.doesNotMatch(m.body, /did not take effect|did not happen/);
+  assert.match(msg(night(failedSome, close({ offReason: 'target', offAtMs: OFF_312 }))).body, /was switched ON but did not take effect on slot\(s\) 2, 3 \(the buy above the reserve did not happen on those slot\(s\)\)/);
+  assert.doesNotMatch(msg(night(failedSome, close({ offReason: 'target', offAtMs: OFF_312 }))).body, /readback check failed/);
+  for (const offReason of [null, 'windowEnd', 'maxRun', 'gridLoss']) {
+    const away = msg(night(failedAll, close({ offReason, offAtMs: offReason == null ? null : OFF_230 }))).body;
+    assert.match(away, /was switched ON but did not take effect, with no re-issue of the ON/, String(offReason));
+    assert.doesNotMatch(away, /readback check failed/, String(offReason));
+  }
 });
 
 test('★★★ C9 failed on some slots with a target OFF: the slots stay in the lead and the title, and the stop is said', () => {
@@ -1312,7 +1324,7 @@ test('★★★ C9 an OFF time the clock cannot print (1e300, 8.64e15 + 1, -1e30
     [ran, 'maxRun', T_PLAIN, COMPLETED, `reserve raised to 50%, and force-charge ran toward ~56.7% (~6.2 kWh expected) and was switched off before the window close (the run backstop)${AT_49}`],
     [ran, 'windowEnd', T_PLAIN, COMPLETED, `reserve raised to 50%, and force-charge ran toward ~56.7% until the window close (~6.2 kWh expected)${AT_49}`],
     [ran, null, T_PLAIN, COMPLETED, `reserve raised to 50%, and force-charge ran toward ~56.7% (~6.2 kWh expected)${AT_49}`],
-    [failedAll, 'target', T_ON_NOT_CONFIRMED, ON_NOT_CONFIRMED, `${FAILED_ALL_WORDS}, with no re-issue of the ON; the pool read ~56.7% and the force-charge was switched off there${AT_49}`],
+    [failedAll, 'target', T_ON_NOT_CONFIRMED, ON_NOT_CONFIRMED, `${FAILED_AT_STOP_WORDS}, with no re-issue of the ON; the pool read ~56.7% and the force-charge was switched off there${AT_49}`],
     [failedAll, 'maxRun', T_NO_EFFECT, NO_FORCE_CHARGE, `${FAILED_ALL_WORDS}, with no re-issue of the ON; it was switched off before the window close (the run backstop)${AT_49}`],
     [failedAll, 'windowEnd', T_NO_EFFECT, NO_FORCE_CHARGE, `${FAILED_ALL_WORDS}, with no re-issue of the ON${AT_49}`],
     [failedAll, null, T_NO_EFFECT, NO_FORCE_CHARGE, `${FAILED_ALL_WORDS}, with no re-issue of the ON${AT_49}`],
@@ -1362,7 +1374,7 @@ test('★★★ C9 the largest time a Date holds still prints its clock; one mil
     assert.deepEqual(built(night(ran, close({ offReason: 'maxRun', offAtMs: at })), String(at)), whole(T_PLAIN, COMPLETED,
       `reserve raised to 50%, and force-charge ran toward ~56.7% (~6.2 kWh expected) and was switched off at ${clock} (the run backstop)${AT_49}`), String(at));
     assert.deepEqual(built(night(failedAll, close({ offReason: 'target', offAtMs: at })), String(at)), whole(T_ON_NOT_CONFIRMED, ON_NOT_CONFIRMED,
-      `${FAILED_ALL_WORDS}, with no re-issue of the ON; the pool read ~56.7% at ${clock} and the force-charge was switched off there${AT_49}`), String(at));
+      `${FAILED_AT_STOP_WORDS}, with no re-issue of the ON; the pool read ~56.7% at ${clock} and the force-charge was switched off there${AT_49}`), String(at));
     assert.deepEqual(built(night(unconfirmed, close({ offReason: 'maxRun', offAtMs: at })), String(at)), whole(T_NOT_CONFIRMED, UNCONFIRMED,
       `${UNCONFIRMED_WORDS}; it was switched off at ${clock} (the run backstop)${AT_49}`), String(at));
   }
@@ -1385,7 +1397,7 @@ test('★★★ C9 a re-issue count that is no count (NaN, -1, 1.5, a string) sa
     assert.deepEqual(built(night(failedEmpty, unusable({ onReissues: bad })), what), whole(T_NO_EFFECT, NO_FORCE_CHARGE, `${FAILED_ALL_WORDS}${AT_49}`), what);
     // The stop, or the early OFF, follows the failure straight away.
     assert.deepEqual(built(night(failedAll, unusable({ onReissues: bad, offReason: 'target', offAtMs: OFF_312, poolPct: 57 })), what), whole(T_ON_NOT_CONFIRMED, ON_NOT_CONFIRMED,
-      `${FAILED_ALL_WORDS}; the pool read ~56.7% at 3:12am and the force-charge was switched off there${AT_57}`), what);
+      `${FAILED_AT_STOP_WORDS}; the pool read ~56.7% at 3:12am and the force-charge was switched off there${AT_57}`), what);
     assert.deepEqual(built(night(failedSome, unusable({ onReissues: bad, offReason: 'maxRun', offAtMs: OFF_230 })), what), whole(T_SLOTS_2_3, NOT_EVERY_SLOT,
       `${FAILED_SOME_WORDS}; it was switched off at 2:30am (the run backstop)${AT_49}`), what);
     for (const fc of [failedAll, failedSome, failedEmpty]) for (const from of [close(), close({ offReason: 'target', offAtMs: OFF_312 }), close({ offReason: 'maxRun' }), close({ poolPct: null, leftOutSlots: [1] })]) {
@@ -1538,7 +1550,7 @@ test('★★★ C9 a slot the ON was not sent to, on a failed night: after the f
     `${FAILED_ALL_WORDS}, after one re-issue of the ON; it was switched off at 2:30am (the run backstop)${leftOut('1, 2')}${AT_49}`));
   // On every slot at its stop.
   assert.deepEqual(msg(night(failedAll, close({ offReason: 'target', offAtMs: null, leftOutSlots: [3] }))), whole(T_ON_NOT_CONFIRMED, ON_NOT_CONFIRMED,
-    `${FAILED_ALL_WORDS}, with no re-issue of the ON; the pool read ~56.7% and the force-charge was switched off there${leftOut('3')}${AT_49}`));
+    `${FAILED_AT_STOP_WORDS}, with no re-issue of the ON; the pool read ~56.7% and the force-charge was switched off there${leftOut('3')}${AT_49}`));
   // With a count that is no count, and a close with no reading.
   assert.deepEqual(msg(night(failedSome, unusable({ onReissues: 'x', leftOutSlots: [1], poolPct: null }))), whole(T_SLOTS_2_3, NOT_EVERY_SLOT,
     `${FAILED_SOME_WORDS}${leftOut('1')}; the pool was not read at the close (no fresh panel reading); the evening notice named ~56.7%`));
