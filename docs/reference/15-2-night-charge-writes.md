@@ -59,7 +59,7 @@ When `NIGHT_CHARGE_MODE` is `supervised` (or `auto`), each charge night runs one
    ledger row (`expected_buy_kwh`, `ledgerExpectedBuyKwh`) — "(~34.9 kWh expected)" — or, a row
    with none, no kWh at all. The morning push states what the force-charge did, from the
    actuation record (`forceChargeNightOutcome`). On a night with no outage line the close account
-   (the next paragraph) completes each outcome; these are the outcome's words without it:
+   (the next paragraph) tells each outcome in its own words; these are the words without it:
    "reserve raised to 50%, and force-charge ran toward ~80% (~34.9 kWh expected); the reserve is
    restored to 16%" when a readback proved the
    ON (`forceChargeOnVerifiedAtMs`, a late apply included); "force-charge toward ~80% was switched
@@ -99,8 +99,9 @@ When `NIGHT_CHARGE_MODE` is `supervised` (or `auto`), each charge night runs one
    was expected)", and the apply-failure warning calls it a reserve hold. A restore that ended the night early is not reported as completed: an owner
    cancel after the write ("Night-charge: cancelled — reserve restored to 16%") and a grid-loss
    abort ("Night-charge: stopped (grid lost) — …") say so, with no figure; nor is a night with no
-   outage line whose force-charge did not run, did not take effect or was never confirmed short
-   of its stop (the close account's lead and title, below). The armed record's
+   outage line whose force-charge did not take effect, was never confirmed short of its stop, or
+   never started without the pool read at or above that stop at the close (the close account's
+   lead and title, below). The armed record's
    `buyKwh` is the worst case and is never pushed;
    only the log lines name it, labelled (`buyFiguresLogText`).
    Harness: `scripts/mutate-actuation-readback.mjs` (5 mutants).
@@ -115,36 +116,71 @@ When `NIGHT_CHARGE_MODE` is `supervised` (or `auto`), each charge night runs one
    pool when the summary is sent, `freshPoolSocPct`: a fresh, coherent readback, else null);
    `readLate` (`lineCloseReadingLate`: more than 15 minutes after the add-on's close);
    `offReason` and `offAtMs` (`forceChargeOffReason`, `forceChargeOffAtMs`); `onReissues`
-   (`forceChargeOnRetries`). A start was announced when the announced level equals the outcome's
-   stop, both at one decimal.
-   - **The force-charge, by the record.** An OFF with reason `target` and its time reads
-     "reached ~56.7% at 3:12am and was switched off there". That reason is stamped only on a pool
-     reading at or above the stop, so it stands where the ON was never verified too, as "…, with no
-     readback showing every slot ON" under the normal lead: a short top-up reaches its stop
-     before the ON's readback check, 15 minutes after the ON. OFF reason `windowEnd`: "ran toward
-     ~56.7% until the window close". No OFF reason: "ran toward ~56.7%". Any other OFF: "ran toward
-     ~56.7% until 2:30am (switched off: the run backstop)" (`forceChargeOffWords`), with "until
-     before the window close" where the record has no OFF time. A verified night with a re-issue
-     adds " (after one re-issue of the ON)". A failed night keeps its failure words and adds
-     ", with no re-issue of the ON" or ", after one re-issue of the ON"; an unconfirmed one adds
-     the second where one was made.
+   (`forceChargeOnRetries`). `NightChargeCostClose` also takes an optional `leftOutSlots`: the
+   slots the ON was not sent to because the pool alarm named their Core out of the backup pool.
+   A start was announced when the announced level equals the outcome's stop, both at one
+   decimal.
+   - **What ended the force-charge.** It ended at its stop when the OFF reason is `target`, with
+     or without an OFF time: that reason is stamped only on a pool reading at or above the stop.
+     Any OFF reason other than `target` and `windowEnd` is an early OFF, told with its clock and
+     its cause (`forceChargeOffWords`). The clock is printed only for an OFF time that is finite
+     and within ±8.64e15 ms (`MAX_DATE_MS`, the largest magnitude a date holds, beyond which the
+     clock formatter throws); any other time is left out and nothing throws.
+   - **A force-charge that ran.** At its stop: "reached ~56.7% at 3:12am and was switched off
+     there", or "reached ~56.7% and was switched off there" with no clock. No OFF reason: "ran
+     toward ~56.7%". OFF reason `windowEnd`: "ran toward ~56.7% until the window close". An early
+     OFF: "ran toward ~56.7% and was switched off at 2:30am (the run backstop)", or "… and was
+     switched off before the window close (the run backstop)" with no clock.
+   - **A re-issue of the ON, and the expected figure.** A re-issue is a comma clause, never a
+     bracket: ", after one re-issue of the ON" (", after 2 re-issues of the ON" for a larger
+     count; the add-on makes at most one, `FORCE_CHARGE_ON_MAX_RETRIES`). The count is read only
+     where it is a non-negative integer. The expected figure stays beside the charge's own
+     phrase, ahead of the close: "reached ~56.7% at 3:12am and was switched off there, after one
+     re-issue of the ON (~6.4 kWh expected)". On an early OFF the figure comes before the OFF and
+     the re-issue after it: "ran toward ~56.7% (~6.4 kWh expected) and was switched off at 2:30am
+     (the run backstop), after one re-issue of the ON".
+   - **An ON that failed.** "was switched ON but did not take effect", with "on slot(s) 2, 3 (the
+     buy above the reserve did not happen on those slot(s))" where the failed-slot list is not
+     empty (a null or empty list is every slot). Then ", after one re-issue of the ON" or ", with
+     no re-issue of the ON", and neither where the count is not usable. Then what switched the
+     force-charge off: at its stop, "; the pool read ~56.7% at 12:20am and the force-charge was
+     switched off there"; on an early OFF, "; it was switched off at 2:30am (the run backstop)",
+     or "; it was switched off before the window close (the run backstop)" with no clock; nothing
+     for a `windowEnd` OFF or none.
+   - **An ON never confirmed.** At its stop: "force-charge reached ~56.7% at 12:20am and was
+     switched off there, with no readback showing every slot ON", then the re-issue clause where
+     one was made, under the normal lead and title: a short top-up reaches its stop before the
+     ON's readback check, 15 minutes after the ON. Otherwise: "was switched ON but the panel never
+     confirmed it", then the re-issue clause, then "; it was switched off at 2:30am (the run
+     backstop)" on an early OFF.
+   - **A force-charge that never started.** It keeps "force-charge toward ~56.7% never started",
+     with " (the grid read as lost)" where the night read the grid lost.
+   - **A slot the ON was not sent to.** Where `leftOutSlots` holds slot numbers (positive
+     integers; any other entry is dropped): "; slot(s) 1 not switched on (named out of the backup
+     pool by the pool alarm)". It follows the force-charge clause and precedes the close, on a
+     night whose force-charge ran, failed or was never confirmed, and is not given on one that
+     never started.
    - **The close.** "; the pool read 49% at the close, against the ~56.7% the evening notice
      named". With `readLate`: "; the pool reads 61% now, past the window close; the evening notice
      named ~56.7%". With no reading: "; the pool was not read at the close (no fresh panel
      reading); the evening notice named ~56.7%". With no announced level on the record the
      "against" or "named" part is dropped. It states two figures and no verdict: the reading is a
-     whole percent, taken when the summary goes, beside a one-decimal level. The expected figure,
-     beside a force-charge that ran, follows the close.
-   - **The lead and the title.** Four outcomes take a lead other than "completed" and a title
+     whole percent, taken when the summary goes, beside a one-decimal level.
+   - **The lead and the title.** A flagged night takes a lead other than "completed" and a title
      that puts a flag before the restore's: "Night-charge: force-charge did not run — reserve
      restored to 16%", or, with no readback yet, "… — reserve restore to 16% sent". Never started
      with a start announced: lead "closed without its force-charge", flag "force-charge did not
-     run". Failed on every slot: the same lead, flag "force-charge did not take effect". Failed on
-     some slots: lead "closed with its force-charge not applied on every slot", flag "force-charge
-     not applied on slot(s) 2, 3"; never "applied in part", because a slot left out of the failed
-     list may have been excused at the panel's ceiling, not charged. Unconfirmed without a
-     `target` OFF and its time: lead "closed with its force-charge unconfirmed", flag
-     "force-charge not confirmed". Every other outcome keeps "completed" and the restore's title.
+     run". It is not flagged where the pool was read, not late, at or above the stop (the reading
+     as read against the stop as armed, neither rounded): `decideForceCharge` declines a start
+     there, and the record keeps no reason for a start that never came. Failed with a failed-slot
+     list that is not empty: lead "closed with its force-charge not applied on every slot", flag
+     "force-charge not applied on slot(s) 2, 3"; never "applied in part", because a slot absent
+     from that list may have been excused at the panel's ceiling, not charged. Failed on every
+     slot: at its stop, lead "closed with its force-charge ON not confirmed", flag "force-charge
+     ON not confirmed"; otherwise lead "closed without its force-charge", flag "force-charge did
+     not take effect". Never confirmed and not at its stop: lead "closed with its force-charge
+     unconfirmed", flag "force-charge not confirmed". Every other outcome keeps "completed" and
+     the restore's title.
    - **Where the account is not given.** The summary keeps the outcome's words alone with no
      `cost` (null or omitted), with no finite stop on the outcome, and for a force-charge that
      never started on a night whose evening notice named a level other than the stop: that notice
@@ -458,7 +494,7 @@ written.
   unless a re-ON after it took (`forceChargeLineReOnAppliedAtMs`) or a slot read ON again; with the last
   re-ON taking on no slot and none reading ON after it, Charge Now "read off" before the close. The close reading follows, "under the 55.6% outage line"
   when under, "the pool was not read at the close" with no fresh reading; over 15 minutes late, the pool "now", no verdict (`lineCloseReadingLate`); a grid loss or cancel gives the reading then. A write never read back is told so, not "raised", there and on the banner (`lineWriteUnreadStatus`). A night with nothing to restore (no write, a foreign reserve) has its own account at the close (`lineCloseAccountDue`), a stood night the summary's. A night with no line ask
-  whose force-charge rode it has the close account of the nightly flow, item 2 (`costNightAccount`): what ended its force-charge, the pool reading beside the level the evening notice named, and a lead and title of its own where the force-charge did not run, did not take effect or was never confirmed short of its stop. It gives no verdict. With no `cost` input the summary of a night with no line ask reads as v1.199.1, word for word (`fixtures/lineNightCostTexts.v1199.json`).
+  whose force-charge rode it has the close account of the nightly flow, item 2 (`costNightAccount`): what ended its force-charge, the pool reading beside the level the evening notice named, and a lead and title of its own where the force-charge did not take effect, was never confirmed short of its stop, or never started without the pool read at or above that stop at the close. Its close clause gives no verdict. With no `cost` input the summary of a night with no line ask reads as v1.199.1, word for word (`fixtures/lineNightCostTexts.v1199.json`).
 - **Strikes.** A carried night whose sizing held (`cushion_shortfall` = 0) is clean at or above its line and
   a strike, fail-closed, under it (a run-time refusal, an ON that never took, a slow pack, a late load taking
   the grid cap, below). A row with `cushion_shortfall` = 1 (disclosed, or carried with its caps note) is

@@ -236,11 +236,14 @@ armed notice ends by saying that its figures are that evening's and that a later
 that arms the same window replaces the arm. The worst case appears only on the night-charge card,
 as the basis the target is sized on, and as the "(Worst Case)" sensors. A morning summary says
 what the night did, including the force charge. On a night armed with the cost force charge and
-no outage line, it also states what ended the force charge and gives the pool reading beside the
-level announced the evening before; such a night whose force charge did not run or did not take
-effect is titled so. It says "restored" once the panel reports the
-restored reserve, and otherwise, 5 minutes after the restore was accepted, that it was sent and
-is not yet confirmed.
+no outage line, it also states what ended the force charge (its stop, the window close, or an
+earlier switch-off with its time and cause) and gives the pool reading beside the level announced
+the evening before. The title of such a night says so when the force charge did not take effect
+or was never confirmed short of its stop, or when a start the evening notice announced never
+came and the pool did not read at or above that stop at the close. A slot not switched on because
+the alert "A Core out of the backup pool" named its Core is named. It says "restored" once the
+panel reports the restored reserve, and otherwise, 5 minutes after the restore was accepted, that
+it was sent and is not yet confirmed.
 
 | Mode (`NIGHT_CHARGE_MODE`) | What happens |
 |---|---|
