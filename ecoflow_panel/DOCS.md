@@ -245,6 +245,26 @@ the alert "A Core out of the backup pool" named its Core is named. It says "rest
 panel reports the restored reserve, and otherwise, 5 minutes after the restore was accepted, that
 it was sent and is not yet confirmed.
 
+While the alert "A Core out of the backup pool" stands, the force charge follows it. Its charge
+rate leaves out every Core the alert names or counts as missing (though never all of them), so
+the charge can start earlier; with `ARB_CHARGE_CAP_KW` at 0 the plan caps its charge by the
+same count. Charge Now is not switched on for a slot the alert names. A slot the alert has
+not named is still switched on, and so is a named one when the alert's newest capacity reading
+is more than 15 minutes old, or while newer readings show a Core back or point at other slots.
+While the start waits, the add-on log gives the count and any slot left out ("an ON is not sent
+to slot(s) 1"); the switch-on line names the slot again; and the morning summary of a cost night
+with no outage line says "slot(s) 1 not switched on (named out of the backup pool by the pool
+alarm)". If every connected slot is left out, no force charge starts: the log says so, and on a
+line night a notification does too.
+
+The night-charge ledger (in the database; see Data and backups below) keeps, for each night's
+force charge, the slots it was switched on for, any slot left out, and what became of the
+switch-on: confirmed by the panel's readback, judged not applied, or never judged before the
+force charge ended. A night recorded before the ledger kept this says nothing either way.
+Nothing in Power decides on it: the write-readiness gate, for one, still takes a force charge as
+on once its switch-on was sent. The columns and how to read them:
+[the night-charge ledger](https://github.com/tesseractAZ/power/blob/main/docs/reference/15-3-night-charge-ledger-and-scoring.md).
+
 | Mode (`NIGHT_CHARGE_MODE`) | What happens |
 |---|---|
 | `advisory` (default) | Nothing is written. Use the notice, or automate on the night-charge entities. |
