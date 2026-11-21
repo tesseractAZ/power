@@ -210,7 +210,7 @@ const MUTANTS = [
   {
     id: 'xv. ★★★ just-in-time is removed (starts at the window open, then the house drains it)',
     file: FC,
-    find: '  if (nowMs < forceChargeStartAtMs(endMs, target, o.poolSocPct, o.fullKwh, o.chargeRateKw, o.evDisplacedKwh, slots.length)) { // window checked above',
+    find: '  if (nowMs < forceChargeStartAtMs(endMs, target, o.poolSocPct, o.fullKwh, o.chargeRateKw, o.evDisplacedKwh, rateSlots)) { // window checked above',
     to: '  if (false) { /* MUTANT */',
     why: 'Force-charge reaches the target at ~02:00 and the house draws the pack back toward the 50% reserve for three hours — ~57% at dawn instead of 64%.',
   },

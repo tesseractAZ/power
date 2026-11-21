@@ -1283,7 +1283,8 @@ test('★★★ T9 (Fix14) the time the declined-start push quotes: one figure, 
   // The START keeps its rate and its EV energy, the double count included (it errs early, and it moves writes).
   assert.ok(INDEX.includes('    chargeRateKw,\n    evDisplacedKwh,\n    // v1.191.0 (S6, W5) — the run backstop of the tariff in effect'));
   const NFC_SRC = readFileSync(resolve(HERE, '../src/nightForceCharge.ts'), 'utf8');
-  assert.ok(NFC_SRC.includes('if (nowMs < forceChargeLineStartAtMs(endMs, mode.startTargetPct, o.poolSocPct, o.fullKwh, o.chargeRateKw, o.evDisplacedKwh, slots.length)) {'));
+  // v1.209.0 — the fallback's slot count is `rateSlots`: the ON's slots, or fewer when the pool alarm counts one of them out.
+  assert.ok(NFC_SRC.includes('if (nowMs < forceChargeLineStartAtMs(endMs, mode.startTargetPct, o.poolSocPct, o.fullKwh, o.chargeRateKw, o.evDisplacedKwh, rateSlots)) {'));
 });
 
 /** (Fix13) index.ts's pushLineDeclinedIfDue over minute ticks: the real decision, the real tick, the real helper and the real body, with what
