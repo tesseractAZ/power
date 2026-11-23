@@ -43,7 +43,8 @@
  *     unflagged return.
  * (X) THE WIRING (index.ts sendRestoreSummary): `cost` only where the record carries no line, and each of its six fields from
  *     its own source. index.ts cannot be imported by a test, so these are held by the source check in
- *     test/costNightClose.test.ts (C7).
+ *     test/costNightClose.test.ts (C7). The block's SEVENTH field, leftOutSlots (the slots the ON was not sent to),
+ *     is pinned by the same check and its mutant lives in scripts/mutate-pool-slots.mjs, with the field's record.
  *
  *   node scripts/mutate-cost-night-close.mjs [--only <id prefix>]
  *
