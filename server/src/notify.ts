@@ -1471,8 +1471,17 @@ export function buildNightForceChargeOnFailure(o: {
   /** v1.200.0 — on a LINE night: the outage line the force-charge was to carry (the record's
    *  forceChargeLinePct). The warning then says, in words true in every outcome, what the failure leaves the line. */
   lineLinePct?: number | null;
+  /** v1.209.0 — the slots among `slots` that are listed because the pool alarm names their Core out of the backup
+   *  pool (the verify names them when no slot in the pool took the ON). The warning then says so in a sentence of
+   *  its own: such a slot is not one the panel "still reads OFF" by a fault of the ON, and Charge Now on it lifts
+   *  nothing. Absent, null or none of them among `slots` ⇒ the words of the release before, to the letter. */
+  outOfPoolSlots?: readonly number[] | null;
 }): NotifyMessage {
   const partial = partialForceChargeOnFailureSlots({ forceChargeSlots: o.ourSlots, forceChargeOnFailedSlots: o.slots }) != null;
+  const outListed = Array.isArray(o.outOfPoolSlots) ? [...new Set(o.slots.filter((n) => o.outOfPoolSlots!.includes(n)))].sort((x, y) => x - y) : [];
+  const outNote = outListed.length > 0
+    ? ` Slot(s) ${outListed.join(', ')} are listed because the pool alarm names their Core out of the backup pool: a Core out of the pool takes no charge, whatever its Charge Now reads.`
+    : '';
   const toward = o.ceilingPct != null && Number.isFinite(o.ceilingPct) ? ` (toward ~${round1(forceChargeStopPct(o.ceilingPct))}%)` : '';
   // v1.196.0 — each failed slot's Core, and what about it differs from the other Cores'.
   const named = forceChargeFailedSlotsText(o.slots, o.ourSlots, o.cores ?? null);
@@ -1506,7 +1515,7 @@ export function buildNightForceChargeOnFailure(o: {
     severity: 'warning',
     dedupId: 'night_charge_force_charge_on_failure',
     title: line == null ? 'Night-charge: force-charge did not take effect' : 'Night-charge: the outage-line force-charge has not taken effect',
-    body: head + lost,
+    body: head + lost + outNote,
   };
 }
 

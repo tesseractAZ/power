@@ -1736,7 +1736,7 @@ test('★★ the force-charge ON-failure push names where the force-charge stops
   const idx = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
   // v1.200.0 — a cost night's ceiling as before; a line night names its line (lineForceCharge.test.ts T9) — (review 2)
   // from the record's line ask, whatever the mode (forceChargeOnFailureNight; lineForceChargeAtRisk.test.ts W5).
-  assert.match(idx, /buildNightForceChargeOnFailure\(\{\n\s+day: state\.day, slots: action\.slots, ourSlots: state\.forceChargeSlots, retries: state\.forceChargeOnRetries,\n\s+noRetry: action\.noRetry === true,\n(\s+\/\/[^\n]*\n)*\s+\.\.\.forceChargeOnFailureNight\(state\),\n\s+cores: slotCores,\n\s+\}\)\)/);
+  assert.match(idx, /buildNightForceChargeOnFailure\(\{\n\s+day: state\.day, slots: action\.slots, ourSlots: state\.forceChargeSlots, retries: state\.forceChargeOnRetries,\n\s+noRetry: action\.noRetry === true,\n(\s+\/\/[^\n]*\n)*\s+\.\.\.forceChargeOnFailureNight\(state\),\n\s+cores: slotCores,\n\s+outOfPoolSlots: pool\.leftOut,[^\n]*\n\s+\}\)\)/);
   assert.doesNotMatch(idx, /\(toward \$\{state\.forceChargeCeilingPct/);
   // (review 2) …and the record's fields as index.ts spreads them (forceChargeOnFailureNight): a cost night's armed
   // ceiling, so the warning still says where the forfeited force-charge would have stopped.

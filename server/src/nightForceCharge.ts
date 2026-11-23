@@ -1509,14 +1509,15 @@ function panelStopCeilingPct(s: NightActuationState, o: ForceChargeOpts): number
  * its reading OFF is not judged a failure of the ON, and it is in no re-issue (an ON target the alarm rules out).
  * It is reported as out of the pool (`outOfPool`), never as at the ceiling: a Core out of the pool whose own
  * percent reads at the ceiling was not switched off by the panel at the end of its charge. The rule that a
- * verified verdict needs a slot of ours reading ON is unchanged.
- * A FAILURE WITH NO SLOT OF OURS READING ON NAMES THE EXEMPT SLOTS TOO. Every reader of a failure takes a list
- * shorter than `ours` as "the ON took on the others" (partialForceChargeOnFailureSlots, lineRunGone, the push, the
- * morning summary). A slot out of the pool takes no charge, so with none reading ON the ON took nowhere and the
- * failure carries every slot of ours that reads OFF and is not at the ceiling, out of the pool or not. With a slot
- * reading ON the failure is partial whatever the list holds, and the exempt slot stays out of it. With every slot
- * of ours out of the pool and none reading ON there is no slot a re-issue may be sent to: the failure is declared
- * after the same grace, with no re-issue (`noRetry` is not set: that flag says the window was too short for one).
+ * verified verdict needs a slot of ours reading ON stands, and the slot must be IN THE POOL: a slot named out that
+ * reads ON proves nothing (its Core takes no charge), so it neither verifies the ON nor makes a failure partial.
+ * A FAILURE WITH NO IN-POOL SLOT OF OURS READING ON NAMES THE EXEMPT SLOTS TOO. Every reader of a failure takes a
+ * list shorter than `ours` as "the ON took on the others" (partialForceChargeOnFailureSlots, lineRunGone, the push,
+ * the morning summary). With no in-pool slot reading ON the ON took on no Core that can take a charge, and the
+ * failure carries every slot of ours out of the pool beside the slots that read OFF under the ceiling. With an
+ * in-pool slot reading ON the failure is partial whatever the list holds, and the exempt slot stays out of it. With
+ * every slot of ours out of the pool there is no slot a re-issue may be sent to: the failure is declared after the
+ * same grace, with no re-issue (`noRetry` is not set: that flag says the window was too short for one).
  */
 function verifyForceChargeOn(
   s: NightActuationState, nowMs: number, o: ForceChargeOpts, ours: number[],
@@ -1533,21 +1534,22 @@ function verifyForceChargeOn(
   // v1.186.0 — an all-exempt verdict needs at least one slot of ours actually reading ON:
   // with none ON, "every Core at the ceiling" is far likelier a bad reading than a finished
   // charge (ON only starts below the stop), and a false verdict is permanent and silent.
-  const anyOn = ours.some((n) => o.slotsOn!.includes(n));
+  // v1.209.0 — and a slot reading ON whose Core the pool alarm names out of the pool is no such proof: a Core out of
+  // the pool takes no charge, whatever its Charge Now reads. With none named out this is the test of the release before.
+  const anyOn = ours.some((n) => o.slotsOn!.includes(n) && !outOfPool(n));
   if (notOn.length === 0 && anyOn) {
-    const off = ours.filter((n) => !o.slotsOn!.includes(n));
-    const out = off.filter(outOfPool);
-    return out.length > 0
-      ? { kind: 'onVerified', atCeiling: off.filter((n) => !outOfPool(n)), outOfPool: out }
-      : { kind: 'onVerified', atCeiling: off };
+    const off = ours.filter((n) => !o.slotsOn!.includes(n) && !outOfPool(n));
+    const out = ours.filter(outOfPool);
+    return out.length > 0 ? { kind: 'onVerified', atCeiling: off, outOfPool: out } : { kind: 'onVerified', atCeiling: off };
   }
   // v1.209.0 — a slot out of the pool is in no re-issue; with none named out `pending` is the list of the release before.
   const judged = ours.some(outOfPool) ? ours.filter((n) => !outOfPool(n)) : ours;
   const pending = notOn.length > 0 ? notOn : judged;
-  // v1.209.0 — the slots a failure names. With no slot of ours reading ON, the exempt slots that read OFF are named
-  // too (see the header): a shorter list would be read as a failure on SOME slots of an ON that took on none.
-  const outOff = anyOn ? [] : ours.filter((n) => outOfPool(n) && !o.slotsOn!.includes(n));
-  const failed = outOff.length > 0 ? ours.filter((n) => pending.includes(n) || outOff.includes(n)) : pending;
+  // v1.209.0 — the slots a failure names. With no slot of ours IN THE POOL reading ON, the slots out of the pool are
+  // named too, whatever their Charge Now reads (see the header): a shorter list would be read as a failure on SOME
+  // slots of an ON that took on no Core that can take a charge.
+  const outOurs = anyOn ? [] : ours.filter(outOfPool);
+  const failed = outOurs.length > 0 ? ours.filter((n) => pending.includes(n) || outOurs.includes(n)) : pending;
   if (failed.length === 0) return { kind: 'none' };
   if (s.forceChargeOnFailedAtMs != null) return { kind: 'none' };
   const since = nowMs - (s.forceChargeOnLastAttemptMs ?? s.forceChargeOnAtMs!);

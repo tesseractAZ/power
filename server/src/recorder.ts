@@ -985,16 +985,17 @@ export interface NightLedgerRow {
    *  route serves ledger rows without authentication. NULL in all six = no ON, or a row from before v1.209.0.
    *   - force_charge_on_failed_at_ms: when the ON was judged not applied (the record's forceChargeOnFailedAtMs);
    *     NULL = no such verdict.
-   *   - force_charge_on_failed_slots: the slots still off at that verdict ('2,3'); NULL with none. A slot excused
-   *     (at the panel's ceiling, or named out of the pool since the ON) is not in it, so fewer slots than
-   *     force_charge_on_slots does not show the rest charged.
+   *   - force_charge_on_failed_slots: the slots the failure names ('2,3'); NULL with none. A slot excused at the
+   *     panel's ceiling is not in it, and neither is one named out of the pool since the ON while another slot IN
+   *     the pool read ON, so fewer slots than force_charge_on_slots does not show the rest charged. With no slot
+   *     in the pool reading ON the slots named out are in it too: the list then equals force_charge_on_slots.
    *   - force_charge_on_left_out: the connected slots the ON was NOT sent to because the pool alarm named their
    *     Core out of the panel's backup pool ('1'); NULL = none.
    *   - force_charge_on_retries: ON re-issues made. 0 is written at the ON, so NULL means "not recorded" (no ON,
    *     or a row older than this release), never "not confirmed".
    *   - force_charge_on_slots: the slots the ON was sent to ('1,2,3').
    *   - force_charge_on_verified_at_ms: when a readback showed the ON applied (forceChargeOnVerifiedAtMs: every
-   *     slot it was sent to reading ON or excused, at least one reading ON); NULL = never. */
+   *     slot it was sent to reading ON or excused, at least one slot in the pool reading ON); NULL = never. */
   force_charge_on_failed_at_ms: number | null;
   force_charge_on_failed_slots: string | null;
   force_charge_on_left_out: string | null;
