@@ -1635,7 +1635,8 @@ const MAX_DATE_MS = 8.64e15;
  * a night whose evening notice expected none (it named the written reserve, and that is the night it announced).
  *  - The force-charge, by what the record holds. Its OFF reason is 'target' only where the add-on read the pool at the stop
  *    (nightForceCharge offReason), so "reached ~S% at <clock> and was switched off there" is a reading, with or without a
- *    verified ON: a short top-up two slots finish before the third's readback check is not "never confirmed". An OFF at the
+ *    verified ON: a short top-up that reads its stop before every slot has read ON, and before the failure verdict the
+ *    check gives 15 minutes after the ON, is not "never confirmed" (success itself is read on every tick). An OFF at the
  *    window end "ran toward ~S% until the window close"; any other OFF names its clock and its cause, on a night whose ON
  *    failed or was never confirmed too. A re-issue of the ON is counted where one was made, its absence said on a night
  *    the ON did not take effect, and nothing said of it where the count on the record is not a count.

@@ -988,7 +988,8 @@ export interface NightLedgerRow {
    *   - force_charge_on_failed_slots: the slots the failure names ('2,3'); NULL with none. A slot excused at the
    *     panel's ceiling is not in it, and neither is one named out of the pool since the ON while another slot IN
    *     the pool read ON, so fewer slots than force_charge_on_slots does not show the rest charged. With no slot
-   *     in the pool reading ON the slots named out are in it too: the list then equals force_charge_on_slots.
+   *     in the pool reading ON the slots named out are in it too: the list then equals force_charge_on_slots,
+   *     unless a slot in the pool was excused at the panel's ceiling (that slot stays out of the list).
    *   - force_charge_on_left_out: the connected slots the ON was NOT sent to because the pool alarm named their
    *     Core out of the panel's backup pool ('1'); NULL = none.
    *   - force_charge_on_retries: ON re-issues made. 0 is written at the ON, so NULL means "not recorded" (no ON,

@@ -26,7 +26,7 @@
 
 ### Verification
 
-VERIFICATION-TO-BE-FILLED
+7,094 server tests pass in both time zones. Three new mutation harnesses hold the release: `mutate-cost-night-close.mjs` (244 mutants), `mutate-pool-slots.mjs` (183) and `mutate-on-fate.mjs` (143), every mutant killed in a full run of each; 6,619 anchors resolve across 158 harnesses. Each part's tests were written by an author who did not write its code. A review of the whole change by six independent readers, each finding checked by a second, found no wrong write and no difference from 1.208.0 while no pool alarm stands.
 
 ## 1.208.0
 

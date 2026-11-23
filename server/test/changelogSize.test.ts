@@ -134,6 +134,9 @@ test('every release heading in the live CHANGELOG.md is a bare `## X.Y.Z` (Home 
   const heads = headings(readFileSync(LIVE, 'utf8')).filter((h) => h !== FOOTER_HEADING);
   const bad = heads.filter((h) => !/^## \d+\.\d+\.\d+$/.test(h));
   assert.deepEqual(bad, [], 'a date or suffix on a heading makes the update dialog show the whole file');
+  // v1.209.0 — and no unfinished placeholder: a section drafted ahead of its verification is filled before it ships.
+  // Home Assistant's dialog and the release notes both print the section whole, and no other gate reads its words.
+  assert.doesNotMatch(readFileSync(LIVE, 'utf8'), /TO-BE-FILLED/, 'a placeholder left in the changelog ships in the update dialog and in the release notes');
 });
 
 test("release.yml's changelog step writes a bare heading, demotes headings inside the notes, and rolls", (t) => {

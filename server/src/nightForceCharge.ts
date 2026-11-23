@@ -429,7 +429,9 @@ export interface ForceChargeOpts {
   /** v1.200.1 — the reserve (backupReserveSoc) from the SAME fresh readback as slotsOn; null = no fresh number. Read on a stood night
    *  alone (reserveStandingAtMs), by strict equality with the target, on the tick of the ceiling sync and the ON. Absent ⇒ no reading. */
   reservePct?: number | null;
-  /** Slots physically connected (hwConnect) — the candidates for ON. */
+  /** Slots physically connected (hwConnect) — the candidates for ON. v1.209.0 — while the tick leaves a slot out for
+   *  the pool alarm, the connected slots LESS those (forceChargePoolSlots.targets); the slots left out come in
+   *  `poolOutSlots`. */
   connectedSlots: number[];
   /** Host vitals critical — no new device writes from a struggling process. */
   vitalsRed: boolean;
@@ -2734,7 +2736,10 @@ export interface ForceChargePoolSlots {
  * count are exactly those of the release before this function.
  *
  * THE TWO USES FAIL SAFE IN OPPOSITE DIRECTIONS, so they follow different rules.
- *  - The RATE counts a doubtful slot OUT (a lower rate starts the charge earlier). `outCount` is the named slots that
+ *  - The RATE counts a doubtful slot OUT: a start timed for fewer Cores suffices for more (the plant charges at least
+ *    as fast as the one the start was timed for). That start is usually the EARLIER one; with a predicted EV it can
+ *    be the later one (evDisplacedPackKwh models the EV as taking less from fewer Cores), and it still covers the
+ *    need. `outCount` is the named slots that
  *    are connected, whatever the verdict's age and whether or not a dwell is running against it, plus the slots the
  *    alarm counts short and has not identified: the larger of its latched count and the count of a different set on
  *    its way through the dwell (`countAtMost`), less the names. It is capped so that `rateCount` is never below 1

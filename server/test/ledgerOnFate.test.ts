@@ -42,6 +42,8 @@ import type { ForceChargeOpts, ForceChargeAction, ForceChargeOnFate } from '../s
  * the other ledger migration tests build theirs (ledgerChargeCycle.test.ts).
  */
 const tmp = mkdtempSync(join(tmpdir(), 'ef-on-fate-'));
+// Registered before anything else can throw: a failed setup still removes its folder.
+after(() => rmSync(tmp, { recursive: true, force: true }));
 const DB = join(tmp, 'ecoflow.db');
 process.env.DB_PATH = DB;
 
@@ -96,7 +98,6 @@ const { computeNightChargeReadiness, CURRENT_ALGO_VERSION, phoenixYmd } = await 
 const { middayChargeHourEpochs } = await import('../src/nightLedgerScoring.js');
 const { SHP2_SOURCE_SLOTS } = await import('../src/hwSpec.js');
 
-after(() => rmSync(tmp, { recursive: true, force: true }));
 
 /** The six columns and their declared types, as the specification lists them. */
 const FATE_SCHEMA: ReadonlyArray<readonly [string, 'INTEGER' | 'TEXT']> = [
@@ -1674,6 +1675,9 @@ test('★★★ the status route serves ledger rows without authentication: only
   const rec = openRecorder();
   try {
     const day = phoenixYmd(Date.now() + DAY_MS);
+    // "Tomorrow" can be a day an earlier test of this file already gave a row (its fixture days are calendar days), with a
+    // mode on it. What is asserted of the mode is that the stamp does not write one: the row keeps what it held.
+    const heldMode = (rec.readNightLedger(7).find((r) => r.plan_date === day) as unknown as Row | undefined)?.force_charge_mode ?? null;
     const leg = { ...hostile, day, forceChargeMode: SERIAL } as unknown as NightActuationState;
     const s = recordingStampers(rec);
     s.stampForceChargeOnFate(leg, leg, 'write');
@@ -1681,7 +1685,7 @@ test('★★★ the status route serves ledger rows without authentication: only
     assert.deepEqual(s.log, { warn: [], debug: [] });
     const served = rec.readNightLedger(7).find((r) => r.plan_date === day) as unknown as Row;
     assert.ok(served != null, 'the row is among those the route serves');
-    assert.deepEqual([served.force_charge_on_at_ms, served.force_charge_mode], [ON_AT, null], 'the ON time; the mode that is not a mode is not written');
+    assert.deepEqual([served.force_charge_on_at_ms, served.force_charge_mode], [ON_AT, heldMode], 'the ON time; the mode that is not a mode is not written (the row keeps what it held)');
     for (const [c, t] of FATE_SCHEMA) {
       const v = served[c];
       if (t === 'TEXT') assert.ok(v === null || /^[1-3](,[1-3])*$/.test(String(v)), `${c}: ${String(v)}`);

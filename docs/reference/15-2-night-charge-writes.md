@@ -166,8 +166,11 @@ When `NIGHT_CHARGE_MODE` is `supervised` (or `auto`), each charge night runs one
      for a `windowEnd` OFF or none.
    - **An ON never confirmed.** At its stop: "force-charge reached ~56.7% at 12:20am and was
      switched off there, with no readback showing every slot ON", then the re-issue clause where
-     one was made, under the normal lead and title: a short top-up reaches its stop before the
-     ON's readback check, 15 minutes after the ON. Otherwise: "was switched ON but the panel never
+     one was made, under the normal lead and title: a short top-up reads its stop before every
+     slot has read ON and before the check's failure verdict, which comes 15 minutes after the
+     ON (a readback showing every slot ON verifies the ON on any tick, with no wait). The words
+     say what was read, the pool at its stop, and that no readback showed every slot ON; they
+     do not say which slots charged. Otherwise: "was switched ON but the panel never
      confirmed it", then the re-issue clause, then "; it was switched off at 2:30am (the run
      backstop)" on an early OFF.
    - **A force-charge that never started.** It keeps "force-charge toward ~56.7% never started",
@@ -458,8 +461,11 @@ Three properties an operator needs before setting these:
      fresh on, `poolOutSensorState`). A reading whose capacity cannot be judged, a reading
      held as a contradiction (capacity short while every slot carries its share) and a
      reading whose capacity reads whole do not keep the verdict young.
-   - **Two rules that fail safe in opposite directions.** A lower rate starts the charge
-     earlier, so the rate counts a doubtful slot **out**. A withheld ON costs a Core its charge
+   - **Two rules that fail safe in opposite directions.** A start timed for fewer Cores
+     suffices for more, since the plant then charges at least as fast as the one the start
+     was timed for, so the rate counts a doubtful slot **out**. That start is usually the
+     earlier one. With a predicted EV it can be the later one, because `evDisplacedPackKwh`
+     models the EV as taking less from fewer Cores; it still covers the need. A withheld ON costs a Core its charge
      for the night. An ON sent to a Core that is out costs a write and, where that slot does
      not read ON, the re-issue of the ON (where one can still be sent) and then an ON-failure
      warning and push that name it: the verify judges a slot kept in for doubt as any other
