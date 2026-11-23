@@ -690,7 +690,8 @@ test('★★★ WRITE-AHEAD: the ON intent is persisted before any ON write is i
   // v1.200.0 (review) — the intent is forceChargeOnStamp's (forceChargeOnAtMs: nowMs, the slots, the mode and the
   // panel ceiling read back; lineForceCharge.test.ts T6), on the leg's LIVE gates, persisted whole.
   const stamp = INDEX.indexOf('const onStamp = forceChargeOnStamp(state, nowMs, action.slots, forceChargeGatesOn(legRoleOf(state)));', fn);
-  const intent = INDEX.indexOf('persistNightActuation({ ...nightActuationMem, ...onStamp });', fn);
+  // v1.209.0 — the same persist also stamps the slots the ON is not sent to (forceChargeLeftOutSlots).
+  const intent = INDEX.indexOf('persistNightActuation({ ...nightActuationMem, ...onStamp, forceChargeLeftOutSlots: pool.leftOut.length > 0 ? [...pool.leftOut] : null });', fn);
   const write = INDEX.indexOf("on: true, source: { ua: 'night-force-charge' }", fn);
   assert.ok(stamp > fn && intent > stamp && write > fn, 'all located');
   assert.ok(intent < write,
@@ -913,5 +914,8 @@ test('★★★ v1.170.0 — with a Core out, the rate is bounded by what each c
     forceChargeRateKw({ gridCapKw: 17, houseLoadKw: 2.5, legEff: LEG }), 'no count ⇒ no bound (ON needs a slot anyway)');
   const fn = INDEX.indexOf('async function runForceChargeTick(');
   const body = INDEX.slice(fn, INDEX.indexOf('async function escalateForceChargeStuck(', fn));
-  assert.ok(body.includes('slotCount: connectedSlots.filter((n) => n >= 1 && n <= SHP2_SOURCE_SLOTS).length,'), 'index.ts passes the connected count (v1.191.0: hwSpec\'s three slots)');
+  // v1.209.0 — the count is forceChargePoolSlots' rateCount: the connected slots of hwSpec's three, less those the pool alarm counts out.
+  assert.ok(body.includes('    slotCount: pool.rateCount,\n')
+    && body.includes('  const pool = forceChargePoolSlots(hwSlots.filter((n) => n >= 1 && n <= SHP2_SOURCE_SLOTS), store.poolOutRead(shp2.sn), nowMs);\n'),
+  'index.ts passes the connected count (v1.191.0: hwSpec\'s three slots; v1.209.0: of the Cores in the pool)');
 });

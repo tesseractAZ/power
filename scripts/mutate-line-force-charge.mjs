@@ -5069,8 +5069,8 @@ const MUTANTS = [
   {
     id: 'F13-a(viii). ★★★ the START rides it (a write moves)',
     file: NFC, tests: [T_LINE],
-    find: "    if (nowMs < forceChargeLineStartAtMs(endMs, mode.startTargetPct, o.poolSocPct, o.fullKwh, o.chargeRateKw, o.evDisplacedKwh, slots.length)) {\n",
-    to: "    if (nowMs < forceChargeLineStartAtMs(endMs, mode.startTargetPct, o.poolSocPct, o.fullKwh, lineDeliverableRateKw(slots.length), o.evDisplacedKwh, slots.length)) { /* MUTANT */\n",
+    find: "    if (nowMs < forceChargeLineStartAtMs(endMs, mode.startTargetPct, o.poolSocPct, o.fullKwh, o.chargeRateKw, o.evDisplacedKwh, rateSlots)) {\n",
+    to: "    if (nowMs < forceChargeLineStartAtMs(endMs, mode.startTargetPct, o.poolSocPct, o.fullKwh, lineDeliverableRateKw(rateSlots), o.evDisplacedKwh, rateSlots)) { /* MUTANT */\n",
     why: 'Nothing written moves: the helper reads the gate and the quote alone.',
   },
   // (b) the time the declined-start push quotes
