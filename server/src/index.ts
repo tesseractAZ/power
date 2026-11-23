@@ -7100,6 +7100,11 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     // EFFECT" nor "forfeited". A night with no line ask keeps v1.199.1's line, word for word.
     if (lineLogPct(state) != null) app.log.warn(`night-charge: force-charge ON for ${state.day}'s ${lineLogPct(state)}% outage line has NOT taken effect — slot(s) ${failedSlots.text} still read FORCE_CHARGE_OFF after ${state.forceChargeOnRetries} re-issue(s)${action.noRetry ? ` (none sent: under ${Math.round(FORCE_CHARGE_ON_RETRY_CUTOFF_MS / 60_000)} min of the window left, so the window-end OFF is never held behind one)` : ''}, and their Cores do not read at the panel's ceiling. Unless it applies late (a late apply is still verified), the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve${all ? '' : ' on those slot(s)'}; the reserve charge is unaffected, and the OFF at the window close still runs.`);
     else app.log.warn(`night-charge: force-charge ON NEVER TOOK EFFECT for ${state.day} — slot(s) ${failedSlots.text} still read FORCE_CHARGE_OFF after ${state.forceChargeOnRetries} re-issue(s)${action.noRetry ? ` (none sent: under ${Math.round(FORCE_CHARGE_ON_RETRY_CUTOFF_MS / 60_000)} min of the window left, so the window-end OFF is never held behind one)` : ''}, and their Cores do not read at the panel's ceiling. Tonight's buy above the ${RESERVE_WRITE_MAX_PCT}% reserve is forfeited${all ? '' : ' on those slot(s)'}; the reserve charge is unaffected, and the OFF at the window close still runs.`);
+    // v1.209.0 — and, in a line of its own, the slots listed above because their Core is out of the pool: the verify names
+    // them when no slot IN the pool took the ON, and the line above says of every slot that it still reads OFF under the
+    // panel's ceiling. With none (no alarm standing, or a slot in the pool took the ON) nothing is added.
+    const outListed = action.slots.filter((n) => pool.leftOut.includes(n));
+    if (outListed.length > 0) app.log.warn(`night-charge: of those, slot(s) ${outListed.join(',')} are listed because the pool alarm names their Core out of the panel's backup pool (a Core out of the pool takes no charge, whatever its Charge Now and its percent read): no slot in the pool took the ON.`);
     try {
       // v1.187.22 — toward where it stops (~80%), as every other surface names it, not the ceiling.
       await sendNotification(loadNotifyConfig(), buildNightForceChargeOnFailure({
@@ -7109,6 +7114,7 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
         // record's line ask, never the stamped mode: a cost-dominant night (stamped 'cost') carries its line too.
         ...forceChargeOnFailureNight(state),
         cores: slotCores,
+        outOfPoolSlots: pool.leftOut, // v1.209.0 — the slots listed because the pool alarm names their Core out of the pool
       }));
     } catch (e: any) {
       app.log.warn(`night-charge: force-charge ON-failure notify failed (${e?.message ?? e})`);

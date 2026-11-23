@@ -1264,18 +1264,21 @@ export interface PoolOutRead {
   named: number[];
   /** The latched count of slots out, named or not; 0 with no episode. */
   count: number;
-  /** The largest count of slots out that any standing reading of the episode holds: `count`, or the count of a
-   *  different set on its way through the dwell (`episode.change`) when that one is larger. Never below `count`. */
+  /** The largest count of slots out that any standing reading of the episode holds: `count`, or the largest count on
+   *  its way through a dwell (`episode.change` and the larger counts chained under it, `more`). Never below `count`. */
   countAtMost: number;
   /** The capacity reads whole again and the clear dwell is running: the alarm still stands and still names its slots. */
   returning: boolean;
-  /** Readings since the latch disagree with it and are on their way through a dwell: FEWER slots short than it
-   *  counts (`episode.less`: a Core of the named ones may be back), or a DIFFERENT set (`episode.change`: the names
-   *  may be wrong). The alarm still stands and still names its slots; which of them are out is not established. */
+  /** Something stands against the latch: readings on their way through a dwell that count FEWER slots short
+   *  (`episode.less`: a Core of the named ones may be back) or a DIFFERENT set (`episode.change`: the names may be
+   *  wrong), or the NEWEST usable reading shows every slot carrying its share (flow healthy: a named slot is seen
+   *  carrying). The alarm still stands and still names its slots; which of them are out is not established. */
   contested: boolean;
-  /** DATA time of the newest usable observation whose CAPACITY verdict could be judged (healthy or short); null with
-   *  none. Not the newest usable observation: one whose capacity cannot be judged neither confirms the named slots
-   *  nor starts their return, and must not keep the verdict young. */
+  /** DATA time of the newest COUNTED reading of the standing episode (`episode.lastFault`: capacity short AND a
+   *  slot's percent or flow at fault, or its flow not judged); null with no episode. Not the newest usable reading,
+   *  and not the newest judged capacity: a reading whose capacity cannot be judged, and one held as a contradiction
+   *  (capacity short while every slot carries its share), neither confirms the named slots nor starts their return,
+   *  and must not keep the verdict young. */
   asOfMs: number | null;
 }
 
@@ -1294,23 +1297,31 @@ export interface PoolOutRead {
  * uses fail safe in opposite directions, and each takes the doubt its own way.
  *
  * No clock argument: the title has none, and the tracker's rule is that age ends no alarm. A caller that must not act
- * on an old verdict reads `asOfMs` (forceChargePoolSlots does, for the slots it leaves out of an ON). It is the
- * time of `lastCapMs`, the one poolOutSensorState measures its own freshness on.
+ * on an old verdict reads `asOfMs` (forceChargePoolSlots does, for the slots it leaves out of an ON): the newest
+ * counted reading, the tracker's own record of the last evidence that a slot is out.
  *
  * No state, or no episode standing: nothing named, nothing counted.
  */
 export function poolOutRead(state: PoolOutState | null | undefined): PoolOutRead {
-  const asOfMs = state?.lastCapMs ?? null;
   const ep = state?.episode;
-  if (ep == null) return { named: [], count: 0, countAtMost: 0, returning: false, contested: false, asOfMs };
+  if (state == null || ep == null) return { named: [], count: 0, countAtMost: 0, returning: false, contested: false, asOfMs: null };
+  const faultAt: unknown = ep.lastFault?.atMs;
+  const asOfMs = typeof faultAt === 'number' && Number.isFinite(faultAt) ? faultAt : null;
   const slots: unknown[] = Array.isArray(ep.slots) ? ep.slots : [];
   const named = [...new Set(slots.filter((n): n is number => typeof n === 'number' && Number.isInteger(n) && n >= 1 && n <= SHP2_SOURCE_SLOTS))]
     .sort((a, b) => a - b);
   const whole = (k: unknown): number => (typeof k === 'number' && Number.isInteger(k) && k >= 0 ? k : 0);
   const count = whole(ep.k);
+  // The largest count on its way through a dwell: the change streak and every larger count chained under it.
+  let countAtMost = count;
+  for (let st: PoolOutStreak | null | undefined = ep.change, depth = 0; st != null && depth < 8; st = st.more, depth++) {
+    countAtMost = Math.max(countAtMost, whole(st.k));
+  }
   return {
-    named, count, countAtMost: Math.max(count, whole(ep.change?.k)),
-    returning: ep.clear != null, contested: ep.less != null || ep.change != null, asOfMs,
+    named, count, countAtMost,
+    returning: ep.clear != null,
+    contested: ep.less != null || ep.change != null || state.last?.flow?.v === 'healthy',
+    asOfMs,
   };
 }
 
