@@ -94,14 +94,20 @@ When `NIGHT_CHARGE_MODE` is `supervised` (or `auto`), each charge night runs one
    reserve with the other Cores' in the EcoFlow app". The slot → Core join comes from the same fresh
    panel readback the ON verify read; each Core's work mode and reserve are its last reported DPU
    settings. The "force-charge ON NEVER TOOK EFFECT" log line names the slots the same
-   way; the morning push keeps slot numbers. A night
+   way; the morning push keeps slot numbers. Where a listed slot is listed because the pool
+   alarm names its Core out of the backup pool, the warning ends with one more sentence and the
+   log has one more line ("The ON-failure warning", under "Only the Cores in the panel's backup
+   pool" below). A night
    expected to charge nothing reads "the reserve was held at 50% overnight as a floor (no charge
    was expected)", and the apply-failure warning calls it a reserve hold. A restore that ended the night early is not reported as completed: an owner
    cancel after the write ("Night-charge: cancelled — reserve restored to 16%") and a grid-loss
    abort ("Night-charge: stopped (grid lost) — …") say so, with no figure; nor is a night with no
-   outage line whose force-charge did not take effect, was never confirmed short of its stop, or
-   never started without the pool read at or above that stop at the close (the close account's
-   lead and title, below). The armed record's
+   outage line whose force-charge did not take effect, was never confirmed short of its stop, or,
+   where the evening notice announced a start, never started without the pool read at or above
+   that stop at the close (the close account's lead and title, below). A force-charge that never
+   started on a night whose notice announced no start, or whose record holds no announced level,
+   is still reported as completed under the restore's plain title, with no close reading,
+   whatever the pool read. The armed record's
    `buyKwh` is the worst case and is never pushed;
    only the log lines name it, labelled (`buyFiguresLogText`).
    Harness: `scripts/mutate-actuation-readback.mjs` (5 mutants).
@@ -141,8 +147,14 @@ When `NIGHT_CHARGE_MODE` is `supervised` (or `auto`), each charge night runs one
      the re-issue after it: "ran toward ~56.7% (~6.4 kWh expected) and was switched off at 2:30am
      (the run backstop), after one re-issue of the ON".
    - **An ON that failed.** "was switched ON but did not take effect", with "on slot(s) 2, 3 (the
-     buy above the reserve did not happen on those slot(s))" where the failed-slot list is not
-     empty (a null or empty list is every slot). On every slot and at its stop the opening words
+     buy above the reserve did not happen on those slot(s))" where the failure covered only some
+     of the ON's slots (the outcome's `partialSlots`, from `partialForceChargeOnFailureSlots`:
+     the record's failed slots where they are fewer than the ON's slots; a failed list as long
+     as the ON's slots, an empty one, none, or a record with no slot list is every slot). A
+     failure declared with no in-pool slot of
+     ours reading ON lists the slots out of the pool with the rest ("What a failure names",
+     below), so it is told here as a failure on every slot unless an in-pool slot was excused
+     at the panel's ceiling. On every slot and at its stop the opening words
      are instead "was switched ON and its readback check failed": the pool read its stop, which
      it does not do overnight with no force-charge at all, and a slot that applied late leaves
      the same record, so the body says what is on record and not that the charge did not happen.
@@ -164,8 +176,8 @@ When `NIGHT_CHARGE_MODE` is `supervised` (or `auto`), each charge night runs one
      integers; any other entry is dropped): "; slot(s) 1 not switched on (named out of the backup
      pool by the pool alarm)". It follows the force-charge clause and precedes the close, on a
      night whose force-charge ran, failed or was never confirmed, and is not given on one that
-     never started. The list is stamped at the ON: a slot the ON was sent to and the alarm named
-     afterwards is not in it.
+     never started. The list is stamped at the ON: a slot the ON was sent to and the alarm's
+     verdict left out afterwards is not in it.
    - **The close.** "; the pool read 49% at the close, against the ~56.7% the evening notice
      named". With `readLate`: "; the pool reads 61% now, past the window close; the evening notice
      named ~56.7%". With no reading: "; the pool was not read at the close (no fresh panel
@@ -178,20 +190,24 @@ When `NIGHT_CHARGE_MODE` is `supervised` (or `auto`), each charge night runs one
      with a start announced: lead "closed without its force-charge", flag "force-charge did not
      run". It is not flagged where the pool was read, not late, at or above the stop (the reading
      as read against the stop as armed, neither rounded): `decideForceCharge` declines a start
-     there, and the record keeps no reason for a start that never came. Failed with a failed-slot
-     list that is not empty: lead "closed with its force-charge not applied on every slot", flag
+     there, and the record keeps no reason for a start that never came. Failed on some of
+     the ON's slots (`partialSlots` not empty): lead "closed with its force-charge not applied on every slot", flag
      "force-charge not applied on slot(s) 2, 3"; never "applied in part", because a slot absent
-     from that list may have been excused at the panel's ceiling, or exempt as named out of the
-     backup pool after the ON, not charged. Failed on every
+     from that list may have been excused at the panel's ceiling, or left out for the pool
+     alarm at the readback check, not charged. Failed on every
      slot: at its stop, lead "closed with its force-charge ON not confirmed", flag "force-charge
      ON not confirmed"; otherwise lead "closed without its force-charge", flag "force-charge did
      not take effect". Never confirmed and not at its stop: lead "closed with its force-charge
      unconfirmed", flag "force-charge not confirmed". Every other outcome keeps "completed" and
-     the restore's title.
+     the restore's title. That includes a force-charge that ran and was switched off early
+     (the run backstop, a grid-loss reading that did not end the night): only the body states
+     the early switch-off and the close.
    - **Where the account is not given.** The summary keeps the outcome's words alone with no
      `cost` (null or omitted), with no finite stop on the outcome, and for a force-charge that
-     never started on a night whose evening notice named a level other than the stop: that notice
-     expected no start. `cost` is not read on a reserve-only night, on a night a cancel or a grid
+     never started on a night whose evening notice named a level other than the stop (that notice
+     expected no start) or whose record holds no announced level (`announcedLevelPct` null or
+     not finite): no close and no flag, whatever the pool read. `cost` is not read on a
+     reserve-only night, on a night a cancel or a grid
      loss ended, or where the input or the outcome carries a line. The mid-day summary and a
      stood night's close take none.
 
@@ -420,41 +436,55 @@ Three properties an operator needs before setting these:
    counted for its rate and sent ON."
    - **The verdict** (`PoolOutRead`). `named` (the slots in the alarm's title) and `count` (the
      slots out, named or not) are built from the episode's latched fields alone, the two the
-     title is built from, never from one reading or a streak before its raise. `countAtMost`
-     and `contested` read the episode's pending streaks, and the raise itself can seed one from
-     the streak that raised it: a larger count still on its way to a dwell, or a set its
-     readings agree on and have not yet named for a dwell. `countAtMost`: `count`, or the count
-     of a different set on its way through a dwell when that is larger. `returning`: the
-     capacity reads whole again and the clear dwell is running. `contested`: readings that
-     disagree with the latch are on their way through a dwell, showing fewer slots short (since
-     the raise) or a different set (since the raise, or carried into it), so a verdict can be
-     contested from the moment of its raise. `asOfMs` is the tracker's own time, outside the
-     episode: the data time of the newest reading whose capacity could be judged, healthy or
-     short (`lastCapMs`), the time the alarm's Home Assistant sensor is judged fresh on
-     (`poolOutSensorState`). A reading whose capacity cannot be judged does not keep the verdict
-     young.
+     title is built from, never from one reading or a streak before its raise. What stands
+     against the latch is reported beside it. `countAtMost` and `contested` read the episode's
+     pending streaks, and the raise itself can seed one from the streak that raised it: a
+     larger count still on its way to a dwell, or a set its readings agree on and have not yet
+     named for a dwell. `countAtMost`: the largest of `count`, the count of the streak on its
+     way through a dwell against the latch (`episode.change`) and every larger count chained
+     under that streak (`more`, read through eight streaks at most); never under `count`.
+     `returning`: the capacity reads whole again and the clear dwell is running. `contested` is true on any
+     of three things. Readings that count fewer slots short than the latch are on their way
+     through a dwell (`episode.less`, since the raise). Readings that count more slots short
+     than the latch, or name at its count a set other than the latched one (any set where the
+     latch names none), are (`episode.change`, since the raise or carried into it, so a
+     verdict can be contested from the moment of its raise). Or the newest usable reading
+     shows every slot carrying its share (its flow verdict reads healthy): a named slot is seen carrying, which is doubt at
+     once, with no dwell. `asOfMs` is the data time of the newest counted reading of the
+     standing episode (`episode.lastFault`), null with no episode. A reading is counted when
+     the capacity reads short and either a slot's percent is at fault or the flow does not
+     show every slot carrying its share. It is not the newest usable reading, and not the
+     newest judged capacity (`lastCapMs`, the time the alarm's Home Assistant sensor is judged
+     fresh on, `poolOutSensorState`). A reading whose capacity cannot be judged, a reading
+     held as a contradiction (capacity short while every slot carries its share) and a
+     reading whose capacity reads whole do not keep the verdict young.
    - **Two rules that fail safe in opposite directions.** A lower rate starts the charge
      earlier, so the rate counts a doubtful slot **out**. A withheld ON costs a Core its charge
      for the night. An ON sent to a Core that is out costs a write and, where that slot does
      not read ON, the re-issue of the ON (where one can still be sent) and then an ON-failure
      warning and push that name it: the verify judges a slot kept in for doubt as any other
-     slot of ours. So the ON targets keep a doubtful slot **in**.
+     slot of ours, and reading ON it counts as proof that the ON took. So the ON targets keep
+     a doubtful slot **in**.
    - **The rate.** `outCount` is the named slots that are connected, whatever the verdict's age
      and whether or not a dwell runs against it, plus the slots counted short and not named (the
-     larger of `count` and `countAtMost`, less the names). `rateCount` is the connected slots
-     less `outCount`, and never under one while a slot is connected: a count of 0 reads as
+     larger of `count` and `countAtMost`, less the names), and at most one fewer than the
+     connected slots. `rateCount` is the connected slots
+     less `outCount`, so never under one while a slot is connected: a count of 0 reads as
      unknown downstream and lifts the bound, the fastest rate and the latest start. With no slot
      connected it stays 0. The live rate is bounded by `rateCount` × the per-Core rate
      (`forceChargeRateKw`).
    - **The ON targets.** A connected slot is left out only when the alarm names it, no return
-     dwell is running, nothing contests the latch, and the verdict's data time is at most 15
-     minutes old (`POOL_OUT_SENSOR_FRESH_MS`) and not ahead of the tick's clock. The alarm stands
-     through a stale shadow, an offline panel, a capacity that cannot be judged and a restart,
-     and age ends no alarm; an ON is not withheld on a verdict that old, or on one with no data
-     time. Each flag must read false: a verdict missing either one leaves nothing out. So a slot
-     counted short and not named, a named slot whose return dwell is running or whose latch is
-     contested, and a named slot on an old verdict are each counted out of the rate, down to
-     its floor of one, and still sent ON.
+     dwell is running, nothing contests the latch, and the verdict's data time (`asOfMs`, the
+     newest counted reading) is at most 15 minutes old (`POOL_OUT_SENSOR_FRESH_MS`) and not
+     ahead of the tick's clock. The alarm stands through a stale shadow, an offline panel, a
+     capacity that cannot be judged and a restart, and age ends no alarm; an ON is not withheld
+     on a verdict that old, or on one with no data time. Each flag must read false: a verdict
+     missing either one leaves nothing out. So a slot counted short and not named, a named slot
+     whose return dwell is running or whose latch is contested, and a named slot on an old
+     verdict are each counted out of the rate, down to its floor of one, and still sent ON. A
+     named slot stops being left out as soon as the newest usable reading shows every slot
+     carrying its share, and once 15 minutes have passed with no counted reading, whatever
+     other readings arrive in that time.
    - **The decision** (`decideForceCharge`). The tick passes the targets as `connectedSlots`
      while a slot is left out (the connected list itself otherwise), `leftOut` as `poolOutSlots`
      and `rateCount` as `rateSlotCount`. The slots reading ON and the per-slot percents are not
@@ -467,36 +497,47 @@ Three properties an operator needs before setting these:
      used with no live rate; it reads a count only where `FORCE_CHARGE_KW_PER_CORE` is set): the
      lower of the ON's slots and `rateSlotCount`, or the ON's own slot count where that is
      absent, null or not a whole number of 1 or more.
-   - **The verify** (`verifyForceChargeOn`). A slot the ON went to that the alarm names
-     afterwards (a slot of ours in `poolOutSlots`) is exempt as a slot at the panel's ceiling
-     is: reading OFF it is no failure of the ON, and it is in no re-issue. The exemption is the
-     tick's own: the slots left out are judged again on every tick, from that tick's verdict
-     and only among the slots still reading connected. So while the ON is neither verified nor
-     failed, a slot exempt on one tick is judged like any other slot of ours once the verdict
-     is over 15 minutes old, contested or returning, or the slot no longer reads connected, and
-     can then draw the re-issue or be named in a failure. A verified ON still needs a slot of
-     ours reading ON, and reports an exempt slot reading OFF as `outOfPool`, never as at the
-     ceiling. A slot of ours that is out of the pool and reads ON counts as a slot of ours
-     reading ON: a verified ON, or a failure reported as on some slots, can rest on that slot
-     alone. A failure with **no** slot of ours reading ON names the exempt slots that read
-     OFF too: every reader takes a failed list shorter than the ON's slots as an ON that took on
-     the others (`partialForceChargeOnFailureSlots`, the push, the morning summary), and this ON
-     took on none. That failure is whole unless a slot of ours in the pool is exempt at the
-     panel's ceiling while another reads OFF under it: the slot at the ceiling stays out of the
-     list as before, and the shorter list is still read as a failure on some slots. With a slot
-     of ours reading ON the failure is partial and the exempt slot stays out of its list. With
-     every slot of ours out of the pool and none reading ON there is no slot a re-issue may go
-     to: the failure is declared 15 minutes after the last attempt
-     (`FORCE_CHARGE_ON_VERIFY_AFTER_MS`), with no re-issue and without `noRetry`. A slot at the
-     panel's ceiling is treated as before.
+   - **The verify** (`verifyForceChargeOn`). A slot the ON went to that the tick's verdict
+     leaves out (a slot of ours in `poolOutSlots`: named since the ON, or named before it on a
+     verdict the ON did not act on) is out of the pool for the check. Reading OFF, it is
+     not by itself a failure of the ON, as with a slot at the panel's ceiling, and it is in no
+     re-issue. Every other slot of ours is in the pool for the check, a slot counted out of
+     the rate and still sent ON too. The exemption is the tick's own: the slots left out are
+     judged again on every tick, from that tick's verdict and only among the slots still
+     reading connected. So while the ON is neither verified nor failed, a slot out of the pool
+     on one tick is judged like any other slot of ours once the verdict is over 15 minutes
+     old, contested or returning, or the slot no longer reads connected, and can then draw the
+     re-issue or be named in a failure.
+   - **What proves the ON took.** Only a slot in the pool reading ON. A slot of ours that is
+     out of the pool and reads Charge Now ON proves nothing, because its Core takes no charge:
+     it neither verifies the ON nor makes a failure one on some slots. A verified ON needs
+     every in-pool slot of ours reading ON or at the panel's ceiling, and at least one of them
+     reading ON. It reports the in-pool slots that read OFF as at the ceiling (`atCeiling`)
+     and every slot of ours out of the pool as `outOfPool`, whatever its Charge Now reads,
+     never as at the ceiling. A re-issue goes to in-pool slots only.
+   - **What a failure names.** A failure with no in-pool slot of ours reading ON names every
+     slot of ours out of the pool too, reading ON or OFF, in the order of the ON's slots:
+     every reader takes a failed list shorter than the ON's slots as an ON that took on the
+     others (`partialForceChargeOnFailureSlots`, `lineRunGone`, the push, the morning
+     summary), and this ON took on no Core that can take a charge. That failure is whole
+     unless an in-pool slot of ours is exempt at the panel's ceiling while another reads OFF
+     under it: the slot at the ceiling stays out of the list as before, and the shorter list
+     is still read as a failure on some slots. With an in-pool slot of ours reading ON the failure names only the
+     in-pool slots that read OFF under the ceiling, and the slots out of the pool stay out of
+     its list. With every slot of ours out of the pool there is no slot a re-issue may go to:
+     the failure is declared 15 minutes after the last attempt
+     (`FORCE_CHARGE_ON_VERIFY_AFTER_MS`), names every slot of ours, and comes with no re-issue
+     and without `noRetry`. A slot at the panel's ceiling is treated as before, and with no
+     slot out of the pool every verdict is the one given before.
    - **The OFF side is unchanged.** Every slot the ON was sent to is switched OFF, and its OFF
      verified, whatever the alarm says by then: the record's slots, or all three where the
      record has lost its list. A slot left out at the ON gets no OFF of ours while the record
      keeps its list.
    - **The log.** On a tick of a live night (the reserve write applied, or a standing reserve
      ready to ride; not reverted, not cancelled) that declines the start with a reason, before
-     the ON, one line is written for each distinct combination of rate count, count out and
-     slots left out, once a night in one process: "night-charge: force-charge for", the
+     the ON, while the verdict counts a slot out of the rate (`outCount` above 0) or leaves
+     one out of the ON, one line is written for each distinct combination of rate count, count
+     out and slots left out, once a night in one process: "night-charge: force-charge for", the
      night's day, and then for example ": the pool alarm stands for this panel — its charge
      rate counts 2 of the 3 connected Core(s), and an ON is not sent to slot(s) 1 (the alarm
      names their Core out of the backup pool)."; the clause from ", and an ON" is printed only
@@ -506,7 +547,22 @@ Three properties an operator needs before setting these:
      "; slot(s) 1 left out: the pool alarm names its Core out of the backup
      pool", and with a slot counted out its rate note, where it names a Core count, reads "2
      Core(s) counted in the pool" where it otherwise reads "3 connected Core(s)". The ON
-     VERIFIED line adds "; slot(s) 1 out of the panel's backup pool (the pool alarm names it)".
+     VERIFIED line lists every slot of ours out of the pool, whatever its Charge Now reads,
+     after the slots at the ceiling: "; slot(s) 1 out of the panel's backup pool (the pool
+     alarm names it)". Such a slot is not among the slots the line says "read
+     FORCE_CHARGE_ON".
+   - **The ON-failure warning.** Its log line (on a night with a line ask "has NOT taken
+     effect", otherwise "ON NEVER TOOK EFFECT") and its push are as before, and one line and
+     one sentence are added where a listed slot is one the tick's verdict leaves out, which
+     is the case only when no in-pool slot read ON. The added warning line: "night-charge: of
+     those, slot(s) 1 are listed because the pool alarm names their Core out of the panel's
+     backup pool (a Core out of the pool takes no charge, whatever its Charge Now and its
+     percent read): no slot in the pool took the ON." The push
+     (`buildNightForceChargeOnFailure`, which takes the tick's left-out slots as
+     `outOfPoolSlots`) ends with: "Slot(s) 1 are listed because the pool alarm names their
+     Core out of the backup pool: a Core out of the pool takes no charge, whatever its Charge
+     Now reads." The push names those slots ascending, each once. With no such slot among
+     the listed ones the log and the push read as before, to the letter.
    - **The record.** The ON's write-ahead persist stamps `forceChargeLeftOutSlots`: the
      connected slots the ON was not sent to, null with none, never an empty list, and not
      carried to the next night. `GET /api/night-charge/status` serves it with the rest of the
@@ -518,17 +574,41 @@ Three properties an operator needs before setting these:
      with the blocker's words, and the pool line above. Where the hold lasts to the close no ON
      is stamped, so `forceChargeLeftOutSlots` stays null, and the morning summary says "never
      started" with no cause and no slot left out.
-   - **The planner** (`recomputeNightChargePlan`) reads the same verdict for its own list of
-     connected slots and caps its charge with the same `rateCount` (`planChargeCapKw`, where
-     `ARB_CHARGE_CAP_KW` is 0), so the plan's cap and the tick's bound count the same Cores. No
-     capacity or standby figure is changed.
+   - **The planner** (`recomputeNightChargePlan`) reads the verdict for its own list of
+     connected slots, once for each plan it computes, and caps its charge with that `rateCount`
+     (`planChargeCapKw`, where `ARB_CHARGE_CAP_KW` is 0): a plan and a tick that read the same
+     connected slots and the same verdict count the same Cores. The tick reads the verdict
+     again each time, so a plan computed before the alarm raised or cleared counts what stood
+     then. With
+     `ARB_CHARGE_CAP_KW` above 0 the plan's cap is the option, whatever the alarm counts out.
+     No capacity or standby figure is changed.
    - **Limits.** A loss the alarm has not raised yet is not counted: both rules read the
      standing alarm, which raises only once its own rule is met (a dwell of readings, or the
-     flap rule's third confirmed loss step inside its window). A slot named out after the ON is
-     recorded nowhere on the night's record or its ledger row as out of the pool: a verified ON
-     names it in its log line only, a failure with no slot of ours reading ON names it as a
-     failed slot, and a failure on some slots names it nowhere, the log included. The record
-     and the ledger row name as left out only the slots left out at the ON. The morning summary
+     flap rule's third confirmed loss step inside its window). With no live rate (no
+     grid-input cap, or no live house load) and `FORCE_CHARGE_KW_PER_CORE` unset, the start is
+     timed at the fixed 10 kW plan rate (`FORCE_CHARGE_PLAN_RATE_KW`) whatever `rateCount` is:
+     a pool of one Core, counted at 5.5 kW in the live rate
+     (`FORCE_CHARGE_PROVEN_KW_PER_SLOT`), is timed at 10 kW and starts later than its own rate
+     would time it. A slot left out at the ON is not
+     switched on later that night when its Core returns to the pool: the ON is made once a
+     night, and its re-issue and a line night's re-ON go only to the slots the ON was sent to.
+     On a record that has lost its slot list every slot counts as the ON's (`decideForceCharge`,
+     `oursOf`): the verify, the re-issue and a line night's re-ON then reach a slot left out at
+     the ON too, once no verdict leaves it out.
+     A slot out of the pool at a verified ON gets no re-issue afterwards either; on a line
+     night the re-ON can still switch it back on, under the re-ON's own conditions, once no
+     verdict leaves it out. A slot the verdict leaves out after the ON is recorded nowhere on
+     the night's record or its ledger row as out of the pool: a verified ON names it in its
+     log line only; a failure with no in-pool slot of ours reading ON names it as a failed
+     slot on the record and the row, and only the added warning line and push sentence say
+     why it is listed; a failure with an in-pool slot of ours reading ON names it nowhere, the
+     log included. The
+     unchanged lines of that warning and the first sentence of its push say of every listed
+     slot that it still reads OFF (the log adds that its Core does not read at the panel's
+     ceiling), a slot listed for the pool alarm included, whatever it reads; on a night with
+     a line ask the push also says, ahead of the added sentence, that Charge Now switched on
+     for the listed slots can still lift the pool, that slot among them. The record and the
+     ledger row name as left out only the slots left out at the ON. The morning summary
      names those only in the close account of a night with no outage line (`costNightAccount`):
      the account of a night whose record carries a line, a stood night's close and the mid-day
      summary take no such input, so a line night with a slot left out of its ON can read "ran
@@ -609,7 +689,7 @@ written.
   under), at most twice a night (`FORCE_CHARGE_LINE_REON_MAX`), 15 minutes apart, and never in the last
   20 minutes (a re-ON shares each slot's command cooldown with the close's OFF). The budget is counted
   write-ahead (`forceChargeLineReOns`). Each re-ON is read back 15 minutes after it, as the ON is
-  (`lineReOnCheckDue`): slots still reading OFF, their Cores under the ceiling, are counted not applied (`forceChargeLineReOnsNotApplied`), and the budget's next re-ON is the retry. Unlike the ON's verify, this check has no exemption for the pool alarm: a slot the re-ON switched that is left out for the alarm by the time of the check, still reading OFF with its Core under the ceiling, is counted not applied, and no further re-ON is sent to it while it stays left out. A
+  (`lineReOnCheckDue`): slots still reading OFF, their Cores under the ceiling, are counted not applied (`forceChargeLineReOnsNotApplied`), and the budget's next re-ON is the retry. Unlike the ON's verify, this check has no exemption for the pool alarm: a slot the re-ON switched that is left out for the alarm by the time of the check, still reading OFF with its Core under the ceiling, is counted not applied, and no further re-ON is sent to it while it stays left out; one that reads ON counts there as a slot that took the re-ON, in the pool or not. A
   slot switched off in the app reads the same and is switched back on within that budget. The expected walk models both.
 - **The panel ceiling** is `desiredForceChargeCeilingPct(max(target, ⌈L⌉ + 10))`: 80 for any ask up to
   70, then ask + 10, at most 100. The value written is kept (`forceChargeCeilingSyncedPct`) for the ON verify's
@@ -631,12 +711,12 @@ written.
   under the line, above 100% "above a full
   pool", and on a `nearFull` walk that holds "cannot hold it with its usual margin"; never "no
   force-charge". The "charge/pool caps" note needs a sizing that fell short.
-- **At run time** a night with a line ask, a cost-dominant one too, pushes when anything but the clock or the pool holds its start. Causes (`forceChargeBlockerClass`): the ceiling refused or unread, Charge Now already on, the grid unknown or absent, red vitals, no slot read back or connected, every connected slot left out for the pool alarm (`noPoolSlots`, "Only the Cores in the panel's backup pool" above), an incoherent SoC, and a stood night's reserve moved or unread. Each pushes once a night, after 10 minutes unbroken (`lineDeclinedPushTick`), recorded first (`forceChargeLineDeclinedPushed`). The push quotes a latest start erring early on every input but, while the pool alarm stands, the slot bound (`lineDeclinedLatestStartMs`: ⌈L⌉ by the close with a 15-minute buffer, never the last 20 minutes, from at most the reserve, at the lower of the live and slot-bounded plan rates, with the EV's energy; the bound counts the connected slots less those left out of the ON, not the Cores counted in the pool, so with no live rate it can run late: "Limits", above), e.g. "If it has not started by ~04:24, the pool may close under the line"; no time gone by the push: "The later it starts, the lower the pool may close, perhaps under the line". An ON that took on no slot says that, unless it applies late, the add-on adds nothing above the reserve and the pool may close under the line; one that failed on some slots, that the pool may close short of it (`forceChargeOnFailureNight`). Both say what can still lift the pool (Charge Now on for those slots, switched off at the close), never "no action needed". A reserve write never read back on such a night says it keeps its own reserve, under the line, until the panel reads 50%, and to set 50% in the app now: the last start, the close less 20 minutes, may close under the line. With no start left (`forceChargeStartClosed`: cancelled, too late) it and its logs say why none starts. A write missing its apply window pushes too (`missedApplyDue`): an attempt in those words (no reading: the force-charge waits on one),
+- **At run time** a night with a line ask, a cost-dominant one too, pushes when anything but the clock or the pool holds its start. Causes (`forceChargeBlockerClass`): the ceiling refused or unread, Charge Now already on, the grid unknown or absent, red vitals, no slot read back or connected, every connected slot left out for the pool alarm (`noPoolSlots`, "Only the Cores in the panel's backup pool" above), an incoherent SoC, and a stood night's reserve moved or unread. Each pushes once a night, after 10 minutes unbroken (`lineDeclinedPushTick`), recorded first (`forceChargeLineDeclinedPushed`). The push quotes a latest start erring early on every input but, while the pool alarm stands, the slot bound (`lineDeclinedLatestStartMs`: ⌈L⌉ by the close with a 15-minute buffer, never the last 20 minutes, from at most the reserve, at the lower of the live and slot-bounded plan rates, with the EV's energy; the bound counts the connected slots less those left out of the ON, not the Cores counted in the pool, so with no live rate it can run late: "Limits", above), e.g. "If it has not started by ~04:24, the pool may close under the line"; no time gone by the push: "The later it starts, the lower the pool may close, perhaps under the line". An ON that took on no slot says that, unless it applies late, the add-on adds nothing above the reserve and the pool may close under the line; one that failed on some slots, that the pool may close short of it (`forceChargeOnFailureNight`). Both say what can still lift the pool (Charge Now on for those slots, switched off at the close), never "no action needed"; where a listed slot is listed for the pool alarm, the added sentence follows ("The ON-failure warning", above). A reserve write never read back on such a night says it keeps its own reserve, under the line, until the panel reads 50%, and to set 50% in the app now: the last start, the close less 20 minutes, may close under the line. With no start left (`forceChargeStartClosed`: cancelled, too late) it and its logs say why none starts. A write missing its apply window pushes too (`missedApplyDue`): an attempt in those words (no reading: the force-charge waits on one),
   none issued naming Charge Now by hand. A write-blocked ON or ceiling sync is a held start.
 - **The line at risk** (`lineAtRiskPushDue`). After the verified ON the re-ON is the only remedy, so a line lost another way (a re-ON not applied or spent, its gates holding, a late load taking the grid cap, the ON-reading latch below) pushes once a night, stamped before it goes (`forceChargeLineAtRiskPushedAtMs`). It needs a line ask (a cost-dominant one too) and the line gate on, no OFF issued (its own stop too), over 20 minutes before the add-on's close OFF (`FORCE_CHARGE_LINE_AT_RISK_LEAD_MS`, the re-ON's cutoff), a fresh, coherent pool under the start target (⌈L⌉ + 5 on a cost-dominant night) and below a reading at least 10 minutes older, or level with it at or under ⌈L⌉, with no slot off only once the time left no longer covers ⌈L⌉ at the slot-bounded plan rate (`lineFlatPushHeld`; `FORCE_CHARGE_LINE_TREND_MS`, the two-sample trail `lineNightObservations` stamps first, with the panel's own stop, anew after a re-ON or a slot seen ON; `lineTrendReference`
   takes only a reading 15 minutes or more after the last ON or re-ON, past one checked not applied, or a
   slot seen ON again that no ON of ours explains, `forceChargeLineOnSeenAtMs`, or an ON verified late), and no re-ON due nor a
-  rate-limited one's retry due a full tick before the cutoff (else `reOnRefused`, judged on its own tick and after a ceiling lowering; "may try once more" only where a tick can). Above a 95% line the re-ON and the push key on 95, under the line; emulated, the push reaches no near-full night that closes under. It names the slots: reading OFF, Charge Now on can still lift the pool; reading ON, the pool not rising, stopping a large load may let it rise; with none on, off and on again may restart the charge. The slots reading OFF are read against the tick's `connectedSlots`, the ON targets while a slot is left out, so a slot of ours left out for the pool alarm is not named as reading OFF; with no other slot of ours reading OFF (connected, its Core under the ceiling) and none reading ON, no push goes, and the pool alarm itself still stands. A cost-dominant night's push names ⌈L⌉ + 5 by its margin over the
+  rate-limited one's retry due a full tick before the cutoff (else `reOnRefused`, judged on its own tick and after a ceiling lowering; "may try once more" only where a tick can). Above a 95% line the re-ON and the push key on 95, under the line; emulated, the push reaches no near-full night that closes under. It names the slots: reading OFF, Charge Now on can still lift the pool; reading ON, the pool not rising, stopping a large load may let it rise; with none on, off and on again may restart the charge. The slots reading OFF are read against the tick's `connectedSlots`, the ON targets while a slot is left out, so a slot of ours left out for the pool alarm is not named as reading OFF; with no other slot of ours reading OFF (connected, its Core under the ceiling) and none reading ON, no push goes, and the pool alarm itself still stands. The slots reading ON are not read against that list: a slot of ours left out and reading ON is named as reading ON. A cost-dominant night's push names ⌈L⌉ + 5 by its margin over the
   line, and its cost force-charge as not switched back on. No write rests on the ON-reading shape; seen (slots of ours ON, their Cores under the ceiling, the pool falling against
   `lineTrendReference`) one warning is logged a night (`lineOnReadingShape`), never on the measured latch. A `gridLoss` OFF no abort reports is pushed (`lineGridOffPushDue`).
 - **The morning account** of a night with a line ask says it "ran to the window close
@@ -646,14 +726,14 @@ written.
   unless a re-ON after it took (`forceChargeLineReOnAppliedAtMs`) or a slot read ON again; with the last
   re-ON taking on no slot and none reading ON after it, Charge Now "read off" before the close. The close reading follows, "under the 55.6% outage line"
   when under, "the pool was not read at the close" with no fresh reading; over 15 minutes late, the pool "now", no verdict (`lineCloseReadingLate`); a grid loss or cancel gives the reading then. A write never read back is told so, not "raised", there and on the banner (`lineWriteUnreadStatus`). A night with nothing to restore (no write, a foreign reserve) has its own account at the close (`lineCloseAccountDue`), a stood night the summary's. None of these names a slot left out of the ON for the pool alarm: on a night with a line ask that is in the add-on log (the pool line and the ON line), the record (`forceChargeLeftOutSlots`) and the ledger row (`force_charge_on_left_out`) only. A night with no line ask
-  whose force-charge rode it has the close account of the nightly flow, item 2 (`costNightAccount`): what ended its force-charge, the pool reading beside the level the evening notice named, and a lead and title of its own where the force-charge did not take effect, was never confirmed short of its stop, or never started without the pool read at or above that stop at the close. Its close clause gives no verdict. With no `cost` input the summary of a night with no line ask reads as v1.199.1, word for word (`fixtures/lineNightCostTexts.v1199.json`).
+  whose force-charge rode it has the close account of the nightly flow, item 2 (`costNightAccount`): what ended its force-charge, the pool reading beside the level the evening notice named, and a lead and title of its own where the force-charge did not take effect, was never confirmed short of its stop, or, with a start announced by the evening notice, never started without the pool read at or above that stop at the close. Its close clause gives no verdict. With no `cost` input the summary of a night with no line ask reads as v1.199.1, word for word (`fixtures/lineNightCostTexts.v1199.json`).
 - **Strikes.** A carried night whose sizing held (`cushion_shortfall` = 0) is clean at or above its line and
   a strike, fail-closed, under it (a run-time refusal, an ON that never took, a slow pack, a late load taking
   the grid cap, below). A row with `cushion_shortfall` = 1 (disclosed, or carried with its caps note) is
   exempt unless it is armed, actuated and never switched on (`force_charge_on_at_ms` NULL) with a close
-  under min(line, 100): a strike, an owner's cancel after the apply too (no cancel column). An ON sent that never took leaves it exempt: the ledger records the ON's fate (`force_charge_on_verified_at_ms` and the columns beside it; chapter 15 part 3, "The learning ledger"), and the gate does not read those columns. "It ran" is still `force_charge_on_at_ms`, an ON that was sent. `forceChargeStateAt` and the mid-day hour mask (`middayChargeHourEpochs`) read no fate column either: `forceChargeStateAt` still serves an hour of a night whose ON never took as a force-charge that was on. A write that never held it (`actuated` 0, a missed apply) is graded as actuated (`lineWriteNeverHeld`). A verify after `applyFailed` stamps `actuated` 1. `lineForceChargeStrikes` counts the strikes with an ask in the window. The ledger
+  under min(line, 100): a strike, an owner's cancel after the apply too (no cancel column). An ON that never took leaves it exempt: the ledger records the ON's fate (`force_charge_on_verified_at_ms` and the columns beside it; chapter 15 part 3, "The learning ledger"), and the gate does not read those columns. "It ran" is still `force_charge_on_at_ms`: the ON as the night's record holds it, and the record takes the ON before the first ON command is sent. `forceChargeStateAt` and the mid-day hour mask (`middayChargeHourEpochs`) read no fate column either: `forceChargeStateAt` still serves an hour of a night whose ON never took as a force-charge that was on. Every fate stamp writes the ON time to the row again, so after one all three read as switched on a night on which the add-on restarted after the record took the ON and before any ON command went out. A write that never held it (`actuated` 0, a missed apply) is graded as actuated (`lineWriteNeverHeld`). A verify after `applyFailed` stamps `actuated` 1. `lineForceChargeStrikes` counts the strikes with an ask in the window. The ledger
   records `cushion_line_force_charge_pct` (the ask armed), `cushion_envelope_shortfall` (1/0) and, at the ON, `force_charge_mode` ('cost' or
-  'line') and the six fate columns. `force_charge_mode` and `force_charge_on_at_ms` are written again, from the record, beside every fate stamp (`forceChargeOnStampColumns` in `stampForceChargeOnFate`: the ON, the verify, a re-issue, the failure, the first OFF), so a first ON stamp lost to a restart is repaired at the next one. `CURRENT_ALGO_VERSION` stays 3: no scored column's formula or sign moved.
+  'line') and the six fate columns. `force_charge_mode` and `force_charge_on_at_ms` are written again, from the record, beside every fate stamp (`forceChargeOnStampColumns` in `stampForceChargeOnFate`: the ON, the verify, a re-issue, the failure, the first OFF), so a first ON stamp lost to a restart is repaired at the next one. The first OFF's stamp is the last: it is made once, after the OFF's device writes (from the tick's own copy of the leg when the record has moved on), so a restart during those writes leaves a stamp that was already lost, lost. `CURRENT_ALGO_VERSION` stays 3: no scored column's formula or sign moved.
 - **The exposure.** On a line night in a write mode, Charge Now is ON from the timed start
   to the close or the panel's own stop, whatever `ARB_OBJECTIVE` says: new to a resilience-objective
   plant. Emulated over the year's line shapes
