@@ -1293,7 +1293,8 @@ export interface PoolOutRead {
  * and a count that is not a non-negative integer is 0.
  *
  * What stands AGAINST the latch is reported beside it, never folded into it: `returning` (the clear dwell),
- * `contested` (fewer slots short, or another set, on its way through a dwell) and `countAtMost`. The caller's two
+ * `contested` (fewer slots short, or another set, on its way through a dwell; or the newest usable reading showing
+ * every slot carrying its share) and `countAtMost`. The caller's two
  * uses fail safe in opposite directions, and each takes the doubt its own way.
  *
  * No clock argument: the title has none, and the tracker's rule is that age ends no alarm. A caller that must not act
