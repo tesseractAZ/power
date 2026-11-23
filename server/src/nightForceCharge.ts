@@ -455,7 +455,8 @@ export interface ForceChargeOpts {
   /** v1.209.0 — the slots of this panel left out of the force-charge because the pool alarm names their Core out of
    *  the backup pool (forceChargePoolSlots.leftOut): never a candidate for ON or for a line night's re-ON (the
    *  decision takes them out of `connectedSlots` itself, whatever list it is handed), never re-issued, and not a
-   *  failure of the ON while another slot of ours reads ON. Absent/null/[] ⇒ none. */
+   *  failure of the ON while another slot of ours IN THE POOL reads ON; such a slot reading ON is itself no proof
+   *  that the ON took (verifyForceChargeOn). Absent/null/[] ⇒ none. */
   poolOutSlots?: readonly number[] | null;
   /** v1.209.0 — the Cores the charge rate may be timed for (forceChargePoolSlots.rateCount): fewer than the ON's
    *  slots while the pool alarm counts out a slot it has not named, or names one on a verdict the ON does not act
@@ -487,9 +488,10 @@ export type ForceChargeAction =
   | { kind: 'on'; slots: number[] }
   /** v1.186.0 — a live readback shows every slot of ours ON; `atCeiling` = the slots
    *  exempted because their Core already sits at the panel's ceiling.
-   *  v1.209.0 — `outOfPool` = the slots of ours not reading ON that were exempted because the pool alarm names
-   *  their Core out of the backup pool (ForceChargeOpts.poolOutSlots): present only when there is one, and such a
-   *  slot is never listed in `atCeiling`, whatever its Core reads. */
+   *  v1.209.0 — `outOfPool` = EVERY slot of ours the pool alarm names out of the backup pool
+   *  (ForceChargeOpts.poolOutSlots), whatever its Charge Now reads: present only when there is one, and such a
+   *  slot is never listed in `atCeiling`, whatever its Core reads. The verdict itself rests on a slot IN the pool
+   *  reading ON. */
   | { kind: 'onVerified'; atCeiling: number[]; outOfPool?: number[] }
   /** v1.186.0 — slots still reading OFF past the ON grace: re-issue ON to them, once. */
   | { kind: 'onRetry'; slots: number[] }
@@ -2740,11 +2742,12 @@ export interface ForceChargePoolSlots {
  *    fastest rate and the latest start. With no slot connected the count stays 0, as before.
  *  - The ON TARGETS keep a doubtful slot IN (a withheld ON costs a Core its charge for the night; an ON sent to a
  *    Core that is out costs one write). A slot is left out only when it is NAMED, nothing stands against the latch
- *    (`returning` false: no clear dwell; `contested` false: no fewer-short and no other-set streak), and the
- *    verdict's data time (the newest reading whose CAPACITY could be judged) is no older than the pool-out sensor's
- *    own freshness rule (POOL_OUT_SENSOR_FRESH_MS, 15 min) and not ahead of `nowMs`. An alarm stands through a
- *    stale shadow, an offline panel, a capacity that cannot be judged and a restart by design; a force-charge is
- *    not withheld on a verdict that old, or on one with no data time at all. Each test is `=== false`, so a
+ *    (`returning` false: no clear dwell; `contested` false: no fewer-short and no other-set streak, and the newest
+ *    usable reading does not show every slot carrying its share), and the verdict's data time (the newest COUNTED
+ *    reading of the episode) is no older than the pool-out sensor's own freshness rule (POOL_OUT_SENSOR_FRESH_MS,
+ *    15 min) and not ahead of `nowMs`. An alarm stands through a stale shadow, an offline panel, a capacity that
+ *    cannot be judged, a held contradiction and a restart by design; a force-charge is not withheld on a verdict
+ *    that old, or on one with no data time at all. Each test is `=== false`, so a
  *    verdict missing either flag withholds nothing.
  * No option read, no log.
  */

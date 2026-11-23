@@ -10,8 +10,11 @@
  * a doubtful slot OUT, the ON keeps a doubtful slot IN. Each mutant below removes or moves one rule of that.
  *
  * (R) THE READ (poolOut.ts poolOutRead): the names (a list only, whole slots of the panel's three, each once, ascending,
- *     a copy); the count and what is no count; the at-most (the larger of the count and the other set's on its way);
- *     returning; contested, each half; the data time (the newest reading whose capacity could be judged); no episode.
+ *     a copy); the count and what is no count; the at-most (the largest count standing against the latch: the other
+ *     set's on its way and every count chained under it, eight streaks deep, never below the latched count, never by a
+ *     count that is none); returning; contested, each of its three halves (fewer slots short, another set, the newest
+ *     usable reading showing every slot carrying its share); the data time (the newest COUNTED reading of the standing
+ *     alarm, a finite number or none); no episode.
  * (N) THE STORE'S READER (snapshot.ts): that panel's own state; a read that throws is null, and said.
  * (S) THE SELECTION (nightForceCharge.ts forceChargePoolSlots): what "no alarm" is; the larger of the two counts; a slot
  *     left out only when named, not returning, not contested and fresh, each side of the freshness window; named AND
@@ -19,38 +22,71 @@
  * (D) THE START AND THE RE-ON (decideForceCharge, lineReOnDue): a slot left out is no candidate; "every slot left out"
  *     against "no slots connected", and its class; the fallback rate's count (never raised, a whole number of 1 or
  *     more, on a cost night and on a line night).
- * (V) THE ON VERIFY (verifyForceChargeOn): the exemption; what a verified verdict names out of the pool and at the
- *     ceiling; a re-issue never to a slot out of the pool; a failure with no slot of ours reading ON names the exempt
- *     slots too, in the ON's order, and a slot at the ceiling is not added back; with nothing to re-issue the failure
- *     is declared after the grace, once, with no noRetry; each verdict carries its own list.
+ * (V) THE ON VERIFY (verifyForceChargeOn): the exemption; the proof that the ON took (a slot of ours IN THE POOL reading
+ *     ON, each half of that test); what a verified verdict names out of the pool (every such slot of ours, whatever it
+ *     reads) and at the ceiling (never one of them); a re-issue never to a slot out of the pool; a failure with no slot
+ *     of ours in the pool reading ON names every slot of ours out of the pool, reading ON or OFF, in the ON's order,
+ *     and a slot at the ceiling is not added back; with nothing to re-issue the failure is declared after the grace,
+ *     once, with no noRetry; each verdict carries its own list.
+ * (P) THE PUSH OF A FAILED ON (notify.ts buildNightForceChargeOnFailure): the sentence for the listed slots that are out
+ *     of the pool — only slots of the failure, ascending, each once, joined as the push joins slots, absent with none
+ *     and with no list, last in the body, on a line night as on a cost night.
+ * (M) THE MORNING SUMMARY'S CLAUSE (notify.ts costNightAccount): the slots the ON was not sent to are named in every
+ *     account of a force-charge that was switched ON (it ran, it reached its stop unconfirmed, it was never confirmed,
+ *     it did not take effect), directly before the close's figures, joined as the summary joins slots; only whole
+ *     slots of 1 or more; nothing with none. No test of this branch stated the clause before this harness: the eight
+ *     mutants first written here all survived, and the test file took one case for them.
  * (A) THE RECORD (nightChargeActuator.ts forceChargeLeftOutSlots): null by default, coerced on load, null for an empty
  *     list, and not carried to the next night (armFromPlan, chargeCycle.ts carryCeilingPrior).
  * (X) THE WIRING (index.ts): the tick's read of the verdict, the list handed on, the slots reading ON handed on as
  *     read, the two fields of the decision's options, the write-ahead persist, the morning summary's field, the planner's
- *     count, the once-a-night line (its guard, its key, its memory, its two figures). `slotCount: pool.rateCount` is
- *     mutant lxvi of mutate-force-charge.mjs.
+ *     count, the once-a-night line (its guard, its key, its memory, its two figures), the ON-failure handler's added
+ *     line (its list, its guard, its level) and the list it hands the push. `slotCount: pool.rateCount` is mutant lxvi
+ *     of mutate-force-charge.mjs.
  * (W) THE WORDS OF THE ON AND OF ITS VERIFY (index.ts): the fallback's count, each count named as what it is, the slot
- *     left out, a slot out of the pool never listed as reading ON.
+ *     left out, a slot out of the pool never listed as reading ON and always said to be out of the pool.
  * index.ts cannot be imported by a test: (X) and (W) are held by the source pins of test/forceChargePoolSlots.test.ts.
  *
  *   node scripts/mutate-pool-slots.mjs [--only <id prefix>]
  *
  * ★ Every id starts PSL- (no other harness uses it). Anchor-asserted (each anchor matches exactly once); every mutant must
  *   TYPECHECK (one that does not is reported INVALID and fails the run); the subset alone decides (no full-suite step), and
- *   the failing tests of each mutant are named. Run with MUTATE_CONCURRENCY=3, on a GREEN tree.
+ *   the failing tests of each mutant are named. Run with MUTATE_CONCURRENCY=4 or fewer, on a GREEN tree.
+ *
+ * THE SECOND ROUND OF FIXES REVERSED THREE PROPERTIES; each mutant that stated the old one is replaced by its reverse.
+ *  - R-i: the data time was the newest judged capacity's, and the mutant put the newest usable reading's in its place.
+ *    It is now the newest COUNTED reading's (episode.lastFault). R-i is kept against the new line, and R-i(b) is the
+ *    mutant that puts the newest judged capacity's back: readings held as a contradiction kept the verdict young.
+ *  - R-v: with no alarm standing the read carried a data time, and the mutant took it away. It now carries none; R-v is
+ *    the mutant that hands one on.
+ *  - V-ii: a verified verdict listed as out of the pool only the named slots reading OFF, and the mutant listed every
+ *    one. Every one is now listed, whatever it reads; V-ii is the mutant that lists only those reading OFF.
+ * And one entry of the list below became a mutant: the exempt slots a failure names are no longer only those reading
+ * OFF (V-ix(b)).
  *
  * Not written, because no input tells them apart:
- *  - poolOutRead: the `typeof … === 'number'` half beside each Number.isInteger test (Number.isInteger of what is no
- *    number is false); `k >= 0` against `k > 0` in the count's check (0 is 0 either way).
+ *  - poolOutRead: the `typeof … === 'number'` half beside each Number.isInteger test and beside the data time's
+ *    Number.isFinite (neither is true of what is no number); `k >= 0` against `k > 0` in the count's check (0 is 0
+ *    either way); `state == null ||` in the no-alarm return (a state that is null has no episode: the half only narrows
+ *    the type).
  *  - forceChargePoolSlots: `pool == null ||` in the early return (a null verdict counts 0 and names nothing: the half
  *    only narrows the type); `named.length > 0 &&` in the slots left out (with no name there is no named slot connected);
  *    the `typeof` test and the Number.isFinite test of the data time, each alone (the other one and the two comparisons
  *    refuse null, NaN and both infinities); `k > 0` against `k >= 0` in its count check.
  *  - decideForceCharge: `o.rateSlotCount != null &&` beside Number.isInteger (null is no integer).
- *  - verifyForceChargeOn: `&& !o.slotsOn!.includes(n)` in the exempt slots a failure names (they are computed only when
- *    no slot of ours reads ON); `outOff.length > 0 ? … : pending` against the filter alone (the same slots in the same
+ *  - verifyForceChargeOn: `outOurs.length > 0 ? … : pending` against the filter alone (the same slots in the same
  *    order); `slots: failed` against `slots: ours` in the failure with nothing to re-issue (every slot of ours is then
- *    out of the pool and reads OFF).
+ *    out of the pool, so the failure names each); `if (failed.length === 0) return { kind: 'none' }` taken out (the
+ *    one caller never hands in an empty list of ours, and a failure of a list that is not empty names a slot);
+ *    `ours.some(outOfPool) ? … : ours` against the filter alone in the slots a re-issue may go to (the same slots).
+ * Not written, for another reason:
+ *  - buildNightForceChargeOnFailure: `Array.isArray(…)` against `!= null` for the list of slots out of the pool. They
+ *    differ only on a value that is neither a list nor null, which the type refuses and the one caller (the tick's
+ *    `pool.leftOut`, always a list) cannot hand in; the fix states nothing for such a value. P-v is the half that
+ *    matters: null and a missing argument are both "none".
+ *  - poolOutRead's walk with no bound at all: on a chain looped on itself it never returns, and this runner has no
+ *    timeout. The near side of the bound is R-xx(c). A walk one streak deeper (`depth < 9`) is not stated by the fix
+ *    ("at most 8 deep") beyond what is built, and the tracker builds at most three.
  */
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -60,6 +96,7 @@ const SERVER = resolve(REPO, 'server');
 const PO = resolve(SERVER, 'src/poolOut.ts');
 const SN = resolve(SERVER, 'src/snapshot.ts');
 const NF = resolve(SERVER, 'src/nightForceCharge.ts');
+const NT = resolve(SERVER, 'src/notify.ts');
 const NA = resolve(SERVER, 'src/nightChargeActuator.ts');
 const CC = resolve(SERVER, 'src/chargeCycle.ts');
 const IX = resolve(SERVER, 'src/index.ts');
@@ -69,16 +106,21 @@ const SUBSET = ['test/forceChargePoolSlots.test.ts'];
 const NL = "\n";
 
 /* poolOutRead (poolOut.ts), line by line. */
-const R_ASOF = "  const asOfMs = state?.lastCapMs ?? null;";
 const R_EP = "  const ep = state?.episode;";
-const R_NOEP = "  if (ep == null) return { named: [], count: 0, countAtMost: 0, returning: false, contested: false, asOfMs };";
+const R_NOEP = "  if (state == null || ep == null) return { named: [], count: 0, countAtMost: 0, returning: false, contested: false, asOfMs: null };";
+const R_FAULTAT = "  const faultAt: unknown = ep.lastFault?.atMs;";
+const R_ASOF = "  const asOfMs = typeof faultAt === 'number' && Number.isFinite(faultAt) ? faultAt : null;";
 const R_SLOTS = "  const slots: unknown[] = Array.isArray(ep.slots) ? ep.slots : [];";
 const R_NAMED = "  const named = [...new Set(slots.filter((n): n is number => typeof n === 'number' && Number.isInteger(n) && n >= 1 && n <= SHP2_SOURCE_SLOTS))]";
 const R_SORT = "    .sort((a, b) => a - b);";
 const R_WHOLE = "  const whole = (k: unknown): number => (typeof k === 'number' && Number.isInteger(k) && k >= 0 ? k : 0);";
 const R_COUNT = "  const count = whole(ep.k);";
-const R_RET1 = "    named, count, countAtMost: Math.max(count, whole(ep.change?.k)),";
-const R_RET2 = "    returning: ep.clear != null, contested: ep.less != null || ep.change != null, asOfMs,";
+const R_ATMOST = "  let countAtMost = count;";
+const R_WALK = "  for (let st: PoolOutStreak | null | undefined = ep.change, depth = 0; st != null && depth < 8; st = st.more, depth++) {";
+const R_MAX = "    countAtMost = Math.max(countAtMost, whole(st.k));";
+const R_RET1 = "    named, count, countAtMost,";
+const R_RETURNING = "    returning: ep.clear != null,";
+const R_CONTESTED = "    contested: ep.less != null || ep.change != null || state.last?.flow?.v === 'healthy',";
 
 /* SnapshotStore.poolOutRead (snapshot.ts). */
 const N_READ = "      return poolOutRead(this.poolOutBySn.get(sn));";
@@ -90,6 +132,7 @@ const S_WHOLE = "  const whole = (k: unknown): number => (typeof k === 'number' 
 const S_COUNT = "  const count = pool != null ? Math.max(whole(pool.count), whole(pool.countAtMost)) : 0;";
 const S_EARLY_IF = "  if (pool == null || (count === 0 && named.length === 0)) {";
 const S_EARLY_RET = "    return { targets: [...connected], leftOut: [], rateCount: connected.length, outCount: 0 };";
+const S_NAMEDCONN = "  const namedConnected = connected.filter((n) => named.includes(n));";
 const S_FRESH = "  const fresh = typeof asOfMs === 'number' && Number.isFinite(asOfMs) && nowMs - asOfMs >= 0 && nowMs - asOfMs <= POOL_OUT_SENSOR_FRESH_MS;";
 const S_LEFT = "  const leftOut = named.length > 0 && pool.returning === false && pool.contested === false && fresh ? namedConnected : [];";
 const S_OUT = "  const outCount = Math.max(0, Math.min(namedConnected.length + Math.max(0, count - named.length), connected.length - 1));";
@@ -108,12 +151,14 @@ const D_REON = "  const slots = ours.filter((n) => !o.slotsOn!.includes(n) && o.
 
 /* verifyForceChargeOn (nightForceCharge.ts). */
 const V_NOTON = "  const notOn = ours.filter((n) => !o.slotsOn!.includes(n) && !atCeiling(n) && !outOfPool(n));";
-const V_OUT = "    const out = off.filter(outOfPool);";
-const V_RET_IF = "    return out.length > 0";
-const V_RET_SPLIT = "      ? { kind: 'onVerified', atCeiling: off.filter((n) => !outOfPool(n)), outOfPool: out }";
+const V_ANYON = "  const anyOn = ours.some((n) => o.slotsOn!.includes(n) && !outOfPool(n));";
+const V_VERIFIED_IF = "  if (notOn.length === 0 && anyOn) {";
+const V_OFF = "    const off = ours.filter((n) => !o.slotsOn!.includes(n) && !outOfPool(n));";
+const V_OUT = "    const out = ours.filter(outOfPool);";
+const V_RET = "    return out.length > 0 ? { kind: 'onVerified', atCeiling: off, outOfPool: out } : { kind: 'onVerified', atCeiling: off };";
 const V_JUDGED = "  const judged = ours.some(outOfPool) ? ours.filter((n) => !outOfPool(n)) : ours;";
-const V_OUTOFF = "  const outOff = anyOn ? [] : ours.filter((n) => outOfPool(n) && !o.slotsOn!.includes(n));";
-const V_FAILED = "  const failed = outOff.length > 0 ? ours.filter((n) => pending.includes(n) || outOff.includes(n)) : pending;";
+const V_OUTOURS = "  const outOurs = anyOn ? [] : ours.filter(outOfPool);";
+const V_FAILED = "  const failed = outOurs.length > 0 ? ours.filter((n) => pending.includes(n) || outOurs.includes(n)) : pending;";
 const V_FAILED0 = "  if (failed.length === 0) return { kind: 'none' };";
 const V_ONCE = "  if (s.forceChargeOnFailedAtMs != null) return { kind: 'none' };";
 const V_GRACE = "  if (since < FORCE_CHARGE_ON_VERIFY_AFTER_MS) return { kind: 'none' };";
@@ -121,6 +166,21 @@ const V_EMPTY = "  if (pending.length === 0) return { kind: 'onFailed', slots: f
 const V_NORETRY = "      return { kind: 'onFailed', slots: failed, noRetry: true };";
 const V_RETRY = "    return { kind: 'onRetry', slots: pending };";
 const V_LAST = "\n  return { kind: 'onFailed', slots: failed };\n}";
+
+/* buildNightForceChargeOnFailure (notify.ts): the sentence for the listed slots that are out of the pool. */
+const P_LISTED = "  const outListed = Array.isArray(o.outOfPoolSlots) ? [...new Set(o.slots.filter((n) => o.outOfPoolSlots!.includes(n)))].sort((x, y) => x - y) : [];";
+const P_NOTE_IF = "  const outNote = outListed.length > 0";
+const P_NOTE = "    ? ` Slot(s) ${outListed.join(', ')} are listed because the pool alarm names their Core out of the backup pool: a Core out of the pool takes no charge, whatever its Charge Now reads.`";
+const P_BODY = "    body: head + lost + outNote,";
+
+/* costNightAccount (notify.ts): the morning summary's clause for the slots the ON was not sent to. */
+const M_LIST = "  const leftOut = Array.isArray(cost.leftOutSlots) ? cost.leftOutSlots.filter((n) => Number.isInteger(n) && n >= 1) : [];";
+const M_IF = "  const leftOutWords = leftOut.length > 0";
+const M_WORDS = "    ? `; slot(s) ${leftOut.join(', ')} not switched on (named out of the backup pool by the pool alarm)` : '';";
+const M_RAN = "${ran}${leftOutWords}${close}";
+const M_FAILED = "${ended}${leftOutWords}${close}";
+const M_STOP = "with no readback showing every slot ON${afterReissue}${leftOutWords}${close}";
+const M_UNCONF = "${earlyOff != null ? `; it was switched off${earlyOff}` : ''}${leftOutWords}${close}";
 
 /* The record (nightChargeActuator.ts, chargeCycle.ts). */
 const A_DEFAULT = "    forceChargeLeftOutSlots: null,";
@@ -144,12 +204,16 @@ const X_ADD = "          forceChargeWhyLogged.reasons.add(poolKey);";
 const X_LINE = "          app.log.info(`night-charge: force-charge for ${state.day}: the pool alarm stands for this panel — its charge rate counts ${pool.rateCount} of the ${pool.rateCount + pool.outCount} connected Core(s)${pool.leftOut.length > 0 ? `, and an ON is not sent to slot(s) ${pool.leftOut.join(',')} (the alarm names their Core out of the backup pool)` : ''}.`);";
 const X_PERSIST = "    persistNightActuation({ ...nightActuationMem, ...onStamp, forceChargeLeftOutSlots: pool.leftOut.length > 0 ? [...pool.leftOut] : null });";
 const X_SUMMARY = "        leftOutSlots: state.forceChargeLeftOutSlots,";
+const X_OUTLISTED = "    const outListed = action.slots.filter((n) => pool.leftOut.includes(n));";
+const X_OUTWARN = "    if (outListed.length > 0) app.log.warn(`night-charge: of those, slot(s) ${outListed.join(',')} are listed because the pool alarm names their Core out of the panel's backup pool";
+const X_PUSHARG = "        outOfPoolSlots: pool.leftOut,";
 const W_FALLBACK = "    const fallbackSlots = pool.rateCount >= 1 ? Math.min(slotsNow, pool.rateCount) : slotsNow;";
 const W_BOUND = "    const boundCores = pool.outCount > 0 ? `${pool.rateCount} Core(s) counted in the pool` : `${slotsNow} connected Core(s)`;";
 const W_FBCORES = "    const fallbackCores = pool.outCount > 0 ? `${fallbackSlots} Core(s) counted in the pool` : `${slotsNow} connected Core(s)`;";
 const W_FB_IF = "      : (planRateFallbackKw(fallbackSlots) === FORCE_CHARGE_PLAN_RATE_KW";
 const W_NOTE = "    const leftOutNote = pool.leftOut.length > 0 ? `; slot(s) ${pool.leftOut.join(',')} left out: the pool alarm names its Core out of the backup pool` : '';";
 const W_VOUT = "    const outOfPool = action.outOfPool ?? [];";
+const W_VCLAUSE = "${outOfPool.length > 0 ? `; slot(s) ${outOfPool.join(',')} out of the panel's backup pool (the pool alarm names it)` : ''}";
 const W_VON = "    const on = (state.forceChargeSlots ?? []).filter((n) => !action.atCeiling.includes(n) && !outOfPool.includes(n));";
 
 /* A fragment two lines above carry: the slots left out, taken out of a list of ON candidates. */
@@ -166,16 +230,44 @@ const MUTANTS = [
   {
     id: 'PSL-R-i. ★★★ the data time is the newest usable reading\'s',
     file: PO,
-    find: R_ASOF,
-    to: "  const asOfMs = state?.lastUsableMs ?? null; /* MUTANT */",
+    find: R_FAULTAT,
+    to: "  const faultAt: unknown = state.lastUsableMs; /* MUTANT */",
     why: 'Readings whose capacity cannot be judged keep the verdict young: a named Core is left out of the ON all night on an alarm no reading has confirmed since.',
+  },
+  {
+    id: 'PSL-R-i(b). ★★★ the data time is the newest judged capacity\'s',
+    file: PO,
+    find: R_FAULTAT,
+    to: "  const faultAt: unknown = state.lastCapMs; /* MUTANT */",
+    why: 'Readings held as a contradiction, the capacity short while every slot carries its share, keep the verdict young: the named Core is left out of the ON for as long as they go on.',
+  },
+  {
+    id: 'PSL-R-i(c). ★★★ the data time is the newest reading\'s own',
+    file: PO,
+    find: R_FAULTAT,
+    to: "  const faultAt: unknown = state.last?.atMs; /* MUTANT */",
+    why: 'Any usable reading, a healthy one included, makes the verdict young again: a Core on its way back is left out on the strength of the reading that shows it back.',
   },
   {
     id: 'PSL-R-ii. ★★★ no verdict carries a data time',
     file: PO,
-    find: R_ASOF,
-    to: "  const asOfMs = null; /* MUTANT */",
+    find: R_FAULTAT,
+    to: "  const faultAt: unknown = null; /* MUTANT */",
     why: 'No verdict is ever fresh: no slot is left out, and an ON is written every night to a Core that is out of the pool.',
+  },
+  {
+    id: 'PSL-R-ii(b). ★★★ an episode with no counted reading on it throws in the read',
+    file: PO,
+    find: R_FAULTAT,
+    to: "  const faultAt: unknown = ep.lastFault.atMs; /* MUTANT */",
+    why: 'A state whose episode lost its last counted reading throws in the read: the store takes it as no verdict, and the rate counts every connected Core while one is out.',
+  },
+  {
+    id: 'PSL-R-ii(c). ★★ a data time that is no finite number is handed on',
+    file: PO,
+    find: R_ASOF,
+    to: swap(R_ASOF, ' && Number.isFinite(faultAt)', ''),
+    why: 'A damaged state\'s data time of NaN or infinity is handed on as read: only the caller\'s own check keeps an ON from being withheld on it.',
   },
   {
     id: 'PSL-R-iii. ★★★ a panel with no tracker state throws in the read',
@@ -192,11 +284,18 @@ const MUTANTS = [
     why: 'On every night with no alarm the rate counts a Core out: every start comes early and every plan\'s charge cap is a Core short.',
   },
   {
-    id: 'PSL-R-v. ★★ with no alarm standing the read has no data time',
+    id: 'PSL-R-v. ★★ with no alarm standing the read carries a data time',
     file: PO,
     find: R_NOEP,
-    to: swap(R_NOEP, 'asOfMs };', 'asOfMs: null };'),
-    why: 'The read of a healthy pool carries no data time: nothing that reads it can tell a pool judged a minute ago from a panel never read.',
+    to: swap(R_NOEP, 'asOfMs: null };', 'asOfMs: state?.lastCapMs ?? null };'),
+    why: 'A healthy pool\'s newest reading is handed on as the age of an alarm that does not stand: a reader of the age takes a verdict where there is none.',
+  },
+  {
+    id: 'PSL-R-v(b). ★★ with no alarm standing a healthy pool reads as contested',
+    file: PO,
+    find: R_NOEP,
+    to: swap(R_NOEP, 'contested: false', "contested: state?.last?.flow?.v === 'healthy'"),
+    why: 'Every reading of a healthy pool shows every slot carrying: with no alarm the read reports a contest of a latch that is not there.',
   },
   {
     id: 'PSL-R-vi. ★★★ a slot list that is no list is taken as one',
@@ -251,7 +350,7 @@ const MUTANTS = [
     id: 'PSL-R-xiii. ★★★ the names are the tracker\'s own array',
     file: PO,
     find: R_RET1,
-    to: "    named: Array.isArray(ep.slots) && ep.slots.length === named.length && ep.slots.every((n, i) => n === named[i]) ? ep.slots : named, count, countAtMost: Math.max(count, whole(ep.change?.k)), /* MUTANT */",
+    to: "    named: Array.isArray(ep.slots) && ep.slots.length === named.length && ep.slots.every((n, i) => n === named[i]) ? ep.slots : named, count, countAtMost, /* MUTANT */",
     why: 'A caller that alters the list it was handed alters the standing alarm\'s latched set: the title then names other slots.',
   },
   {
@@ -285,51 +384,114 @@ const MUTANTS = [
   {
     id: 'PSL-R-xviii. ★★★ the at-most is the count alone',
     file: PO,
-    find: R_RET1,
-    to: swap(R_RET1, 'Math.max(count, whole(ep.change?.k))', 'count'),
+    find: R_WALK,
+    to: swap(R_WALK, 'depth < 8', 'depth < 0'),
     why: 'A second Core on its way out of the pool is not counted until its dwell ends: for those minutes the start is timed for a Core that takes no charge.',
   },
   {
-    id: 'PSL-R-xix. ★★★ the at-most is the other set\'s count alone',
+    id: 'PSL-R-xix. ★★★ the at-most starts under the count',
     file: PO,
-    find: R_RET1,
-    to: swap(R_RET1, 'Math.max(count, whole(ep.change?.k))', 'whole(ep.change?.k)'),
+    find: R_ATMOST,
+    to: "  let countAtMost = 0; /* MUTANT */",
     why: 'With no other set on its way the at-most reads 0, below the count: a reader that takes it alone counts every Core back in.',
   },
   {
     id: 'PSL-R-xx. ★★★ the at-most takes the fewer-short streak\'s count',
     file: PO,
-    find: R_RET1,
-    to: swap(R_RET1, 'whole(ep.change?.k)', 'whole(ep.less?.k)'),
+    find: R_WALK,
+    to: swap(R_WALK, '= ep.change, depth = 0', '= ep.less, depth = 0'),
     why: 'A larger set on its way through the dwell raises nothing: the second Core on its way out is not counted out of the rate.',
+  },
+  {
+    id: 'PSL-R-xx(b). ★★★ the at-most reads the other set\'s own count and nothing chained under it',
+    file: PO,
+    find: R_WALK,
+    to: swap(R_WALK, 'st = st.more, depth++', 'st = null, depth++'),
+    why: 'A second Core seen out under a streak at the latched count is not counted: one reading at the old count hides it, and the start is timed for a Core that takes no charge.',
+  },
+  {
+    id: 'PSL-R-xx(c). ★★ the walk down the chain stops one streak short',
+    file: PO,
+    find: R_WALK,
+    to: swap(R_WALK, 'depth < 8', 'depth < 7'),
+    why: 'A larger count at the eighth streak of the chain is not counted out of the rate.',
+  },
+  {
+    id: 'PSL-R-xx(d). ★★★ the at-most is the deepest streak\'s count against the latched one',
+    file: PO,
+    find: R_MAX,
+    to: "    countAtMost = Math.max(count, whole(st.k)); /* MUTANT */",
+    why: 'A smaller count chained under a larger one takes the larger one back: the second Core on its way out is counted for the rate again.',
+  },
+  {
+    id: 'PSL-R-xx(e). ★★★ the at-most is the smallest count of the chain',
+    file: PO,
+    find: R_MAX,
+    to: "    countAtMost = Math.min(countAtMost, whole(st.k)); /* MUTANT */",
+    why: 'A larger count on its way raises nothing, and a smaller one puts the at-most under the latched count.',
+  },
+  {
+    id: 'PSL-R-xx(f). ★★ a count in the chain that is no count is taken',
+    file: PO,
+    find: R_MAX,
+    to: "    countAtMost = Math.max(countAtMost, st.k); /* MUTANT */",
+    why: 'A damaged streak\'s count of 1.5, of infinity or of no number at all is handed on as the most slots out: only the caller\'s own check keeps it out of the charge rate.',
   },
   {
     id: 'PSL-R-xxi. ★★★ never returning',
     file: PO,
-    find: R_RET2,
-    to: swap(R_RET2, 'returning: ep.clear != null', 'returning: false'),
+    find: R_RETURNING,
+    to: "    returning: false, /* MUTANT */",
     why: 'A Core whose capacity reads whole again is still left out through the clear dwell: an ON that falls in those minutes leaves it uncharged for the night.',
   },
   {
     id: 'PSL-R-xxii. ★★★ returning is inverted',
     file: PO,
-    find: R_RET2,
-    to: swap(R_RET2, 'returning: ep.clear != null', 'returning: ep.clear == null'),
+    find: R_RETURNING,
+    to: "    returning: ep.clear == null, /* MUTANT */",
     why: 'Every standing alarm reads as returning: no named Core is ever left out, and an ON is written to a Core that is out of the pool.',
   },
   {
     id: 'PSL-R-xxiii. ★★★ fewer slots short on its way is no contest',
     file: PO,
-    find: R_RET2,
-    to: swap(R_RET2, 'contested: ep.less != null || ep.change != null', 'contested: ep.change != null'),
+    find: R_CONTESTED,
+    to: swap(R_CONTESTED, 'ep.less != null || ', ''),
     why: 'Two Cores named and one back: while the smaller set runs its dwell both are still left out, and the Core that returned is sent no ON.',
   },
   {
     id: 'PSL-R-xxiv. ★★★ another set on its way is no contest',
     file: PO,
-    find: R_RET2,
-    to: swap(R_RET2, 'contested: ep.less != null || ep.change != null', 'contested: ep.less != null'),
+    find: R_CONTESTED,
+    to: swap(R_CONTESTED, 'ep.change != null || ', ''),
     why: 'Readings name another slot than the latch does: the latched slot is still left out of the ON, on a name that may be wrong.',
+  },
+  {
+    id: 'PSL-R-xxv. ★★★ every slot seen carrying its share is no contest',
+    file: PO,
+    find: R_CONTESTED,
+    to: swap(R_CONTESTED, " || state.last?.flow?.v === 'healthy'", ''),
+    why: 'The newest reading shows the named Core carrying its share and the Core is still left out of the ON, until the verdict ages out fifteen minutes later.',
+  },
+  {
+    id: 'PSL-R-xxvi. ★★★ a flow that is not judged is a contest',
+    file: PO,
+    find: R_CONTESTED,
+    to: swap(R_CONTESTED, "state.last?.flow?.v === 'healthy'", "state.last?.flow?.v !== 'fault'"),
+    why: 'On an idle or a charging pool, the state of every night-charge window, no named Core is ever left out: an ON is written to a Core that is out of the pool.',
+  },
+  {
+    id: 'PSL-R-xxvii. ★★ the contest reads the capacity\'s verdict for the flow\'s',
+    file: PO,
+    find: R_CONTESTED,
+    to: swap(R_CONTESTED, 'state.last?.flow?.v', 'state.last?.cap?.v'),
+    why: 'A reading held as a contradiction, the capacity short while every slot carries, is no contest: the named Core seen carrying its share is still left out of the ON.',
+  },
+  {
+    id: 'PSL-R-xxviii. ★★★ a state with no newest reading throws in the read',
+    file: PO,
+    find: R_CONTESTED,
+    to: swap(R_CONTESTED, 'state.last?.flow?.v', 'state.last!.flow.v'),
+    why: 'A restored state that holds an alarm and no newest reading throws in the read: the store takes it as no verdict, and the rate counts every connected Core while one is out.',
   },
 
   /* ── N: the store's reader ── */
@@ -418,6 +580,13 @@ const MUTANTS = [
     find: S_LEFT,
     to: swap(S_LEFT, 'fresh ? namedConnected : []', 'fresh ? [...named] : []'),
     why: 'The record and the morning summary name a slot left out where no Core is connected and nothing was withheld.',
+  },
+  {
+    id: 'PSL-S-ix(b). ★★ the named slots are taken in the alarm\'s order, each once',
+    file: NF,
+    find: S_NAMEDCONN,
+    to: "  const namedConnected = named.filter((n) => connected.includes(n)); /* MUTANT */",
+    why: 'The slots left out are no longer the panel\'s own list less the targets: on a list the panel reports out of order the record names them in another order than the ON was sent in.',
   },
   {
     id: 'PSL-S-x. ★★★ a named slot with no Core connected is counted out',
@@ -669,31 +838,66 @@ const MUTANTS = [
     why: 'A Core that left the pool after the ON is re-issued, then reported as a failed ON, where the ON took on every Core in the pool.',
   },
   {
-    id: 'PSL-V-ii. ★★ a named slot reading ON is reported out of the pool',
+    id: 'PSL-V-i(b). ★★★ any slot of ours reading ON proves the ON took',
+    file: NF,
+    find: V_ANYON,
+    to: swap(V_ANYON, ' && !outOfPool(n)', ''),
+    why: 'A Core out of the pool whose Charge Now reads ON verifies an ON that took on no Core able to charge, or makes its failure a partial one: the night reads as charging and nothing is.',
+  },
+  {
+    id: 'PSL-V-i(c). ★★★ a slot in the pool proves the ON without reading ON',
+    file: NF,
+    find: V_ANYON,
+    to: swap(V_ANYON, 'o.slotsOn!.includes(n) && ', ''),
+    why: 'With the Cores in the pool reading OFF at the ceiling and only a Core out of the pool reading ON, the ON is stamped verified: a false verdict, permanent and silent.',
+  },
+  {
+    id: 'PSL-V-i(e). ★★★ a slot that is not ours, reading ON, proves the ON took',
+    file: NF,
+    find: V_ANYON,
+    to: "  const anyOn = o.slotsOn!.some((n) => !outOfPool(n)); /* MUTANT */",
+    why: 'A Charge Now switched on in the app for a slot the ON was not sent to verifies an ON whose own slots all read OFF at the ceiling.',
+  },
+  {
+    id: 'PSL-V-i(d). ★★★ a verified verdict needs no slot reading ON',
+    file: NF,
+    find: V_VERIFIED_IF,
+    to: "  if (notOn.length === 0) { /* MUTANT */",
+    why: 'With every slot of ours out of the pool the ON is stamped verified on the first readback, with no Core charging and no failure ever told.',
+  },
+  {
+    id: 'PSL-V-ii. ★★★ a named slot reading ON is not reported out of the pool',
     file: NF,
     find: V_OUT,
-    to: "    const out = ours.filter(outOfPool); /* MUTANT */",
-    why: 'A named slot that reads ON is logged as out of the pool and not as switched on.',
+    to: "    const out = ours.filter((n) => outOfPool(n) && !o.slotsOn!.includes(n)); /* MUTANT */",
+    why: 'A Core out of the pool whose Charge Now reads ON is logged among the slots switched on, where it takes no charge.',
+  },
+  {
+    id: 'PSL-V-ii(b). ★★ the slots out of the pool are listed in the alarm\'s order',
+    file: NF,
+    find: V_OUT,
+    to: "    const out = (o.poolOutSlots ?? []).filter((n) => ours.includes(n)); /* MUTANT */",
+    why: 'For an ON sent to slots 3, 1 and 2 the verified verdict lists the slots out of the pool in another order than the ON\'s own, the order every other list of the verdict keeps.',
   },
   {
     id: 'PSL-V-iii. ★★★ no slot is ever reported out of the pool',
     file: NF,
     find: V_OUT,
     to: "    const out: number[] = []; /* MUTANT */",
-    why: 'A Core out of the pool is logged as already at the panel\'s ceiling, switched off by the panel itself.',
+    why: 'A Core out of the pool is logged as reading FORCE_CHARGE_ON, and nothing in the verified verdict says it takes no charge.',
   },
   {
     id: 'PSL-V-iv. ★★ every verified verdict carries the key',
     file: NF,
-    find: V_RET_IF,
-    to: "    return out.length >= 0 /* MUTANT */",
+    find: V_RET,
+    to: swap(V_RET, 'out.length > 0 ?', 'out.length >= 0 ?'),
     why: 'On every night with no alarm the verified verdict carries an empty out-of-the-pool list: its shape is no longer that of the release before.',
   },
   {
     id: 'PSL-V-v. ★★★ a slot out of the pool is listed at the ceiling as well',
     file: NF,
-    find: V_RET_SPLIT,
-    to: swap(V_RET_SPLIT, 'off.filter((n) => !outOfPool(n))', 'off'),
+    find: V_OFF,
+    to: swap(V_OFF, ' && !outOfPool(n)', ''),
     why: 'A Core out of the pool is logged twice, once as switched off by the panel at its ceiling.',
   },
   {
@@ -706,29 +910,36 @@ const MUTANTS = [
   {
     id: 'PSL-V-vii. ★★★ a failure never names the exempt slots',
     file: NF,
-    find: V_OUTOFF,
-    to: "  const outOff: number[] = []; /* MUTANT */",
+    find: V_OUTOURS,
+    to: "  const outOurs: number[] = []; /* MUTANT */",
     why: 'An ON that took on no slot is reported as failed on SOME slots: the push says "on those slot(s)" and the morning summary reads the rest as taken.',
   },
   {
     id: 'PSL-V-viii. ★★★ a failure names the exempt slots whatever reads ON',
     file: NF,
-    find: V_OUTOFF,
-    to: swap(V_OUTOFF, 'anyOn ? [] : ', ''),
+    find: V_OUTOURS,
+    to: swap(V_OUTOURS, 'anyOn ? [] : ', ''),
     why: 'With a Core in the pool reading ON, the partial failure also names the Core out of the pool, which was never judged.',
   },
   {
     id: 'PSL-V-ix. ★★★ a slot at the ceiling is added back to a failure',
     file: NF,
-    find: V_OUTOFF,
-    to: swap(V_OUTOFF, 'outOfPool(n) && ', ''),
+    find: V_OUTOURS,
+    to: "  const outOurs = anyOn ? [] : ours.filter((n) => outOfPool(n) || !o.slotsOn!.includes(n)); /* MUTANT */",
     why: 'With no slot reading ON, a Core the panel itself holds at its ceiling is reported with the rest as an ON that did not take.',
+  },
+  {
+    id: 'PSL-V-ix(b). ★★★ a failure names only the exempt slots that read OFF',
+    file: NF,
+    find: V_OUTOURS,
+    to: "  const outOurs = anyOn ? [] : ours.filter((n) => outOfPool(n) && !o.slotsOn!.includes(n)); /* MUTANT */",
+    why: 'With only a Core out of the pool reading ON, the failure leaves that slot off its list: every reader takes the ON as taken there, and the push says the buy is lost "on those slot(s)" only.',
   },
   {
     id: 'PSL-V-x. ★★ a failure lists its slots out of the ON\'s order',
     file: NF,
     find: V_FAILED,
-    to: swap(V_FAILED, 'ours.filter((n) => pending.includes(n) || outOff.includes(n))', '[...pending, ...outOff]'),
+    to: swap(V_FAILED, 'ours.filter((n) => pending.includes(n) || outOurs.includes(n))', '[...pending, ...outOurs]'),
     why: 'The push and the record read "slot(s) 2, 3, 1" for an ON sent to 1, 2 and 3.',
   },
   {
@@ -736,7 +947,7 @@ const MUTANTS = [
     file: NF,
     find: V_FAILED0,
     to: "  if (pending.length === 0) return { kind: 'none' }; /* MUTANT */",
-    why: 'An ON whose every slot is out of the pool, none reading ON, is never judged: no failure and no push, all night.',
+    why: 'An ON whose every slot is out of the pool is never judged, whatever the slots read: no failure and no push, all night.',
   },
   {
     id: 'PSL-V-xii. ★★★ the failure with nothing to re-issue repeats',
@@ -793,6 +1004,157 @@ const MUTANTS = [
     find: V_LAST,
     to: "\n  return { kind: 'onFailed', slots: pending }; /* MUTANT */\n}",
     why: 'An ON that took on no slot is reported as failed on the slots in the pool only: the whole failure reads as a partial one.',
+  },
+
+  /* ── P: the push of a failed ON ── */
+  {
+    id: 'PSL-P-i. ★★★ the push lists every slot out of the pool, failed or not',
+    file: NT,
+    find: P_LISTED,
+    to: swap(P_LISTED, 'o.slots.filter((n) => o.outOfPoolSlots!.includes(n))', 'o.outOfPoolSlots'),
+    why: 'On a failure of the slots in the pool alone, the push says a slot it does not list is "listed because the pool alarm names" it.',
+  },
+  {
+    id: 'PSL-P-ii. ★★★ the push says the slots IN the pool are listed for the alarm',
+    file: NT,
+    find: P_LISTED,
+    to: swap(P_LISTED, 'o.outOfPoolSlots!.includes(n)', '!o.outOfPoolSlots!.includes(n)'),
+    why: 'The push says of the Cores that did not take the ON that the pool alarm names them out, and nothing of the one it does name.',
+  },
+  {
+    id: 'PSL-P-iii. ★★ the slots of the sentence are not ascending',
+    file: NT,
+    find: P_LISTED,
+    to: swap(P_LISTED, '.sort((x, y) => x - y)', ''),
+    why: 'For an ON sent to slots 3, 1 and 2 the sentence reads "Slot(s) 3, 1".',
+  },
+  {
+    id: 'PSL-P-iv. ★★ a slot the failure lists twice is said twice',
+    file: NT,
+    find: P_LISTED,
+    to: swap(P_LISTED, '[...new Set(o.slots.filter((n) => o.outOfPoolSlots!.includes(n)))]', 'o.slots.filter((n) => o.outOfPoolSlots!.includes(n))'),
+    why: 'The sentence reads "Slot(s) 1, 1".',
+  },
+  {
+    id: 'PSL-P-v. ★★★ a missing list throws in the push',
+    file: NT,
+    find: P_LISTED,
+    to: swap(P_LISTED, 'Array.isArray(o.outOfPoolSlots) ?', 'o.outOfPoolSlots !== undefined ?'),
+    why: 'A caller that hands null for the list loses the whole ON-failure push to a thrown error: the failure is told in the log alone.',
+  },
+  {
+    id: 'PSL-P-vi. ★★★ the sentence is said with no slot to name',
+    file: NT,
+    find: P_NOTE_IF,
+    to: "  const outNote = outListed.length >= 0 /* MUTANT */",
+    why: 'Every ON-failure push, on a night with no pool alarm too, ends "Slot(s)  are listed because the pool alarm names their Core out of the backup pool".',
+  },
+  {
+    id: 'PSL-P-vii. ★★ the sentence is said on a cost night only',
+    file: NT,
+    find: P_NOTE_IF,
+    to: "  const outNote = outListed.length > 0 && o.lineLinePct == null /* MUTANT */",
+    why: 'On a line night the push tells the reader that Charge Now on slot(s) 1, 2, 3 can still lift the pool, and never that slot 1\'s Core takes no charge.',
+  },
+  {
+    id: 'PSL-P-viii. ★★ the slots of the sentence are joined as a log joins them',
+    file: NT,
+    find: P_NOTE,
+    to: swap(P_NOTE, "outListed.join(', ')", "outListed.join(',')"),
+    why: 'The push reads "slot(s) 1, 2, 3" in its first sentence and "Slot(s) 1,3" in its last.',
+  },
+  {
+    id: 'PSL-P-ix. ★★ the sentence does not say that a Charge Now reading proves nothing',
+    file: NT,
+    find: P_NOTE,
+    to: swap(P_NOTE, ', whatever its Charge Now reads', ''),
+    why: 'A reader who sees Charge Now ON for the listed slot in the app is not told why the push lists it as a failure.',
+  },
+  {
+    id: 'PSL-P-x. ★★★ the sentence is never said',
+    file: NT,
+    find: P_BODY,
+    to: "    body: head + lost, /* MUTANT */",
+    why: 'The push says slot(s) 1, 2, 3 still read OFF and never that slot 1 is listed because its Core is out of the pool: the reader looks for a fault of the ON on a slot that reads ON.',
+  },
+  {
+    id: 'PSL-P-xi. ★★ the sentence is not the last of the body',
+    file: NT,
+    find: P_BODY,
+    to: "    body: head + outNote + lost, /* MUTANT */",
+    why: 'The sentence stands between the failure and what it costs: "no action needed tonight" then reads as said of the Core out of the pool.',
+  },
+
+  /* ── M: the morning summary's clause (inside template literals a mutant carries no marker) ── */
+  {
+    id: 'PSL-M-i. ★★★ the morning summary reads no slot left out',
+    file: NT,
+    find: M_LIST,
+    to: "  const leftOut: number[] = []; /* MUTANT */",
+    why: 'The morning summary never says that a Core was sent no ON: a close under the announced level is told with no cause.',
+  },
+  {
+    id: 'PSL-M-ii. ★★ the morning summary names an entry that is no slot',
+    file: NT,
+    find: M_LIST,
+    to: swap(M_LIST, '.filter((n) => Number.isInteger(n) && n >= 1)', ''),
+    why: 'A damaged record\'s entry of 0 or of half a slot is told in the morning summary as a slot that was not switched on.',
+  },
+  {
+    id: 'PSL-M-ii(b). ★★ the morning summary names slot 0',
+    file: NT,
+    find: M_LIST,
+    to: swap(M_LIST, 'n >= 1', 'n >= 0'),
+    why: 'A damaged record\'s entry of 0 is told in the morning summary as "slot(s) 0 not switched on".',
+  },
+  {
+    id: 'PSL-M-iii. ★★★ the morning summary\'s clause is said with no slot to name',
+    file: NT,
+    find: M_IF,
+    to: "  const leftOutWords = leftOut.length >= 0 /* MUTANT */",
+    why: 'Every cost night\'s summary says "slot(s)  not switched on" for the pool alarm, with no alarm standing and every slot sent its ON.',
+  },
+  {
+    id: 'PSL-M-iv. ★★ the summary joins the slots left out as a log joins them',
+    file: NT,
+    find: M_WORDS,
+    to: swap(M_WORDS, "leftOut.join(', ')", "leftOut.join(',')"),
+    why: 'One summary reads "slot(s) 2, 3" for the slots a failed ON names and "slot(s) 1,3" for the slots left out.',
+  },
+  {
+    id: 'PSL-M-v. ★★★ a force-charge that ran is told with no slot left out',
+    file: NT,
+    find: M_RAN,
+    to: "${ran}${close}",
+    why: 'On the usual night, an ON verified on the Cores in the pool, the summary does not say that one Core was sent no ON and got no charge.',
+  },
+  {
+    id: 'PSL-M-v(b). ★ the clause stands after the close\'s figures',
+    file: NT,
+    find: M_RAN,
+    to: "${ran}${close}${leftOutWords}",
+    why: 'The slot left out is told after what the pool read at the close, apart from the force-charge it belongs to: it reads as a slot that was not switched on once the window had closed.',
+  },
+  {
+    id: 'PSL-M-vi. ★★★ a force-charge that did not take effect is told with no slot left out',
+    file: NT,
+    find: M_FAILED,
+    to: "${ended}${close}",
+    why: 'The summary of a failed ON names the slots that did not take it and not the slot that was never sent it.',
+  },
+  {
+    id: 'PSL-M-vii. ★★ a force-charge that reached its stop unconfirmed is told with no slot left out',
+    file: NT,
+    find: M_STOP,
+    to: "with no readback showing every slot ON${afterReissue}${close}",
+    why: 'The summary says no readback showed every slot ON and not that one slot was sent no ON at all.',
+  },
+  {
+    id: 'PSL-M-viii. ★★ a force-charge never confirmed is told with no slot left out',
+    file: NT,
+    find: M_UNCONF,
+    to: "${earlyOff != null ? `; it was switched off${earlyOff}` : ''}${close}",
+    why: 'The summary of an unconfirmed ON does not say that one Core was sent no ON.',
   },
 
   /* ── A: the record ── */
@@ -1058,6 +1420,56 @@ const MUTANTS = [
     why: 'With a Core out and not identified the log says an ON is not sent to "slot(s) " and that the alarm names their Core.',
   },
 
+  {
+    id: 'PSL-X-xxix. ★★★ the failure handler says every slot left out is listed',
+    file: IX,
+    find: X_OUTLISTED,
+    to: "    const outListed = [...pool.leftOut]; /* MUTANT */",
+    why: 'On a failure of slot 2 alone, with slot 3 charging, the log says slot 1 is listed and that "no slot in the pool took the ON".',
+  },
+  {
+    id: 'PSL-X-xxx. ★★★ the failure handler says the slots IN the pool are listed for the alarm',
+    file: IX,
+    find: X_OUTLISTED,
+    to: "    const outListed = action.slots.filter((n) => !pool.leftOut.includes(n)); /* MUTANT */",
+    why: 'On every failed ON with no alarm standing the log says the failed slots are listed because the pool alarm names their Core.',
+  },
+  {
+    id: 'PSL-X-xxxi. ★★★ the failure handler\'s added line is said with no slot to name',
+    file: IX,
+    find: X_OUTWARN,
+    to: swap(X_OUTWARN, 'if (outListed.length > 0) app.log.warn(', 'if (outListed.length >= 0) app.log.warn('),
+    why: 'Every failed ON, with no alarm standing too, logs "slot(s)  are listed because the pool alarm names their Core" and "no slot in the pool took the ON".',
+  },
+  {
+    id: 'PSL-X-xxxii. ★★ the failure handler\'s added line is logged at info',
+    file: IX,
+    find: X_OUTWARN,
+    to: swap(X_OUTWARN, 'app.log.warn(', 'app.log.info('),
+    why: 'At the add-on\'s default log level the failure\'s two warn lines say every listed slot still reads OFF, and the line that says why a slot reading ON is listed is not shown.',
+  },
+  {
+    id: 'PSL-X-xxxiii. ★★★ the push is not given the slots left out',
+    file: IX,
+    find: X_PUSHARG,
+    to: "        outOfPoolSlots: null, /* MUTANT */",
+    why: 'The ON-failure push never says a listed slot is out of the pool: the reader is sent to the cloud link for a Core that takes no charge.',
+  },
+  {
+    id: 'PSL-X-xxxiv. ★★★ the push is given the targets as the slots out of the pool',
+    file: IX,
+    find: X_PUSHARG,
+    to: "        outOfPoolSlots: pool.targets, /* MUTANT */",
+    why: 'The push says of the Cores in the pool that the pool alarm names them out.',
+  },
+  {
+    id: 'PSL-X-xxxv. ★★★ the push is given the failed slots as the slots out of the pool',
+    file: IX,
+    find: X_PUSHARG,
+    to: "        outOfPoolSlots: action.slots, /* MUTANT */",
+    why: 'Every failed ON, with no alarm standing too, pushes that its slots are listed because the pool alarm names their Core.',
+  },
+
   /* ── W: index.ts, the words of the ON and of its verify ── */
   {
     id: 'PSL-W-i. ★★ the ON line\'s fallback count is the ON\'s slot count',
@@ -1107,6 +1519,13 @@ const MUTANTS = [
     find: W_VON,
     to: swap(W_VON, ' && !outOfPool.includes(n)', ''),
     why: 'A Core out of the pool is logged as reading FORCE_CHARGE_ON, and again as out of the pool.',
+  },
+  {
+    id: 'PSL-W-viii. ★★ the verify log does not say which slot is out of the pool',
+    file: IX,
+    find: W_VCLAUSE,
+    to: "${outOfPool.length < 0 ? `; slot(s) ${outOfPool.join(',')} out of the panel's backup pool (the pool alarm names it)` : ''}", // inside a template literal: no marker
+    why: 'The verified ON lists the slots that read ON and the slots at the ceiling, and a slot of the ON is in neither with nothing said of it.',
   },
 ];
 

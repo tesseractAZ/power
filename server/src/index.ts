@@ -6980,8 +6980,9 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     // v1.209.0 — the ledger's row learns the ON took, directly after the record does (a verify after the failure warning
     // keeps the failure's time beside it: verified wins when the row is read).
     stampForceChargeOnFate(state, nightActuationMem, 'omit');
-    // v1.209.0 — a slot of ours not reading ON that the pool alarm names out of the pool (action.outOfPool; absent with none)
-    // is said as that, never as "already at the panel's ceiling": the panel did not switch it off at the end of a charge.
+    // v1.209.0 — a slot of ours the pool alarm names out of the pool (action.outOfPool: every such slot, whatever its
+    // Charge Now reads; absent with none) is said as that, never as "already at the panel's ceiling" (the panel did not
+    // switch it off at the end of a charge) and never among the slots that "read FORCE_CHARGE_ON" (it proves nothing).
     const outOfPool = action.outOfPool ?? [];
     const on = (state.forceChargeSlots ?? []).filter((n) => !action.atCeiling.includes(n) && !outOfPool.includes(n));
     app.log.info(`night-charge: force-charge ON VERIFIED by device readback for ${state.day} — slot(s) ${on.join(',') || 'none'} read FORCE_CHARGE_ON${action.atCeiling.length > 0 ? `; slot(s) ${action.atCeiling.join(',')} already at the panel's ceiling (switched off by the panel itself)` : ''}${outOfPool.length > 0 ? `; slot(s) ${outOfPool.join(',')} out of the panel's backup pool (the pool alarm names it)` : ''}${state.forceChargeOnFailedAtMs != null ? ' (after the warning — it applied late)' : ''}.`);

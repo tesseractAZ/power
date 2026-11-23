@@ -1621,8 +1621,9 @@ export class SnapshotStore extends EventEmitter {
   }
 
   /** v1.209.0 — the standing alarm's verdict on one panel's slots (poolOut.ts poolOutRead), for the force-charge tick
-   *  and the planner's charge cap: the latched count and names, whether the return dwell is running, and the data time
-   *  of the newest usable observation. A panel with no tracker state reads as no alarm. CONTAINED: both callers sit on
+   *  and the planner's charge cap: the latched count and names, what stands against the latch (the return dwell, a
+   *  contest, a larger count on its way), and the data time of the episode's newest COUNTED reading. A panel with no
+   *  tracker state reads as no alarm. CONTAINED: both callers sit on
    *  the night-charge path, and a verdict that cannot be read is null there, which they take as no alarm: every
    *  connected slot is then counted for the rate and sent ON, as before this reader existed. */
   poolOutRead(sn: string): PoolOutRead | null {
