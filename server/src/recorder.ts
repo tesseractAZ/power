@@ -975,6 +975,34 @@ export interface NightLedgerRow {
   /** v1.200.0 — the mode the cost leg's force-charge was switched ON in (nightForceCharge forceChargeModeOf
    *  at the ON): 'cost' or 'line'. NULL when it never switched ON, and on rows written before v1.200.0. */
   force_charge_mode: string | null;
+  /** v1.209.0 — THE ON'S FATE: whether the cost leg's force-charge ON took, as the night's record knew it. Six raw
+   *  stamps of the record's own fields, never a stored verdict: nightForceCharge.forceChargeOnFateColumns is the one
+   *  derivation every stamp uses, and forceChargeOnFateOf reads a row's verdict from them (verified wins over
+   *  failed: a late apply after a failure verdict is a verified ON, and the row keeps both times). Written at the
+   *  ON, again as the record changes (the verify, a re-issue, the failure verdict) and whole at the first OFF,
+   *  which repairs a stamp a restart lost. Never written by the plan row: a re-issued plan must not touch them.
+   *  Slot text is slot numbers only, ascending and comma-joined ('1,2,3'), never an empty string: the status
+   *  route serves ledger rows without authentication. NULL in all six = no ON, or a row from before v1.209.0.
+   *   - force_charge_on_failed_at_ms: when the ON was judged not applied (the record's forceChargeOnFailedAtMs);
+   *     NULL = no such verdict.
+   *   - force_charge_on_failed_slots: the slots the failure names ('2,3'); NULL with none. A slot excused at the
+   *     panel's ceiling is not in it, and neither is one named out of the pool since the ON while another slot IN
+   *     the pool read ON, so fewer slots than force_charge_on_slots does not show the rest charged. With no slot
+   *     in the pool reading ON the slots named out are in it too: the list then equals force_charge_on_slots,
+   *     unless a slot in the pool was excused at the panel's ceiling (that slot stays out of the list).
+   *   - force_charge_on_left_out: the connected slots the ON was NOT sent to because the pool alarm named their
+   *     Core out of the panel's backup pool ('1'); NULL = none.
+   *   - force_charge_on_retries: ON re-issues made. 0 is written at the ON, so NULL means "not recorded" (no ON,
+   *     or a row older than this release), never "not confirmed".
+   *   - force_charge_on_slots: the slots the ON was sent to ('1,2,3').
+   *   - force_charge_on_verified_at_ms: when a readback showed the ON applied (forceChargeOnVerifiedAtMs: every
+   *     slot it was sent to reading ON or excused, at least one slot in the pool reading ON); NULL = never. */
+  force_charge_on_failed_at_ms: number | null;
+  force_charge_on_failed_slots: string | null;
+  force_charge_on_left_out: string | null;
+  force_charge_on_retries: number | null;
+  force_charge_on_slots: string | null;
+  force_charge_on_verified_at_ms: number | null;
   /** When an unconfirmed restore of the cost leg first paged (nightChargeActuator
    *  decideRevertDeadline). */
   revert_deadline_paged_at_ms: number | null;
@@ -1120,6 +1148,9 @@ export const CHARGE_CYCLE_LEDGER_SCHEMA: ReadonlyArray<readonly [keyof NightLedg
   ['force_charge_off_verified_at_ms', 'INTEGER'], ['revert_deadline_paged_at_ms', 'INTEGER'],
   // v1.200.0 — see NightLedgerRow.force_charge_mode.
   ['force_charge_mode', 'TEXT'],
+  // v1.209.0 — the ON's fate, six raw stamps of the night's record: see NightLedgerRow.force_charge_on_retries.
+  ['force_charge_on_failed_at_ms', 'INTEGER'], ['force_charge_on_failed_slots', 'TEXT'], ['force_charge_on_left_out', 'TEXT'],
+  ['force_charge_on_retries', 'INTEGER'], ['force_charge_on_slots', 'TEXT'], ['force_charge_on_verified_at_ms', 'INTEGER'],
   ['chg_max_soc_pct', 'REAL'], ['pack_accept_kw', 'REAL'],
 ];
 /** v1.189.0 (R4) — the mid-day cycle in shadow (NightLedgerRow.shadow_cycle_why onward), in the same

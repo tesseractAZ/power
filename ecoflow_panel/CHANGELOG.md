@@ -1,3 +1,33 @@
+## 1.209.0
+
+### The force-charge follows the backup pool, the ledger records the ON's fate, and a cost night's summary states its close
+
+- **The pool.** While the pool alarm (1.208.0) stands for the panel, two rules that fail safe in opposite directions apply.
+  - The charge rate counts a doubtful slot out: each connected slot the alarm names, whatever the verdict's age, and each it counts short without naming (the largest count in a dwell included); never under one Core. The live rate's bound, the plan's automatic charge cap and, where `FORCE_CHARGE_KW_PER_CORE` is set, the start's fallback rate take that count (unset: the fixed 10 kW).
+  - The ON keeps a doubtful slot in: at the start, a re-issue or a line night's re-ON, a slot is left out only when the alarm names it, its newest counted reading is at most 15 minutes old, no return dwell is running and nothing contests the names (fewer or other slots in a dwell, or the newest reading showing every slot carrying its share).
+  - With every connected slot left out the start is refused ("every connected battery slot is left out"). A line night pushes that after 10 minutes; the morning summary gives no cause.
+  - The ON's readback check applies the same test. A slot it leaves out gets no re-issue, and its reading ON neither verifies the ON nor makes a failure partial; only another slot's does. A failure with no other slot reading ON lists the left-out slots too (one more log line and push sentence say which); with every slot of the ON left out, a failure is declared after the usual 15 minutes with no re-issue.
+  - The log, while the start waits: "its charge rate counts 2 of the 3 connected Core(s), and an ON is not sent to slot(s) 1". The ON line adds "; slot(s) 1 left out", and while a Core is counted out a rate note that counts Cores says "Core(s) counted in the pool", not "connected Core(s)". The record keeps the slots (`forceChargeLeftOutSlots`, on the status route).
+- **The ledger.** `night_charge_ledger` gains six columns: `force_charge_on_slots`, `force_charge_on_left_out`, `force_charge_on_retries`, `force_charge_on_verified_at_ms`, `force_charge_on_failed_at_ms`, `force_charge_on_failed_slots`. Retries is written 0 at the ON, so NULL means the fate was not recorded (no ON where the ON time is NULL too). Otherwise a verified time wins, also after a failure (a late apply); then a failed time; neither, the ON was never judged. Stamped at the ON, at each verdict and re-issue and at the leg's first OFF (a trailing leg's too), each time with the ON time and mode, restoring an ON stamp lost to a restart; never for a backup leg, at a re-issue the two-panel write block refuses, or, short of the first OFF, from a record that no longer holds the leg. A slot column holds slot numbers, ascending and comma-joined, or NULL; the failed slots include the slots left out at the check when no other slot read ON. The status route serves the columns unauthenticated.
+- **The summary.** On a night with no outage line whose force-charge rode it (exceptions below), the morning summary states when the force-charge reached its stop, or when and why it was switched off early (after a verified ON, also a run to the window close), the ON's re-issues (after a failed ON, also "with no re-issue of the ON"), the slots the ON was not sent to, and the pool as read when the summary is sent beside the level the evening notice named: "the pool read 57% at the close, against the ~56.7% the evening notice named"; sent over 15 minutes after the close, "reads 61% now, past the window close"; with no fresh reading, "was not read at the close". A night whose force-charge failed its readback check, was never confirmed short of its stop, or never started as announced with the pool not read at or above its stop at the close, no longer goes under "completed" and the plain restore title. The title says the force-charge "did not run", "did not take effect", was "not applied on slot(s) 2, 3" or "not confirmed", or, failed on every slot and switched off at its stop, "force-charge ON not confirmed" (body: "was switched ON and its readback check failed"). An ON never confirmed that reached its stop keeps "completed" and the plain title; the body adds "with no readback showing every slot ON".
+- **Why.** On 2026-11-16 a top-up that no slot applied closed at 49% against an announced 56.7% under the title "reserve restored" and the lead "completed". Its rate was timed for three Cores with two in the pool, and the ledger kept only that an ON was sent.
+- **What does not change.** With no pool alarm standing, or none that can be read (said once at warn), every connected slot is counted and switched on as before. The OFF still goes to the slots the ON was sent to, so a slot left out gets none: the close does not switch off a Charge Now switched on by hand for it. The refusal on a Charge Now already ON (a left-out slot's too) and the capacity and standby figures are untouched. The summary changes no write. Unchanged summaries: a line night's, a reserve-only night's, that of a night a cancel or a grid loss ended, of one with no force-charge stop on record, of one whose force-charge never started where the evening notice expected none (its level was not the stop), and the mid-day one.
+- **Known limits.**
+  - A top-up needing under about 22 minutes of charge still has no room for a re-issue of its ON: the start has no floor for one.
+  - The flat-pool hold of a line night's at-risk push, and the rate behind the clock a declined-start push quotes, take the count of the ON's targets, not the pool's.
+  - A Core out of the pool that the ON's rule keeps in (counted and not named, or named on a verdict over 15 minutes old, contested or with a return dwell running) still gets the ON and its re-issue, and its reading ON still verifies the ON or makes a failure partial. A slot the alarm names wrongly, on a verdict the ON acts on, gets no ON that night.
+  - A slot the check excuses as out of the pool is named so only in a verified ON's log line. As left out, the ledger and a no-line night's summary name only the slots left out at the ON; a line night's summary names none.
+  - A slot left out at the ON is not switched on later that night when its Core returns; nor is one excused at the check, unless a line night's re-ON reaches it.
+  - A loss the alarm has not yet raised is not counted out of the rate, and nothing says that the plan's charge cap counted a Core out: only the force-charge's log lines give a count.
+  - The readiness gate, `forceChargeStateAt` and the mid-day hour mask read none of the new columns; to them an ON is still `force_charge_on_at_ms`, so a night whose ON never took is still served as a force-charge that was on. With the ON time restored from the record, so is a night on which the add-on restarted before any ON command went out.
+  - The first OFF's ledger stamp is made once, after the OFF's device writes: a restart during them leaves a fate stamp already lost, lost.
+  - A force-charge that ran and was cut short (the run backstop, a grid loss that did not end the night) keeps "completed" and the plain title; the body states the switch-off and the close.
+- **Detail.** `docs/reference/15-2-night-charge-writes.md` and `15-3-night-charge-ledger-and-scoring.md`.
+
+### Verification
+
+7,094 server tests pass in both time zones. Three new mutation harnesses hold the release: `mutate-cost-night-close.mjs` (244 mutants), `mutate-pool-slots.mjs` (183) and `mutate-on-fate.mjs` (143), every mutant killed in a full run of each; 6,619 anchors resolve across 158 harnesses. Each part's tests were written by an author who did not write its code. A review of the whole change by six independent readers, each finding checked by a second, found no wrong write and no difference from 1.208.0 while no pool alarm stands.
+
 ## 1.208.0
 
 ### An alarm when a Core leaves the panel's backup pool, and a notice when it returns
@@ -76,31 +106,6 @@
 
 - `docs/reference/08-1-alerts.md`: the alert, its signals, dwells, clear, severity, state and delivery, and its constants. `08-2-alert-monitor.md`: the family listing, the quiet-hours flag, the return notice, the boot hold. `02-1-cloud-protocol-and-snapshot.md`: the fields read, the recorded series with the flag bit order, the change log, the captures. `02-2-home-assistant-wiring.md`: the entity counts and the debug route. `01-architecture.md`, `10-audible-broadcast.md`, appendix A (a new engine row, 63 engines).
 - `docs/guide/entities.md` and the add-on documentation: the new sensor and the alert, with what to do.
-
-## 1.207.2
-
-### The limit of a spoken alarm pass is an option; a pass leaves time for the other language
-
-**Audible alarms**
-
-- **What changed.**
-  - **An option.** The time one spoken pass may take to render, 12 s since v1.47.5, can be set per install: `BROADCAST_TTS_PASS_TIMEOUT_MS`, 3000 to 60000 ms. Unset, it is 12000.
-  - **A guard, for a limit above 12 s.** A pass may not use time that a pass still to render needs. With *m* passes still to render after it and *R* left of the 25 s spoken phase, an attempt (a first try, or the one retry after a failure of under 3 s) is handed min(limit, *R*, max(*R* − *m* × 8 s, 3 s)). One language, the last pass and every terminator have nothing behind them and keep min(limit, *R*); so does every attempt at 12 s or under.
-- **An install that does not set the option is unchanged.** The default is 12 s, the option is not passed to the server while it is unset, and no reserve is held at 12 s or under. The test "INVARIANT 1" in `audioRendererBilingual.test.ts` holds the limits handed to the speech engine on thirteen paths (one language, two, and three passes; every attempt runs out; the first returns late; a dropped socket, then a retry, its pause on time, late or past the budget; with terminators) to the figures measured on v1.207.1.
-- **Why.** Measured on the reference install on 2026-11-18 (silent renders, the voices in service): with its voice resident the English voice took 0.67 to 0.80 s per second of audio. A 318-character critical (18.4 s of audio) rendered in 12.8 and 13.9 s, a 289-character critical in 11.2 s, a 173-character notice in 6.8 s, and a charge-level sentence in 0.85 s, or 2.2 s after a change of voice. The Spanish voice rendered about 23 s of audio in 2.9 s, or 4.0 s after a change of voice. At 12 s the English pass of that 318-character critical is lost: on 2026-11-17 it was, and the tones and the Spanish pass played.
-- **What a longer limit costs.** Nothing plays until the spoken phase ends, so render time is alarm delay.
-  - **One language** (the shipped default). A pass that never returns holds the tones for the limit: 12 s by default, 20 s at 20000, 25 s from 25000 up.
-  - **Two languages, the first pass late.** With an English pass ready at 14 s and a Spanish pass in 4 s: at 20000 both are spoken, the speech ready at 18 s; at 12 s the English pass is dropped, the speech ready at 16 s.
-  - **Two languages, the first pass lost.** At 20000 it is cut at 17 s and the other has 8 s: one language after the 17 s and its own render time, or the tones alone at 25 s. By default the figures are 12 s, 12 s and 24 s. After a socket drop at 2.9 s the retry at 20000 has 13.8 s: what is left less 8 s.
-  - **A terminator that never returns** holds the speech for its limit too: after a pass ready at 1 s the speech is ready at 13 s by default, at 21 s at 20000. While no English voice is named (the shipped default) its terminator is not kept across a restart.
-  - The reserve is a fixed 8 s. The measured Spanish pass fits in it; a long English sentence rendered second can need more.
-- **Not in this release.** Tones before speech. A per-sentence audio cache. A dropped pass is still recorded as a completed announcement and is not retried.
-
-**Tests**
-
-- `audioRendererBilingual.test.ts` scripts the speech engine on a mocked clock that crosses the retry pause: the thirteen paths; at 20000, the 2026-11-17 shape, a first pass that never returns (17 s, then 8 s, whichever language renders first), a dropped socket then a stalled retry (17, 13.8 and 8 s), a retry on a spent budget (handed 0), three passes (9, 8 and 8 s, from 12001 up), a repeated pass, one language and terminators; the fallback to 12000; the 3 s floor. The budget test set its 5 s after the setting had been read; both settings are read when used, and the test is exact. On v1.207.1's renderer the thirteen-path test passes and the eleven others fail.
-- `optionsEnvBridge.test.ts`: the option's schema, export line, row and translations.
-- Harness: `mutate-v1187-10-g4.mjs` gains `T-i` to `T-xv`; 59 mutants.
 
 ## Older releases
 

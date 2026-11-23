@@ -1257,6 +1257,75 @@ export function poolOutSensorState(state: PoolOutState, nowMs: number): 'on' | '
   return 'off';
 }
 
+/** v1.209.0 — what the STANDING alarm says of this panel's slots, for a caller that decides with it (the force-charge's
+ *  rate and its ON targets: nightForceCharge.ts forceChargePoolSlots). */
+export interface PoolOutRead {
+  /** The slots the standing alarm names (its title's slots): ascending integers 1..SHP2_SOURCE_SLOTS, a COPY; [] with none. */
+  named: number[];
+  /** The latched count of slots out, named or not; 0 with no episode. */
+  count: number;
+  /** The largest count of slots out that any standing reading of the episode holds: `count`, or the largest count on
+   *  its way through a dwell (`episode.change` and the larger counts chained under it, `more`). Never below `count`. */
+  countAtMost: number;
+  /** The capacity reads whole again and the clear dwell is running: the alarm still stands and still names its slots. */
+  returning: boolean;
+  /** Something stands against the latch: readings on their way through a dwell that count FEWER slots short
+   *  (`episode.less`: a Core of the named ones may be back) or a DIFFERENT set (`episode.change`: the names may be
+   *  wrong), or the NEWEST usable reading shows every slot carrying its share (flow healthy: a named slot is seen
+   *  carrying). The alarm still stands and still names its slots; which of them are out is not established. */
+  contested: boolean;
+  /** DATA time of the newest COUNTED reading of the standing episode (`episode.lastFault`: capacity short AND a
+   *  slot's percent or flow at fault, or its flow not judged); null with no episode. Not the newest usable reading,
+   *  and not the newest judged capacity: a reading whose capacity cannot be judged, and one held as a contradiction
+   *  (capacity short while every slot carries its share), neither confirms the named slots nor starts their return,
+   *  and must not keep the verdict young. */
+  asOfMs: number | null;
+}
+
+/**
+ * v1.209.0 — the standing alarm's verdict on the panel's slots. PURE.
+ *
+ * `named` and `count` are built from the LATCHED fields only — `episode.k`, `episode.slots` — the two the alarm's
+ * title and fault token are built from (poolOutTitle, poolOutFault), so the slots named here are the slots the title
+ * names. Never from one reading's verdicts (PoolSignals) or a streak before its raise: neither has been confirmed,
+ * and this output decides which slots a force-charge is sent to. For the same reason every slot and the count are
+ * checked again here, whatever the state holds: a slot that is not an integer in 1..SHP2_SOURCE_SLOTS is left out,
+ * and a count that is not a non-negative integer is 0.
+ *
+ * What stands AGAINST the latch is reported beside it, never folded into it: `returning` (the clear dwell),
+ * `contested` (fewer slots short, or another set, on its way through a dwell; or the newest usable reading showing
+ * every slot carrying its share) and `countAtMost`. The caller's two
+ * uses fail safe in opposite directions, and each takes the doubt its own way.
+ *
+ * No clock argument: the title has none, and the tracker's rule is that age ends no alarm. A caller that must not act
+ * on an old verdict reads `asOfMs` (forceChargePoolSlots does, for the slots it leaves out of an ON): the newest
+ * counted reading, the tracker's own record of the last evidence that a slot is out.
+ *
+ * No state, or no episode standing: nothing named, nothing counted.
+ */
+export function poolOutRead(state: PoolOutState | null | undefined): PoolOutRead {
+  const ep = state?.episode;
+  if (state == null || ep == null) return { named: [], count: 0, countAtMost: 0, returning: false, contested: false, asOfMs: null };
+  const faultAt: unknown = ep.lastFault?.atMs;
+  const asOfMs = typeof faultAt === 'number' && Number.isFinite(faultAt) ? faultAt : null;
+  const slots: unknown[] = Array.isArray(ep.slots) ? ep.slots : [];
+  const named = [...new Set(slots.filter((n): n is number => typeof n === 'number' && Number.isInteger(n) && n >= 1 && n <= SHP2_SOURCE_SLOTS))]
+    .sort((a, b) => a - b);
+  const whole = (k: unknown): number => (typeof k === 'number' && Number.isInteger(k) && k >= 0 ? k : 0);
+  const count = whole(ep.k);
+  // The largest count on its way through a dwell: the change streak and every larger count chained under it.
+  let countAtMost = count;
+  for (let st: PoolOutStreak | null | undefined = ep.change, depth = 0; st != null && depth < 8; st = st.more, depth++) {
+    countAtMost = Math.max(countAtMost, whole(st.k));
+  }
+  return {
+    named, count, countAtMost,
+    returning: ep.clear != null,
+    contested: ep.less != null || ep.change != null || state.last?.flow?.v === 'healthy',
+    asOfMs,
+  };
+}
+
 /** The boot orphan sweep may resolve this alert only once the tracker has, IN THIS PROCESS, raised or seen a full clear
  *  dwell of healthy capacity — or when the END of that alarm is on file: no episode standing, and an end record dated
  *  at or after the push being resolved (`pushedAtMs`). A lost state file must not push a "Resolved" that nothing

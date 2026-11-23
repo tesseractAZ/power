@@ -76,6 +76,12 @@ import {
   lineReOnCheckedStamp,
   // v1.200.0 (review 6) — the force-charge tick's cadence, which the line-at-risk push's hand-back hold counts.
   FORCE_CHARGE_TICK_MS,
+  // v1.209.0 — only the Cores in the panel's backup pool are counted for the charge rate and sent ON.
+  forceChargePoolSlots,
+  // v1.209.0 — the ledger's record of whether the ON took: the one derivation every stamp of it uses.
+  forceChargeOnFateColumns,
+  // v1.209.0 — and the ON's own two columns again from the record, beside every fate stamp (a lost ON stamp is repaired).
+  forceChargeOnStampColumns,
 } from './nightForceCharge.js';
 import {
   extractSettingsSurface, evaluateDrift, freshDriftState, loadConfirmedSurface,
@@ -3670,6 +3676,41 @@ function stampLegOutcome(leg: NightActuationState & { leg?: ChargeLegRole }, fie
   catch (e: any) { app.log.warn(`night-charge: ledger stamp failed for ${leg.day} (${e?.message ?? e})`); }
 }
 
+/**
+ * v1.209.0 — THE ON'S FATE on the ledger: whether a leg's force-charge ON took, stamped to its row's six fate columns
+ * (NightLedgerRow.force_charge_on_failed_at_ms to force_charge_on_verified_at_ms) in a write of its own through
+ * stampLegOutcome. Before it the row said only that an ON was sent, and a night whose ON never took read as one that
+ * force-charged.
+ *  - `leg` is the leg the tick is working (it names the row and the role; a backup leg has no such column and is not
+ *    written). `live` is that leg's record AS IT STANDS NOW, never the copy the tick read at its start: the stamp
+ *    follows cloud writes, and a count or a time the handler has just changed must be the one stamped. Every value
+ *    comes from the one derivation (nightForceCharge.forceChargeOnFateColumns), an absolute figure, never an increment.
+ *  - A record that is no longer this leg's (re-armed, promoted or moved to the trailing slot under an await) stamps
+ *    nothing: another night's fate never reaches this row. EXCEPT at the leg's first OFF (`final`): there the leg's own
+ *    copy is stamped instead. After the OFF the ON is never judged again and no ON handler ran on that tick, so the
+ *    copy the tick read holds the leg's final fate; and that stamp is the last one the leg gets (the trailing leg's
+ *    first-OFF guard is already spent by then), so skipping it would leave a lost stamp lost for good.
+ *  - `nulls`: 'write' at the ON (a fresh ON has a fresh fate: the count 0 and NULL for what has not happened);
+ *    'omit' on every later stamp, which then never erases what the row holds.
+ *  - Beside the fate, the ON's own two columns again from the same record (nightForceCharge.forceChargeOnStampColumns):
+ *    the row's first ON stamp follows awaited cloud writes and a restart there loses it; every fate stamp repairs it.
+ * Never throws: the derivation and the write are both contained, so no stamp can cost the tick its log line or a push.
+ */
+function stampForceChargeOnFate(leg: NightActuationState & { leg?: ChargeLegRole }, live: NightActuationState, nulls: 'write' | 'omit', final = false): void {
+  try {
+    if (leg.day == null) return;
+    const held = live.day === leg.day && live.windowStartMs === leg.windowStartMs;
+    if (!held && !final) {
+      app.log.debug(`night-charge: ledger stamp of the force-charge ON's fate skipped for ${leg.day}: the record no longer holds that leg.`);
+      return;
+    }
+    const from = held ? live : leg;
+    stampLegOutcome(leg, { ...forceChargeOnStampColumns(from), ...forceChargeOnFateColumns(from, nulls) });
+  } catch (e: any) {
+    app.log.warn(`night-charge: ledger stamp of the force-charge ON's fate failed for ${leg.day} (${e?.message ?? e})`);
+  }
+}
+
 /** v1.200.0 — the house pool's state of charge from a FRESH, coherent readback, or null (a line night's
  *  morning summary states where its pool closed). */
 function freshPoolSocPct(nowMs: number): number | null {
@@ -3982,9 +4023,16 @@ async function recomputeNightChargePlan(
   const costMaxSocPct = option<number>('ARB_COST_MAX_SOC_PCT');
   const islandedLoadSafety = option<number>('ARB_ISLANDED_LOAD_SAFETY');
   // v1.173.0 — 0 (default) = AUTO: connected Cores × the proven per-Core rate (planChargeCapKw).
-  const planConnectedSlots = Array.isArray(sp.sources)
-    ? sp.sources.filter((c: any) => c?.hwConnect === true && Number.isInteger(Number(c?.slot))).length
+  // v1.209.0 — the Cores IN THE PANEL'S BACKUP POOL: the connected slots less those the standing pool alarm counts out
+  // (forceChargePoolSlots' `rateCount`, the count the force-charge tick times its rate with), so the plan's charge cap and
+  // the tick's bound are still one model while a Core is out. Before, the plan capped the charge for every connected Core
+  // while the pool held fewer, and stated a night the tick could not deliver. Read here, before the first await, for the
+  // panel the plan is for. With no alarm standing (or no verdict to read) it is the connected count, as before; with the
+  // slots unknown it stays unknown. Capacity and standby figures are not touched: a Core out of the pool still stands by.
+  const planHwSlots: number[] | null = Array.isArray(sp.sources)
+    ? sp.sources.filter((c: any) => c?.hwConnect === true && Number.isInteger(Number(c?.slot))).map((c: any) => Number(c.slot))
     : null;
+  const planConnectedSlots = planHwSlots == null ? null : forceChargePoolSlots(planHwSlots, store.poolOutRead(shp2.sn), nowMs).rateCount;
   const chargeCapKw = planChargeCapKw(option<number>('ARB_CHARGE_CAP_KW'), planConnectedSlots, legEff);
   // v1.60.0 — the SHARED grid-input envelope the charger and the house both draw
   // from. Default 17 kW is the COEXISTENCE figure measured on 2026-08-02→03: at
@@ -6629,8 +6677,18 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
   const sources: any[] | null = Array.isArray(sp?.sources) ? sp.sources : null;
   const slotsOn = sources == null ? null
     : sources.filter((c) => c?.forceCharge === 'FORCE_CHARGE_ON').map((c) => Number(c.slot)).filter(Number.isInteger);
-  const connectedSlots = (sources ?? [])
+  const hwSlots = (sources ?? [])
     .filter((c) => c?.hwConnect === true).map((c) => Number(c.slot)).filter(Number.isInteger);
+  // v1.209.0 — ONLY THE CORES IN THE PANEL'S BACKUP POOL are counted for the charge rate and sent ON
+  // (nightForceCharge.forceChargePoolSlots, on the standing pool alarm's verdict for THIS panel: store.poolOutRead). A Core
+  // out of the pool takes no charge: on 2026-11-16 the rate counted three Cores with two in the pool, and the start came
+  // late. The two uses follow different rules: the rate counts a doubtful slot out (`rateCount`), the ON leaves out only a
+  // slot the alarm NAMES on a recent verdict (`leftOut`). With no alarm standing, no tracker state or a read that failed,
+  // nothing is left out and every connected slot is counted: `connectedSlots` is then the list above itself. Slots outside
+  // 1..SHP2_SOURCE_SLOTS are not handed in, as the rate's count never took them. `slotsOn` and the per-slot percents are NOT
+  // filtered: a Charge Now reading ON on a slot left out still declines the start.
+  const pool = forceChargePoolSlots(hwSlots.filter((n) => n >= 1 && n <= SHP2_SOURCE_SLOTS), store.poolOutRead(shp2.sn), nowMs);
+  const connectedSlots = pool.leftOut.length > 0 ? pool.targets : hwSlots;
   // v1.186.0 — each slot's Core SoC from the SAME fresh readback, for the ON verify's
   // at-the-ceiling exemption. A stale readback gives none (sources is null).
   const slotSocPct: Record<number, number | null> | null = sources == null ? null
@@ -6651,7 +6709,9 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
   const chargeRateKw = forceChargeRateKw({
     gridCapKw, houseLoadKw, legEff: Math.sqrt(DISPATCH_ROUND_TRIP_EFFICIENCY),
     // v1.170.0 — fewer Cores connected ⇒ bounded by what each is proven to take.
-    slotCount: connectedSlots.filter((n) => n >= 1 && n <= SHP2_SOURCE_SLOTS).length,
+    // v1.209.0 — and fewer in the pool: the connected slots (1..SHP2_SOURCE_SLOTS) less those the pool alarm counts out, never under 1
+    // while a slot is connected (forceChargePoolSlots); with no alarm standing, the connected count as before.
+    slotCount: pool.rateCount,
   });
   // …and the EV the live reading cannot see yet: the planner's predicted (P90) EV energy in
   // the rest of TONIGHT's window, which the pack will not get (review F1, 2026-09-18). Only
@@ -6688,6 +6748,8 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     reservePct: typeof sp?.backupReserveSoc === 'number' ? sp.backupReserveSoc : null,
     connectedSlots,
     slotSocPct, // v1.186.0 — the ON verify's at-the-ceiling exemption
+    poolOutSlots: pool.leftOut, // v1.209.0 — the slots left out: the "every slot left out" refusal, and the ON verify's out-of-the-pool exemption
+    rateSlotCount: pool.rateCount, // v1.209.0 — and the count the start's FALLBACK rate may be timed for (a slot counted out and still sent ON)
     vitalsRed: currentAssessment()?.level === 'crit',
     socCoherent,
     ceilingReadbackPct: typeof sp?.forceChargeCeilingSoc === 'number' ? sp.forceChargeCeilingSoc : null,
@@ -6786,6 +6848,18 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
         forceChargeWhyLogged.reasons.add(action.why);
         app.log.info(`night-charge: force-charge NOT starting for ${state.day} — ${action.why}.`);
       }
+      // v1.209.0 — and what the pool alarm takes out of tonight's force-charge, before the ON: one line per distinct count
+      // and set of slots, through the same once-a-night memory. Its key carries numbers only (the rate's count, the count
+      // out, the slots left out): no reading and no clock, so a verdict that stands all night is said once.
+      if (pool.leftOut.length > 0 || pool.outCount > 0) {
+        const poolKey = `${pool.rateCount}|${pool.outCount}|${pool.leftOut.join(',')}`;
+        if (!forceChargeWhyLogged.reasons.has(poolKey)) {
+          forceChargeWhyLogged.reasons.add(poolKey);
+          // In words true whether or not an ON comes tonight, and with no count of Cores out: the alarm may count a slot it
+          // has not named, and the rate's count has a floor of one.
+          app.log.info(`night-charge: force-charge for ${state.day}: the pool alarm stands for this panel — its charge rate counts ${pool.rateCount} of the ${pool.rateCount + pool.outCount} connected Core(s)${pool.leftOut.length > 0 ? `, and an ON is not sent to slot(s) ${pool.leftOut.join(',')} (the alarm names their Core out of the backup pool)` : ''}.`);
+        }
+      }
     }
     pushLineDeclinedIfDue(action.why);
     judgeLineNight();
@@ -6847,7 +6921,10 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     // (review) and the panel ceiling this tick read back, which the ON verify then reads (forceChargeOnStamp).
     const onStamp = forceChargeOnStamp(state, nowMs, action.slots, forceChargeGatesOn(legRoleOf(state)));
     const onMode = onStamp.forceChargeMode;
-    persistNightActuation({ ...nightActuationMem, ...onStamp });
+    // v1.209.0 — and, in the same write-ahead persist, the connected slots this ON is NOT sent to because the pool alarm
+    // names their Core out of the pool (null with none): the morning summary names them, and a restart cannot lose them
+    // apart from the ON they belong to.
+    persistNightActuation({ ...nightActuationMem, ...onStamp, forceChargeLeftOutSlots: pool.leftOut.length > 0 ? [...pool.leftOut] : null });
     const results: string[] = [];
     let rejected = 0;
     for (const slot of action.slots) {
@@ -6860,33 +6937,55 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     // from the stamp let the one re-issue land inside a later slot's cooldown, rate-limited.
     persistNightActuation({ ...nightActuationMem, forceChargeOnLastAttemptMs: Date.now() });
     stampLegOutcome(state, { force_charge_on_at_ms: nowMs, force_charge_mode: onMode }); // v1.189.0 — the ledger's force-charge stamps; v1.200.0 — and its mode
+    // v1.209.0 — and the ON's fate as it stands at the ON: the slots it was sent to, the slots left out, the re-issue count
+    // (0, the mark that the fate was recorded) and NULL for a verdict not yet reached. A write of ITS OWN, after the stamp
+    // above: one failed upsert must not take force_charge_on_at_ms with it (the readiness gate reads that as "never
+    // switched on"). From the live record, which holds the ON since the write-ahead persist; `state` was read before it.
+    stampForceChargeOnFate(state, nightActuationMem, 'write');
     const slotsNow = connectedSlots.filter((n) => n >= 1 && n <= SHP2_SOURCE_SLOTS).length;
     const unboundedKw = gridCapKw != null ? (gridCapKw - Math.max(0, houseLoadKw ?? 0)) * Math.sqrt(DISPATCH_ROUND_TRIP_EFFICIENCY) : null;
+    // v1.209.0 — each count named as what it is. The live rate's bound is the count it was timed with (pool.rateCount), and
+    // the fallback rate's is the decision's own (decideForceCharge's rateSlots: the ON's slots, or fewer when the alarm
+    // counts one of them out; mirrored here as fallbackSlots). With a Core counted out each is "N Core(s) counted in the
+    // pool": counted, since the alarm may count a slot it has not named and the count has a floor of one. With nothing
+    // counted out both are today's words, to the letter.
+    const fallbackSlots = pool.rateCount >= 1 ? Math.min(slotsNow, pool.rateCount) : slotsNow;
+    const boundCores = pool.outCount > 0 ? `${pool.rateCount} Core(s) counted in the pool` : `${slotsNow} connected Core(s)`;
+    const fallbackCores = pool.outCount > 0 ? `${fallbackSlots} Core(s) counted in the pool` : `${slotsNow} connected Core(s)`;
     const rateNote = (chargeRateKw != null
       ? (unboundedKw != null && chargeRateKw < unboundedKw - 1e-9 && chargeRateKw > FORCE_CHARGE_MIN_RATE_KW
-        ? `timed at ~${chargeRateKw.toFixed(1)} kW (bounded by ${slotsNow} connected Core(s) × ${forceChargeKwPerCore()} kW)`
+        ? `timed at ~${chargeRateKw.toFixed(1)} kW (bounded by ${boundCores} × ${forceChargeKwPerCore()} kW)`
         : `timed at ~${chargeRateKw.toFixed(1)} kW (grid cap ${gridCapKw} kW less the house's ${Math.max(0, houseLoadKw ?? 0).toFixed(1)} kW, through the charge leg, floored at 1 kW)`)
-      : (planRateFallbackKw(slotsNow) === FORCE_CHARGE_PLAN_RATE_KW
+      : (planRateFallbackKw(fallbackSlots) === FORCE_CHARGE_PLAN_RATE_KW
         ? `timed at the fixed ${FORCE_CHARGE_PLAN_RATE_KW} kW fallback (${gridCapKw == null ? 'no grid-input cap configured' : 'no live house load'})`
         // v1.191.0 (H2) — FORCE_CHARGE_KW_PER_CORE set and the slots known: the fallback is slots × that rate.
-        : `timed at the ${planRateFallbackKw(slotsNow)} kW fallback (${slotsNow} connected Core(s) × ${forceChargeKwPerCore()} kW; ${gridCapKw == null ? 'no grid-input cap configured' : 'no live house load'})`))
+        : `timed at the ${planRateFallbackKw(fallbackSlots)} kW fallback (${fallbackCores} × ${forceChargeKwPerCore()} kW; ${gridCapKw == null ? 'no grid-input cap configured' : 'no live house load'})`))
       + (evDisplacedKwh != null && evDisplacedKwh > 0 ? `, plus ~${evDisplacedKwh.toFixed(1)} kWh the predicted EV will take` : '');
+    // v1.209.0 — and the slots this ON was not sent to, beside the slots it was ('' with none: the line is today's).
+    const leftOutNote = pool.leftOut.length > 0 ? `; slot(s) ${pool.leftOut.join(',')} left out: the pool alarm names its Core out of the backup pool` : '';
     // v1.186.0 — a rejected ON is no longer an info-level footnote: it is verified by
     // readback like an accepted one, re-issued once, then warned about.
     const onLineMode = onMode === 'line' ? forceChargeModeOf(state, { cost: forceChargeOn(legRoleOf(state)), line: true }) : null;
     const onLine = onLineMode?.kind === 'line'
       // v1.200.0 — a LINE night: on to the window close for the outage line, no software stop. (A5, L3) The panel's own
       // OFF at its ceiling is a stop, not a backstop: the line ARMED says the walk reaches it, and the tick re-ONs after it.
-      ? `night-charge: FORCE-CHARGE ON for ${state.day} — ${results.join(', ')}; for the ${lineLogPct(state) ?? onLineMode.askPct}% outage line: timed to reach ~${onLineMode.startTargetPct}% ${Math.round(FORCE_CHARGE_MIN_RUN_MS / 60_000)} min before the window close (${new Date(state.windowEndMs!).toISOString()}), ${rateNote}, and ON until the close (no software stop) unless the panel switches it off at its ${onLineMode.panelCeilingPct}% ceiling (switched back on under ${onLineMode.startTargetPct}% before the close, at most ${lineReOnTimesWords(FORCE_CHARGE_LINE_REON_MAX)}). Also OFF on cancel, revert, grid loss or disable. Verifying ON by readback${rejected > 0 ? ` (${rejected} write(s) REJECTED — re-issued once if the slot does not read ON within ${Math.round(FORCE_CHARGE_ON_VERIFY_AFTER_MS / 60_000)} min)` : ''}.`
-      : `night-charge: FORCE-CHARGE ON for ${state.day} — ${results.join(', ')}; just in time to reach ${state.forceChargeCeilingPct}% by the window close (${new Date(state.windowEndMs!).toISOString()}), ${rateNote} — stops at the target, with the panel's ${desiredForceChargeCeilingPct(state.forceChargeCeilingPct!)}% ceiling as the backstop. Also OFF on window end, cancel, revert, grid loss or disable. Verifying ON by readback${rejected > 0 ? ` (${rejected} write(s) REJECTED — re-issued once if the slot does not read ON within ${Math.round(FORCE_CHARGE_ON_VERIFY_AFTER_MS / 60_000)} min)` : ''}.`;
+      ? `night-charge: FORCE-CHARGE ON for ${state.day} — ${results.join(', ')}${leftOutNote}; for the ${lineLogPct(state) ?? onLineMode.askPct}% outage line: timed to reach ~${onLineMode.startTargetPct}% ${Math.round(FORCE_CHARGE_MIN_RUN_MS / 60_000)} min before the window close (${new Date(state.windowEndMs!).toISOString()}), ${rateNote}, and ON until the close (no software stop) unless the panel switches it off at its ${onLineMode.panelCeilingPct}% ceiling (switched back on under ${onLineMode.startTargetPct}% before the close, at most ${lineReOnTimesWords(FORCE_CHARGE_LINE_REON_MAX)}). Also OFF on cancel, revert, grid loss or disable. Verifying ON by readback${rejected > 0 ? ` (${rejected} write(s) REJECTED — re-issued once if the slot does not read ON within ${Math.round(FORCE_CHARGE_ON_VERIFY_AFTER_MS / 60_000)} min)` : ''}.`
+      : `night-charge: FORCE-CHARGE ON for ${state.day} — ${results.join(', ')}${leftOutNote}; just in time to reach ${state.forceChargeCeilingPct}% by the window close (${new Date(state.windowEndMs!).toISOString()}), ${rateNote} — stops at the target, with the panel's ${desiredForceChargeCeilingPct(state.forceChargeCeilingPct!)}% ceiling as the backstop. Also OFF on window end, cancel, revert, grid loss or disable. Verifying ON by readback${rejected > 0 ? ` (${rejected} write(s) REJECTED — re-issued once if the slot does not read ON within ${Math.round(FORCE_CHARGE_ON_VERIFY_AFTER_MS / 60_000)} min)` : ''}.`;
     if (rejected > 0) app.log.warn(onLine); else app.log.info(onLine);
     return;
   }
 
   if (action.kind === 'onVerified') {
     persistNightActuation({ ...nightActuationMem, forceChargeOnVerifiedAtMs: nowMs });
-    const on = (state.forceChargeSlots ?? []).filter((n) => !action.atCeiling.includes(n));
-    app.log.info(`night-charge: force-charge ON VERIFIED by device readback for ${state.day} — slot(s) ${on.join(',') || 'none'} read FORCE_CHARGE_ON${action.atCeiling.length > 0 ? `; slot(s) ${action.atCeiling.join(',')} already at the panel's ceiling (switched off by the panel itself)` : ''}${state.forceChargeOnFailedAtMs != null ? ' (after the warning — it applied late)' : ''}.`);
+    // v1.209.0 — the ledger's row learns the ON took, directly after the record does (a verify after the failure warning
+    // keeps the failure's time beside it: verified wins when the row is read).
+    stampForceChargeOnFate(state, nightActuationMem, 'omit');
+    // v1.209.0 — a slot of ours the pool alarm names out of the pool (action.outOfPool: every such slot, whatever its
+    // Charge Now reads; absent with none) is said as that, never as "already at the panel's ceiling" (the panel did not
+    // switch it off at the end of a charge) and never among the slots that "read FORCE_CHARGE_ON" (it proves nothing).
+    const outOfPool = action.outOfPool ?? [];
+    const on = (state.forceChargeSlots ?? []).filter((n) => !action.atCeiling.includes(n) && !outOfPool.includes(n));
+    app.log.info(`night-charge: force-charge ON VERIFIED by device readback for ${state.day} — slot(s) ${on.join(',') || 'none'} read FORCE_CHARGE_ON${action.atCeiling.length > 0 ? `; slot(s) ${action.atCeiling.join(',')} already at the panel's ceiling (switched off by the panel itself)` : ''}${outOfPool.length > 0 ? `; slot(s) ${outOfPool.join(',')} out of the panel's backup pool (the pool alarm names it)` : ''}${state.forceChargeOnFailedAtMs != null ? ' (after the warning — it applied late)' : ''}.`);
     return;
   }
 
@@ -6916,6 +7015,10 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
       forceChargeOnLastAttemptMs: Date.now(),
       ...(unspent ? { forceChargeOnRetries: Math.max(0, nightActuationMem.forceChargeOnRetries - 1) } : {}),
     });
+    // v1.209.0 — the ledger's re-issue count, AFTER the hand-back above: the record's own figure as it now stands (this
+    // handler can run again, and its count goes down as well as up), never an increment and never the count the tick read
+    // at its start. From the live record of this same leg.
+    stampForceChargeOnFate(state, nightActuationMem, 'omit');
     if (unspent) results.push('all rate-limited — re-issue not counted');
     app.log.warn(`night-charge: force-charge ON NOT APPLIED — slot(s) ${action.slots.join(',')} still read FORCE_CHARGE_OFF ${Math.round((nowMs - (state.forceChargeOnLastAttemptMs ?? state.forceChargeOnAtMs ?? nowMs)) / 60_000)}m after the ON; re-issuing ON (retry ${state.forceChargeOnRetries + 1}/${FORCE_CHARGE_ON_MAX_RETRIES}): ${results.join(', ')}.`);
     return;
@@ -6984,6 +7087,9 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     // the morning push (partialForceChargeOnFailureSlots).
     persistNightActuation({ ...nightActuationMem, forceChargeOnFailedAtMs: nowMs, forceChargeOnFailedSlots: [...action.slots] });
     const all = partialForceChargeOnFailureSlots({ forceChargeSlots: state.forceChargeSlots, forceChargeOnFailedSlots: action.slots }) == null;
+    // v1.209.0 — the ledger's row learns the failure verdict and its slots from the record just persisted, BEFORE the
+    // awaited push below: a restart during the push would lose a stamp placed after it, and this handler never runs again.
+    stampForceChargeOnFate(state, nightActuationMem, 'omit');
     // v1.196.0 — name each failed slot's Core, and what about it differs from the other Cores' (its
     // work mode, its own backup reserve). The slot → Core join is the fresh panel readback the verify
     // read (onFailed needs one); each Core's settings are its last reported DPU projection.
@@ -6995,6 +7101,11 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     // EFFECT" nor "forfeited". A night with no line ask keeps v1.199.1's line, word for word.
     if (lineLogPct(state) != null) app.log.warn(`night-charge: force-charge ON for ${state.day}'s ${lineLogPct(state)}% outage line has NOT taken effect — slot(s) ${failedSlots.text} still read FORCE_CHARGE_OFF after ${state.forceChargeOnRetries} re-issue(s)${action.noRetry ? ` (none sent: under ${Math.round(FORCE_CHARGE_ON_RETRY_CUTOFF_MS / 60_000)} min of the window left, so the window-end OFF is never held behind one)` : ''}, and their Cores do not read at the panel's ceiling. Unless it applies late (a late apply is still verified), the add-on adds nothing above the ${RESERVE_WRITE_MAX_PCT}% reserve${all ? '' : ' on those slot(s)'}; the reserve charge is unaffected, and the OFF at the window close still runs.`);
     else app.log.warn(`night-charge: force-charge ON NEVER TOOK EFFECT for ${state.day} — slot(s) ${failedSlots.text} still read FORCE_CHARGE_OFF after ${state.forceChargeOnRetries} re-issue(s)${action.noRetry ? ` (none sent: under ${Math.round(FORCE_CHARGE_ON_RETRY_CUTOFF_MS / 60_000)} min of the window left, so the window-end OFF is never held behind one)` : ''}, and their Cores do not read at the panel's ceiling. Tonight's buy above the ${RESERVE_WRITE_MAX_PCT}% reserve is forfeited${all ? '' : ' on those slot(s)'}; the reserve charge is unaffected, and the OFF at the window close still runs.`);
+    // v1.209.0 — and, in a line of its own, the slots listed above because their Core is out of the pool: the verify names
+    // them when no slot IN the pool took the ON, and the line above says of every slot that it still reads OFF under the
+    // panel's ceiling. With none (no alarm standing, or a slot in the pool took the ON) nothing is added.
+    const outListed = action.slots.filter((n) => pool.leftOut.includes(n));
+    if (outListed.length > 0) app.log.warn(`night-charge: of those, slot(s) ${outListed.join(',')} are listed because the pool alarm names their Core out of the panel's backup pool (a Core out of the pool takes no charge, whatever its Charge Now and its percent read): no slot in the pool took the ON.`);
     try {
       // v1.187.22 — toward where it stops (~80%), as every other surface names it, not the ceiling.
       await sendNotification(loadNotifyConfig(), buildNightForceChargeOnFailure({
@@ -7004,6 +7115,7 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
         // record's line ask, never the stamped mode: a cost-dominant night (stamped 'cost') carries its line too.
         ...forceChargeOnFailureNight(state),
         cores: slotCores,
+        outOfPoolSlots: pool.leftOut, // v1.209.0 — the slots listed because the pool alarm names their Core out of the pool
       }));
     } catch (e: any) {
       app.log.warn(`night-charge: force-charge ON-failure notify failed (${e?.message ?? e})`);
@@ -7035,6 +7147,12 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     }
     if (!isRetry && state.forceChargeOffAtMs == null) {
       stampLegOutcome(state, { force_charge_off_at_ms: nowMs, force_charge_off_reason: action.reason }); // v1.189.0
+      // v1.209.0 — and the ON's whole fate again, from the record, NULLs left out so nothing the row holds is erased. After
+      // the OFF the ON is never judged again, so the record's fate is final here, and no ON handler runs twice: this is
+      // the repair for a stamp lost to a restart between the record write and the ledger write (and for a night whose
+      // ON was judged by a release that had no such columns). The LAST stamp this leg gets, so it is made even when the
+      // record moved on during the writes above (`final`: the tick's own copy of the leg is stamped then).
+      stampForceChargeOnFate(state, nightActuationMem, 'omit', true);
     }
     if (isRetry && action.kind === 'offRetry' && action.unconfirmed) {
       app.log.warn(`night-charge: force-charge NOT CONFIRMED OFF (no live panel readback) — re-sending OFF to slots ${action.slots.join(',')} every 15 min until a readback shows it off: ${results.join(', ')}`);
@@ -7279,6 +7397,14 @@ function sendRestoreSummary(state: ChargeLegState, restore: RestoreSummaryKind, 
       closeReadLate: lineNight != null && lineCloseReadingLate(state, nowMs),
       // (Fix10 review 1) A write the panel never read back is not told as raised. A night with no line keeps its words.
       writeUnread: lineNight != null && state.applyVerifiedAtMs == null,
+      // ★★★ v1.209.0 — a night with no line: where the pool closed against the level the evening notice named, what switched the
+      // force-charge off, and whether its ON was re-issued (notify.ts costNightAccount). The reading is the panel's own, now, as a
+      // line night's is; a night whose record carries a line keeps its own account.
+      cost: lineNight == null ? {
+        announcedLevelPct: state.announcedLevelPct, poolPct: freshPoolSocPct(nowMs), readLate: lineCloseReadingLate(state, nowMs),
+        offReason: state.forceChargeOffReason, offAtMs: state.forceChargeOffAtMs, onReissues: state.forceChargeOnRetries,
+        leftOutSlots: state.forceChargeLeftOutSlots, // v1.209.0 — the slots the ON was not sent to (the pool alarm named their Core out of the pool)
+      } : null,
     })).catch((e: any) => {
       app.log.debug(`night-charge: morning summary notify failed (${e?.message ?? e})`);
     });
@@ -7834,6 +7960,9 @@ async function runTrailingLegTick(): Promise<void> {
     if (isRetry && acked > 0) persistTrailing({ ...cur(), forceChargeOffRetries: cur().forceChargeOffRetries + 1 });
     if (!isRetry && t.forceChargeOffAtMs == null) {
       stampLegOutcome(t, { force_charge_off_at_ms: nowMs, force_charge_off_reason: action.reason });
+      // v1.209.0 — and the ON's whole fate again from the trailing record, NULLs left out, as at the active leg's first
+      // OFF: a leg that moved to the trailing slot before its OFF has no other tick that repairs a lost stamp.
+      stampForceChargeOnFate(t, cur(), 'omit', true);
     }
     app.log.warn(`night-charge: trailing ${t.day} leg — force-charge OFF ${isRetry ? 're-sent' : 'sent'} to slots ${action.slots.join(',')}${isRetry && action.kind === 'offRetry' && action.unconfirmed ? ' (no live readback)' : ''}: ${results.join(', ')}.`);
     return;
