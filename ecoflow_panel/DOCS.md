@@ -48,7 +48,7 @@ press a button or make an API request.
 | Writer | When it writes | Limits | Off switch |
 |---|---|---|---|
 | **Backup-reserve setpoint** (night charge) | `NIGHT_CHARGE_MODE` is `supervised` or `auto`, and that evening's notice reached you. Once, at the charge window's open (or up to 30 minutes after), it raises the panel's backup reserve to the plan's setpoint. It restores the earlier value at the window close (an hour before on-peak at the latest), or at once on a cancel or a grid loss. A reserve of 10–50 % you set yourself while the night's raise stands is left as you set it once it has read the same for 5 minutes. One set before the raise has read back, in the last 5 minutes before the restore, outside 10–50 %, or (on a night the panel took only part of the raise) within what the night asked for is overwritten by the night's write or its restore. | 10–50 %, whole numbers, and only above the current reserve. Not while the alarm host is under critical pressure, nor within an hour of on-peak. Read back after each write and re-issued up to twice; a restore that does not take, or is not confirmed 30 minutes after the close, is announced as critical, and no later night's write is armed while the panel still reads the raised reserve. | `advisory` (the default). **Cancel tonight** on the night-charge card (**Cancel this write** while the write's window is a day or more away). A cancel withdraws the arm of the evening that made it; an evening run still to come before the same window plans it again. A reserve already raised is still restored. |
-| **Force charge ON/OFF per Core slot** and the panel's **force-charge ceiling** (night charge) | As above, on a night whose reserve write has read back, or on a line night whose reserve already read the target behind the same guards. The cost force charge also needs `ARB_OBJECTIVE` `cost` and `ARB_COST_MAX_SOC_PCT` above 50; the line force charge runs on a night whose outage line is above 49 % (the panel holds a pool it charges to its 50 % reserve at 49 %), whatever those two say. The ceiling is set to the night's target and restored afterwards. Force charge switches on just in time to reach the target, which on a line night can be early in the window, and off at a cost target, the window close, a cancel or a grid loss. | Panel slots 1–3; ceiling 80–100 %. On only with the grid known present and no slot already on. ON and OFF are read back; a slot that stays on is announced as critical and sent OFF again every 15 minutes. | The cost force charge: `ARB_COST_MAX_SOC_PCT` 50, `ARB_OBJECTIVE` `resilience`, or `advisory`. The line force charge: `advisory`, the per-night cancel, or a line at or under 49. The OFF side keeps running. |
+| **Force charge ON/OFF per Core slot** and the panel's **force-charge ceiling** (night charge) | As above, on a night whose reserve write has read back, or on a line night whose reserve already read the target behind the same guards. The cost force charge also needs `ARB_OBJECTIVE` `cost` and `ARB_COST_MAX_SOC_PCT` above 50; the line force charge runs on a night whose outage line is above 49 % (the panel holds a pool it charges to its 50 % reserve at 49 %), whatever those two say. The ceiling is set to the night's target and restored afterwards. Force charge switches on just in time to reach the target, which on a line night can be early in the window, and off at a cost target, the window close, a cancel or a grid loss. | Panel slots 1–3; ceiling 80–100 %. On only with the grid known present and no slot already on. No ON, and so no OFF, for a slot that the alert for a Core out of the backup pool names on a reading at most 15 minutes old that nothing newer contests (see Night charge below). ON and OFF are read back; a slot that stays on is announced as critical and sent OFF again every 15 minutes. | The cost force charge: `ARB_COST_MAX_SOC_PCT` 50, `ARB_OBJECTIVE` `resilience`, or `advisory`. The line force charge: `advisory`, the per-night cancel, or a line at or under 49. The OFF side keeps running. |
 | **Force charge OFF** (Charge Now responder) | `CHARGE_NOW_RESPONSE` is `supervised`, and a Core's Charge Now has been buying grid power on-peak (800 W or more for 10 minutes) with the pool more than 10 points above the reserve. | OFF only, never ON. Once per episode, at most twice a day, read back with one retry. Stands down while a storm pre-charge advisory is active. | `advisory` (the default: a notification only) or `off`. |
 | **Reserve floor** (your request) | `POST /api/reserve-floor?pct=N`, through the write gate. | 10–50 %, whole numbers. Refused while a night-charge write holds the reserve up; the refusal says when it is restored. At most 10 an hour. | Do not call it. |
 | **Cloud-presence refresh** | The **Refresh cloud** button on the panel's card. | Re-sends the reserve the panel already holds, so nothing changes; refused if that reading is missing or outside 10–50. Once per 30 seconds. | Do not press it. |
@@ -235,9 +235,60 @@ hold, a refused arm or a missing plan for such a window says that nothing is arm
 armed notice ends by saying that its figures are that evening's and that a later evening run
 that arms the same window replaces the arm. The worst case appears only on the night-charge card,
 as the basis the target is sized on, and as the "(Worst Case)" sensors. A morning summary says
-what the night did, including the force charge. It says "restored" once the panel reports the
-restored reserve, and otherwise, 5 minutes after the restore was accepted, that it was sent and
-is not yet confirmed.
+what the night did, including the force charge. On a night armed with the cost force charge and
+no outage line, it also states what ended a force charge that ran (its stop, the window close, or
+an earlier switch-off with its time and cause) and gives the pool reading beside the level
+announced the evening before. A reading taken more than 15 minutes after the close is given as
+what the pool reads now, and with no fresh panel reading the summary says that the pool was not
+read. Where the switch-on failed or was never confirmed, the summary gives a stop or an earlier
+switch-off, and says nothing of a force charge left on to the window close. The title of such a
+night says so when the switch-on failed its readback check (on every slot or on some), or was
+never confirmed short of its stop, or when a start the evening notice announced never came and
+the pool did not read at or above that stop at the close. A force charge that ran and was
+switched off early (by the run backstop, for one) stays under "completed", and the text gives the
+switch-off and the pool reading. So does one that reached its stop before its switch-on was
+confirmed or judged failed; the text says that no readback showed every slot on. On such a night
+a slot not switched on because the alert for a Core out of the backup pool named its Core is
+named. A night whose evening notice expected no force charge, and that had none, gets no such
+account, and neither does a night that a cancel or a grid loss ended. The summary says "restored"
+once the panel reports the restored reserve, and otherwise, 5 minutes after the restore was
+accepted, that it was sent and is not yet confirmed.
+
+While the alert for a Core out of the backup pool stands (in the table of alerts above; its
+title begins "Core out of the backup pool", or "2 Cores out of the backup pool" with two out),
+the force charge follows it. Its charge rate leaves out every Core the alert names or counts as
+missing (though never all of them), so the charge can start earlier; with `ARB_CHARGE_CAP_KW` at
+0 the plan caps its charge by the same count. Charge Now is not switched on for a slot the alert
+names, and the alert can name the wrong slot. A slot the alert has not named is still switched
+on, and so is a named one when the alert's newest reading that counts a Core out is more than 15
+minutes old, or while newer readings show the capacity whole again, fewer Cores out, other slots,
+or every slot carrying its share of the load. A slot left out when the force charge switches on
+stays out for that night, even if its Core returns, and the night charge's switch-off goes to the
+slots it switched on: a Charge Now you switch on yourself for a slot left out is yours to switch
+off. A slot the alert comes to name after the switch-on is, under the same conditions, left out
+of the readback check: it is sent no repeat of the switch-on, and its Charge Now reading on
+proves nothing. The switch-on counts as confirmed only when a slot that is not left out in this
+way reads on, and the warning that none did lists a slot left out and says why. A Core that is
+out of the pool and that the alert counts without naming, or names on an older or contested
+reading, is not left out: its slot is still switched on, sent the repeat if it reads off, and
+counted as confirmation when its Charge Now reads on.
+
+While the start waits, the add-on log gives the count and any slot left out ("an ON is not sent
+to slot(s) 1"); the switch-on line names the slot again; and the morning summary of a cost night
+with no outage line says "slot(s) 1 not switched on (named out of the backup pool by the pool
+alarm)". Neither the evening notice nor the night-charge card says that a Core was counted out.
+A line night's summary names no such slot. If every connected slot is left out, no
+force charge starts: the log says so, and on a line night a notification does too once that has
+lasted 10 minutes. The morning summary gives no cause for it.
+
+The night-charge ledger (in the database; see Data and backups below) keeps, for each night's
+force charge, the slots it was switched on for, any slot left out, and what became of the
+switch-on: confirmed by the panel's readback, judged not applied, or never judged before the
+force charge ended. A night recorded before the ledger kept this says nothing either way.
+Nothing in Power decides on it: the write-readiness gate described below, for one, takes a
+force charge as on once its switch-on is on record, whether or not it took. The columns and how
+to read them:
+[the night-charge ledger](https://github.com/tesseractAZ/power/blob/main/docs/reference/15-3-night-charge-ledger-and-scoring.md).
 
 | Mode (`NIGHT_CHARGE_MODE`) | What happens |
 |---|---|

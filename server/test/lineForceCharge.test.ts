@@ -1283,7 +1283,8 @@ test('★★★ T9 (Fix14) the time the declined-start push quotes: one figure, 
   // The START keeps its rate and its EV energy, the double count included (it errs early, and it moves writes).
   assert.ok(INDEX.includes('    chargeRateKw,\n    evDisplacedKwh,\n    // v1.191.0 (S6, W5) — the run backstop of the tariff in effect'));
   const NFC_SRC = readFileSync(resolve(HERE, '../src/nightForceCharge.ts'), 'utf8');
-  assert.ok(NFC_SRC.includes('if (nowMs < forceChargeLineStartAtMs(endMs, mode.startTargetPct, o.poolSocPct, o.fullKwh, o.chargeRateKw, o.evDisplacedKwh, slots.length)) {'));
+  // v1.209.0 — the fallback's slot count is `rateSlots`: the ON's slots, or fewer when the pool alarm counts one of them out.
+  assert.ok(NFC_SRC.includes('if (nowMs < forceChargeLineStartAtMs(endMs, mode.startTargetPct, o.poolSocPct, o.fullKwh, o.chargeRateKw, o.evDisplacedKwh, rateSlots)) {'));
 });
 
 /** (Fix13) index.ts's pushLineDeclinedIfDue over minute ticks: the real decision, the real tick, the real helper and the real body, with what
@@ -1513,7 +1514,8 @@ test('★★ T12 (review) the line-night surfaces are wired: the ON\'s mode stam
   const tick = INDEX.slice(INDEX.indexOf('async function runForceChargeTick('), INDEX.indexOf('async function escalateForceChargeStuck('));
   assert.ok(tick.includes('const onStamp = forceChargeOnStamp(state, nowMs, action.slots, forceChargeGatesOn(legRoleOf(state)));\n'));
   assert.ok(tick.includes('    const onMode = onStamp.forceChargeMode;\n'));
-  assert.ok(tick.includes('    persistNightActuation({ ...nightActuationMem, ...onStamp });\n'));
+  // v1.209.0 — the same persist also stamps the slots the ON is not sent to (forceChargeLeftOutSlots).
+  assert.ok(tick.includes('    persistNightActuation({ ...nightActuationMem, ...onStamp, forceChargeLeftOutSlots: pool.leftOut.length > 0 ? [...pool.leftOut] : null });\n'));
   assert.ok(tick.includes('stampLegOutcome(state, { force_charge_on_at_ms: nowMs, force_charge_mode: onMode });'));
   const stamped = nfc.forceChargeOnStamp(night(), WIN_END - H, [1, 2, 3], { cost: false, line: true });
   assert.equal(stamped.forceChargeMode, 'line');

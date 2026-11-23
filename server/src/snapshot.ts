@@ -18,8 +18,8 @@ import { poolDiagFromRaw, type PoolDiag } from './ecoflow/poolDiag.js';
 import {
   advancePoolOut, emptyPoolOutState, parsePoolOutFile, serializePoolOutFile, poolOutAlertParts, poolOutLatestEnd, poolOutEndText,
   poolOutSensorState, poolOutOrphanHoldReleased, poolOutTitle, poolOutFault, poolOutSeverity, poolVerdictsText, poolOutAlertId, POOL_OUT_ALERT_ID,
-  poolRoster, poolReferenceLeavesOut,
-  type PoolOutState, type PoolSignals, type PoolSkipReason, type PoolOutAlertParts, type PoolObservation,
+  poolRoster, poolReferenceLeavesOut, poolOutRead,
+  type PoolOutState, type PoolSignals, type PoolSkipReason, type PoolOutAlertParts, type PoolObservation, type PoolOutRead,
 } from './poolOut.js';
 import {
   poolDiagChanges, parsePoolDiagSigs, withPoolDiagSigs, parsePoolOutCards, withPoolOutCards, poolEventCapture, poolEventFileName, poolOutDebugView,
@@ -1617,6 +1617,21 @@ export class SnapshotStore extends EventEmitter {
     } catch (e) {
       this.poolOutFailed('the sensor state could not be read', e, 'Home Assistant reads unknown');
       return ['unknown'];
+    }
+  }
+
+  /** v1.209.0 — the standing alarm's verdict on one panel's slots (poolOut.ts poolOutRead), for the force-charge tick
+   *  and the planner's charge cap: the latched count and names, what stands against the latch (the return dwell, a
+   *  contest, a larger count on its way), and the data time of the episode's newest COUNTED reading. A panel with no
+   *  tracker state reads as no alarm. CONTAINED: both callers sit on
+   *  the night-charge path, and a verdict that cannot be read is null there, which they take as no alarm: every
+   *  connected slot is then counted for the rate and sent ON, as before this reader existed. */
+  poolOutRead(sn: string): PoolOutRead | null {
+    try {
+      return poolOutRead(this.poolOutBySn.get(sn));
+    } catch (e) {
+      this.poolOutFailed("the standing alarm's slots could not be read for the force-charge", e, 'every connected slot is counted for its rate and sent ON');
+      return null;
     }
   }
 
