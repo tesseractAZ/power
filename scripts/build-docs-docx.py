@@ -7,7 +7,7 @@ Used two ways:
   * CI (.github/workflows/ci.yml)        — build on every PR and upload the result, so a
     document that no longer converts fails the PR instead of the release.
   * Release (.github/workflows/images.yml) — build at the tagged ref and attach the .docx (and the
-    .pdf LibreOffice renders from it) to the GitHub Release.
+    .pdf scripts/build-docs-pdf.py renders from it with LibreOffice) to the GitHub Release.
 
 WHAT IS PRINTED, IN ORDER
   1. README.md                                   (the tour)
@@ -47,6 +47,15 @@ shipping a broken document) and --resource-path=<repo root>. `-f markdown` (not 
 `{=openxml}` raw blocks that carry the Word page breaks; `+task_lists` keeps `- [ ]` checkboxes;
 `+gfm_auto_identifiers` is the fallback for any heading without an explicit id.
 
+THE CONTENTS. `--toc --toc-depth=2` makes pandoc write a Word TOC field with nothing in it: Word
+fills it when the file is opened (it asks first), and no other viewer does. After pandoc, the
+field is filled with one cached entry per level-1 and level-2 heading, a hyperlink to the bookmark
+pandoc writes for the heading, level 2 indented, and no page number (only a layout engine knows
+it; build-docs-pdf.py has LibreOffice update the field before it exports the PDF). The field and
+its dirty flag stay, so Word still rebuilds it with page numbers. A heading without a bookmark,
+a field missing or of another depth, or entries that do not number the assembled Markdown's
+level-1 and level-2 headings end the build with exit 1, and the .docx is removed.
+
 FLAGS THAT DO NOT NEED PANDOC (checked before pandoc is looked for)
   --list-sources       print the printed sources in order, one "<role>\\t<path>" per line
   --assemble-only      write the assembled Markdown to --output (or stdout) and stop
@@ -67,6 +76,7 @@ import shutil
 import subprocess
 import sys
 import unicodedata
+import zipfile
 from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit
 
@@ -92,6 +102,8 @@ REPO_OWNER = "tesseractaz"
 REPO_NAME = "power"
 REPO_URL = "https://github.com/tesseractAZ/power"
 PANDOC_FROM = "markdown+task_lists+gfm_auto_identifiers"
+# The contents lists the level-1 and level-2 headings: pandoc's --toc-depth and the cached entries.
+TOC_DEPTH = 2
 
 ALERT_LABELS = {
     "NOTE": "Note.",
@@ -1577,6 +1589,112 @@ class Document:
         return "".join(pieces) + "\n"
 
 
+# ─────────────────────────────── the table of contents ───────────────────────────────
+
+# Pandoc's own TOC field, exactly as it writes it: one paragraph holding the field's begin (dirty,
+# so Word offers to update it), its instruction, its separator and its end, with nothing cached.
+TOC_FIELD = re.compile(
+    r'<w:p><w:r><w:fldChar w:fldCharType="begin" w:dirty="true" />'
+    r'<w:instrText xml:space="preserve">(TOC \\o &quot;1-(\d)&quot;[^<]*)</w:instrText>'
+    r'<w:fldChar w:fldCharType="separate" /><w:fldChar w:fldCharType="end" /></w:r></w:p>')
+DOCX_PARAGRAPH = re.compile(r"<w:p(?: [^>]*)?>.*?</w:p>", re.S)
+DOCX_HEADING = re.compile(r'<w:p(?: [^>]*)?><w:pPr><w:pStyle w:val="Heading(\d)" />')
+# The bookmark pandoc writes for each heading: directly before its paragraph, or (a heading in a
+# quote or a list item) first in it, after its properties. A long id is hashed into an "X…" name,
+# so the name is read here, never derived from the id.
+DOCX_BOOKMARK_BEFORE = re.compile(r'<w:bookmarkStart w:id="\d+" w:name="([^"]+)" />\s*\Z')
+DOCX_BOOKMARK_INSIDE = re.compile(r'</w:pPr><w:bookmarkStart w:id="\d+" w:name="([^"]+)" />')
+DOCX_TEXT = re.compile(r"<w:t(?: [^>]*)?>([^<]*)</w:t>")
+TOC_INDENT_TWIPS = 240  # a level-2 entry, a sixth of an inch in
+
+
+class TocEntry:
+    __slots__ = ("level", "bookmark", "text")
+
+    def __init__(self, level: int, bookmark: str, text: str) -> None:
+        self.level = level
+        self.bookmark = bookmark
+        self.text = text  # as it stands in the XML (still escaped)
+
+
+def toc_heading_count(markdown: str) -> int:
+    """The level-1 and level-2 headings of the assembled Markdown: the entries the contents must
+    hold."""
+    return sum(1 for h in scan_markdown(markdown).headings if h.level <= TOC_DEPTH)
+
+
+def toc_entry_xml(entry: TocEntry, field_start: str = "") -> str:
+    """One cached entry: a paragraph holding a hyperlink to the heading's bookmark, level 2
+    indented. No page number: only a layout engine knows it, and a wrong one is worse than
+    none."""
+    indent = "" if entry.level == 1 else f'<w:ind w:left="{TOC_INDENT_TWIPS * (entry.level - 1)}" />'
+    return (f'<w:p><w:pPr><w:spacing w:before="0" w:after="40" />{indent}</w:pPr>{field_start}'
+            f'<w:hyperlink w:anchor="{entry.bookmark}" w:history="1">'
+            f'<w:r><w:t xml:space="preserve">{entry.text}</w:t></w:r></w:hyperlink></w:p>')
+
+
+def fill_toc(document_xml: str, expected: int) -> tuple[str, list[TocEntry]]:
+    """Cache one entry per level-1 and level-2 heading in pandoc's empty TOC field, so the
+    contents shows in any viewer. The field stays (instruction and dirty flag unchanged), so Word
+    still rebuilds it with page numbers; it now spans paragraphs as Word stores a TOC: begin,
+    instruction and separator in the first entry's paragraph, the end in a closing paragraph.
+    Every heading must have the bookmark pandoc writes before it, and the entries must number
+    `expected` (the assembled Markdown's level-1 and level-2 headings), or the build fails: a
+    partial contents list is not shipped."""
+    fields = list(TOC_FIELD.finditer(document_xml))
+    if len(fields) != 1:
+        raise BuildError(f"the .docx holds {len(fields)} empty TOC fields as pandoc writes them, not 1 — the contents cannot be filled")
+    field = fields[0]
+    if int(field.group(2)) != TOC_DEPTH:
+        raise BuildError(f"the .docx TOC field lists levels 1-{field.group(2)}, not 1-{TOC_DEPTH}")
+    entries: list[TocEntry] = []
+    errors: list[str] = []
+    last_end = field.end()
+    for p in DOCX_PARAGRAPH.finditer(document_xml, field.end()):
+        gap, last_end = document_xml[last_end:p.start()], p.end()
+        h = DOCX_HEADING.match(p.group(0))
+        if h is None:
+            continue
+        level = int(h.group(1))
+        if level <= TOC_DEPTH:
+            text = "".join(DOCX_TEXT.findall(p.group(0)))
+            b = DOCX_BOOKMARK_BEFORE.search(gap) or DOCX_BOOKMARK_INSIDE.search(p.group(0))
+            if b is None:
+                errors.append(f"the .docx heading {json.dumps(text)} (level {level}) has no bookmark before it — its contents entry would link nowhere")
+                continue
+            entries.append(TocEntry(level, b.group(1), text))
+    if errors:
+        raise BuildError("\n".join(errors))
+    if len(entries) != expected:
+        raise BuildError(f"the .docx has {len(entries)} level-1 and level-2 headings, the assembled Markdown {expected} — the contents would not match the document")
+    if not entries:
+        return document_xml, entries
+    field_start = ('<w:r><w:fldChar w:fldCharType="begin" w:dirty="true" /></w:r>'
+                   f'<w:r><w:instrText xml:space="preserve">{field.group(1)}</w:instrText></w:r>'
+                   '<w:r><w:fldChar w:fldCharType="separate" /></w:r>')
+    body = [toc_entry_xml(entries[0], field_start)]
+    body += [toc_entry_xml(e) for e in entries[1:]]
+    body.append('<w:p><w:r><w:fldChar w:fldCharType="end" /></w:r></w:p>')
+    return document_xml[:field.start()] + "".join(body) + document_xml[field.end():], entries
+
+
+def fill_docx_toc(docx: Path, expected: int) -> list[TocEntry]:
+    """fill_toc on the .docx's word/document.xml, every other part copied as it is; the file is
+    replaced only once the new one is complete."""
+    tmp = docx.with_name(docx.name + ".toc")
+    try:
+        with zipfile.ZipFile(docx) as zin:
+            xml, entries = fill_toc(zin.read("word/document.xml").decode("utf-8"), expected)
+            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
+                for item in zin.infolist():
+                    data = xml.encode("utf-8") if item.filename == "word/document.xml" else zin.read(item.filename)
+                    zout.writestr(item, data)
+        os.replace(tmp, docx)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return entries
+
+
 # ─────────────────────────────── CLI ───────────────────────────────
 
 
@@ -1604,7 +1722,7 @@ def pandoc_argv(repo_root: Path, combined_path: Path, output: Path, version: str
     return [
         "pandoc", str(combined_path), "-o", str(output),
         "-f", PANDOC_FROM,
-        "--standalone", "--toc", "--toc-depth=2",
+        "--standalone", "--toc", f"--toc-depth={TOC_DEPTH}",
         "--fail-if-warnings",
         f"--resource-path={repo_root}",
         "--metadata", f"title={TITLE}",
@@ -1688,8 +1806,20 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return proc.returncode
 
+    try:
+        entries = fill_docx_toc(output, toc_heading_count(combined))
+    except BuildError as e:
+        # a .docx whose contents could not be filled is not left behind to be attached
+        output.unlink(missing_ok=True)
+        for line in str(e).split("\n"):
+            print(f"build-docs-docx: {line}", file=sys.stderr)
+        return 1
+
     size = output.stat().st_size
     print(f"wrote {output} ({size:,} bytes) — v{version} @ {args.ref}")
+    level1 = sum(1 for e in entries if e.level == 1)
+    print(f"contents: {len(entries)} entries ({level1} level-1, {len(entries) - level1} level-2 headings), "
+          f"no page numbers until the field is updated (Word, or build-docs-pdf.py)")
     return 0
 
 

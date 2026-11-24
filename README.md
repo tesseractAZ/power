@@ -68,7 +68,7 @@ Energy Dashboard), and opt-in **Home Assistant notifications** with companion-ap
 
 Every change ships through the test suite, and a guard that a plausible refactor could silently
 disarm is held by a committed mutation harness: **158 harnesses** holding
-**6619 anchor-asserted mutants**. The harness, mutant, test and reference counts, the engine
+**6679 anchor-asserted mutants**. The harness, mutant, test and reference counts, the engine
 floor and group counts, and every engine-index row's code anchor are checked against the tree in
 CI ([Quality & accuracy](#quality--accuracy)).
 
@@ -99,10 +99,12 @@ reports the site clock, coordinates, currency and PV array in force.
 > [GitHub Release](https://github.com/tesseractAZ/power/releases). It holds this README, the
 > operator guide with its setup, option and entity pages, `SECURITY.md` and the whole engineering
 > reference, and a link between them jumps within the document. Nothing in the frozen
-> [`docs/history/`](docs/history/) is printed, and the PDF's
-> table-of-contents page is empty for now. Regenerate locally with
+> [`docs/history/`](docs/history/) is printed. The table of contents lists every level-1 and
+> level-2 heading: in the `.docx` as links (Word adds the page numbers when it updates the
+> field), in the PDF with page numbers. Regenerate locally with
 > `python3 -I -B scripts/build-docs-docx.py` (needs `pandoc`, which CI installs from a pinned,
-> sha256-checked upstream release; the PDF additionally needs LibreOffice).
+> sha256-checked upstream release), then the PDF with
+> `python3 -I -B scripts/build-docs-pdf.py <the .docx>` (needs LibreOffice).
 
 ---
 
@@ -440,14 +442,14 @@ want to do, and the add-on's Configuration tab shows each one's help text.
 | `ecoflow_panel/` | Add-on manifest (`config.yaml`), `translations/`, `DOCS.md` (the operator guide, on the Documentation tab), `README.md` (the Info-tab card), `CHANGELOG.md` (+ archive), AppArmor profile |
 | `rootfs/` | s6 service runner (`etc/services.d/ecoflow-panel/run`) — the options→env bridge that turns the add-on Configuration into the server's environment |
 | `Dockerfile`, `build.yaml`, `repository.yaml` | Container build, digest-pinned per-arch base images, add-on repository manifest |
-| `scripts/` | Docs builder (`build-docs-docx.py`) and CHANGELOG roller (`roll-changelog.mjs`); CI gates (`check-docs.mjs`, `check-doc-claims.mjs`, `check-mutant-anchors.mjs`, `check-npm-audit.mjs`, `check-no-secrets.py`, `check-release-pr.py`, `validate-addon-config.py`); the golden-capture tool for the frozen characterisation goldens in `server/test/golden/` (`golden-capture.mts`); the README screenshot fixture, replay server and capture tool (`screenshots/`); the mutation harnesses (`mutate-*.mjs`); device probes |
+| `scripts/` | Docs builder (`build-docs-docx.py`, and `build-docs-pdf.py` for its PDF) and CHANGELOG roller (`roll-changelog.mjs`); CI gates (`check-docs.mjs`, `check-doc-claims.mjs`, `check-mutant-anchors.mjs`, `check-npm-audit.mjs`, `check-no-secrets.py`, `check-release-pr.py`, `validate-addon-config.py`); the golden-capture tool for the frozen characterisation goldens in `server/test/golden/` (`golden-capture.mts`); the README screenshot fixture, replay server and capture tool (`screenshots/`); the mutation harnesses (`mutate-*.mjs`); device probes |
 | `docs/` | `guide/` (the setup checklist for another home, every option and every Home Assistant entity), `reference/` (the engineering reference: an index and one file per chapter or part), `history/` (the engineering release log, the operations audits, the reference plant's notes and an early section of the performance record, frozen), `PERFORMANCE.md` (measured-accuracy record), `NIGHT_CHARGE_ARBITRAGE_DESIGN.md` (binding design of record for the device-write path), `ble-probe-runbook.md` |
 | `.github/workflows/` | `ci.yml` (type-checks ×3, server tests + README-claim check, mutant-anchor check, personal-data scan, dependency advisories, add-on config/translation validation, Dockerfile smoke, docs `.docx`+`.pdf`) · `release-pr.yml` (release-PR version check, re-run on a title edit) · `tag-release.yml` (on every push to `main`: tags the version the add-on manifest declares, or fails when it cannot be published) · `images.yml` (tests, multi-arch GHCR publish, GitHub Release) · `release.yml` (manual dispatch) · `codeql.yml` (CodeQL analysis). Every job runs on a pinned runner image (`ubuntu-26.04`, `ubuntu-26.04-arm`; CodeQL on `ubuntu-24.04` until CodeQL supports 26.04). |
 
 ## Development
 
 ```bash
-cd server && npm install && npm test     # 7,094 tests
+cd server && npm install && npm test     # 7,127 tests
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.json      # src
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.test.json # src + tests
 cd web    && npm install && npm run build

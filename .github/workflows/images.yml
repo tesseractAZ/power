@@ -349,8 +349,14 @@ jobs:
       # PR's docs check is the hard gate that the PDF toolchain works.
       # v1.187.3 (review) — rendered only from a .docx whose build SUCCEEDED: a .docx
       # left by a killed build may be truncated, and so would be its PDF.
+      # 1.209.1 — by scripts/build-docs-pdf.py, the script the PR's docs check runs: a plain
+      # `--convert-to pdf` does not update the contents, and every Release PDF up to 1.209.0
+      # printed "Table of Contents" over nothing. The script updates it before the export
+      # and fails (so the PDF is not attached) unless it lists every level-1 and level-2
+      # heading with a page number. Both PDF steps are gated on that script, so a re-run
+      # against a tag that predates it skips the PDF (no contents-less PDF is attached).
       - name: Ensure LibreOffice (docx → pdf)
-        if: ${{ steps.gate.outputs.skip != 'true' && hashFiles('scripts/build-docs-docx.py') != '' }}
+        if: ${{ steps.gate.outputs.skip != 'true' && hashFiles('scripts/build-docs-pdf.py') != '' }}
         continue-on-error: true
         timeout-minutes: 10
         env:
@@ -364,14 +370,13 @@ jobs:
 
       - name: Build documentation .pdf
         id: pdf
-        if: ${{ steps.gate.outputs.skip != 'true' && steps.docx.outcome == 'success' && hashFiles('scripts/build-docs-docx.py') != '' }}
+        if: ${{ steps.gate.outputs.skip != 'true' && steps.docx.outcome == 'success' && hashFiles('scripts/build-docs-pdf.py') != '' }}
         continue-on-error: true
         timeout-minutes: 5
         env:
           V: ${{ needs.resolve.outputs.version }}
         run: |
-          timeout -k 10 240 libreoffice --headless -env:UserInstallation=file:///tmp/loprofile \
-            --convert-to pdf --outdir . "Power-Documentation-v${V}.docx"
+          timeout -k 10 240 python3 -I -B scripts/build-docs-pdf.py "Power-Documentation-v${V}.docx"
           test -s "Power-Documentation-v${V}.pdf"
           ls -la "Power-Documentation-v${V}.pdf"
 
