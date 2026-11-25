@@ -20,6 +20,15 @@
  *   - on the repository: the source list against the manifest and the reference directory, and
  *     the Python slugger against scripts/lib/markdownScan.mjs (the ids GitHub gives) on every
  *     printed heading;
+ *   - 1.209.1, the contents: fill_toc on a document.xml shaped as pandoc writes it (one cached
+ *     entry per level-1 and level-2 heading, linked to the heading's bookmark, level 2 indented, no
+ *     page numbers, the field kept as Word stores it; a heading with no bookmark, a missing,
+ *     doubled or other-depth field, or a count unlike the Markdown's fails); where pandoc is
+ *     installed, a real build of the fixture (and a contents that cannot be filled leaves no .docx);
+ *     where LibreOffice is installed too and starts, scripts/build-docs-pdf.py on that build and on
+ *     a .docx LibreOffice cannot load (each skips cleanly without them, or where LibreOffice is
+ *     installed but cannot start, as inside a command sandbox; CI's docs job runs both tools on
+ *     the repository on every PR);
  *   - STAGED (enabled by the 1.188.0 release commit, like docsLayout's whole-tree tests): the
  *     repository's assembled document itself — at least 900,000 bytes, chapters 1–15 and
  *     Appendix A once each under the synthetic heading, no alert marker, no link left pointing at
@@ -94,7 +103,7 @@ const P = {
 const BREAK = '```{=openxml}';
 const PANDOC_FROM = 'markdown+task_lists+gfm_auto_identifiers';
 
-type Files = Record<string, string | null>;
+type Files = Record<string, string | Buffer | null>;
 const lines = (...ls: string[]) => `${ls.join('\n')}\n`;
 
 function baseFiles(): Files {
@@ -536,5 +545,316 @@ test('the repository assembles: ≥ 900,000 bytes, chapters 1–15 and Appendix 
     const hist = ms.scanMarkdown(readFileSync(join(ROOT, D, 'history', name), 'utf8'));
     for (const h of hist.headings) assert.ok(!headingTexts.has(h.raw), `history heading "${h.raw}" (${name}) was printed`);
     for (const p of hist.paragraphs) if (p.text.length >= 40) assert.ok(!md.includes(p.text), `history text from ${name}:${p.line} was printed`);
+  }
+});
+
+/* ── 1.209.1: the contents ────────────────────────────────────────────────── */
+// pandoc writes the TOC as an empty field, which only Word fills (it asks first): every viewer
+// but Word, and the release PDF, showed "Table of Contents" over nothing. The builder caches one
+// entry per level-1 and level-2 heading in it.
+
+const WNS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+const TOC_INSTR = 'TOC \\o &quot;1-2&quot; \\h \\z \\u';
+const tocField = (instr = TOC_INSTR) =>
+  `<w:p><w:r><w:fldChar w:fldCharType="begin" w:dirty="true" /><w:instrText xml:space="preserve">${instr}</w:instrText>`
+  + '<w:fldChar w:fldCharType="separate" /><w:fldChar w:fldCharType="end" /></w:r></w:p>';
+const tocBlock = (fields: string) =>
+  '<w:sdt><w:sdtPr><w:docPartObj><w:docPartGallery w:val="Table of Contents" /><w:docPartUnique /></w:docPartObj></w:sdtPr>'
+  + '<w:sdtContent><w:p><w:pPr><w:pStyle w:val="TOCHeading" /></w:pPr><w:r><w:t xml:space="preserve">Table of Contents</w:t></w:r></w:p>'
+  + `${fields}</w:sdtContent></w:sdt>`;
+let bookmarkId = 100;
+/** A heading as pandoc writes it: its bookmark directly before the paragraph (`inside`: first in it, as in a quote). */
+function wHeading(level: number, runs: string, bookmark: string | null, inside = false): string {
+  const mark = bookmark ? `<w:bookmarkStart w:id="${bookmarkId++}" w:name="${bookmark}" />` : '';
+  return inside
+    ? `\n    <w:p><w:pPr><w:pStyle w:val="Heading${level}" /></w:pPr>${mark}${runs}</w:p>`
+    : `\n    ${mark}\n    <w:p><w:pPr><w:pStyle w:val="Heading${level}" /></w:pPr>${runs}</w:p>`;
+}
+const run = (t: string) => `<w:r><w:t xml:space="preserve">${t}</w:t></w:r>`;
+const BODY_PARA = '\n    <w:p><w:pPr><w:pStyle w:val="BodyText" /></w:pPr><w:r><w:t xml:space="preserve">Text.</w:t></w:r><w:r><w:tab /></w:r></w:p>';
+
+/** A document.xml: title, the TOC block, then the headings given. */
+function wDocument(headings: string[], fields = tocField()): string {
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<w:document ${WNS}>\n<w:body>\n    <w:p><w:pPr><w:pStyle w:val="Title" /></w:pPr>${run('Manual')}</w:p>\n    `
+    + tocBlock(fields) + headings.map((h) => h + BODY_PARA).join('') + '\n  </w:body>\n</w:document>';
+}
+
+/** The document every fill case starts from: levels 1, 2 (one with code and an entity), 3, and a quoted 2. */
+const FILL_HEADINGS = () => [
+  wHeading(1, run('Guide'), 'guide'),
+  wHeading(2, run('Setup &amp; ') + '<w:r><w:rPr><w:rStyle w:val="VerbatimChar" /></w:rPr><w:t xml:space="preserve">TARIFF_PLAN</w:t></w:r>', 'setup'),
+  wHeading(3, run('Detail'), 'detail'),
+  wHeading(2, run('Quoted'), 'quoted', true),
+  wHeading(1, run('A very long heading'), 'X0123456789abcdef0123456789abcdef0123456'),
+];
+
+interface Filled { ok: boolean; error?: string; xml?: string; entries?: [number, string, string][] }
+function fillToc(xml: string, expected: number): Filled {
+  const code = [
+    'import importlib.util, json, sys',
+    'import xml.etree.ElementTree as ET',
+    'spec = importlib.util.spec_from_file_location("build_docs", sys.argv[1])',
+    'm = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)',
+    'req = json.loads(sys.stdin.read())',
+    'try:',
+    '    doc, entries = m.fill_toc(req["xml"], req["expected"])',
+    'except m.BuildError as e:',
+    '    print(json.dumps({"ok": False, "error": str(e)})); raise SystemExit(0)',
+    'ET.fromstring(doc.encode("utf-8"))  # still well-formed XML',
+    'print(json.dumps({"ok": True, "xml": doc, "entries": [[e.level, e.bookmark, e.text] for e in entries]}))',
+  ].join('\n');
+  const r = spawnSync(PYTHON, ['-I', '-B', '-c', code, BUILDER], { encoding: 'utf8', input: JSON.stringify({ xml, expected }), maxBuffer: 64 * 1024 * 1024 });
+  assert.equal(r.status, 0, out(r));
+  return JSON.parse(r.stdout) as Filled;
+}
+
+const sdtContent = (xml: string) => {
+  const m = /<w:sdtContent>([\s\S]*?)<\/w:sdtContent>/.exec(xml);
+  assert.ok(m, 'no TOC block');
+  return { inner: m![1], before: xml.slice(0, m!.index), after: xml.slice(m!.index + m![0].length) };
+};
+
+test('★★★ fill_toc: one entry per level-1 and level-2 heading, linked to its bookmark, level 2 indented, no page number', () => {
+  const src = wDocument(FILL_HEADINGS());
+  const f = fillToc(src, 4);
+  assert.ok(f.ok, f.error);
+  assert.deepEqual(f.entries, [
+    [1, 'guide', 'Guide'],
+    [2, 'setup', 'Setup &amp; TARIFF_PLAN'],
+    [2, 'quoted', 'Quoted'],
+    [1, 'X0123456789abcdef0123456789abcdef0123456', 'A very long heading'],
+  ]);
+  const toc = sdtContent(f.xml!);
+  const paras = toc.inner.match(/<w:p>[\s\S]*?<\/w:p>/g) ?? [];
+  assert.equal(paras.length, 1 + 4 + 1, 'the TOC heading, four entries and the closing paragraph');
+  const entries = paras.slice(1, 5);
+  for (const [i, [level, bookmark, text]] of f.entries!.entries()) {
+    const p = entries[i];
+    assert.ok(p.includes(`<w:hyperlink w:anchor="${bookmark}" w:history="1"><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:hyperlink>`), p);
+    assert.equal(p.includes('<w:ind w:left="240" />'), level === 2, `level ${level} indent: ${p}`);
+  }
+  assert.ok(!/PAGEREF|<w:tab|w:leader/.test(toc.inner), 'a cached entry carries no page number, tab or leader');
+  assert.ok(!toc.inner.includes('Detail'), 'a level-3 heading is not listed');
+  // everything outside the TOC block is unchanged
+  const was = sdtContent(src);
+  assert.equal(toc.before, was.before);
+  assert.equal(toc.after, was.after);
+});
+
+test('★★★ fill_toc: the field stays, as Word stores a TOC: begin (dirty), instruction and separator in the first entry\'s paragraph, the end in a closing paragraph', () => {
+  const f = fillToc(wDocument(FILL_HEADINGS()), 4);
+  assert.ok(f.ok, f.error);
+  const paras = sdtContent(f.xml!).inner.match(/<w:p>[\s\S]*?<\/w:p>/g) ?? [];
+  const first = paras[1];
+  const marks = ['<w:fldChar w:fldCharType="begin" w:dirty="true" />', `<w:instrText xml:space="preserve">${TOC_INSTR}</w:instrText>`,
+    '<w:fldChar w:fldCharType="separate" />', '<w:hyperlink w:anchor="guide"'];
+  const at = marks.map((m) => first.indexOf(m));
+  assert.ok(at.every((i, k) => i >= 0 && (k === 0 || i > at[k - 1])), `the first entry's paragraph: ${first}`);
+  assert.equal(paras[paras.length - 1], '<w:p><w:r><w:fldChar w:fldCharType="end" /></w:r></w:p>');
+  const chars = [...sdtContent(f.xml!).inner.matchAll(/<w:fldChar w:fldCharType="(\w+)"/g)].map((m) => m[1]);
+  assert.deepEqual(chars, ['begin', 'separate', 'end'], 'one field, no nested PAGEREF fields');
+});
+
+test('★★★ fill_toc: a level-1 or level-2 heading with no bookmark fails, naming it: an entry that links nowhere is not shipped', () => {
+  const hs = FILL_HEADINGS();
+  hs.splice(1, 0, wHeading(2, run('Orphan'), null));
+  const f = fillToc(wDocument(hs), 5);
+  assert.equal(f.ok, false);
+  assert.match(f.error!, /^the \.docx heading "Orphan" \(level 2\) has no bookmark before it — its contents entry would link nowhere$/);
+  // a level-3 heading without one is not listed, so it does not matter
+  const deep = FILL_HEADINGS();
+  deep.push(wHeading(3, run('Deep'), null));
+  assert.ok(fillToc(wDocument(deep), 4).ok);
+});
+
+test('★★★ fill_toc: entries that do not number the assembled Markdown\'s level-1 and level-2 headings fail', () => {
+  for (const expected of [3, 5]) {
+    const f = fillToc(wDocument(FILL_HEADINGS()), expected);
+    assert.equal(f.ok, false, `expected ${expected}`);
+    assert.equal(f.error, `the .docx has 4 level-1 and level-2 headings, the assembled Markdown ${expected} — the contents would not match the document`);
+  }
+});
+
+test('★★ fill_toc: no TOC field, two, or one of another depth fails', () => {
+  assert.match(fillToc(wDocument(FILL_HEADINGS(), ''), 4).error ?? '', /holds 0 empty TOC fields as pandoc writes them, not 1/);
+  assert.match(fillToc(wDocument(FILL_HEADINGS(), tocField() + tocField()), 4).error ?? '', /holds 2 empty TOC fields/);
+  assert.match(fillToc(wDocument(FILL_HEADINGS(), tocField('TOC \\o &quot;1-3&quot; \\h \\z \\u')), 4).error ?? '', /lists levels 1-3, not 1-2/);
+});
+
+test('★★ toc_heading_count: the assembled fixture has 7 level-1 and 9 level-2 headings, the synthetic one included', () => {
+  withFixture(undefined, (dir) => {
+    const code = [
+      'import importlib.util, sys',
+      'from pathlib import Path',
+      'spec = importlib.util.spec_from_file_location("build_docs", sys.argv[1])',
+      'm = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)',
+      'print(m.toc_heading_count(m.Document(Path(sys.argv[2]), "main").assemble()))',
+    ].join('\n');
+    const r = spawnSync(PYTHON, ['-I', '-B', '-c', code, BUILDER, dir], { encoding: 'utf8' });
+    assert.equal(r.status, 0, out(r));
+    assert.equal(r.stdout.trim(), '16');
+  });
+});
+
+/* ── the real tools, where they are installed ─────────────────────────────── */
+
+const has = (cmd: string) => spawnSync('sh', ['-c', `command -v ${cmd}`], { encoding: 'utf8' }).status === 0;
+const NO_PANDOC: string | false = has('pandoc') ? false : 'pandoc is not installed here (CI\'s docs job runs it on every PR)';
+const LIBREOFFICE = ['libreoffice', 'soffice'].find(has) ?? null;
+const NO_LIBREOFFICE: string | false = LIBREOFFICE ? false : 'LibreOffice is not installed here (CI\'s docs job runs it on every PR)';
+const PDF_SCRIPT = join(ROOT, 'scripts', 'build-docs-pdf.py');
+
+/** Why LibreOffice cannot run here, or null: installed is not enough (inside a command sandbox its
+ *  first start can hang). One first start on a throwaway profile and TMPDIR, in a process group of
+ *  its own that is killed after 30 s; run once, by the first test that needs it. */
+let cannotStart: string | null | undefined;
+function libreOfficeCannotStart(): string | null {
+  if (cannotStart !== undefined) return cannotStart;
+  const code = [
+    'import os, shutil, signal, subprocess, sys, tempfile',
+    'from pathlib import Path',
+    'd = Path(tempfile.mkdtemp(prefix="lo-probe-"))',
+    'try:',
+    '    p = subprocess.Popen([sys.argv[1], "--headless", "--norestore", "-env:UserInstallation=" + (d / "profile").as_uri(), "--terminate_after_init"],',
+    '                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,',
+    '                         env=dict(os.environ, TMPDIR=str(d)))',
+    '    try:',
+    '        print(p.wait(timeout=float(sys.argv[2])))',
+    '    except subprocess.TimeoutExpired:',
+    '        print("timeout")',
+    '    finally:',
+    '        try:',
+    '            os.killpg(p.pid, signal.SIGKILL)',
+    '        except OSError:',
+    '            pass',
+    '        p.wait()',
+    'finally:',
+    '    shutil.rmtree(d, ignore_errors=True)',
+  ].join('\n');
+  const r = spawnSync(PYTHON, ['-I', '-B', '-c', code, LIBREOFFICE!, '30'], { encoding: 'utf8', timeout: 60_000 });
+  const got = r.stdout.trim();
+  cannotStart = got === '0' ? null
+    : `LibreOffice is installed but its first start here ${got === 'timeout' ? 'did not end within 30 s' : `exited ${got || r.status}`} `
+      + '(a command sandbox can stop it); CI\'s docs job runs it on every PR';
+  return cannotStart;
+}
+// a 1×1 PNG: pandoc reads the fixture's image, and --fail-if-warnings fails on one it cannot size
+const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
+const FIXTURE_TOC = [
+  [1, 'Readme title'], [1, 'Guide'], [2, 'Setup'], [1, 'Your home'], [2, 'Time zone'], [1, 'Options'], [2, 'Tariff'],
+  [1, 'Entities'], [2, 'Sensors'], [1, 'Security'], [2, 'Reporting'], [1, 'Engineering reference'],
+  [2, 'How this reference is organised'], [2, '1. One'], [2, '2. Two'], [2, 'Appendix A — Inventory'],
+];
+
+/** Build the fixture with pandoc; returns the build and the cached entries and bookmarks read back from the .docx. */
+function buildFixtureDocx<T>(fn: (dir: string, docx: string, r: SpawnSyncReturns<string>) => T): T {
+  return withFixture((f) => { f[P.shot] = PNG; }, (dir) => {
+    const docx = join(dir, 'Power-Documentation.docx');
+    return fn(dir, docx, build(['--repo-root', dir, '--output', docx]));
+  });
+}
+
+test('★★★ pandoc: the fixture .docx caches its 16 level-1 and level-2 headings, in order, each linking the bookmark pandoc wrote for it', { skip: NO_PANDOC }, () => {
+  buildFixtureDocx((_dir, docx, r) => {
+    assert.equal(r.status, 0, out(r));
+    assert.match(r.stdout, /^contents: 16 entries \(7 level-1, 9 level-2 headings\), no page numbers until the field is updated/m);
+    const code = [
+      'import json, re, sys, zipfile',
+      'import xml.etree.ElementTree as ET',
+      'z = zipfile.ZipFile(sys.argv[1])',
+      'assert z.testzip() is None and z.namelist()[0] == "[Content_Types].xml"',
+      'd = z.read("word/document.xml").decode("utf-8")',
+      'ET.fromstring(d.encode("utf-8"))',
+      'toc = re.search(r"<w:sdtContent>(.*?)</w:sdtContent>", d, re.S).group(1)',
+      'entries = re.findall(r\'<w:hyperlink w:anchor="([^"]+)" w:history="1"><w:r><w:t xml:space="preserve">([^<]*)</w:t>\', toc)',
+      'heads = {}',
+      'for m in re.finditer(r\'<w:bookmarkStart w:id="\\d+" w:name="([^"]+)" />\\s*<w:p><w:pPr><w:pStyle w:val="Heading(\\d)" />(.*?)</w:p>\', d, re.S):',
+      '    heads[m.group(1)] = [int(m.group(2)), "".join(re.findall(r"<w:t(?: [^>]*)?>([^<]*)</w:t>", m.group(3)))]',
+      'print(json.dumps({"entries": entries, "heads": heads, "dirty": toc.count(\'w:fldCharType="begin" w:dirty="true"\'), "pageref": "PAGEREF" in toc}))',
+    ].join('\n');
+    const x = spawnSync(PYTHON, ['-I', '-B', '-c', code, docx], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+    assert.equal(x.status, 0, out(x));
+    const got = JSON.parse(x.stdout) as { entries: [string, string][]; heads: Record<string, [number, string]>; dirty: number; pageref: boolean };
+    assert.deepEqual(got.entries.map(([, text]) => text), FIXTURE_TOC.map(([, t]) => t));
+    for (const [i, [bookmark, text]] of got.entries.entries()) {
+      assert.deepEqual(got.heads[bookmark], [FIXTURE_TOC[i][0], text], `entry "${text}" links ${bookmark}, which is not that heading's bookmark`);
+    }
+    assert.equal(got.dirty, 1, 'the field is still marked dirty: Word offers to rebuild it with page numbers');
+    assert.equal(got.pageref, false);
+  });
+});
+
+test('★★ pandoc: a contents that cannot be filled fails the build and leaves no .docx to be attached', { skip: NO_PANDOC }, () => {
+  withFixture((f) => { f[P.shot] = PNG; }, (dir) => {
+    const docx = join(dir, 'Power-Documentation.docx');
+    const code = [
+      'import importlib.util, sys',
+      'spec = importlib.util.spec_from_file_location("build_docs", sys.argv[1])',
+      'm = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)',
+      'm.toc_heading_count = lambda markdown: 999  # the Markdown and the .docx disagree',
+      'raise SystemExit(m.main(["--repo-root", sys.argv[2], "--output", sys.argv[3]]))',
+    ].join('\n');
+    const r = spawnSync(PYTHON, ['-I', '-B', '-c', code, BUILDER, dir, docx], { encoding: 'utf8' });
+    assert.equal(r.status, 1, out(r));
+    assert.match(r.stderr, /^build-docs-docx: the \.docx has 16 level-1 and level-2 headings, the assembled Markdown 999/m);
+    assert.deepEqual(readdirSync(dir).filter((n) => n.startsWith('Power-Documentation')), [], 'a .docx (or its staging file) was left');
+  });
+});
+
+test('★★★ LibreOffice: build-docs-pdf.py renders the fixture build with its contents updated, 16 entries with rising page numbers, and leaves nothing behind', { skip: NO_PANDOC || NO_LIBREOFFICE }, (t) => {
+  const why = libreOfficeCannotStart();
+  if (why) { t.skip(why); return; }
+  buildFixtureDocx((dir, docx, r) => {
+    assert.equal(r.status, 0, out(r));
+    const tmp = join(dir, 'tmp');
+    mkdirSync(tmp);
+    // the script's deadline under this call's bound: a LibreOffice that does not end fails with the script's own line
+    const pdf = spawnSync(PYTHON, ['-I', '-B', PDF_SCRIPT, docx, '--deadline', '90'], { encoding: 'utf8', timeout: 120_000, env: { ...process.env, TMPDIR: tmp } });
+    assert.equal(pdf.status, 0, out(pdf));
+    const m = /^wrote .*Power-Documentation\.pdf \([\d,]+ bytes\): the contents lists 16 entries, each with its page number \(pages (\d+) to (\d+)\)$/m.exec(pdf.stdout);
+    assert.ok(m, out(pdf));
+    assert.ok(Number(m![2]) > Number(m![1]), out(pdf));
+    assert.equal(readFileSync(join(dir, 'Power-Documentation.pdf')).subarray(0, 5).toString(), '%PDF-');
+    assert.deepEqual(readdirSync(tmp), [], 'the profile or LibreOffice\'s temp outlived the run');
+    assert.deepEqual(readdirSync(dir).filter((n) => n.startsWith('.~lock')), [], 'a lock file was left beside the .docx');
+  });
+});
+
+test('★★★ LibreOffice: a .docx it cannot load fails within seconds with one line, not a hang until the caller\'s timeout', { skip: NO_LIBREOFFICE }, (t) => {
+  const why = libreOfficeCannotStart();
+  if (why) { t.skip(why); return; }
+  const dir = mkdtempSync(join(tmpdir(), 'docs-pdf-load-'));
+  try {
+    // a contents the script's own checks accept (two cached entries, two headings), in a package
+    // LibreOffice does not recognise, so its load gives nothing
+    const docx = join(dir, 'Unloadable.docx');
+    const code = [
+      'import sys, zipfile',
+      'start = (\'<w:r><w:fldChar w:fldCharType="begin" w:dirty="true" /></w:r><w:r><w:instrText xml:space="preserve">TOC \\\\o &quot;1-2&quot; \\\\h \\\\z \\\\u</w:instrText></w:r>\'',
+      '         \'<w:r><w:fldChar w:fldCharType="separate" /></w:r>\')',
+      'entry = lambda a, first="": f\'<w:p>{first}<w:hyperlink w:anchor="{a}" w:history="1"><w:r><w:t>{a}</w:t></w:r></w:hyperlink></w:p>\'',
+      'head = lambda level, a: f\'<w:bookmarkStart w:id="{level}" w:name="{a}" /><w:p><w:pPr><w:pStyle w:val="Heading{level}" /></w:pPr><w:r><w:t>{a}</w:t></w:r></w:p>\'',
+      'xml = (\'<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>\'',
+      '       + entry("One", start) + entry("Two") + \'<w:p><w:r><w:fldChar w:fldCharType="end" /></w:r></w:p>\' + head(1, "One") + head(2, "Two") + "</w:body></w:document>")',
+      'with zipfile.ZipFile(sys.argv[1], "w") as z:',
+      '    z.writestr("[Content_Types].xml", "<Types/>")',
+      '    z.writestr("word/document.xml", xml)',
+    ].join('\n');
+    const w = spawnSync(PYTHON, ['-I', '-B', '-c', code, docx], { encoding: 'utf8' });
+    assert.equal(w.status, 0, out(w));
+    const tmp = join(dir, 'tmp');
+    mkdirSync(tmp);
+    const t0 = Date.now();
+    const r = spawnSync(PYTHON, ['-I', '-B', PDF_SCRIPT, docx, '--deadline', '60'], { encoding: 'utf8', timeout: 90_000, env: { ...process.env, TMPDIR: tmp } });
+    const took = Date.now() - t0;
+    assert.equal(r.status, 1, out(r));
+    const lines = r.stderr.trim().split('\n');
+    assert.equal(lines[0], 'build-docs-pdf: the conversion macro failed: LibreOffice did not load the .docx', out(r));
+    assert.deepEqual(lines.slice(1).filter((l) => !l.startsWith('libreoffice: ')), [], out(r));
+    assert.ok(took < 45_000, `it took ${took} ms`);
+    assert.deepEqual(readdirSync(tmp), [], 'the profile or LibreOffice\'s temp outlived the run');
+    assert.deepEqual(readdirSync(dir).sort(), ['Unloadable.docx', 'tmp'], 'a lock file or a PDF was left beside the .docx');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

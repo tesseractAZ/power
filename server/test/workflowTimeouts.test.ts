@@ -128,10 +128,11 @@ test('★★★ every apt-get in both workflows runs under `timeout` with apt\'s
 test('★★ the docs tools themselves run under `timeout`', () => {
   for (const j of [RELEASE, DOCS_CI]) {
     const docx = j.steps.find((s) => /build-docs-docx\.py \\/.test(s.text));
-    const pdf = j.steps.find((s) => /--convert-to pdf/.test(s.text));
+    // 1.209.1: the PDF step runs scripts/build-docs-pdf.py, which runs LibreOffice; the bound is on the script
+    const pdf = j.steps.find((s) => /^ {10}\S.*scripts\/build-docs-pdf\.py/m.test(s.text));
     assert.ok(docx && pdf, 'docs steps not found');
     assert.match(docx!.text, /timeout -k \d+ \d+ python3 scripts\/build-docs-docx\.py/);
-    assert.match(pdf!.text, /timeout -k \d+ \d+ libreoffice --headless/);
+    assert.match(pdf!.text, /timeout -k \d+ \d+ python3 -I -B scripts\/build-docs-pdf\.py /);
   }
 });
 
@@ -383,4 +384,35 @@ test('★★ each docs-job step\'s bound covers its commands\' bounds, and the j
     if (need > 0) assert.ok(need <= t * 60, `${s.name}: commands bounded at ${need} s, step at ${t} min`);
   }
   assert.ok(DOCS_CI.timeout! >= sum + 5, `docs-docx job ${DOCS_CI.timeout} min vs Σ steps ${sum} min (+5 for checkout and the upload)`);
+});
+
+/* ── 1.209.1: both workflows render the PDF with its contents updated ─────── */
+// A plain `libreoffice --convert-to pdf` does not update a document's indexes: every release PDF
+// up to 1.209.0 printed "Table of Contents" over nothing, and the step passed.
+
+test('★★★ both workflows render the PDF with scripts/build-docs-pdf.py, from the .docx the step before wrote; neither converts with a bare --convert-to', () => {
+  for (const [file, yml] of [['images.yml', IMAGES], ['ci.yml', CI]] as const) {
+    const lines = yml.split('\n').filter((l) => !/^\s*#/.test(l));
+    assert.deepEqual(lines.filter((l) => /--convert-to\b/.test(l)), [], `${file} converts without updating the contents`);
+  }
+  const cases = [
+    { j: RELEASE, docx: 'Build documentation .docx', pdf: 'Build documentation .pdf' },
+    { j: DOCS_CI, docx: 'Build .docx', pdf: 'Build .pdf (render the .docx)' },
+  ];
+  for (const { j, docx, pdf } of cases) {
+    const out = /--output "([^"]+\.docx)"/.exec(runBlock(stepNamed(j, docx)))?.[1];
+    assert.ok(out, `${docx}: no --output`);
+    const run = commands(stepNamed(j, pdf));
+    assert.equal(run[0], `timeout -k 10 240 python3 -I -B scripts/build-docs-pdf.py "${out}"`, `${pdf}: ${run[0]}`);
+    // the PDF it checks is the one the script writes: beside the .docx, with a .pdf suffix
+    const want = out.replace(/\.docx$/, '.pdf');
+    assert.ok(run.some((c) => c === `test -s "${want}"` || c === `test -s ${want}`), `${pdf}: no test -s of ${want}`);
+    assert.ok(j.steps.indexOf(stepNamed(j, docx)) < j.steps.indexOf(stepNamed(j, pdf)));
+  }
+});
+
+test('★★ the release renders the PDF only where the tagged tree has the script: an older tag skips it rather than attaching a PDF with no contents', () => {
+  for (const name of ['Ensure LibreOffice (docx → pdf)', 'Build documentation .pdf']) {
+    assert.match(key(stepNamed(RELEASE, name), 'if') ?? '', /hashFiles\('scripts\/build-docs-pdf\.py'\) != ''/, name);
+  }
 });

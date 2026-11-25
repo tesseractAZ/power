@@ -26,6 +26,10 @@
  * Release attaches a document only on its build step's own success (review). Mutants
  * xxxiv-xlviii (the Release step's script is RUN against a stub gh; the rest structural).
  *
+ * (4) 1.209.1: both workflows render the PDF with scripts/build-docs-pdf.py, which updates the
+ * contents before the export (a bare `--convert-to pdf` printed "Table of Contents" over nothing),
+ * under `timeout`, and the release only where the tagged tree has the script. Mutants xlix-lii.
+ *
  *   node scripts/mutate-v1187-3i.mjs
  *
  * ★ Anchor-asserted; a red subset baseline aborts; restores in a finally block and on
@@ -342,8 +346,9 @@ const MUTANTS = [
   {
     id: 'xxxix. ★★ the pdf render is unbounded in the release job',
     file: IMG,
-    find: '          timeout -k 10 240 libreoffice --headless -env:UserInstallation=file:///tmp/loprofile \\\n            --convert-to pdf --outdir . "Power-Documentation-v${V}.docx"',
-    to: '          libreoffice --headless -env:UserInstallation=file:///tmp/loprofile \\\n            --convert-to pdf --outdir . "Power-Documentation-v${V}.docx" # MUTANT',
+    // 1.209.1: the step runs scripts/build-docs-pdf.py (which runs LibreOffice), not a bare --convert-to.
+    find: '          timeout -k 10 240 python3 -I -B scripts/build-docs-pdf.py "Power-Documentation-v${V}.docx"',
+    to: '          python3 -I -B scripts/build-docs-pdf.py "Power-Documentation-v${V}.docx" # MUTANT',
     why: 'A wedged headless LibreOffice holds the step to its bound on every release.',
   },
   {
@@ -412,6 +417,35 @@ const MUTANTS = [
     find: '          timeout -k 10 240 python3 scripts/build-docs-docx.py \\\n            --ref',
     to: '          python3 scripts/build-docs-docx.py \\\n            --ref # MUTANT',
     why: 'A hung pandoc conversion holds the check to the step bound on every PR.',
+  },
+  /* ── (4, 1.209.1) the PDF's contents ─────────────────────────────────────── */
+  {
+    id: 'xlix. ★★★ the PR renders the PDF with a bare --convert-to, which does not update the contents',
+    file: CI,
+    find: '          timeout -k 10 240 python3 -I -B scripts/build-docs-pdf.py "Power-Documentation.docx"',
+    to: '          timeout -k 10 240 libreoffice --headless --convert-to pdf --outdir . "Power-Documentation.docx" # MUTANT',
+    why: 'The PR check passes on a PDF whose "Table of Contents" lists nothing, as every PDF up to 1.209.0 did.',
+  },
+  {
+    id: 'l. ★★★ the release renders the PDF with a bare --convert-to, which does not update the contents',
+    file: IMG,
+    find: '          timeout -k 10 240 python3 -I -B scripts/build-docs-pdf.py "Power-Documentation-v${V}.docx"',
+    to: '          timeout -k 10 240 libreoffice --headless --convert-to pdf --outdir . "Power-Documentation-v${V}.docx" # MUTANT',
+    why: 'The Release seals a PDF with an empty contents, a different render from the one the PR checked.',
+  },
+  {
+    id: 'li. ★★ the PR\'s PDF render is unbounded',
+    file: CI,
+    find: '          timeout -k 10 240 python3 -I -B scripts/build-docs-pdf.py "Power-Documentation.docx"',
+    to: '          python3 -I -B scripts/build-docs-pdf.py "Power-Documentation.docx" # MUTANT',
+    why: 'A wedged headless LibreOffice holds the check to the step bound on every PR.',
+  },
+  {
+    id: 'lii. ★★ the release renders a PDF on a tag that predates the script',
+    file: IMG,
+    find: "steps.docx.outcome == 'success' && hashFiles('scripts/build-docs-pdf.py') != ''",
+    to: "steps.docx.outcome == 'success' && hashFiles('scripts/build-docs-docx.py') != '' /* MUTANT */",
+    why: 'A re-run against an older tag fails its PDF step on a missing script instead of skipping it.',
   },
 ];
 

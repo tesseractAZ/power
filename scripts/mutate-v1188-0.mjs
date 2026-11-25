@@ -28,7 +28,26 @@
  *       non-unique link passing, history bundled, the synthetic h1 omitted, the alert marker
  *       kept, --fail-if-warnings or --resource-path dropped, a punctuation-keeping Python slugger,
  *       one that keeps superscripts and fractions or drops the zero-width joiners,
- *       a missing, unlisted or unprinted file passing, links not pinned to --ref, no page breaks
+ *       a missing, unlisted or unprinted file passing, links not pinned to --ref, no page breaks;
+ *       1.209.1, the contents: the .docx's left empty, a heading without a bookmark linked
+ *       nowhere, a quoted heading's bookmark unread, level 3 cached or level 2 dropped, the count
+ *       unchecked against the Markdown (or the Markdown's widened), a field of another depth or a
+ *       second one filled, the dirty flag dropped, an unfilled .docx left behind; and the PDF
+ *       (build-docs-pdf.py): its count unchecked, the indexes not updated, the first start
+ *       skipped or the profile made by hand (the first-start trap), the module unregistered, a
+ *       missing report, an entry without a page number or with page 0 counted, level 3 counted
+ *       or level 2 dropped, no field or two passing, a missing, empty or non-PDF file passing, a
+ *       Basic error unquoted, an unlistable script.xlb, an unreadable or missing .docx unnamed,
+ *       a stale PDF kept, the work directory kept, SIGTERM not unwound, LibreOffice outliving
+ *       the run, soffice not looked for; and (review) the count taken from a field of another
+ *       depth, from one with no cached entries, or unchecked against the Heading1/2 paragraphs, a
+ *       nested field ending it or the body counted with it, pages that go back or never rise, no
+ *       deadline of its own or one past the workflows' timeout, no SIGTERM before SIGKILL, a
+ *       second signal cutting the cleanup short, a stop with no line, SIGINT unhandled, the
+ *       caller's .docx loaded in place (its lock file left beside it), LibreOffice's TMPDIR not
+ *       the work directory's, the .docx taken for the PDF, a missing or unwritable PDF directory
+ *       unnamed, the stale PDF removed after the usage exits, the macro's handler cleaning up in
+ *       error mode, a .docx that did not load unnamed, the depth unlike the builder's
  *
  * Every anchor sits on a comparison, a condition or a call, never on a baseline value or a pinned
  * hash in scripts/docs-baselines.json, so lowering a ratchet cannot orphan one.
@@ -42,10 +61,12 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const CD = resolve(REPO, 'scripts/check-docs.mjs');
 const MS = resolve(REPO, 'scripts/lib/markdownScan.mjs');
 const BD = resolve(REPO, 'scripts/build-docs-docx.py');
+const BP = resolve(REPO, 'scripts/build-docs-pdf.py');
 const SUBSET = [
   'test/docsLayout.test.ts',
   'test/docsBuild.test.ts',
   'test/nightChargeMqtt.test.ts',
+  'test/docsPdf.test.ts',
 ];
 
 const MUTANTS = [
@@ -717,6 +738,401 @@ const MUTANTS = [
     find: 'if cat[0] in "LM" or cat in SLUG_KEEP_CATEGORIES or ch in SLUG_KEEP_JOINERS:',
     to: 'if cat[0] in "LM" or cat in SLUG_KEEP_CATEGORIES:  # MUTANT',
     why: 'A heading with a joiner gets a printable id that the links resolved against GitHub\'s ids miss.',
+  },
+  /* ── P, 1.209.1: the contents of the .docx (build-docs-docx.py) ── */
+  {
+    id: 'P-xviii. ★★★ the .docx contents is left empty',
+    file: BD,
+    find: '        entries = fill_docx_toc(output, toc_heading_count(combined))',
+    to: '        entries = []  # MUTANT',
+    why: 'Every viewer but Word shows "Table of Contents" over nothing again.',
+  },
+  {
+    id: 'P-xix. ★★★ a heading with no bookmark gets an entry that links nowhere',
+    file: BD,
+    find: '            b = DOCX_BOOKMARK_BEFORE.search(gap) or DOCX_BOOKMARK_INSIDE.search(p.group(0))',
+    to: '            b = DOCX_BOOKMARK_BEFORE.search(gap) or DOCX_BOOKMARK_INSIDE.search(p.group(0)) or re.match("()", "")  # MUTANT',
+    why: 'A contents entry with an empty anchor is sealed into the release .docx.',
+  },
+  {
+    id: 'P-xx. ★★ a quoted or listed heading\'s bookmark is not read',
+    file: BD,
+    find: '            b = DOCX_BOOKMARK_BEFORE.search(gap) or DOCX_BOOKMARK_INSIDE.search(p.group(0))',
+    to: '            b = DOCX_BOOKMARK_BEFORE.search(gap)  # MUTANT',
+    why: 'A heading in a quote or a list item (pandoc puts its bookmark inside the paragraph) fails the build.',
+  },
+  {
+    id: 'P-xxi. ★★ the .docx contents lists level-3 headings too',
+    file: BD,
+    find: '        if level <= TOC_DEPTH:',
+    to: '        if level <= TOC_DEPTH + 1:  # MUTANT',
+    why: 'The cached list is not the one Word builds from the field (\\o "1-2"), and grows by 188 entries.',
+  },
+  {
+    id: 'P-xxii. ★★ the .docx contents leaves level-2 headings out',
+    file: BD,
+    find: '        if level <= TOC_DEPTH:',
+    to: '        if level < TOC_DEPTH:  # MUTANT',
+    why: 'The contents lists the seven parts and none of their sections.',
+  },
+  {
+    id: 'P-xxiii. ★★★ the cached entries are not counted against the Markdown\'s headings',
+    file: BD,
+    find: '    if len(entries) != expected:',
+    to: '    if False:  # MUTANT',
+    why: 'A heading pandoc did not write as a heading drops out of the contents silently.',
+  },
+  {
+    id: 'P-xxiv. ★★ the Markdown count takes level-3 headings too',
+    file: BD,
+    find: '    return sum(1 for h in scan_markdown(markdown).headings if h.level <= TOC_DEPTH)',
+    to: '    return sum(1 for h in scan_markdown(markdown).headings if h.level <= TOC_DEPTH + 1)  # MUTANT',
+    why: 'Every build fails on a count the contents was never meant to reach.',
+  },
+  {
+    id: 'P-xxv. ★★ a TOC field of another depth is filled with level-1 and level-2 entries',
+    file: BD,
+    find: '    if int(field.group(2)) != TOC_DEPTH:',
+    to: '    if False:  # MUTANT',
+    why: 'The cached list disagrees with the one Word rebuilds from the field.',
+  },
+  {
+    id: 'P-xxvi. ★ a second TOC field passes and only the first is filled',
+    file: BD,
+    find: '    if len(fields) != 1:',
+    to: '    if not fields:  # MUTANT',
+    why: 'A second, empty contents is shipped beside the filled one.',
+  },
+  {
+    id: 'P-xxvii. ★★ the field loses its dirty flag',
+    file: BD,
+    find: '    field_start = (\'<w:r><w:fldChar w:fldCharType="begin" w:dirty="true" /></w:r>\'',
+    to: '    field_start = (\'<w:r><w:fldChar w:fldCharType="begin" /></w:r>\'  # MUTANT',
+    why: 'Word no longer offers to rebuild the contents with page numbers.',
+  },
+  {
+    id: 'P-xxviii. ★ a .docx whose contents could not be filled is left behind',
+    file: BD,
+    find: '        # a .docx whose contents could not be filled is not left behind to be attached\n        output.unlink(missing_ok=True)',
+    to: '        # a .docx whose contents could not be filled is not left behind to be attached\n        pass  # MUTANT',
+    why: 'A failed build leaves pandoc\'s empty-contents .docx where the upload and a local reader find it.',
+  },
+  /* ── P, 1.209.1: the PDF (build-docs-pdf.py) ── */
+  {
+    id: 'P-xxix. ★★★ the PDF\'s contents is not counted against the entries cached in the .docx',
+    file: BP,
+    find: '    if len(pages) != expected:',
+    to: '    if False:  # MUTANT',
+    why: 'Exit 0 with an empty table of contents: the defect itself.',
+  },
+  {
+    id: 'P-xxx. ★★★ the indexes are not updated before the export',
+    file: BP,
+    find: '      idx.getByIndex(i).update()',
+    to: '      REM MUTANT',
+    why: 'The PDF prints the cached entries with no page numbers (or, from an older .docx, nothing).',
+  },
+  {
+    id: 'P-xxxi. ★★ the macro leaves LibreOffice running after the report',
+    file: BP,
+    find: '  StarDesktop.terminate()\nEnd Sub\n',
+    to: '  REM MUTANT\nEnd Sub\n',
+    why: 'Where a headless office does not exit once its last document closes, every render runs into the deadline.',
+  },
+  {
+    id: 'P-xxxii. ★★★ LibreOffice is not started once before the module is written',
+    file: BP,
+    find: '    first_start, _ = run_libreoffice(binary, work, deadline, "making its profile (its first start)", "--terminate_after_init")',
+    to: '    first_start = 0  # MUTANT',
+    why: 'There is no profile to register the module in: every render fails.',
+  },
+  {
+    id: 'P-xxxiii. ★★★ the profile is made by hand instead of by a first start (the first-start trap)',
+    file: BP,
+    find: '    first_start, _ = run_libreoffice(binary, work, deadline, "making its profile (its first start)", "--terminate_after_init")',
+    to: '    (work / "profile" / "user" / "basic" / "Standard").mkdir(parents=True); (work / "profile" / "user" / "basic" / "Standard" / "script.xlb").write_text("<library:library>\\n</library:library>\\n"); first_start = 0  # MUTANT',
+    why: 'LibreOffice\'s first start rewrites script.xlb, the macro is not registered and nothing runs.',
+  },
+  {
+    id: 'P-xxxiv. ★★★ the module is not registered in script.xlb',
+    file: BP,
+    find: '    xlb.write_text(text.replace("</library:library>", entry + "</library:library>", 1), encoding="utf-8")',
+    to: '    pass  # MUTANT',
+    why: 'LibreOffice does not find DocsPdf.Convert, does nothing and exits 0.',
+  },
+  {
+    id: 'P-xxxv. ★ a script.xlb the module cannot be listed in is not named',
+    file: BP,
+    find: '    if "</library:library>" not in text:',
+    to: '    if False:  # MUTANT',
+    why: 'The module is written but never listed, and the failure says only that the macro did not run.',
+  },
+  {
+    id: 'P-xxxvi. ★★ a missing report is not named',
+    file: BP,
+    find: '    if not report.is_file():',
+    to: '    if False:  # MUTANT',
+    why: 'A macro that never ran ends in a traceback rather than the line that says so.',
+  },
+  {
+    id: 'P-xxxvii. ★★★ an entry without a page number counts',
+    file: BP,
+    find: '            if m:\n                pages.append(int(m.group(1)))',
+    to: '            pages.append(int(m.group(1)) if m else 1)  # MUTANT',
+    why: 'A contents printed from the cached entries, never updated, passes.',
+  },
+  {
+    id: 'P-xxxviii. ★★ page 0 counts as a page number',
+    file: BP,
+    find: 'PAGED_ENTRY = re.compile(r"[^\\t]*\\t([1-9][0-9]*)")',
+    to: 'PAGED_ENTRY = re.compile(r"[^\\t]*\\t([0-9]+)")  # MUTANT',
+    why: 'Cached PAGEREF fields that LibreOffice never evaluated (each "0") pass.',
+  },
+  {
+    id: 'P-xxxix. ★★ the PDF\'s heading count takes level-3 headings too',
+    file: BP,
+    find: '    headings = sum(1 for level in HEADING_STYLE.findall(xml) if 1 <= int(level) <= TOC_DEPTH)',
+    to: '    headings = sum(1 for level in HEADING_STYLE.findall(xml) if 1 <= int(level) <= TOC_DEPTH + 1)  # MUTANT',
+    why: 'Every correct .docx fails before LibreOffice starts.',
+  },
+  {
+    id: 'P-xl. ★★ the PDF\'s heading count leaves level-2 headings out',
+    file: BP,
+    find: '    headings = sum(1 for level in HEADING_STYLE.findall(xml) if 1 <= int(level) <= TOC_DEPTH)',
+    to: '    headings = sum(1 for level in HEADING_STYLE.findall(xml) if 1 <= int(level) < TOC_DEPTH)  # MUTANT',
+    why: 'Every correct .docx fails; one whose cached entries are the seven parts alone would pass.',
+  },
+  {
+    id: 'P-xli. ★★ a .docx with two TOC fields passes',
+    file: BP,
+    find: '    if len(instructions) != 1:',
+    to: '    if not instructions:  # MUTANT',
+    why: 'The count is taken against one field while LibreOffice reports both.',
+  },
+  {
+    id: 'P-xlii. ★★ a missing or empty PDF passes the size check',
+    file: BP,
+    find: '    if not pdf.is_file() or pdf.stat().st_size == 0:',
+    to: '    if False:  # MUTANT',
+    why: 'A render that wrote nothing ends in a traceback or a misleading line.',
+  },
+  {
+    id: 'P-xliii. ★ a file that is not a PDF passes',
+    file: BP,
+    find: '        if f.read(5) != b"%PDF-":',
+    to: '        if False:  # MUTANT',
+    why: 'An error page written under the PDF\'s name is uploaded as the PDF.',
+  },
+  {
+    id: 'P-xliv. ★ a Basic error in the macro is not quoted',
+    file: BP,
+    find: '    if text.startswith("error "):',
+    to: '    if False:  # MUTANT',
+    why: 'The failure says no PDF was written, not why.',
+  },
+  {
+    id: 'P-xlv. ★★ a PDF from an earlier run stays at the output path',
+    file: BP,
+    find: '    try:\n        output.unlink(missing_ok=True)\n    except OSError as e:',
+    to: '    try:\n        pass  # MUTANT\n    except OSError as e:',
+    why: 'A failed render leaves the old PDF where the upload finds it.',
+  },
+  {
+    id: 'P-xlvi. ★★ the work directory (profile, copy, report) is not removed',
+    file: BP,
+    find: '        shutil.rmtree(work, ignore_errors=True)',
+    to: '        pass  # MUTANT',
+    why: 'Every run leaves a LibreOffice profile and a copy of the .docx in the temporary directory.',
+  },
+  {
+    id: 'P-xlvii. ★★★ SIGTERM from the caller\'s timeout is not unwound',
+    file: BP,
+    find: 'STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT)',
+    to: 'STOP_SIGNALS = (signal.SIGINT,)  # MUTANT',
+    why: 'A timed-out render dies without its finally blocks: the work directory stays and LibreOffice runs on.',
+  },
+  {
+    id: 'P-xlviii. ★★★ LibreOffice\'s process group is not killed on the way out',
+    file: BP,
+    find: '    signal_group(proc, signal.SIGKILL)\n    proc.wait()',
+    to: '    pass  # MUTANT\n    proc.wait()',
+    why: 'A LibreOffice that ignores SIGTERM holds the run until the caller kills it, work directory and all.',
+  },
+  {
+    id: 'P-xlix. ★ a .docx that is not one ends in a traceback',
+    file: BP,
+    find: '    except (OSError, zipfile.BadZipFile, KeyError, UnicodeDecodeError) as e:',
+    to: '    except ():  # MUTANT',
+    why: 'A truncated .docx (a killed build) is reported as a Python traceback, not as what it is.',
+  },
+  {
+    id: 'P-l. ★ a missing .docx is not named',
+    file: BP,
+    find: '    if not docx.is_file():',
+    to: '    if False:  # MUTANT',
+    why: 'A wrong path fails later, as an unreadable .docx, and with exit 1 rather than the usage exit 2.',
+  },
+  {
+    id: 'P-li. ★ soffice is not looked for',
+    file: BP,
+    find: 'LIBREOFFICE_COMMANDS = ("libreoffice", "soffice")',
+    to: 'LIBREOFFICE_COMMANDS = ("libreoffice",)  # MUTANT',
+    why: 'The script cannot run where LibreOffice installs only soffice (macOS).',
+  },
+  /* ── P, 1.209.1 (review): the PDF's count from the .docx alone, its pages, its deadline, its stops ── */
+  {
+    id: 'P-lii. ★★★ a TOC field of another depth than 1-2 passes',
+    file: BP,
+    find: '    if depth != TOC_DEPTH:',
+    to: '    if False:  # MUTANT',
+    why: 'A `\\o "1-1"` field passes with the seven parts listed and 73 sections missing.',
+  },
+  {
+    id: 'P-liii. ★★★ a field with no cached entries passes',
+    file: BP,
+    find: '    if cached == 0:',
+    to: '    if False:  # MUTANT',
+    why: 'A document with no headings passes with an empty contents: exit 0, "Table of Contents" over nothing.',
+  },
+  {
+    id: 'P-liv. ★★★ the cached entries are not counted against the Heading1 and Heading2 paragraphs',
+    file: BP,
+    find: '    if headings != cached:',
+    to: '    if False:  # MUTANT',
+    why: 'Headings restyled as body text, or added after the build, pass a contents that does not list them.',
+  },
+  {
+    id: 'P-lv. ★★ a field nested in the contents ends it',
+    file: BP,
+    find: '        if kind == "begin":\n            depth += 1',
+    to: '        if kind == "begin":\n            pass  # MUTANT',
+    why: 'A contents Word has updated (a PAGEREF in each entry) counts one entry.',
+  },
+  {
+    id: 'P-lvi. ★★ the cached entries are counted to the end of the document, not of the field',
+    file: BP,
+    find: '                return None if result is None else xml[result:m.start()]',
+    to: '                return None if result is None else xml[result:]  # MUTANT',
+    why: 'Every link in the body counts as a contents entry.',
+  },
+  {
+    id: 'P-lvii. ★★ page numbers that go back pass',
+    file: BP,
+    find: '        if pages[i] < pages[i - 1]:',
+    to: '        if False:  # MUTANT',
+    why: 'An index updated out of layout passes on its count.',
+  },
+  {
+    id: 'P-lviii. ★★ a contents that ends on the page it starts passes',
+    file: BP,
+    find: '    if len(pages) > 1 and pages[-1] <= pages[0]:',
+    to: '    if False:  # MUTANT',
+    why: 'An update that never laid the pages out (every entry on one page) passes.',
+  },
+  {
+    id: 'P-lix. ★★★ LibreOffice has no deadline of the script\'s own',
+    file: BP,
+    find: '            out, _ = proc.communicate(timeout=deadline.left())',
+    to: '            out, _ = proc.communicate()  # MUTANT',
+    why: 'A LibreOffice that does not end holds the step to the caller\'s timeout, which ends it with no reason given.',
+  },
+  {
+    id: 'P-lx. ★★ the deadline outlasts the workflows\' timeout',
+    file: BP,
+    find: 'DEADLINE_SECONDS = 200',
+    to: 'DEADLINE_SECONDS = 240',
+    why: 'The caller\'s timeout fires first, and the step ends at exit 124 with nothing said.',
+  },
+  {
+    id: 'P-lxi. ★★ LibreOffice gets SIGKILL with no SIGTERM first',
+    file: BP,
+    find: '    if proc.poll() is None:\n        signal_group(proc, signal.SIGTERM)',
+    to: '    if proc.poll() is None:\n        pass  # MUTANT',
+    why: 'LibreOffice is never asked to end, and every stop waits out the grace.',
+  },
+  {
+    id: 'P-lxii. ★★ a second signal cuts the cleanup short',
+    file: BP,
+    find: '    for s in STOP_SIGNALS:\n        signal.signal(s, signal.SIG_IGN)',
+    to: '    pass  # MUTANT',
+    why: 'A second SIGTERM during the grace skips the SIGKILL, and a LibreOffice that ignores SIGTERM runs on.',
+  },
+  {
+    id: 'P-lxiii. ★★ a stop prints no line',
+    file: BP,
+    find: '    print(f"build-docs-pdf: stopped by {signal.Signals(signum).name} after {PROGRESS.seconds()} s, while {PROGRESS.doing}",\n          file=sys.stderr)',
+    to: '    pass  # MUTANT',
+    why: 'A run the caller\'s timeout stopped ends with nothing on stderr.',
+  },
+  {
+    id: 'P-lxiv. ★★ SIGINT is not handled',
+    file: BP,
+    find: 'STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT)',
+    to: 'STOP_SIGNALS = (signal.SIGTERM,)  # MUTANT',
+    why: 'Ctrl-C ends in a KeyboardInterrupt traceback, raised again inside the cleanup.',
+  },
+  {
+    id: 'P-lxv. ★★★ the macro loads the caller\'s .docx, not a copy in the work directory',
+    file: BP,
+    find: '    macro = f\'macro:///Standard.{MODULE}.Convert("{source.as_uri()}","{pdf.as_uri()}","{report.as_uri()}")\'',
+    to: '    macro = f\'macro:///Standard.{MODULE}.Convert("{docx.as_uri()}","{pdf.as_uri()}","{report.as_uri()}")\'  # MUTANT',
+    why: 'A stopped run leaves LibreOffice\'s lock file beside the .docx, and every later run on that file waits for it.',
+  },
+  {
+    id: 'P-lxvi. ★★ LibreOffice writes its temporary files to the caller\'s TMPDIR',
+    file: BP,
+    find: '        env=dict(os.environ, TMPDIR=str(work / "tmp")))',
+    to: '        env=dict(os.environ))  # MUTANT',
+    why: 'A stopped run leaves LibreOffice\'s temporary entries behind.',
+  },
+  {
+    id: 'P-lxvii. ★★ a PDF path that is the .docx itself is accepted',
+    file: BP,
+    find: '    if output == docx:',
+    to: '    if False:  # MUTANT',
+    why: 'A .docx named with a .pdf suffix is removed as the PDF of an earlier run.',
+  },
+  {
+    id: 'P-lxviii. ★ a missing directory for the PDF is found only after the render',
+    file: BP,
+    find: '    if not output.parent.is_dir():',
+    to: '    if False:  # MUTANT',
+    why: 'A full render runs before the PDF has nowhere to go.',
+  },
+  {
+    id: 'P-lxix. ★ a PDF that cannot be written ends in a traceback',
+    file: BP,
+    find: '    except (RenderError, OSError) as e:',
+    to: '    except RenderError as e:  # MUTANT',
+    why: 'An unwritable output directory is reported as a Python traceback.',
+  },
+  {
+    id: 'P-lxx. ★★ the stale PDF is removed only after the usage exits',
+    file: BP,
+    find: '    try:\n        output.unlink(missing_ok=True)\n    except OSError as e:\n        return usage(f"{output}: the PDF already there cannot be removed ({e.strerror or e})")\n    if not docx.is_file():\n        return usage(f"{docx}: no such file")\n    binary = find_libreoffice()\n    if binary is None:\n        return usage("neither libreoffice nor soffice is on PATH (CI installs libreoffice-writer)")\n',
+    to: '    if not docx.is_file():\n        return usage(f"{docx}: no such file")\n    binary = find_libreoffice()\n    if binary is None:\n        return usage("neither libreoffice nor soffice is on PATH (CI installs libreoffice-writer)")\n    output.unlink(missing_ok=True)  # MUTANT\n',
+    why: 'An exit 2 leaves the PDF of an earlier run where a caller that goes on finds it.',
+  },
+  {
+    id: 'P-lxxi. ★★ the macro\'s error handler cleans up while still in error mode',
+    file: BP,
+    find: '  Resume Done\n',
+    to: '  WriteReport(reportUrl, report)\n  On Error Resume Next\n  doc.close(True)\n  StarDesktop.terminate()\n  Exit Sub\n',
+    why: 'A failing call in the handler (doc.close on a document that never loaded) ends the Sub: LibreOffice runs on until the deadline.',
+  },
+  {
+    id: 'P-lxxii. ★★ a .docx LibreOffice did not load is not named',
+    file: BP,
+    find: '  If IsNull(doc) Then\n    report = &quot;error LibreOffice did not load the .docx&quot; &amp; Chr(10)\n    GoTo Done\n  End If\n',
+    to: '  REM MUTANT\n',
+    why: 'A file LibreOffice cannot open is reported as "Object variable not set".',
+  },
+  {
+    id: 'P-lxxiii. ★ the PDF is checked at another depth than the builder fills',
+    file: BP,
+    find: 'build-docs-docx.py\'s TOC_DEPTH.\nTOC_DEPTH = 2',
+    to: 'build-docs-docx.py\'s TOC_DEPTH.\nTOC_DEPTH = 3  # MUTANT',
+    why: 'Every .docx the builder writes fails before LibreOffice starts.',
   },
 ];
 
