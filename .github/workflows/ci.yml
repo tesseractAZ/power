@@ -240,7 +240,8 @@ jobs:
     # a release, and (2) publish a downloadable
     # preview artifact so reviewers can read the offline manual for the branch.
     # The same generator (scripts/build-docs-docx.py) attaches the .docx to the
-    # GitHub Release in images.yml, so this job keeps that path exercised.
+    # GitHub Release in images.yml, and the same renderer (scripts/build-docs-pdf.py)
+    # makes its .pdf, so this job keeps that path exercised.
     name: Build documentation (.docx + .pdf)
     runs-on: ubuntu-26.04
     # v1.187.3 — bounded, as images.yml's release job: the same unbounded apt-get stalled a
@@ -307,11 +308,15 @@ jobs:
             --ref "${GITHUB_SHA:0:7}" \
             --output "Power-Documentation.docx"
 
-      # A PDF alongside the .docx — a faithful render of the SAME document (same
-      # generated TOC + page breaks) via LibreOffice headless (no LaTeX). On the
-      # PR this is a HARD gate (if-no-files-found: error below): a documentation or
-      # toolchain change that can't produce a PDF fails the check rather than
-      # silently shipping a release without one.
+      # A PDF alongside the .docx: the SAME document (same page breaks) rendered by
+      # LibreOffice headless (no LaTeX). On the PR this is a HARD gate (if-no-files-found:
+      # error below): a documentation or toolchain change that can't produce a PDF fails
+      # the check rather than silently shipping a release without one.
+      # 1.209.1: a plain `libreoffice --convert-to pdf` does not update the document's
+      # indexes, so every PDF up to 1.209.0 printed "Table of Contents" over nothing, and
+      # the step passed. scripts/build-docs-pdf.py (images.yml's release step runs the
+      # same script) has LibreOffice update the contents before it exports, and fails
+      # unless the contents lists every level-1 and level-2 heading with a page number.
       # 2026-11-19: download first, then install from the cache (see Ensure pandoc), and the same dpkg
       # lock wait as the pandoc step, for a dpkg its fallback left running.
       - name: Ensure LibreOffice (docx → pdf)
@@ -329,8 +334,7 @@ jobs:
       - name: Build .pdf (render the .docx)
         timeout-minutes: 5
         run: |
-          timeout -k 10 240 libreoffice --headless -env:UserInstallation=file:///tmp/loprofile \
-            --convert-to pdf --outdir . "Power-Documentation.docx"
+          timeout -k 10 240 python3 -I -B scripts/build-docs-pdf.py "Power-Documentation.docx"
           test -s Power-Documentation.pdf
           ls -la Power-Documentation.pdf
 

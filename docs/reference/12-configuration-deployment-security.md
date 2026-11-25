@@ -557,7 +557,7 @@ since the previous tag if empty). It:
 - `Dependency advisories` (`scripts/check-npm-audit.mjs`).
 - `Validate add-on config + translations`.
 - `Dockerfile smoke build (amd64)`.
-- `Build documentation (.docx + .pdf)` (bounded; see Step 4).
+- `Build documentation (.docx + .pdf)` (bounded, and the PDF's table of contents checked; see Step 4).
 
 `release-pr.yml` runs on every pull request to `main` (`opened`, `synchronize`, `reopened` and
 `edited`, so a title edit re-runs it): `Release PR declares the version it names`
@@ -669,7 +669,16 @@ build to `gh release create`. Jobs:
    cancelled it before the Release was created. Because a bounded step can be killed mid-write,
    a document is attached only when its build step's own `outcome` (before `continue-on-error`)
    is `success` and the file is non-empty, and the .pdf is rendered only from a .docx whose
-   build succeeded: an immutable Release never seals a truncated asset. The images are pushed
+   build succeeded: an immutable Release never seals a truncated asset. Both this job and CI's
+   `docs-docx` job render the .pdf with `scripts/build-docs-pdf.py`, which has LibreOffice update
+   the table of contents before it exports (a plain `--convert-to pdf` does not, and every PDF up
+   to 1.209.0 printed the contents heading over nothing) and fails unless the contents lists every
+   level-1 and level-2 heading with a page number: as many entries as the .docx caches in its
+   field, one per Heading1 and Heading2 paragraph, counted before LibreOffice starts, with pages
+   that rise. A LibreOffice still running after 200 s is stopped by the script itself, with a line
+   that says so, inside the step's 240 s `timeout`. Here its steps run only where the tagged tree
+   has the script. The .docx carries the same entries as links without page numbers, which Word
+   adds when it updates the field. The images are pushed
    by `build` before this job starts. CI's `docs-docx` job (a hard PR gate) is bounded the same way,
    with a 45-min job limit at least 5 min above the sum of its steps' bounds (38 min).
    `server/test/workflowTimeouts.test.ts` holds these bounds. The CI job also drops the runner's
