@@ -11,7 +11,9 @@
  * CHECK: field days only, the map of record, staleness, the judged-bad holds (G4, G6; M4, M5), G10, the night clip, the hysteresis,
  * the threshold 1.05 (owner; 1.04 until v1.207.1). (A) ADMISSION: one predicate for the fit, bias, skill and ledger. (W) THE WORKER: the identity branch,
  * the caches per E, the runway untouched, the planning skill a realized-GHI reader. (S) THE SELECTION: (a)/(b)/(c) with M2, the
- * clauses of (b) in L1's precedence, the transient class, the latch (M1, L2), never a shadow leg. (T) THE WORDS: figures only (M3),
+ * clauses of (b) in L1's precedence, the transient class, the latch (M1, L2), the live selection never a shadow leg's. (M) THE MID-DAY
+ * SHADOW'S OWN SELECTION (v1.210.0): opted into by the shadow's sizer alone, no latch, no live cancel, the install's mode, the band
+ * following it, its refusal in the leg's row, the daylight rule, unknown as before, the basis named on the row. (T) THE WORDS: figures only (M3),
  * every hold's end, G4's grid input and force-charge, en and es, the push, the card. (H) HOME ASSISTANT (L6). (L) THE LEDGER (L5)
  * and (G) THE GATE. (O) THE OWNER'S DECISIONS: the haircut 1.00, every connected slot resolves, the runway at zero sun, 1.05 strict.
  *
@@ -38,6 +40,7 @@ const GATE = resolve(REPO, 'server/src/nightChargeGate.ts');
 const REC = resolve(REPO, 'server/src/recorder.ts');
 const MQTT = resolve(REPO, 'server/src/mqttDiscovery.ts');
 const CARD = resolve(REPO, 'web/src/cards/nightChargeText.ts');
+const MSH = resolve(REPO, 'server/src/middayShadow.ts');
 
 const T_UNIT = 'test/panelPvBasis.test.ts';
 const T_REC = 'test/panelPvBasisRecord.test.ts';
@@ -49,6 +52,8 @@ const T_GHI = 'test/realizedGhiCapture.test.ts';
 const T_CO = 'test/cushionOnlyPlan.test.ts';
 const T_GOLD = 'test/legacyIdentity.test.ts';
 const T_MQTT = 'test/mqttDiscovery.test.ts';
+const T_MSB = 'test/middayShadowPanelBasis.test.ts';
+const T_MSI = 'test/middayShadowBasisIndependent.test.ts';
 
 const MUTANTS = [
   /* ── R: the resolver ── */
@@ -520,11 +525,11 @@ const MUTANTS = [
     why: 'A recompute at 00:30 with no latch judges as of the next evening.',
   },
   {
-    id: 'PB-S-xx. ★★★ a shadow leg takes the panel basis',
-    file: IDX, tests: [T_SEL],
+    id: 'PB-S-xx. ★★★ a shadow leg takes the LIVE selection',
+    file: IDX, tests: [T_SEL, T_MSB],
     find: '  const pvSel: PvSelection | null = shadowLeg ? null : selectPvBasis({',
     to: '  const pvSel: PvSelection | null = selectPvBasis({ /* MUTANT */',
-    why: 'The mid-day, backup and morning-refresh legs size a daylight grid charge on the readings G11 cannot vouch for.',
+    why: 'A shadow leg and the live morning refresh select on the live latch and the live leg\'s eligibility, and reach the live basis log, the live admission memory and (keep-previous) the live plan holder.',
   },
   {
     id: 'PB-S-xxi. ★★★ (L1) the transient class does not keep the 22:30 deferral',
@@ -939,6 +944,294 @@ const MUTANTS = [
     find: '    return e != null && e < -PANEL_UNDERBUY_DIAG_KWH;',
     to: '    return e != null; /* MUTANT */',
     why: 'The diagnostic says every panel night under-bought.',
+  },
+  /* ── (M) the mid-day shadow's own selection (v1.210.0) ────────────────────────────────────────────────────────────────── */
+  {
+    id: 'PB-M-i. ★★★ (exemplar) the shadow sizer does not opt in: the shadow stays on the Cores\' dark band',
+    file: IDX, tests: [T_MSB, T_GOLD],
+    find: '  const r = await recomputeNightChargePlan({ allowStalePanel, shadowLeg: sizing, shadowPvBasis: true });',
+    to: '  const r = await recomputeNightChargePlan({ allowStalePanel, shadowLeg: sizing }); /* MUTANT */',
+    why: 'The v1.209 defect: every mid-day row "not armed — the plan basis is incomplete (only 0 scored calibration day(s), need 4 …)" while the overnight plan of the same evening ran on the panel band.',
+  },
+  {
+    id: 'PB-M-ii. ★★★ any pinned leg takes the shadow\'s selection',
+    file: IDX, tests: [T_MSB],
+    find: '  const shadowPvAsOfDay: string | null = shadowLeg != null && opts.shadowPvBasis === true && window != null',
+    to: '  const shadowPvAsOfDay: string | null = shadowLeg != null && window != null /* MUTANT */',
+    why: 'The live morning refresh, the R6 write path, plans on the panel band with no weather-age rule.',
+  },
+  {
+    id: 'PB-M-iii. ★★★ the leg\'s role decides the shadow\'s mode',
+    file: IDX, tests: [T_MSB],
+    find: "  const shadowPvWriteMode = lineForceChargeOn('cost');",
+    to: '  const shadowPvWriteMode = lineForceChargeOn(legRole); /* MUTANT */',
+    why: 'Every backup leg is refused as "the add-on is in advisory mode" in a write mode.',
+  },
+  {
+    id: 'PB-M-iv. ★★★ the band does not follow the shadow\'s selection',
+    file: IDX, tests: [T_MSB],
+    find: "  const pvPlanning = pvSel?.use === 'planning' || shadowPv?.use === 'planning';",
+    to: "  const pvPlanning = pvSel?.use === 'planning'; /* MUTANT */",
+    why: 'A leg selected on the panel band is sized on the Cores\' dark band: nothing sized, and its row names a band it was not sized on.',
+  },
+  {
+    id: 'PB-M-v. ★★★ the shadow\'s refusal never reaches the planner',
+    file: IDX, tests: [T_MSB],
+    find: '    ...shadowPvPlannerDeps(shadowPv),',
+    to: '    /* MUTANT */',
+    why: 'A refused leg\'s row is silent about the panel, and M2 lets it size on a band that leaves a Core out.',
+  },
+  {
+    id: 'PB-M-vi. ★★★ a refused leg claims the panel basis',
+    file: IDX, tests: [T_MSB],
+    find: "    ...(shadowPv?.use === 'planning' ? { shadowPanelPvAsOfDay: shadowPv.asOfDay } : {}),",
+    to: '    ...(shadowPv != null ? { shadowPanelPvAsOfDay: shadowPv.asOfDay } : {}), /* MUTANT */',
+    why: 'A row refused the panel basis says the panel\'s readings sized it.',
+  },
+  {
+    id: 'PB-M-vii. ★★ the shadow takes a rollup of any evening',
+    file: IDX, tests: [T_MSB],
+    find: '    planningRollupOk: multiDayPlanning != null && multiDayPlanning.asOfDay === shadowPvAsOfDay,',
+    to: '    planningRollupOk: multiDayPlanning != null, /* MUTANT */',
+    why: 'The hours beyond the band come from another evening\'s planning layer.',
+  },
+  {
+    id: 'PB-M-viii. ★★ a night reading is refused without its hour or the force-charge',
+    file: IDX, tests: [T_MSB],
+    find: "    enrich: (r) => (r.code === 'night-reading' ? { ...r, hourClock: fmtSiteClock(r.hourStartMs), forceCharge: forceChargeStateAt(r.hourStartMs) } : r),",
+    to: '    enrich: (r) => r, /* MUTANT */',
+    why: 'The row says "the add-on\'s force-charge state in that hour is not on record" of an hour the record holds.',
+  },
+  {
+    id: 'PB-M-ix. ★★★ the daylight rule starts at the window, not the plan instant',
+    file: IDX, tests: [T_MSB],
+    find: '    fromMs: nowMs, toMs: horizonEndMs, clockHourOf: siteHour, clockText: fmtSiteClock,',
+    to: '    fromMs: window?.startMs ?? nowMs, toMs: horizonEndMs, clockHourOf: siteHour, clockText: fmtSiteClock, /* MUTANT */',
+    why: 'The morning that sets the pool at the open is read on the typical-day fallback.',
+  },
+  {
+    id: 'PB-M-x. ★★★ the shadow reads the live night\'s cancel',
+    file: SEL, tests: [T_MSB],
+    find: '    eligible: { writeMode: i.writeMode, panelFresh: i.panelFresh, cancelled: false },',
+    to: '    eligible: { writeMode: i.writeMode, panelFresh: i.panelFresh, cancelled: true }, /* MUTANT */',
+    why: 'A shadow leg is refused with "tonight\'s write was cancelled", a statement about the live night.',
+  },
+  {
+    id: 'PB-M-xi. ★★★ the shadow takes the panel basis in advisory mode',
+    file: SEL, tests: [T_MSB],
+    find: '    eligible: { writeMode: i.writeMode, panelFresh: i.panelFresh, cancelled: false },',
+    to: '    eligible: { writeMode: true, panelFresh: i.panelFresh, cancelled: false }, /* MUTANT */',
+    why: 'In advisory mode the shadow sizes on the readings the option text says are not used.',
+  },
+  {
+    id: 'PB-M-xii. ★★★ the shadow follows a latch',
+    file: SEL, tests: [T_MSB],
+    find: '    latched: null,\n    published: i.published, planning: i.planning,',
+    to: "    latched: { basis: 'published', asOfDay: i.asOfDay, decided: true }, /* MUTANT */\n    published: i.published, planning: i.planning,",
+    why: 'A passing panel basis is refused as latched: the shadow judged by a decision that was not its own.',
+  },
+  {
+    id: 'PB-M-xiii. ★★★ unknown is not today: a transient report or (a) changes the shadow',
+    file: SEL, tests: [T_MSB],
+    find: '    return sel.reason == null ? null',
+    to: "    return sel.reason == null ? { use: 'published' as const, asOfDay: i.asOfDay, bandCoverageRefusedBy: sel.bandCoverageRefusedBy, panelBasisRefusal: null } /* MUTANT */",
+    why: 'A transient report in the mixed state refuses the Cores\' band (M2) with no word on the panel.',
+  },
+  {
+    id: 'PB-M-xiv. ★★★ a clock hour the band lacks passes',
+    file: SEL, tests: [T_MSB],
+    find: '    if (!carried.has(c) || unfitted.has(c)) return refused(',
+    to: '    if (/* MUTANT */ unfitted.has(c)) return refused(',
+    why: 'A leg is sized over an hour the panel band has no figure for.',
+  },
+  {
+    id: 'PB-M-xv. ★★★ an unfitted daylight hour passes',
+    file: SEL, tests: [T_MSB],
+    find: '    if (!carried.has(c) || unfitted.has(c)) return refused(',
+    to: '    if (!carried.has(c) /* MUTANT */) return refused(',
+    why: 'A leg is sized on the typical-day fallback (0 W where the fit has no rows) in daylight.',
+  },
+  {
+    id: 'PB-M-xvi. ★★ the daylight rule reads past the horizon end',
+    file: SEL, tests: [T_MSB],
+    find: '  for (let t = Math.floor(i.fromMs / HOUR) * HOUR; t < i.toMs; t += HOUR) {',
+    to: '  for (let t = Math.floor(i.fromMs / HOUR) * HOUR; t <= i.toMs; t += HOUR) { /* MUTANT */',
+    why: 'Option B is refused for an hour its walk never reads.',
+  },
+  {
+    id: 'PB-M-xvii. ★★★ the daylight rule skips the morning',
+    file: SEL, tests: [T_MSB],
+    find: '  for (let t = Math.floor(i.fromMs / HOUR) * HOUR; t < i.toMs; t += HOUR) {',
+    to: '  for (let t = Math.floor(i.fromMs / HOUR) * HOUR + 12 * HOUR; t < i.toMs; t += HOUR) { /* MUTANT */',
+    why: 'The hours before the window open, which set the pool the window opens on, are not judged.',
+  },
+  {
+    id: 'PB-M-xviii. ★★★ a report that does not say is taken as fitted',
+    file: SEL, tests: [T_MSB],
+    find: '  if (i.unfittedDaylightTs == null) return null;',
+    to: "  if (i.unfittedDaylightTs == null) return { use: 'planning', asOfDay: i.asOfDay, bandCoverageRefusedBy: null, panelBasisRefusal: null }; /* MUTANT */",
+    why: 'Unknown is sized as fitted.',
+  },
+  {
+    id: 'PB-M-xviii-b. ★★★ a report that does not say is refused with words',
+    file: SEL, tests: [T_MSB, T_MSI],
+    find: '  if (i.unfittedDaylightTs == null) return null;',
+    to: "  if (i.unfittedDaylightTs == null) return { use: 'published', asOfDay: i.asOfDay, bandCoverageRefusedBy: null, panelBasisRefusal: 'unknown' }; /* MUTANT */",
+    why: 'Unknown is not today: the row carries words, and M2 applies, where v1.209.1 had neither.',
+  },
+  {
+    id: 'PB-M-xxxi. ★★★ the daylight rule takes a plan instant that is not a number',
+    file: SEL, tests: [T_MSI],
+    find: '  if (!Number.isFinite(i.fromMs) || !Number.isFinite(i.toMs) || i.toMs <= i.fromMs) return null;',
+    to: '  if (!Number.isFinite(i.toMs) || i.toMs <= i.fromMs) return null; /* MUTANT */',
+    why: 'No hour is judged and the leg is sized on the panel band.',
+  },
+  {
+    id: 'PB-M-xxxii. ★★★ the daylight rule takes a horizon end that is not a number',
+    file: SEL, tests: [T_MSI],
+    find: '  if (!Number.isFinite(i.fromMs) || !Number.isFinite(i.toMs) || i.toMs <= i.fromMs) return null;',
+    to: '  if (!Number.isFinite(i.fromMs) || i.toMs <= i.fromMs) return null; /* MUTANT */',
+    why: 'No hour is judged and the leg is sized on the panel band.',
+  },
+  {
+    id: 'PB-M-xxxiii. ★★★ the daylight rule takes an empty span',
+    file: SEL, tests: [T_MSI],
+    find: '  if (!Number.isFinite(i.fromMs) || !Number.isFinite(i.toMs) || i.toMs <= i.fromMs) return null;',
+    to: '  if (!Number.isFinite(i.fromMs) || !Number.isFinite(i.toMs) || i.toMs < i.fromMs) return null; /* MUTANT */',
+    why: 'A horizon end at the plan instant is judged on the hour it falls in alone.',
+  },
+  {
+    id: 'PB-M-xix. ★★★ the daylight refusal drops M2',
+    file: SEL, tests: [T_MSB],
+    find: '    bandCoverageRefusedBy: i.published.gate.basisComplete && i.published.uncoveredSlots.length > 0 ? bandCoverageRefusalText(i.published.uncoveredSlots) : null,',
+    to: '    bandCoverageRefusedBy: null, /* MUTANT */',
+    why: 'A leg refused the panel band is sized on a Cores\' band that leaves a Core out.',
+  },
+  {
+    id: 'PB-M-xx. ★★ the fit\'s daylight line moves',
+    file: AN, tests: [T_MSB],
+    find: '  return hours.filter((h) => h.modelled !== true && !(h.ghiWm2 != null && h.ghiWm2 <= DAYLIGHT_GHI)).map((h) => h.ts);',
+    to: '  return hours.filter((h) => h.modelled !== true && !(h.ghiWm2 != null && h.ghiWm2 < DAYLIGHT_GHI)).map((h) => h.ts); /* MUTANT */',
+    why: 'An hour at the fit\'s own night line counts as daylight.',
+  },
+  {
+    id: 'PB-M-xxi. ★★★ an hour with no GHI counts as night',
+    file: AN, tests: [T_MSB],
+    find: '  return hours.filter((h) => h.modelled !== true && !(h.ghiWm2 != null && h.ghiWm2 <= DAYLIGHT_GHI)).map((h) => h.ts);',
+    to: '  return hours.filter((h) => h.modelled !== true && !((h.ghiWm2 ?? 0) <= DAYLIGHT_GHI)).map((h) => h.ts); /* MUTANT */',
+    why: 'A fallback hour whose sun is unknown is sized as a fitted one.',
+  },
+  {
+    id: 'PB-M-xxii. ★★★ modelled hours are flagged',
+    file: AN, tests: [T_MSB],
+    find: '  return hours.filter((h) => h.modelled !== true && !(h.ghiWm2 != null && h.ghiWm2 <= DAYLIGHT_GHI)).map((h) => h.ts);',
+    to: '  return hours.filter((h) => !(h.ghiWm2 != null && h.ghiWm2 <= DAYLIGHT_GHI)).map((h) => h.ts); /* MUTANT */',
+    why: 'Every daylight hour reads as unfitted: no leg is ever sized on the panel band.',
+  },
+  {
+    id: 'PB-M-xxiii. ★★★ the planning report says no hour is unfitted',
+    file: RPT, tests: [T_MSB],
+    find: '      planningUnfittedDaylightTs: unfittedDaylightHourTs(p.planningHours),',
+    to: '      planningUnfittedDaylightTs: unfittedDaylightHourTs([]), /* MUTANT */',
+    why: 'The daylight rule never fires on the real band.',
+  },
+  {
+    id: 'PB-M-xxiv. ★★★ the row drops the cost leg\'s basis',
+    file: MSH, tests: [T_MSB],
+    find: '    c ? `cost: ${c.disposition}${panelPvBasisNote(c.panelPvAsOfDay)}` : null,',
+    to: '    c ? `cost: ${c.disposition}` : null, /* MUTANT */',
+    why: 'A cost leg sized on the panel band reads like one sized on the Cores\' band.',
+  },
+  {
+    id: 'PB-M-xxv. ★★★ the row drops the backup leg\'s basis',
+    file: MSH, tests: [T_MSB],
+    find: '    b ? `backup: ${b.disposition}${panelPvBasisNote(b.panelPvAsOfDay)}` : null,',
+    to: '    b ? `backup: ${b.disposition}` : null, /* MUTANT */',
+    why: 'A backup leg sized on the panel band reads like one sized on the Cores\' band.',
+  },
+  {
+    id: 'PB-M-xxvi. ★★ the row drops option B\'s basis',
+    file: MSH, tests: [T_MSB],
+    find: '    b && rec.backupB?.panelPvAsOfDay != null ? `backup option B:${panelPvBasisNote(rec.backupB.panelPvAsOfDay)}` : null,',
+    to: '    null, /* MUTANT */',
+    why: 'Option B\'s figures on the panel band carry no word of it.',
+  },
+  {
+    id: 'PB-M-xxvii. ★★★ the leg forgets its basis',
+    file: MSH, tests: [T_MSB],
+    find: "    ...(p != null && typeof sized?.panelPvAsOfDay === 'string' && YMD_RE.test(sized.panelPvAsOfDay) ? { panelPvAsOfDay: sized.panelPvAsOfDay } : {}),",
+    to: '    /* MUTANT */',
+    why: 'No row ever names the panel band.',
+  },
+  {
+    id: 'PB-M-xxviii. ★★★ a restart forgets the basis',
+    file: MSH, tests: [T_MSB],
+    find: "    ...(typeof o.panelPvAsOfDay === 'string' && YMD_RE.test(o.panelPvAsOfDay) ? { panelPvAsOfDay: o.panelPvAsOfDay } : {}),",
+    to: '    /* MUTANT */',
+    why: 'After a restart the record says nothing of the band its legs were sized on.',
+  },
+  {
+    id: 'PB-M-xxix. ★★ a malformed basis day is kept',
+    file: MSH, tests: [T_MSB],
+    find: "    ...(typeof o.panelPvAsOfDay === 'string' && YMD_RE.test(o.panelPvAsOfDay) ? { panelPvAsOfDay: o.panelPvAsOfDay } : {}),",
+    to: "    ...(typeof o.panelPvAsOfDay === 'string' ? { panelPvAsOfDay: o.panelPvAsOfDay } : {}), /* MUTANT */",
+    why: 'A hand-edited record prints any text as the evening of the band.',
+  },
+  {
+    id: 'PB-M-xxx. ★★★ every row claims the panel basis',
+    file: MSH, tests: [T_MSB],
+    find: "  return asOfDay != null ? ` (on the panel-measured planning band as of ${asOfDay})` : '';",
+    to: "  return ` (on the panel-measured planning band as of ${asOfDay})`; /* MUTANT */",
+    why: 'A row on the Cores\' band, or refused, says the panel band sized it.',
+  },
+  {
+    id: 'PB-M-xxx-b. ★★★ a mixed band is said as the panel\'s own readings of every slot',
+    file: MSH, tests: [T_MSB, T_MSI],
+    find: "  return asOfDay != null ? ` (on the panel-measured planning band as of ${asOfDay})` : '';",
+    to: "  return asOfDay != null ? ` (on the panel's own solar readings as of ${asOfDay})` : ''; /* MUTANT */",
+    why: 'A band whose slot 1 is on its Core\'s own figure is said to be the panel\'s readings throughout.',
+  },
+  {
+    id: 'PB-M-xxxiv. ★★★ the refresh compares across bands',
+    file: MSH, tests: [T_MSI],
+    find: '  const otherBand = sized?.plan != null && sizedBand !== eveningBand;',
+    to: '  const otherBand = false; /* MUTANT */',
+    why: 'A re-plan on the Cores\' band is recorded lowered, capped or unchanged against the panel band\'s evening figures.',
+  },
+  {
+    id: 'PB-M-xxxv. ★★★ the refresh keeps the re-plan on another band',
+    file: MSH, tests: [T_MSI],
+    find: '  const p = otherBand ? null : sized?.plan ?? null;',
+    to: '  const p = sized?.plan ?? null; /* MUTANT */',
+    why: 'The disposition and the needed figures are the other band\'s re-plan.',
+  },
+  {
+    id: 'PB-M-xxxvi. ★★★ a re-plan with no basis field is not the Cores\' band',
+    file: MSH, tests: [T_MSI],
+    find: '  const sizedBand = sized?.panelPvAsOfDay ?? null;',
+    to: '  const sizedBand = sized?.panelPvAsOfDay as string | null; /* MUTANT */',
+    why: 'Every refresh of a Cores\' band evening stands: the refresh is never compared.',
+  },
+  {
+    id: 'PB-M-xxxvii. ★★★ an evening record with no basis field is not the Cores\' band',
+    file: MSH, tests: [T_MSI],
+    find: '  const eveningBand = c.panelPvAsOfDay ?? null;',
+    to: '  const eveningBand = c.panelPvAsOfDay as string | null; /* MUTANT */',
+    why: 'A re-plan that says null for its band stands against a record from before v1.210.0.',
+  },
+  {
+    id: 'PB-M-xxxviii. ★★★ the standing refresh hides why',
+    file: MSH, tests: [T_MSI],
+    find: "    ...(otherBand ? { reason: `the refresh was planned on ${solarBandWords(sizedBand)}, the evening plan on ${solarBandWords(eveningBand)}; the evening plan stands` } : {}),",
+    to: '    /* MUTANT */',
+    why: 'The row reads "the refresh had no plan" on a refresh that had one, on another band.',
+  },
+  {
+    id: 'PB-M-xxxix. ★★★ the standing refresh keeps the other band\'s window PV',
+    file: MSH, tests: [T_MSI],
+    find: '    windowPvP50Kwh: otherBand ? null : fin(sized?.windowPvP50Kwh),',
+    to: '    windowPvP50Kwh: fin(sized?.windowPvP50Kwh), /* MUTANT */',
+    why: 'The refresh push would state a window PV the evening plan was not sized on.',
   },
 ];
 

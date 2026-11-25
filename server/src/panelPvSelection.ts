@@ -33,6 +33,11 @@
  * decision or an arm refused or not delivered; or the window's own evening's on the planning band), every refusal's words speak of the
  * plan shown only and claim nothing of that arm or of tonight's write.
  *
+ * THE MID-DAY SHADOW (v1.210.0, shadowPvBasis). Each leg the shadow sizes selects on its own: the same (a)/(b)/(c) as the evening
+ * job's own call (no latch), as of the evening that owns its window, on the install's write mode and a fresh panel, never the live
+ * night's cancel, plus the daylight rule (an hour its walks read must be a fitted solar figure of the band). It reads no latch, writes
+ * no state, and nothing of it is put on a live plan.
+ *
  * Slot keys ('<panelSn>#<n>') and serials are never printed: the words carry slot numbers and days only. PURE throughout.
  */
 import type { UcChecks, UcReason, UcVerdict, SlotSource, UncountedCause } from './panelPvBasis.js';
@@ -185,8 +190,8 @@ export interface BandGate { basisComplete: boolean; basisBlockedBy: string | nul
 export interface PvSelectionInput {
   /** E. */
   asOfDay: string;
-  /** May the panel basis be used tonight at all: a write mode, a fresh panel, the night not cancelled (the live overnight leg only:
-   *  index.ts never asks for a shadow leg). */
+  /** May the panel basis be used tonight at all: a write mode, a fresh panel, the night not cancelled (the live overnight leg's terms;
+   *  a mid-day shadow leg passes its own, shadowPvBasis). */
   eligible: { writeMode: boolean; panelFresh: boolean; cancelled: boolean };
   /** The latch governing this recompute (latchedPvBasis), or null: none, or the evening job's own (arming) call, which selects afresh as
    *  of its own day (F1: index.ts passes null there whatever the latch holds). */
@@ -299,6 +304,99 @@ export function selectPvBasis(i: PvSelectionInput): PvSelection {
   const b = planningClauses(i);
   if (b.ok) return out('planning', b);
   return out('published', b);
+}
+
+/* ─── ★★★ v1.210.0 — the mid-day shadow's own selection ─────────────────────────────────────────────────────────────────── */
+
+const HOUR = 3_600_000;
+
+/** What one leg of the mid-day shadow selects on (index.ts recomputeNightChargePlan, opted into by the shadow's sizer alone: never a
+ *  live plan, never the live morning refresh). No latch and no armed record: the shadow writes nothing, so neither is its. */
+export interface ShadowPvBasisInput {
+  /** E: the evening that owns the leg's pinned window (chargeWindows.planDateOwningCycle). */
+  asOfDay: string;
+  /** The add-on is in a write mode (the live overnight cost leg's term): the install's mode, never the leg's role. */
+  writeMode: boolean;
+  panelFresh: boolean;
+  published: PvSelectionInput['published'];
+  planning: PvSelectionInput['planning'];
+  planningRollupOk: boolean;
+  connectedKeys: readonly string[];
+  ratioKnown: boolean;
+  /** The planning band's hour starts, and those of them whose PV is the typical-day fallback while the sun may be up
+   *  (analytics.unfittedDaylightHourTs); null: the report does not say. */
+  bandHourTs: readonly number[];
+  unfittedDaylightTs: readonly number[] | null;
+  /** The hours the leg's walks read the band over: the plan instant to the leg's horizon end. */
+  fromMs: number;
+  toMs: number;
+  /** The site clock hour (0-23) of an instant, and its words ("7:00 AM"). */
+  clockHourOf: (ms: number) => number;
+  clockText: (ms: number) => string;
+  /** The reason's figures completed by what only the main thread knows (G4: the hour's clock, the add-on's force-charge in it). */
+  enrich: (r: PvBasisReason) => PvBasisReason;
+}
+
+export interface ShadowPvBasis {
+  /** The band the leg is sized on: 'planning' the panel-measured band as of `asOfDay`; 'published' the Cores' band, the panel's
+   *  readings refused (panelBasisRefusal says why). */
+  use: 'published' | 'planning';
+  asOfDay: string;
+  /** M2's words, for the planner (a refused plan). */
+  bandCoverageRefusedBy: string | null;
+  /** Why the panel's readings are not used, in words, for a refused plan's basisBlockedBy. Null on (a) and when used. */
+  panelBasisRefusal: string | null;
+}
+
+/** The daylight rule's words. PURE. */
+export function shadowDaylightRefusalText(r: { atText: string; missing: boolean }): string {
+  return r.missing
+    ? `the panel-measured band carries no figure for the hour from ${r.atText}`
+    : `the panel-measured band has no fitted solar response for the daylight hour from ${r.atText}`;
+}
+
+/**
+ * The selection a mid-day shadow leg is sized on: selection (a)/(b)/(c) as the evening job's own call makes it (no latch, F1), on the
+ * install's write mode (a backup leg is no advisory leg), never the live night's cancel (the shadow has no write to cancel), and one
+ * rule of its own — THE DAYLIGHT RULE: the panel-measured band is a fitted solar figure only where its hour is modelled
+ * (forecastHourPvW on the slope of that clock hour); a leg is sized on it only when no hour its walks read, from the plan instant to
+ * its horizon end, falls on a clock hour the band lacks or reads as the typical-day fallback in daylight (an hour beyond the 24-hour
+ * band is judged by the band hour of the same clock hour: the slope is per clock hour). Null — the shadow as before, to the letter —
+ * on (a) (the Cores' band passes and covers every connected slot), on the transient class (no report yet, one for another evening
+ * or slot set, a refusal with no reason), and where the daylight rule cannot be judged (a report that does not list its unfitted
+ * hours; a span of hours that is not finite or not after the plan instant). PURE.
+ */
+export function shadowPvBasis(i: ShadowPvBasisInput): ShadowPvBasis | null {
+  const sel = selectPvBasis({
+    asOfDay: i.asOfDay,
+    eligible: { writeMode: i.writeMode, panelFresh: i.panelFresh, cancelled: false },
+    latched: null,
+    published: i.published, planning: i.planning, planningRollupOk: i.planningRollupOk, connectedKeys: i.connectedKeys, ratioKnown: i.ratioKnown,
+  });
+  // (a) and the transient class carry no reason: the shadow as before. (c) with a reason: refused, and said so.
+  if (sel.use !== 'planning') {
+    return sel.reason == null ? null
+      : { use: 'published', asOfDay: i.asOfDay, bandCoverageRefusedBy: sel.bandCoverageRefusedBy, panelBasisRefusal: pvBasisReasonText(i.enrich(sel.reason)) };
+  }
+  const refused = (words: string): ShadowPvBasis => ({
+    use: 'published', asOfDay: i.asOfDay, panelBasisRefusal: words,
+    bandCoverageRefusedBy: i.published.gate.basisComplete && i.published.uncoveredSlots.length > 0 ? bandCoverageRefusalText(i.published.uncoveredSlots) : null,
+  });
+  // The daylight rule unknown (no list of unfitted hours, no span of hours to judge): the shadow as before, never sized unjudged.
+  if (i.unfittedDaylightTs == null) return null;
+  if (!Number.isFinite(i.fromMs) || !Number.isFinite(i.toMs) || i.toMs <= i.fromMs) return null;
+  const carried = new Set(i.bandHourTs.map(i.clockHourOf));
+  const unfitted = new Set(i.unfittedDaylightTs.map(i.clockHourOf));
+  for (let t = Math.floor(i.fromMs / HOUR) * HOUR; t < i.toMs; t += HOUR) {
+    const c = i.clockHourOf(t);
+    if (!carried.has(c) || unfitted.has(c)) return refused(shadowDaylightRefusalText({ atText: i.clockText(t), missing: !carried.has(c) }));
+  }
+  return { use: 'planning', asOfDay: i.asOfDay, bandCoverageRefusedBy: null, panelBasisRefusal: null };
+}
+
+/** The planner deps a shadow leg's selection overrides (index.ts, the last entry of the deps): none without one. PURE. */
+export function shadowPvPlannerDeps(s: ShadowPvBasis | null): { bandCoverageRefusedBy?: string | null; panelBasisRefusal?: string | null } {
+  return s == null ? {} : { bandCoverageRefusedBy: s.bandCoverageRefusedBy, panelBasisRefusal: s.panelBasisRefusal };
 }
 
 /* ─── the words ─────────────────────────────────────────────────────────────────────────────── */

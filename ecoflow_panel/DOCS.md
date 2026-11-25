@@ -316,8 +316,10 @@ only and does not hold back `supervised`. Planning in full:
 `ARB_COST_MAX_SOC_PCT` above 50) and a tariff with a `super_off_peak` period (10am–3pm in
 winter on APS R-EV), on the evening before each winter weekday Power works out the charge it
 would make instead in that period the next day, behind an overnight outage backup, re-checked
-on the morning forecast. Nothing is armed, written, pushed or spoken for it; the overnight
-charge runs as above. The Mid-day Charge entities (`ecoflow_midday_charge_recommended` stays
+on the morning forecast. Its solar is chosen as the overnight plan's is (the panel's own
+readings while the Cores are dark, where those pass their checks), and its ledger row says
+which band sized each leg. Nothing is armed, written, pushed or spoken for it; the
+overnight charge runs as above. The Mid-day Charge entities (`ecoflow_midday_charge_recommended` stays
 off), a read-only part of the night-charge card and the log (`night-charge[midday-shadow]:`)
 show it.
 

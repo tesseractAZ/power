@@ -954,7 +954,7 @@ test('★★ the option texts: while the Cores are dark a write-mode plan takes 
 
 /* ══ the wiring (index.ts source pins) ═══════════════════════════════════════════════════════════════════════════════════ */
 
-test('★★★ wiring: the window resolved first; E asked of both planning reports in the same Promise.all as the published ones; one devs snapshot; every read takes the selected band; never a shadow leg', () => {
+test('★★★ wiring: the window resolved first; E asked of both planning reports in the same Promise.all as the published ones; one devs snapshot; every read takes the selected band; the live selection never a shadow leg\'s', () => {
   const fn = INDEX.slice(INDEX.indexOf('async function recomputeNightChargePlan('), INDEX.indexOf('function armedExpectedBuyKwh('));
   const iWindow = fn.indexOf('const window = shadowLeg ? (shadowLeg.spec.window ?? null)');
   const iReports = fn.indexOf("analytics.report<ProbabilisticForecast>('probabilisticForecast')");
@@ -985,7 +985,7 @@ test('★★★ wiring: the window resolved first; E asked of both planning repo
   // The evening latches its basis.
   assert.match(INDEX, /pv: pvLatchOf\(fresh, today\),\n\s+\}\); \/\/ latch AFTER a successful send/);
   assert.match(INDEX, /writeNightChargeLatch\(\{ lastNotifyDay: today, pv: pvLatchOf\(fresh, today\) \}\);/);
-  // The selection never reaches a shadow leg (the mid-day, backup and refresh legs), nor the armed record.
+  // The live selection never reaches a shadow leg (a mid-day shadow leg takes its own: middayShadowPanelBasis.test.ts), nor the armed record.
   assert.match(fn, /\.\.\.\(pvSel != null && pvAsOfDay != null \? \{ pvSelection: pvSelectionExtras\(pvSel, pvReason, pvAsOfDay\) \} : \{\}\),/);
   assert.doesNotMatch(INDEX.slice(INDEX.indexOf('function armCycle'), INDEX.indexOf('function armCycle') + 1) + readFileSync(resolve(HERE, '../src/chargeCycle.ts'), 'utf8'), /pvBasis|panelPvSelection/);
 });

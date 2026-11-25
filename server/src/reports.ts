@@ -28,6 +28,7 @@ import {
   computeProbabilisticForecast,
   computeMultiDayForecast,
   getPlanningForecast,
+  unfittedDaylightHourTs,
   computeBayesianSolarModel,
   diurnalBaselinePredictor,
   forecastHourPvW,
@@ -262,6 +263,9 @@ const BUILDERS: Record<string, Builder> = {
       // v1.204.0 (L5) — when the planning layer (its verdict and admitted set) was built: a panel row's PV actual reads the admitted
       // set only from a layer built after the morning its last span day's daily total comes in.
       planningGeneratedAt: p.generatedAt,
+      // ★★★ v1.210.0 — the band's hours whose PV is the typical-day fallback while the sun may be up: the mid-day shadow sizes on no leg
+      // whose hours fall on one (panelPvSelection.shadowPvBasis). The live overnight plan does not read it.
+      planningUnfittedDaylightTs: unfittedDaylightHourTs(p.planningHours),
     };
   },
   bayesianSolar: (ctx) => computeBayesianSolarModel(devicesOf(ctx), ctx.recorder),
