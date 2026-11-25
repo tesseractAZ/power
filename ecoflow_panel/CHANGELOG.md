@@ -9,7 +9,7 @@
 
 ### Verification
 
-7,127 server tests pass. The repository's build: the .docx caches 80 entries and the PDF's contents lists 80, each with a page number. Group P of `mutate-v1188-0.mjs` gains 56 mutants and `mutate-v1187-3i.mjs` 4, every mutant killed in a full run of each; 6,679 anchors resolve across 158 harnesses.
+7,123 server tests pass on CI; four more need pandoc or LibreOffice and run where those are installed. The repository's build: the .docx caches 80 entries and the PDF's contents lists 80, each with a page number. Group P of `mutate-v1188-0.mjs` gains 56 mutants and `mutate-v1187-3i.mjs` 4, every mutant killed in a full run of each; 6,679 anchors resolve across 158 harnesses.
 
 ## 1.209.0
 
