@@ -78,7 +78,7 @@ test('★★ the 30-min tick and the warm-up stay STRICT (they keep the previous
   // v1.189.0 (R4) — and the mid-day shadow's sizer, which takes the evening job's own rule in the
   // evening and a fresh panel only for the morning refresh; it plans nothing live.
   assert.equal((INDEX.match(/recomputeNightChargePlan\(\{ allowStalePanel/g) ?? []).length, 2, 'only the evening job (and its shadow) may use a stale panel');
-  assert.ok(INDEX.includes('const r = await recomputeNightChargePlan({ allowStalePanel, shadowLeg: sizing });'));
+  assert.ok(INDEX.includes('const r = await recomputeNightChargePlan({ allowStalePanel, shadowLeg: sizing, shadowPvBasis: true });'));
   assert.ok(INDEX.includes('sizeLeg: (sz) => sizeShadowLeg(sz, nowMin >= sched.staleDeferUntilMin),'));
   assert.ok(INDEX.includes('const sized = await sizeShadowLeg(sizing, false);'));
   assert.equal((INDEX.match(/sizeShadowLeg\(/g) ?? []).length, 3, 'defined once, called by the evening and the refresh');

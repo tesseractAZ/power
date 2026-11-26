@@ -245,10 +245,11 @@ export function minOverSpans(
  *
  *  v1.189.0 (review) — and the PV null on a row whose PV verdict is set aside (`pvSetAside`: the
  *  row's own pvVerdictSetAside / knownFleetMismatchReason, NightLedgerColumns.pvSetAside). The
- *  shadow's window P50 comes from the same evening band as the row's, so a band built on a solar
- *  model fitted on other Cores than the actuals says nothing about forecast skill over the window
- *  either: the measured PV would be graded against it. The load is not a Core-set figure and is
- *  kept. */
+ *  shadow's window P50 is the evening's: v1.210.0 — from the band its own selection took as of the
+ *  same evening (panelPvSelection.shadowPvBasis), the row's band on the evenings the two select alike.
+ *  The set-aside is the row's: a band built on a solar model fitted on other Cores than the actuals
+ *  says nothing about forecast skill over the window either. The load is not a Core-set figure and
+ *  is kept. */
 export function shadowWindowActuals(i: {
   row: Partial<Pick<NightLedgerRow, 'shadow_cost_window_start_ms' | 'shadow_cost_window_end_ms'>>;
   nowMs: number;

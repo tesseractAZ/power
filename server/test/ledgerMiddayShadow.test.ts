@@ -232,7 +232,8 @@ test('★★★ shadowWindowActuals: the home Cores\' PV and the panel\'s load o
 
 /**
  * v1.189.0 (review) — the shadow's measured window PV is forecast-skill evidence only where the
- * row's own PV verdict is: the shadow's window P50 comes from the same evening band. A band built
+ * row's own PV verdict is: the shadow's window P50 is planned the same evening (v1.210.0: on the band
+ * its own selection takes, the row's where the two select alike). A band built
  * on a solar model fitted on other Cores than the actuals (pvVerdictSetAside: the 2026-09-27
  * partial-device-map class, or a roster change between plan and capture) sets the row's verdict
  * aside — and the window's three-Core sum was still written beside a one-Core P50 as a graded pair.

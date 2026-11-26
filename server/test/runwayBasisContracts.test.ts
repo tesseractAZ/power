@@ -604,6 +604,8 @@ test('★★★ SCOPE — source pins: the planner, JIT force-charge and MPC nev
       'app.log.info(cushionStandbyLogText(cushionStandbyW, cushionPoolScale?.connectedCores ?? 0));',
       // v1.204.0 (G8) — the panel basis's selector reads only WHETHER a ratio is known (nightChargeAdvisor.cushionRatioKnown).
       'ratioKnown: cushionRatioKnown(cushionPoolScale),',
+      // v1.210.0 (G8) — and the mid-day shadow's own selector, the same question only.
+      'ratioKnown: cushionRatioKnown(cushionPoolScale),',
       'cushionPoolScale,', // deps
       '...cushionPoolScaleLedgerColumns(plan),', // recordNightPlanRow: written, never read back
     ]],

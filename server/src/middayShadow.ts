@@ -335,6 +335,9 @@ export interface ShadowLegSummary {
    *  for energy (plan.requiredExtraKwh above 0): the line a refused cycle's push says nothing is armed to hold. Absent where the
    *  cushion asked for none, and on a record from before v1.205.1 (whose push then reads as before). */
   cushionAskedLinePct?: number;
+  /** ★★★ v1.210.0 — E, the evening the panel-measured band the leg was sized on is as of (panelPvSelection.shadowPvBasis). Absent on a
+   *  leg sized on the Cores' band, an unsized one, and a record from before v1.210.0. */
+  panelPvAsOfDay?: string;
 }
 
 /** What the morning refresh decided (refreshLeg). */
@@ -398,6 +401,8 @@ export interface ShadowSized {
   weatherFetchedAtMs?: number | null;
   /** v1.192.0 — heldImportEstimate over the leg's hold (index.ts, on the band it was planned on). */
   heldImport?: HeldImport | null;
+  /** ★★★ v1.210.0 — the leg was sized on the panel-measured band as of this evening (index.ts); absent on the Cores' band. */
+  panelPvAsOfDay?: string | null;
 }
 
 /** The arm probe's answer: the roles armCycle armed, and the ones it refused with its words. */
@@ -449,7 +454,22 @@ export function summariseLeg(
     heldImport: sized?.heldImport ?? null,
     ...(p != null && p.requiredExtraKwh != null && p.requiredExtraKwh > 0 && fin(floorCushionLinePct(p)) != null
       ? { cushionAskedLinePct: floorCushionLinePct(p)! } : {}),
+    ...(p != null && typeof sized?.panelPvAsOfDay === 'string' && YMD_RE.test(sized.panelPvAsOfDay) ? { panelPvAsOfDay: sized.panelPvAsOfDay } : {}),
   };
+}
+
+const YMD_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** ★★★ v1.210.0 — what a ledger row says of a leg sized on the panel-measured band ('' on the Cores' band: the row as before). The
+ *  band is named, not its slots: a mixed band takes some slots from their Cores' own figures, so "the panel's readings" would claim
+ *  more than the record holds. PURE. */
+export function panelPvBasisNote(asOfDay: string | undefined): string {
+  return asOfDay != null ? ` (on the panel-measured planning band as of ${asOfDay})` : '';
+}
+
+/** The solar band a leg was sized on, in words (the refresh's reason). PURE. */
+function solarBandWords(asOfDay: string | null): string {
+  return asOfDay != null ? `the panel-measured planning band as of ${asOfDay}` : "the Cores' band";
 }
 
 /* ── the evening ──────────────────────────────────────────────────────────── */
@@ -658,10 +678,15 @@ export function standingRefresh(rec: MiddayShadowRecord, nowMs: number): ShadowR
 }
 
 /** The refresh from a re-sized cost leg (null: the planner had no inputs). R5: the age of the
- *  weather it was sized on is recorded, with the level it asked for and the window's P50 PV. PURE. */
+ *  weather it was sized on is recorded, with the level it asked for and the window's P50 PV.
+ *  ★★★ v1.210.0 — a re-plan on another solar band than the evening's (the panel-measured band on one, the Cores' on the other) is
+ *  no refresh of it: the evening plan stands ('stood'), the reason names both bands, and no figure of the re-plan is recorded. PURE. */
 export function refreshFromSized(rec: MiddayShadowRecord, sized: ShadowSized | null, nowMs: number): ShadowRefresh {
   const c = rec.cost!;
-  const p = sized?.plan ?? null;
+  const sizedBand = sized?.panelPvAsOfDay ?? null;
+  const eveningBand = c.panelPvAsOfDay ?? null;
+  const otherBand = sized?.plan != null && sizedBand !== eveningBand;
+  const p = otherBand ? null : sized?.plan ?? null;
   const refreshedReserve = p != null && p.setpointSocPct != null && Number.isFinite(p.setpointSocPct) ? clampReserveTarget(p.setpointSocPct) : null;
   const r = refreshLeg({
     announced: { levelPct: c.levelPct, reservePct: c.reservePct, expectedBuyKwh: c.expectedBuyKwh, buyKwh: c.buyKwh },
@@ -675,9 +700,10 @@ export function refreshFromSized(rec: MiddayShadowRecord, sized: ShadowSized | n
   });
   return {
     atMs: nowMs, ...r,
+    ...(otherBand ? { reason: `the refresh was planned on ${solarBandWords(sizedBand)}, the evening plan on ${solarBandWords(eveningBand)}; the evening plan stands` } : {}),
     weatherAgeS: weatherAgeSeconds(sized?.weatherFetchedAtMs, nowMs),
     neededLevelPct: p != null ? fin(chargeLevelPct(p)) : null,
-    windowPvP50Kwh: fin(sized?.windowPvP50Kwh),
+    windowPvP50Kwh: otherBand ? null : fin(sized?.windowPvP50Kwh),
     neededReservePct: refreshedReserve,
   };
 }
@@ -848,7 +874,12 @@ export function middayShadowLedgerColumns(rec: MiddayShadowRecord): Partial<Nigh
   const b = rec.backup;
   const c = rec.cost;
   const bit = (v: boolean | undefined): number | null => (v == null ? null : v ? 1 : 0);
-  const disp = [b ? `backup: ${b.disposition}` : null, c ? `cost: ${c.disposition}` : null].filter(Boolean).join('; ');
+  // v1.210.0 — each leg says which solar band sized it where it was the panel-measured one (option B too, which has no verdict).
+  const disp = [
+    b ? `backup: ${b.disposition}${panelPvBasisNote(b.panelPvAsOfDay)}` : null,
+    c ? `cost: ${c.disposition}${panelPvBasisNote(c.panelPvAsOfDay)}` : null,
+    b && rec.backupB?.panelPvAsOfDay != null ? `backup option B:${panelPvBasisNote(rec.backupB.panelPvAsOfDay)}` : null,
+  ].filter(Boolean).join('; ');
   return {
     shadow_cycle_why: rec.why,
     shadow_computed_at_ms: rec.computedAtMs,
@@ -1108,6 +1139,7 @@ const coerceLeg = (raw: unknown): ShadowLegSummary | null => {
     ...(typeof o.basisBlockedBy === 'string' && o.basisBlockedBy !== '' ? { basisBlockedBy: o.basisBlockedBy } : {}),
     ...('heldImport' in o ? { heldImport: coerceHeldImport(o.heldImport) } : {}),
     ...(fin(o.cushionAskedLinePct) != null ? { cushionAskedLinePct: fin(o.cushionAskedLinePct)! } : {}),
+    ...(typeof o.panelPvAsOfDay === 'string' && YMD_RE.test(o.panelPvAsOfDay) ? { panelPvAsOfDay: o.panelPvAsOfDay } : {}),
   };
 };
 

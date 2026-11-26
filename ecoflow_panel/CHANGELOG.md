@@ -1,3 +1,19 @@
+## 1.210.0
+
+### The winter mid-day shadow sizes on the panel's own solar readings while the Cores are dark
+
+- **What was wrong.** Since 1.204.0 the overnight plan takes its solar from the panel's own per-slot readings when the Cores' band cannot be used; the mid-day shadow stayed on the Cores' band. With the Cores dark that band has no scored days, so every mid-day row read "not armed — the plan basis is incomplete (only 0 scored calibration day(s), need 4 …)" and sized nothing, while the overnight plan of the same evenings ran on the panel's readings.
+- **The change.** Each leg the shadow sizes (the backup on options A and B, the mid-day cost leg, the shadow's morning refresh) makes the overnight plan's choice for itself, as of the evening that owns its window: the Cores' band where it passes and covers every connected slot, else the panel-measured band where every one of its checks holds, else the Cores' band. It reads no latch and not the live night's cancel, and takes the add-on's write mode whatever the leg's role. Only the shadow's own sizer asks for it.
+- **Daylight.** The mid-day legs read the band through the day. A band hour is a fitted solar figure only where its clock hour has a fitted slope and a forecast GHI; elsewhere in daylight it is the typical-day fallback (0 W on a clock hour with no readings). A leg takes the panel band only when no hour from the plan instant to its horizon end falls on such an hour, or on one the band lacks.
+- **The row.** A leg refused the panel's readings says why in `shadow_arm_disposition`, after the gate's own words ("…; the panel's own solar readings are not used: …"), and sizes nothing; a leg the panel band sized adds "(on the panel-measured planning band as of <evening>)", the band named rather than its slots, since a mixed band takes some slots from their Cores' own figures. A morning refresh planned on another band than the evening's records `stood` in `shadow_refresh_disposition` with the evening's figures, and its log line names both bands. A planning report not yet available or not listing its unfitted hours, or the Cores' band passing, leaves the row as before. No column is added.
+- **What does not change.** The live overnight plan: its solar choice, latch, served plan, snapshot, ledger row and log lines. The live morning refresh stays on the Cores' band. No device write, push or announcement is added, and nothing arms a mid-day leg.
+- **Known limits.** The shadow evening still runs once: a planning report missing at that minute leaves that evening's row as before. The measured window PV stays the Cores' own meter under the live row's set-aside, so while the Cores are dark a sized row has no measured PV to grade it. Neither band is calibrated per window, and the panel band's blind-band replay covers overnight nights only.
+- **Detail.** Chapter 15 parts 1, 2 and 3 of the reference.
+
+### Verification
+
+7,160 server tests pass on CI; four more need pandoc or LibreOffice and run where those are installed. Two new test files hold the selection, each refusal, the daylight rule, the row, the unchanged cases and the live plan's lines. `mutate-panel-pv-basis.mjs` gains 41 mutants (group M), every mutant killed in a full run; 6,720 anchors resolve across 158 harnesses.
+
 ## 1.209.1
 
 ### The printable documentation's table of contents lists its chapters and sections

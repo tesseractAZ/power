@@ -2097,6 +2097,16 @@ export function forecastHourPvW(
 }
 
 /**
+ * ★★★ v1.210.0 — the hours of a forecast whose PV is not the fitted per-clock-hour response (forecastHourPvW's typical-day fallback:
+ * no slope for that clock hour, or no GHI) while the sun may be up: its GHI unknown, or above DAYLIGHT_GHI, the fit's own daylight
+ * line. A figure there is no fitted solar figure (a clock hour with no rows reads 0 W). The mid-day shadow sizes on no leg whose
+ * hours fall on one (panelPvSelection.shadowPvBasis). PURE.
+ */
+export function unfittedDaylightHourTs(hours: ReadonlyArray<Pick<ForecastHour, 'ts' | 'modelled' | 'ghiWm2'>>): number[] {
+  return hours.filter((h) => h.modelled !== true && !(h.ghiWm2 != null && h.ghiWm2 <= DAYLIGHT_GHI)).map((h) => h.ts);
+}
+
+/**
  * v1.186.5 — the home Cores a forecast built from `devices` fits its solar model on
  * (sorted SNs): projected DPUs listed as connected by any SHP2 (every DPU when none lists
  * any). ONE definition for DayForecast.solarModelSns, the day-forecast cache check and

@@ -337,7 +337,7 @@ test('★★ wiring — index.ts plans the overnight leg: the overnight cycle, t
   // The shadow passes a pinned leg, and so does the live morning refresh (R5, inert until the switch:
   // it plans only an armed super off-peak leg); no other caller does.
   assert.equal(index.split('shadowLeg: sizing').length - 1, 2, 'sizeShadowLeg and the morning refresh pin a leg');
-  assert.ok(index.includes('const r = await recomputeNightChargePlan({ allowStalePanel, shadowLeg: sizing });'));
+  assert.ok(index.includes('const r = await recomputeNightChargePlan({ allowStalePanel, shadowLeg: sizing, shadowPvBasis: true });'));
   const refresh = index.slice(index.indexOf('async function runMorningRefreshTickInner('), index.indexOf('\n}\n', index.indexOf('async function runMorningRefreshTickInner(')));
   assert.ok(refresh.includes('const r = await recomputeNightChargePlan({ shadowLeg: sizing, maxWeatherAgeMs: REFRESH_MAX_WEATHER_AGE_MS });'));
   assert.match(refresh, /^async function runMorningRefreshTickInner\(nowMs: number\): Promise<void> \{\n {2}const due = liveRefreshDue\(nightCycleView\(\), nowMs\);\n {2}if \(due == null\) return;/);

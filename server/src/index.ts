@@ -15,7 +15,7 @@ import { siteResponse, pvSite, isLegacyPvSite, physicsAmbientC, siteRepairIssues
 // v1.191.0 (lane A) — the site clock (siteTime.ts) and its main-thread side (boot log, HA comparison).
 import {
   siteTimeZone, siteYmd, siteMinuteOfDay, siteDayStartMs, siteNextDayStartOf, addDaysYmd, zonedWallTimeMs,
-  fmtSiteClock, fmtSiteWeekday, fmtSiteHm,
+  fmtSiteClock, fmtSiteWeekday, fmtSiteHm, siteHour,
 } from './siteTime.js';
 import {
   createMaintenanceController, guardHomeSet, MAINT_CHOICES_MIN, MAINT_DEFAULT_MS, MAINT_ENDED_KEEP_MS, MAINT_MAX_MS, MAINT_MIN_MS,
@@ -153,6 +153,8 @@ type PlanningProbabilisticReport = ProbabilisticForecast & {
   planningAdmittedDays?: number;
   planningAdmittedSlotDays?: Record<string, string[]>;
   planningGeneratedAt?: number;
+  /** v1.210.0 — the band's hours whose PV is the typical-day fallback while the sun may be up (the mid-day shadow's daylight rule). */
+  planningUnfittedDaylightTs?: number[];
 };
 import { startSshServer, loadOrCreateHostKey } from './console/server.js';
 import { authFromEnv, authConfigProblems, describeSshAuth } from './console/session.js';
@@ -227,7 +229,8 @@ import * as haStateCache from './haStateCache.js';
 // or v1.203.0's cushion-only plan; E (the evening that owns the window) and the evening's latched basis.
 import {
   latchedPvBasis, armMayHold, planAsOfDay, selectPvBasis, pvBasisDecoration, withPvBasis, pvBasisReasonText, pvBasisReasonCode,
-  type PvBasisLatch, type PvBasisReason, type PvSelection,
+  shadowPvBasis, shadowPvPlannerDeps,
+  type PvBasisLatch, type PvBasisReason, type PvSelection, type ShadowPvBasis,
 } from './panelPvSelection.js';
 import type { UcVerdict } from './panelPvBasis.js';
 // v1.38.0 (night-charge WS4 integration) — wire the ADVISORY TOU-arbitrage
@@ -3837,6 +3840,9 @@ interface NightPlanExtras {
     pvBasisRefusedBy: string | null;
     pvUpperRatio: number | null;
   };
+  /** ★★★ v1.210.0 — a mid-day shadow leg sized on the panel-measured band only: E, the evening that band is as of
+   *  (panelPvSelection.shadowPvBasis). Absent on every live plan and on a shadow leg on the Cores' band. */
+  shadowPanelPvAsOfDay?: string;
 }
 
 /** ★★★ v1.204.0 (L2) — after a restart inside a window latched on the planning basis, while the planning report is not yet
@@ -3936,7 +3942,7 @@ function logPvBasisOnChange(sel: PvSelection, reason: PvBasisReason | null, asOf
  */
 async function recomputeNightChargePlan(
   /** `arming`: the evening job's plan, which replaces the record it would otherwise read (armedNoLineStartMs, below). */
-  opts: { allowStalePanel?: boolean; role?: ChargeLegRole; shadowLeg?: ShadowLegSizing; maxWeatherAgeMs?: number; arming?: boolean } = {},
+  opts: { allowStalePanel?: boolean; role?: ChargeLegRole; shadowLeg?: ShadowLegSizing; maxWeatherAgeMs?: number; arming?: boolean; shadowPvBasis?: boolean } = {},
 ): Promise<{ plan: NightChargePlan; extras: NightPlanExtras } | 'panelStale' | null> {
   const nowMs = Date.now();
   // R4 — a mid-day cycle's leg sized in SHADOW (middayShadow.ts): its window, horizon end and PV
@@ -4130,7 +4136,7 @@ async function recomputeNightChargePlan(
   // ★★★ v1.204.0 (M1, L2) — E, THE EVENING THAT OWNS THE WINDOW: the evening job's own site day; for every other recompute the day
   // of the latch that planned this window (a Saturday's latch governs its Monday window to Sunday's evening job), else the plan date
   // that will own it. The latched basis comes with it (latchedPvBasis): a recompute inside the latched window selects that basis.
-  // Never a shadow leg (the mid-day, backup and morning-refresh legs stay on the published band).
+  // Never a shadow leg: the live latch, E and selection are the live plan's alone (a mid-day shadow leg selects its own, below).
   const pvLatchHere = shadowLeg || window == null ? null : latchedPvBasis({
     lastNotifyDay: readNightChargeLatch().lastNotifyDay,
     pv: readNightChargeLatch().pv,
@@ -4153,6 +4159,13 @@ async function recomputeNightChargePlan(
   const pvWriteMode = lineForceChargeOn(legRole);
   const pvCancelled = nightActuationMem.cancelled === true && window != null && nightActuationMem.windowStartMs === window.startMs;
   const pvAsk = pvAsOfDay != null && pvWriteMode && panel.fresh && !pvCancelled;
+  // ★★★ v1.210.0 — THE MID-DAY SHADOW'S OWN BASIS, opted into by the shadow's sizer alone (never a live plan, never the live morning
+  // refresh): E is the evening that owns its pinned window; it reads no latch and no live cancel, and its mode is the install's (the
+  // live overnight cost leg's term), never the leg's role. Null on every other call: nothing below differs from v1.209.1 there.
+  const shadowPvAsOfDay: string | null = shadowLeg != null && opts.shadowPvBasis === true && window != null
+    ? planDateOwningCycle({ nowMs, firstLegStartMs: window.startMs, timezone: siteTimeZone(), notifyMinuteOfDay: nightSched.notify.fireMin }) : null;
+  const shadowPvWriteMode = lineForceChargeOn('cost');
+  const shadowPvAsk = shadowPvAsOfDay != null && shadowPvWriteMode && panel.fresh;
 
   // Live analytics reports (each best-effort — a missing report degrades the
   // basis to null, never a fabricated number).
@@ -4172,10 +4185,14 @@ async function recomputeNightChargePlan(
     analytics.report<EvWindowPrediction>('evWindowPrediction').catch(() => null),
     pvAsk
       ? analytics.report<PlanningProbabilisticReport | null>('planningProbabilisticForecast', { asOfDay: pvAsOfDay! }).catch(() => null)
-      : Promise.resolve(null),
+      : shadowPvAsk
+        ? analytics.report<PlanningProbabilisticReport | null>('planningProbabilisticForecast', { asOfDay: shadowPvAsOfDay! }).catch(() => null)
+        : Promise.resolve(null),
     pvAsk
       ? analytics.report<(MultiDayForecast & { basis?: string; asOfDay?: string }) | null>('multiDayForecast', { days: 4, basis: 'planning', asOfDay: pvAsOfDay! }).catch(() => null)
-      : Promise.resolve(null),
+      : shadowPvAsk
+        ? analytics.report<(MultiDayForecast & { basis?: string; asOfDay?: string }) | null>('multiDayForecast', { days: 4, basis: 'planning', asOfDay: shadowPvAsOfDay! }).catch(() => null)
+        : Promise.resolve(null),
   ]);
 
   // v1.204.0 (L5) — the planning report's admitted slot-days, for a panel row's PV actual (only a report as of the E it was asked for).
@@ -4228,7 +4245,8 @@ async function recomputeNightChargePlan(
   //  (a) the published band when it passes its gate AND covers the Cores of every connected slot of the house panel — v1.203.0;
   //  (b) else the panel-measured planning band as of E when every clause of (b) holds (its verdict, its keys, G7, G8, its gate);
   //  (c) else the published deps exactly — passed as refused where the band passed without covering every connected slot (M2).
-  // One gate for both bands and for the sizer (solarBasisGate). Every read below takes the selected band. Never a shadow leg.
+  // One gate for both bands and for the sizer (solarBasisGate). Every read below takes the selected band. The live selection is
+  // never a shadow leg's: a mid-day shadow leg takes its own (shadowPvBasis, below), on the same reports.
   const bandGateOf = (p: ProbabilisticForecast | null) => solarBasisGate({
     forecastPresent: (p?.hours ?? []).some((pb) => dayAheadByEpoch.has(Math.floor(pb.ts / HOUR_MS))),
     confidenceTier, calScoredDays: p?.calScoredDays ?? 0, minCalScoredDays: NIGHT_MIN_CAL_DAYS,
@@ -4260,7 +4278,25 @@ async function recomputeNightChargePlan(
     if (getLatestNightChargePlan() == null) seedPlanFromSnapshot(window?.startMs ?? null);
     return 'panelStale';
   }
-  const pvPlanning = pvSel?.use === 'planning';
+  // ★★★ v1.210.0 — the mid-day shadow leg's selection (null on every other call, and on the transient class: the shadow as before).
+  // probPlanning / multiDayPlanning hold the shadow's reports here (pvAsk is false on a shadow leg); notePanelAdmission above
+  // took none of them (pvAsOfDay is null). No latch, no armed record, nothing persisted.
+  const shadowPv: ShadowPvBasis | null = shadowPvAsOfDay == null ? null : shadowPvBasis({
+    asOfDay: shadowPvAsOfDay, writeMode: shadowPvWriteMode, panelFresh: panel.fresh,
+    published: { gate: bandGateOf(probPublished), uncoveredSlots: houseSlots.filter((c) => !publishedSns.has(c.sn)).map((c) => c.slot) },
+    planning: probPlanning == null ? null : {
+      asOfDay: probPlanning.asOfDay, keys: probPlanning.planningModelKeys ?? [], verdict: probPlanning.planningVerdict ?? null,
+      gate: bandGateOf(probPlanning),
+    },
+    planningRollupOk: multiDayPlanning != null && multiDayPlanning.asOfDay === shadowPvAsOfDay,
+    connectedKeys: houseSlots.map((c) => slotKey(shp2.sn, c.slot)),
+    ratioKnown: cushionRatioKnown(cushionPoolScale),
+    bandHourTs: (probPlanning?.hours ?? []).map((pb) => pb.ts),
+    unfittedDaylightTs: probPlanning?.planningUnfittedDaylightTs ?? null,
+    fromMs: nowMs, toMs: horizonEndMs, clockHourOf: siteHour, clockText: fmtSiteClock,
+    enrich: (r) => (r.code === 'night-reading' ? { ...r, hourClock: fmtSiteClock(r.hourStartMs), forceCharge: forceChargeStateAt(r.hourStartMs) } : r),
+  });
+  const pvPlanning = pvSel?.use === 'planning' || shadowPv?.use === 'planning';
   const prob: ProbabilisticForecast | null = pvPlanning ? probPlanning : probPublished;
   const multiDay: MultiDayForecast | null = pvPlanning ? multiDayPlanning : multiDayPublished;
   // The reason enriched with what only the main thread knows (G4: the hour's site clock, the add-on's force-charge in it).
@@ -4455,6 +4491,8 @@ async function recomputeNightChargePlan(
     // R2 — the leg: the overnight window (resolved above) for every live plan, its role the caller's.
     // R4 — a shadow leg's own spec (its pinned window, taper line and backup hold).
     windowSpec: shadowLeg ? shadowLeg.spec : legRole === 'cost' ? OVERNIGHT_WINDOW_SPEC : { kind: 'overnight', role: legRole },
+    // ★★★ v1.210.0 — a mid-day shadow leg's own refusal (M2 and why the panel's readings are not used); nothing on any other call.
+    ...shadowPvPlannerDeps(shadowPv),
   };
 
   const inputs = buildNightChargeInputs(deps);
@@ -4467,8 +4505,9 @@ async function recomputeNightChargePlan(
       : ` NOTE: the panel reading is ${panel.ageMs != null ? `~${Math.round(panel.ageMs / 60_000)} min old` : 'of unknown age'} (${panel.why}); it did not recover before the deferral deadline, and no cushion-only plan is made on it.`;
   }
   // ★★★ v1.204.0 — the selection put on the plan (panelPvSelection.pvBasisDecoration): nothing on (a), the published band covering
-  // every connected slot (that plan is v1.203.0's, byte for byte), and nothing on a shadow leg. Otherwise the pvBasis* fields, and the
-  // rationale's closing sentence: the panel basis on a plan sized on it, the refusal on a cushion-only plan.
+  // every connected slot (that plan is v1.203.0's, byte for byte), and nothing on a shadow leg (its own basis goes in extras).
+  // Otherwise the pvBasis* fields, and the rationale's closing sentence: the panel basis on a plan sized on it, the refusal on a
+  // cushion-only plan.
   // In place: `plan` stays the plan of record every reader below takes (the served plan computed apart gets the same, below).
   const pvDecorate = (p: NightChargePlan): void => {
     if (pvSel == null || pvAsOfDay == null) return;
@@ -4586,6 +4625,8 @@ async function recomputeNightChargePlan(
     ...(shadowLeg ? { weatherFetchedAtMs: prob?.weatherFetchedAtMs ?? dayAhead?.weatherFetchedAtMs ?? null } : {}),
     // ★★★ v1.204.0 — the basis selected, for the evening's latch and the ledger row (never a shadow leg).
     ...(pvSel != null && pvAsOfDay != null ? { pvSelection: pvSelectionExtras(pvSel, pvReason, pvAsOfDay) } : {}),
+    // ★★★ v1.210.0 — a mid-day shadow leg on the panel-measured band: the evening it is as of (its row says so).
+    ...(shadowPv?.use === 'planning' ? { shadowPanelPvAsOfDay: shadowPv.asOfDay } : {}),
     // v1.192.0 — what the leg's hold sends to the grid, on the band it was planned on: the reserve
     // it would write (only a leg that charges writes one), from the pool expected at the open.
     ...(shadowLeg && window ? {
@@ -5787,12 +5828,13 @@ function homeChgMaxSocPcts(): Array<number | null> {
 /** One shadow leg, sized: the plan only (recomputeNightChargePlan sets no holder and writes no
  *  snapshot for a shadow leg) and its window's planned PV and load. */
 async function sizeShadowLeg(sizing: ShadowLegSizing, allowStalePanel: boolean): Promise<ShadowSized | null | 'panelStale'> {
-  const r = await recomputeNightChargePlan({ allowStalePanel, shadowLeg: sizing });
+  const r = await recomputeNightChargePlan({ allowStalePanel, shadowLeg: sizing, shadowPvBasis: true });
   if (r === 'panelStale' || r == null) return r;
   return {
     plan: r.plan, windowPvP50Kwh: r.extras.windowPvP50Kwh ?? null, windowLoadP50Kwh: r.extras.windowLoadP50Kwh ?? null,
     weatherFetchedAtMs: r.extras.weatherFetchedAtMs ?? null,
     heldImport: r.extras.heldImport ?? null,
+    ...(r.extras.shadowPanelPvAsOfDay != null ? { panelPvAsOfDay: r.extras.shadowPanelPvAsOfDay } : {}),
   };
 }
 
