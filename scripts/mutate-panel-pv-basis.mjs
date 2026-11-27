@@ -13,9 +13,13 @@
  * the caches per E, the runway untouched, the planning skill a realized-GHI reader. (S) THE SELECTION: (a)/(b)/(c) with M2, the
  * clauses of (b) in L1's precedence, the transient class, the latch (M1, L2), the live selection never a shadow leg's. (M) THE MID-DAY
  * SHADOW'S OWN SELECTION (v1.210.0): opted into by the shadow's sizer alone, no latch, no live cancel, the install's mode, the band
- * following it, its refusal in the leg's row, the daylight rule, unknown as before, the basis named on the row. (T) THE WORDS: figures only (M3),
- * every hold's end, G4's grid input and force-charge, en and es, the push, the card. (H) HOME ASSISTANT (L6). (L) THE LEDGER (L5)
- * and (G) THE GATE. (O) THE OWNER'S DECISIONS: the haircut 1.00, every connected slot resolves, the runway at zero sun, 1.05 strict.
+ * following it, its refusal in the leg's row, the daylight rule, unknown as before, the basis named on the row. (N) THE SHADOW'S MEASURED
+ * WINDOW (v1.210.1): a cost leg the panel band of the row's own evening sized, on a panel row, graded on the panel's per-slot readings
+ * through the same admission and held rule; the band read back from the row (the cost leg's, never option B's); every other row as
+ * before; on a panel row whose own actual was settled at its capture, the window measured alone once the balance judged its day (the
+ * sweep: its own column only, once per boot, nothing read for a row it does not own). (T) THE WORDS: figures only (M3),
+ * every hold's end, G4's grid input and force-charge, en and es, the push, the card. (H) HOME ASSISTANT (L6). (L) THE LEDGER (L5;
+ * v1.210.1: a panel row's log line is the panel path's own outcome, never the Cores' coverage warning) and (G) THE GATE. (O) THE OWNER'S DECISIONS: the haircut 1.00, every connected slot resolves, the runway at zero sun, 1.05 strict.
  *
  *   node scripts/mutate-panel-pv-basis.mjs [--only <id prefix>]
  *
@@ -54,6 +58,8 @@ const T_GOLD = 'test/legacyIdentity.test.ts';
 const T_MQTT = 'test/mqttDiscovery.test.ts';
 const T_MSB = 'test/middayShadowPanelBasis.test.ts';
 const T_MSI = 'test/middayShadowBasisIndependent.test.ts';
+const T_GRADE = 'test/ledgerPanelPvGrading.test.ts';
+const T_IND = 'test/panelPvGradingIndependent.test.ts';
 
 const MUTANTS = [
   /* ── R: the resolver ── */
@@ -1232,6 +1238,333 @@ const MUTANTS = [
     find: '    windowPvP50Kwh: otherBand ? null : fin(sized?.windowPvP50Kwh),',
     to: '    windowPvP50Kwh: fin(sized?.windowPvP50Kwh), /* MUTANT */',
     why: 'The refresh push would state a window PV the evening plan was not sized on.',
+  },
+  /* ── L (v1.210.1): a panel row's PV actual, said in the log by the panel path ── */
+  {
+    id: 'PB-L-ix. ★★★ (exemplar) the Cores\' coverage warning logged on a panel row',
+    file: IDX, tests: [T_GRADE],
+    find: '    if (!panelRow) {\n      if (pvHeld && heldVerdict != null) {',
+    to: '    if (true as boolean) { /* MUTANT */\n      if (pvHeld && heldVerdict != null) {',
+    why: 'Every night the Cores are dark the log says the PV actual was withheld while the row holds the panel\'s figure.',
+  },
+  {
+    id: 'PB-L-x. ★★★ the Cores\' lines dropped on a Cores row',
+    file: IDX, tests: [T_GRADE],
+    find: '    if (!panelRow) {\n      if (pvHeld && heldVerdict != null) {',
+    to: '    if (panelRow) { /* MUTANT */\n      if (pvHeld && heldVerdict != null) {',
+    why: 'A sum across a dark Core (the August case) is withheld in silence.',
+  },
+  {
+    id: 'PB-L-xi. ★★★ the panel path\'s outcome never logged',
+    file: IDX, tests: [T_GRADE],
+    find: '    if (pvLog != null) app.log[pvLog.level](pvLog.text);',
+    to: '    /* MUTANT */',
+    why: 'A panel row withheld or pending says nothing in the log.',
+  },
+  {
+    id: 'PB-L-xii. ★★★ the log reads the admission past a reason',
+    file: IDX, tests: [T_GRADE],
+    find: '    const pvLog = panelPvActualLogLine(yDate, panelPv.basis, why, why != null ? null : panelAdmission, heldParts);',
+    to: '    const pvLog = panelPvActualLogLine(yDate, panelPv.basis, why, panelAdmission, heldParts); /* MUTANT */',
+    why: 'A row withheld for thin readings is logged as pending a re-capture that never comes.',
+  },
+  {
+    id: 'PB-L-xiii. ★★ the held panel left unnamed',
+    file: IDX, tests: [T_GRADE],
+    find: '      ? [...heldVerdict.pv, ...heldVerdict.load].map(',
+    to: '      ? [...heldVerdict.pv].map( /* MUTANT */',
+    why: 'A row withheld because the panel was held names no device.',
+  },
+  {
+    id: 'PB-L-xiv. ★★★ a pending actual logged as nothing',
+    file: NLS, tests: [T_GRADE],
+    find: "  if (admission?.state === 'pending') {\n    return {\n      level: 'info',",
+    to: "  if ((false as boolean) && admission?.state === 'pending') { /* MUTANT */\n    return {\n      level: 'info',",
+    why: 'The first capture of every panel row says nothing of the figure it left empty.',
+  },
+  {
+    id: 'PB-L-xv. ★★★ a balance withholding logged as nothing',
+    file: NLS, tests: [T_GRADE],
+    find: "  if (admission?.state === 'withheld') {\n    return {",
+    to: "  if ((false as boolean) && admission?.state === 'withheld') { /* MUTANT */\n    return {",
+    why: 'A day the balance refused leaves the PV actual empty with no line.',
+  },
+  {
+    id: 'PB-L-xvi. ★★★ a written actual logged as withheld',
+    file: NLS, tests: [T_GRADE],
+    find: '  if (withheldWhy == null) return null;\n  const held = heldParts',
+    to: '  /* MUTANT */\n  const held = heldParts',
+    why: 'The log says WITHHELD on the nights the panel\'s figure is written.',
+  },
+  {
+    id: 'PB-L-xvii. ★★ the pending line is a warning',
+    file: NLS, tests: [T_GRADE],
+    find: "      level: 'info',",
+    to: "      level: 'warn', /* MUTANT */",
+    why: 'Every panel row\'s first capture raises a warning for the expected wait.',
+  },
+
+  /* ── N (v1.210.1): the shadow's measured window on the panel band ── */
+  {
+    id: 'PB-N-i. ★★★ (exemplar) the capture never passes the band: the shadow stays on the Cores\' dark meter',
+    file: IDX, tests: [T_GRADE],
+    find: '      bandAsOfDay: shadowCostPanelPvAsOfDay(y.shadow_arm_disposition), panelSn: shp2Sn,',
+    to: '      bandAsOfDay: null, panelSn: shp2Sn, /* MUTANT */',
+    why: 'Every sized shadow row keeps no measured window PV while the Cores are dark.',
+  },
+  {
+    id: 'PB-N-ii. ★★★ the capture\'s panel path reads no admission',
+    file: IDX, tests: [T_GRADE],
+    find: '      admission: panelAdmissionMem,\n    },\n  });',
+    to: '      admission: null, /* MUTANT */\n    },\n  });',
+    why: 'The window stays pending for good.',
+  },
+  {
+    id: 'PB-N-iii. ★★★ the capture\'s panel path reads nothing',
+    file: IDX, tests: [T_GRADE],
+    find: '      query: (sn, metric, a, b) => recorder.query(sn, metric, a, b),\n      admission: panelAdmissionMem,',
+    to: '      query: () => [], /* MUTANT */\n      admission: panelAdmissionMem,',
+    why: 'The panel path withholds every window.',
+  },
+  {
+    id: 'PB-N-iv. ★★ a C slot resolves to a Core that is not connected',
+    file: IDX, tests: [T_GRADE],
+    find: "        .find((x) => x.slot === slot && x.isConnected === true && typeof x.sn === 'string')?.sn ?? null,",
+    to: "        .find((x) => x.slot === slot && typeof x.sn === 'string')?.sn ?? null, /* MUTANT */",
+    why: 'A mixed band\'s Core slot is graded on a Core the panel no longer connects.',
+  },
+  {
+    id: 'PB-N-v. ★★★ another evening\'s band graded on this evening\'s slots',
+    file: NLS, tests: [T_GRADE],
+    find: '  const panelPv = p != null && p.bandAsOfDay != null && p.bandAsOfDay === i.row.plan_date\n',
+    to: '  const panelPv = p != null && p.bandAsOfDay != null /* MUTANT */\n',
+    why: 'A leg sized on another evening\'s verdict is measured on slots it was not sized on.',
+  },
+  {
+    id: 'PB-N-vi. ★★★ a row on the Cores\' basis graded on the panel',
+    file: NLS, tests: [T_GRADE],
+    find: '    && isPanelBasisRow({ pv_basis: i.row.pv_basis ?? null, actual_pv_basis: i.row.actual_pv_basis })\n',
+    to: '    && (true as boolean) /* MUTANT */\n',
+    why: 'A Cores row\'s window is measured on slots its row never recorded, pending a re-capture that never comes.',
+  },
+  {
+    id: 'PB-N-vii. ★★★ an unadmitted panel reading graded',
+    file: NLS, tests: [T_GRADE],
+    find: "    const pvKwh = held.pv || held.load || admission.state !== 'admitted' ? null : panelPv.kwh;",
+    to: '    const pvKwh = held.pv || held.load ? null : panelPv.kwh; /* MUTANT */',
+    why: 'A x1.25 fault\'s first day is graded as forecast skill before the balance has judged it.',
+  },
+  {
+    id: 'PB-N-viii. ★★★ the held panel\'s readings graded',
+    file: NLS, tests: [T_GRADE],
+    find: "    const pvKwh = held.pv || held.load || admission.state !== 'admitted' ? null : panelPv.kwh;",
+    to: "    const pvKwh = held.pv || admission.state !== 'admitted' ? null : panelPv.kwh; /* MUTANT */",
+    why: 'A restated reading from a panel offline in the cloud is summed as the window\'s solar.',
+  },
+  {
+    id: 'PB-N-ix. ★★ a held Core leaves the panel\'s figure',
+    file: NLS, tests: [T_GRADE],
+    find: "    const pvKwh = held.pv || held.load || admission.state !== 'admitted' ? null : panelPv.kwh;",
+    to: "    const pvKwh = held.load || admission.state !== 'admitted' ? null : panelPv.kwh; /* MUTANT */",
+    why: 'The window is graded on a rule the live row of the same night does not follow.',
+  },
+  {
+    id: 'PB-N-x. ★★★ a thin panel reading summed',
+    file: NLS, tests: [T_GRADE],
+    find: '      minCoverage: LEDGER_SPAN_MIN_COVERAGE,\n    })\n    : null;',
+    to: '      minCoverage: 0, /* MUTANT */\n    })\n    : null;',
+    why: 'An hour of readings is recorded as a five-hour window\'s solar: a partial sum.',
+  },
+  {
+    id: 'PB-N-xi. ★★ the window judged on the plan\'s evening too',
+    file: NLS, tests: [T_GRADE],
+    find: '    const admission = panelPvAdmission({ basis: panelPv.basis, span: { startMs: a, endMs: b }, admission: p.admission });',
+    to: '    const admission = panelPvAdmission({ basis: panelPv.basis, span: { startMs: a - 24 * HOUR_MS, endMs: b }, admission: p.admission }); /* MUTANT */',
+    why: 'A window the balance passed is withheld for a day it does not touch.',
+  },
+  {
+    id: 'PB-N-xii. ★★★ the panel figure never replaces the Cores\' meter',
+    file: NLS, tests: [T_GRADE],
+    find: '  if (p != null && panelPv != null && panelPv.basis != null) {',
+    to: '  if ((false as boolean) && p != null && panelPv != null && panelPv.basis != null) { /* MUTANT */',
+    why: 'The pure core is wired and never changes a figure.',
+  },
+  {
+    id: 'PB-N-xiii. ★★ unreadable slots replace today\'s figure',
+    file: NLS, tests: [T_GRADE],
+    find: '  if (p != null && panelPv != null && panelPv.basis != null) {',
+    to: '  if (p != null && panelPv != null) { /* MUTANT */',
+    why: 'A row with no readable sources loses the Cores\' figure it had.',
+  },
+  {
+    id: 'PB-N-xiv. ★★★ option B\'s band read as the cost leg\'s',
+    file: MSH, tests: [T_GRADE],
+    find: String.raw`cost: (?:(?!; backup option B:)[\s\S])*? \(on the panel-measured`,
+    to: String.raw`cost: [\s\S]*? \(on the panel-measured`,
+    why: 'A cost leg the daylight rule kept on the Cores\' band is graded on the panel because the backup took it.',
+  },
+  {
+    id: 'PB-N-xv. ★★★ the band read from any part of the row',
+    file: MSH, tests: [T_GRADE],
+    find: String.raw`/(?:^|; )cost: (?:(?!; backup option B:)`,
+    to: String.raw`/(?:(?!; backup option B:)`,
+    why: 'Option B\'s note alone grades a Cores-band cost leg on the panel.',
+  },
+  {
+    id: 'PB-N-xvi. ★★ a malformed evening read as a band',
+    file: MSH, tests: [T_GRADE],
+    find: String.raw`as of (\d{4}-\d{2}-\d{2})\)(?:; backup option B:`,
+    to: String.raw`as of ([^)]*)\)(?:; backup option B:`,
+    why: 'A hand-edited row grades on a band of no evening.',
+  },
+  {
+    id: 'PB-N-xvii. ★★★ the figure the panel path gives never reaches the window',
+    file: NLS, tests: [T_GRADE, T_IND],
+    find: '  if (panelPv != null) pvKwh = panelPv.pvKwh;',
+    to: '  /* MUTANT */',
+    why: 'The shadow stays on the Cores\' dark meter while the pure core measures the panel.',
+  },
+
+  /* ── N (v1.210.1): the shadow's own way out of pending, on a row no re-capture revisits ── */
+  {
+    id: 'PB-N-xviii. ★★★ (exemplar) the sweep never runs',
+    file: IDX, tests: [T_IND],
+    find: '\n  remeasurePendingShadowPv(rows, shp2Sn, nowMs);\n',
+    to: '\n  /* MUTANT */\n',
+    why: 'A panel row withheld for a thin night keeps its window ungraded for good.',
+  },
+  {
+    id: 'PB-N-xix. ★★★ a row its own re-capture revisits measured by the sweep too',
+    file: NLS, tests: [T_IND],
+    find: "  if (String(row.score_notes ?? '').includes(PANEL_PV_PENDING_MARKER)) return false;\n  if (row.shadow_window_pv_kwh != null) return false;",
+    to: "  /* MUTANT */\n  if (row.shadow_window_pv_kwh != null) return false;",
+    why: 'Two paths write one figure, on two judgements.',
+  },
+  {
+    id: 'PB-N-xx. ★★★ a written window measured again',
+    file: NLS, tests: [T_IND],
+    find: '  if (row.shadow_window_pv_kwh != null) return false;\n  if (bandAsOfDay == null',
+    to: '  /* MUTANT */\n  if (bandAsOfDay == null',
+    why: 'Every restart re-reads and re-writes a graded window.',
+  },
+  {
+    id: 'PB-N-xxi. ★★★ the sweep grades a leg sized on the Cores\' band',
+    file: NLS, tests: [T_IND],
+    find: '  if (bandAsOfDay == null || bandAsOfDay !== row.plan_date) return false;',
+    to: '  if (bandAsOfDay == null) return false; /* MUTANT */',
+    why: 'A leg sized on another evening\'s verdict is graded on slots it was not sized on.',
+  },
+  {
+    id: 'PB-N-xxii. ★★ the sweep reads a leg with no band',
+    file: NLS, tests: [T_IND],
+    find: '  if (bandAsOfDay == null || bandAsOfDay !== row.plan_date) return false;',
+    to: '  if (bandAsOfDay != null && bandAsOfDay !== row.plan_date) return false; /* MUTANT */',
+    why: 'A Cores-band leg is read for nothing on every boot.',
+  },
+  {
+    id: 'PB-N-xxiii. ★★★ the sweep reads past the re-capture horizon',
+    file: NLS, tests: [T_IND],
+    find: "  if (typeof row.issued_at_ms !== 'number' || !Number.isFinite(row.issued_at_ms) || nowMs - row.issued_at_ms > horizonMs) return false;\n  const unjudged",
+    to: "  if (typeof row.issued_at_ms !== 'number' || !Number.isFinite(row.issued_at_ms)) return false; /* MUTANT */\n  const unjudged",
+    why: 'A window is graded on telemetry the recorder may have thinned or pruned.',
+  },
+  {
+    id: 'PB-N-xxiv. ★★★ a window the capture judged is judged again',
+    file: NLS, tests: [T_IND],
+    find: "  if (unjudged.state !== 'pending' || !(capturedAt < unjudged.judgeFromMs)) return false;",
+    to: "  if (unjudged.state !== 'pending') return false; /* MUTANT */",
+    why: 'A day the balance refused at the capture is graded on a later evening\'s report.',
+  },
+  {
+    id: 'PB-N-xxv. ★★ a capture at the judging hour counted as unjudged',
+    file: NLS, tests: [T_IND],
+    find: "  if (unjudged.state !== 'pending' || !(capturedAt < unjudged.judgeFromMs)) return false;",
+    to: "  if (unjudged.state !== 'pending' || !(capturedAt <= unjudged.judgeFromMs)) return false; /* MUTANT */",
+    why: 'The boundary of the judging hour moves by one instant.',
+  },
+  {
+    id: 'PB-N-xxvi. ★★★ the sweep measures before the day is judged',
+    file: NLS, tests: [T_IND],
+    find: "  return panelPvAdmission({ basis: row.actual_pv_basis, span: { startMs: a, endMs: b }, admission }).state !== 'pending';",
+    to: '  return true; /* MUTANT */',
+    why: 'Every unjudged window is read on every boot and spends its one measurement on a pending answer.',
+  },
+  {
+    id: 'PB-N-xxvii. ★★★ the sweep\'s unjudged test reads the report',
+    file: NLS, tests: [T_IND],
+    find: '  const unjudged = panelPvAdmission({ basis: row.actual_pv_basis, span: { startMs: a, endMs: b }, admission: null });',
+    to: '  const unjudged = panelPvAdmission({ basis: row.actual_pv_basis, span: { startMs: a, endMs: b }, admission }); /* MUTANT */',
+    why: 'Once a report judges the day the row is never due: the sweep never grades.',
+  },
+  {
+    id: 'PB-N-xxviii. ★★★ the sweep measures again on every tick',
+    file: IDX, tests: [T_IND],
+    find: '      if (shadowPvRemeasuredThisBoot.has(day) || !shadowPanelPvRemeasureDue(',
+    to: '      if (!shadowPanelPvRemeasureDue( /* MUTANT */',
+    why: 'A window that stays NULL is read and logged every thirty minutes.',
+  },
+  {
+    id: 'PB-N-xxix. ★★ the sweep remembers nothing',
+    file: IDX, tests: [T_IND],
+    find: '      shadowPvRemeasuredThisBoot.add(day);',
+    to: '      /* MUTANT */',
+    why: 'A window that stays NULL is read and logged every thirty minutes.',
+  },
+  {
+    id: 'PB-N-xxx. ★★★ the sweep ignores held telemetry',
+    file: IDX, tests: [T_IND],
+    find: '        held: { spans: (from, to) => recorder.heldSpans?.(from, to) ?? [], panelSn: shp2Sn },',
+    to: '        held: null, /* MUTANT */',
+    why: 'A restated reading from a panel offline in the cloud is summed as the window\'s solar.',
+  },
+  {
+    id: 'PB-N-xxxi. ★★ the sweep\'s C slot resolves to a Core off the panel',
+    file: IDX, tests: [T_IND],
+    find: "          coreOfSlot: (slot) => houseSlots.find((x) => x.slot === slot && x.isConnected === true && typeof x.sn === 'string')?.sn ?? null,",
+    to: "          coreOfSlot: (slot) => houseSlots.find((x) => x.slot === slot && typeof x.sn === 'string')?.sn ?? null, /* MUTANT */",
+    why: 'A mixed band\'s Core slot is graded on a Core the panel no longer connects.',
+  },
+  {
+    id: 'PB-N-xxxii. ★★★ the sweep reads no admission',
+    file: IDX, tests: [T_IND],
+    find: '          admission: panelAdmissionMem,\n        },\n      });',
+    to: '          admission: null, /* MUTANT */\n        },\n      });',
+    why: 'Every window the sweep reads stays pending.',
+  },
+  {
+    id: 'PB-N-xxxiii. ★★★ the sweep measures on no band',
+    file: IDX, tests: [T_IND],
+    find: '          bandAsOfDay: band, panelSn: shp2Sn,',
+    to: '          bandAsOfDay: null, panelSn: shp2Sn, /* MUTANT */',
+    why: 'The sweep reads and never grades.',
+  },
+  {
+    id: 'PB-N-xxxiv. ★★★ the sweep never writes its figure',
+    file: IDX, tests: [T_IND],
+    find: '      if (m.pvKwh != null) recorder.recordNightOutcome(day, { shadow_window_pv_kwh: m.pvKwh });',
+    to: '      /* MUTANT */',
+    why: 'The log says the window was measured while the row keeps NULL.',
+  },
+  {
+    id: 'PB-N-xxxv. ★★ the sweep says nothing',
+    file: IDX, tests: [T_IND],
+    find: '      app.log[line.level](line.text);\n    }\n  } catch',
+    to: '      /* MUTANT */\n    }\n  } catch',
+    why: 'A shadow column changes after its capture with no line to say when or why.',
+  },
+  {
+    id: 'PB-N-xxxvi. ★★ the sweep\'s NULL said at the info level',
+    file: NLS, tests: [T_IND],
+    find: "  return { level: 'debug', text: `night-charge ledger: shadow_window_pv_kwh for ${planDate} stays NULL",
+    to: "  return { /* MUTANT */ level: 'info', text: `night-charge ledger: shadow_window_pv_kwh for ${planDate} stays NULL",
+    why: 'Every boot repeats an info line for each window that stays NULL.',
+  },
+  {
+    id: 'PB-N-xxxvii. ★★ a held window\'s NULL given the resolver\'s reason',
+    file: NLS, tests: [T_IND],
+    find: "    const why = held.pv || held.load ? 'held telemetry over the window'",
+    to: "    const why = (false as boolean) ? 'held telemetry over the window' /* MUTANT */",
+    why: 'A window withheld for held telemetry is said to be pending the balance.',
   },
 ];
 

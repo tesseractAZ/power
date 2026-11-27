@@ -249,9 +249,24 @@ export function minOverSpans(
  *  same evening (panelPvSelection.shadowPvBasis), the row's band on the evenings the two select alike.
  *  The set-aside is the row's: a band built on a solar model fitted on other Cores than the actuals
  *  says nothing about forecast skill over the window either. The load is not a Core-set figure and
- *  is kept. */
+ *  is kept.
+ *
+ *  ★★★ v1.210.1 — THE PANEL PATH (`panel`): on a row planned on the panel basis (isPanelBasisRow, the
+ *  live row's own predicate) whose cost leg was sized on the panel-measured band as of the row's own
+ *  evening (`panel.bandAsOfDay`, read back from shadow_arm_disposition, equal to plan_date: the
+ *  row's pv_basis_slots are that evening's verdict, the one report both selections read), the
+ *  window's PV is the live row's rule over the window: the per-slot resolver over pv_basis_slots
+ *  (panelRowPvActual: the panel's own reading for a P slot, the slot's Core's meter for a C slot,
+ *  each at the same 90 % coverage), null when either side was held over the window (the live panel
+ *  row's rule), and null unless the 7-day energy balance admitted the window's day
+ *  (panelPvAdmission: pending until it is judged, withheld where it did not pass). The row's PV
+ *  set-aside does not null it: on a panel row it is the panel's own ("no independent meter"), the
+ *  rule the row's actual_pv_kwh is written under too. A row the panel path does not cover — the
+ *  Cores' band, another evening's band, no readable slots, no `panel` given — is measured as before,
+ *  to the letter. The load is computed the same way on every row. */
 export function shadowWindowActuals(i: {
-  row: Partial<Pick<NightLedgerRow, 'shadow_cost_window_start_ms' | 'shadow_cost_window_end_ms'>>;
+  row: Partial<Pick<NightLedgerRow, 'shadow_cost_window_start_ms' | 'shadow_cost_window_end_ms'
+    | 'plan_date' | 'pv_basis' | 'actual_pv_basis' | 'pv_basis_slots'>>;
   nowMs: number;
   homeSns: readonly string[];
   queryPv: (sn: string, startMs: number, endMs: number) => ReadonlyArray<Sample>;
@@ -262,13 +277,13 @@ export function shadowWindowActuals(i: {
   /** The row's PV set-aside reason (NightLedgerColumns.pvSetAside); null or absent: the band is
    *  evidence and the PV is measured. */
   pvSetAside?: string | null;
+  /** ★★★ v1.210.1 — the panel path's inputs (above). Absent or null: the Cores' meter, as before. */
+  panel?: ShadowWindowPanelInput | null;
 }): { pvKwh: number | null; loadKwh: number | null } | null {
   const a = i.row.shadow_cost_window_start_ms;
   const b = i.row.shadow_cost_window_end_ms;
   if (typeof a !== 'number' || typeof b !== 'number' || !(b > a) || i.nowMs < b) return null;
-  const held = i.held == null ? { pv: false, load: false } : heldSides(heldLedgerVerdict({
-    spans: i.held.spans(a, b), coreSns: i.homeSns, panelSn: i.held.panelSn, span: { startMs: a, endMs: b },
-  }));
+  const held = shadowWindowHeld(i, a, b);
   let pvKwh: number | null = null;
   if (i.homeSns.length > 0) {
     let pvEnergyWh = 0;
@@ -282,10 +297,119 @@ export function shadowWindowActuals(i: {
     if (held.pv) pvKwh = null;
   }
   if (i.pvSetAside != null) pvKwh = null;
+  // ★★★ v1.210.1 — the panel path (above) REPLACES the figure, as the live row's panel block does: the resolver over the row's
+  // slots on the window, null on either side held, and only once the energy balance admitted the window's day.
+  const panelPv = shadowWindowPanelPv({ row: i.row, a, b, held, panel: i.panel });
+  if (panelPv != null) pvKwh = panelPv.pvKwh;
   const load = i.queryLoad(a, b);
   const loadKwh = !held.load && load.length > 0 && coverageFrac(load, a, b) >= LEDGER_SPAN_MIN_COVERAGE
     ? round2(integrateWh(load, false) / 1000) : null;
   return { pvKwh, loadKwh };
+}
+
+/** ★★★ v1.210.1 — the panel path's inputs (shadowWindowActuals' `panel`, the sweep's too: index.ts remeasurePendingShadowPv). */
+export interface ShadowWindowPanelInput {
+  /** E of the panel-measured band the cost leg was sized on (middayShadow.shadowCostPanelPvAsOfDay); null: the Cores' band. */
+  bandAsOfDay: string | null;
+  panelSn: string;
+  coreOfSlot: (slot: number) => string | null;
+  query: (sn: string, metric: string, fromMs: number, toMs: number) => ReadonlyArray<Sample>;
+  /** The newest planning report's admitted slot-days the main thread has read (index.ts panelAdmissionMem). */
+  admission: PanelAdmission | null | undefined;
+}
+
+/** The held sides over the shadow's window [a, b]: heldLedgerVerdict over the window itself, the home Cores and the house panel
+ *  (shadowWindowActuals; the sweep's too). No `held` given: no side is held. PURE. */
+export function shadowWindowHeld(
+  i: { homeSns: readonly string[]; held?: { spans: (startMs: number, endMs: number) => ReadonlyArray<LedgerHeldSpan>; panelSn: string } | null },
+  a: number,
+  b: number,
+): HeldSides {
+  return i.held == null ? { pv: false, load: false } : heldSides(heldLedgerVerdict({
+    spans: i.held.spans(a, b), coreSns: i.homeSns, panelSn: i.held.panelSn, span: { startMs: a, endMs: b },
+  }));
+}
+
+/** ★★★ v1.210.1 — THE PANEL PATH of the shadow's window PV (shadowWindowActuals, above), over the closed window [a, b] on the held
+ *  sides over it: null where the path does not apply (the figure is then the Cores' meter's, as before); else the per-slot resolver's
+ *  figure, null on either side held and unless the 7-day energy balance admitted the window's day, with the sources (`basis`, the
+ *  row's actual_pv_basis form), the admission it was read through, and why it is null (null when it is a figure). PURE. */
+export function shadowWindowPanelPv(i: {
+  row: Partial<Pick<NightLedgerRow, 'plan_date' | 'pv_basis' | 'actual_pv_basis' | 'pv_basis_slots'>>;
+  a: number;
+  b: number;
+  held: HeldSides;
+  panel: ShadowWindowPanelInput | null | undefined;
+}): { pvKwh: number | null; basis: string | null; admission: PanelPvAdmission; why: string | null } | null {
+  const { a, b, held } = i;
+  const p = i.panel;
+  const panelPv = p != null && p.bandAsOfDay != null && p.bandAsOfDay === i.row.plan_date
+    && isPanelBasisRow({ pv_basis: i.row.pv_basis ?? null, actual_pv_basis: i.row.actual_pv_basis })
+    ? panelRowPvActual({
+      slots: i.row.pv_basis_slots, span: { startMs: a, endMs: b }, panelSn: p.panelSn, coreOfSlot: p.coreOfSlot, query: p.query,
+      minCoverage: LEDGER_SPAN_MIN_COVERAGE,
+    })
+    : null;
+  if (p != null && panelPv != null && panelPv.basis != null) {
+    const admission = panelPvAdmission({ basis: panelPv.basis, span: { startMs: a, endMs: b }, admission: p.admission });
+    const pvKwh = held.pv || held.load || admission.state !== 'admitted' ? null : panelPv.kwh;
+    const why = held.pv || held.load ? 'held telemetry over the window'
+      : panelPv.why != null ? panelPv.why
+        : admission.state === 'pending' ? `pending the 7-day energy balance (${admission.lastDay} not yet judged)`
+          : admission.state === 'withheld' ? `slot ${admission.slot}'s ${admission.day} was not passed by the 7-day energy balance as of ${admission.asOfDay}`
+            : null;
+    return { pvKwh, basis: panelPv.basis, admission, why: pvKwh == null ? why : null };
+  }
+  return null;
+}
+
+/** ★★★ v1.210.1 — THE SHADOW'S WINDOW, ON ITS OWN WAY OUT OF PENDING. On a row the panel path covers (shadowWindowPanelPv), the
+ *  window's PV is pending at the row's usual capture: the window lies on the span's last day, which no report the main thread can
+ *  have read by then has judged. A row captured with its own PV actual pending (PANEL_PV_PENDING_MARKER) is re-captured whole once
+ *  that day is judged (panelPvRecaptureDue), and its window is measured again then. A row whose own actual was settled at that
+ *  capture — withheld by its resolver (a slot thin, unsourced or without its Core over the span) or by held telemetry over the span —
+ *  is never re-captured, so its window is measured alone (index.ts remeasurePendingShadowPv). Due when: the row is captured, on the
+ *  panel basis, without the pending marker; its window's PV is NULL; its cost leg's band (`bandAsOfDay`, as the capture reads it) is
+ *  the panel band of the row's own evening; the window has closed; the row is inside the re-capture horizon; it was captured before
+ *  the window's day could be judged (before 09:00 the morning after it, panelPvAdmission over the window on its recorded sources,
+ *  actual_pv_basis), so the capture could not have judged it; and the newest report read (`admission`) now judges that day. A row
+ *  with no P slot on record never pends and is never due. PURE. */
+export function shadowPanelPvRemeasureDue(
+  row: Pick<NightLedgerRow, 'pv_basis'> & Partial<Pick<NightLedgerRow, 'plan_date' | 'outcome_captured_at_ms' | 'score_notes'
+    | 'issued_at_ms' | 'shadow_cost_window_start_ms' | 'shadow_cost_window_end_ms' | 'shadow_window_pv_kwh' | 'actual_pv_basis'>>,
+  bandAsOfDay: string | null,
+  admission: PanelAdmission | null | undefined,
+  nowMs: number,
+  horizonMs: number,
+): boolean {
+  const capturedAt = row.outcome_captured_at_ms;
+  if (typeof capturedAt !== 'number' || !Number.isFinite(capturedAt) || !isPanelBasisRow(row)) return false;
+  if (String(row.score_notes ?? '').includes(PANEL_PV_PENDING_MARKER)) return false;
+  if (row.shadow_window_pv_kwh != null) return false;
+  if (bandAsOfDay == null || bandAsOfDay !== row.plan_date) return false;
+  const a = row.shadow_cost_window_start_ms;
+  const b = row.shadow_cost_window_end_ms;
+  if (typeof a !== 'number' || typeof b !== 'number' || !(b > a) || nowMs < b) return false;
+  if (typeof row.issued_at_ms !== 'number' || !Number.isFinite(row.issued_at_ms) || nowMs - row.issued_at_ms > horizonMs) return false;
+  const unjudged = panelPvAdmission({ basis: row.actual_pv_basis, span: { startMs: a, endMs: b }, admission: null });
+  if (unjudged.state !== 'pending' || !(capturedAt < unjudged.judgeFromMs)) return false;
+  return panelPvAdmission({ basis: row.actual_pv_basis, span: { startMs: a, endMs: b }, admission }).state !== 'pending';
+}
+
+/** ★★★ v1.210.1 — the sweep's log line for a shadow window it measured alone (index.ts remeasurePendingShadowPv): info with the
+ *  figure where it wrote one; debug with the reason where the window stays NULL (nothing is written then). PURE. */
+export function shadowPanelPvRemeasureLogLine(
+  planDate: string,
+  m: NonNullable<ReturnType<typeof shadowWindowPanelPv>>,
+): { level: 'info' | 'debug'; text: string } {
+  const src = m.basis != null ? ` (actual_pv_basis ${m.basis})` : '';
+  if (m.pvKwh != null) {
+    const asOf = m.admission.state === 'admitted' && m.admission.asOfDay != null ? ` as of ${m.admission.asOfDay}` : '';
+    const text = `night-charge ledger: shadow_window_pv_kwh for ${planDate} measured on the panel's own readings${src} — ${m.pvKwh} kWh, `
+      + `the window's day judged by the 7-day energy balance${asOf}; the row's own columns are kept as captured`;
+    return { level: 'info', text };
+  }
+  return { level: 'debug', text: `night-charge ledger: shadow_window_pv_kwh for ${planDate} stays NULL${src} — ${m.why ?? 'no figure'}` };
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -645,6 +769,37 @@ export function panelPvActualNote(
         : ` PV actual is ${src || 'the per-slot resolver'}${p.length > 0 && admission?.state === 'admitted' && admission.asOfDay != null
           ? `, on days the 7-day energy balance passed as of ${admission.asOfDay} (the newest evening it had judged as of when the row was captured)` : ''}.`;
   return `${head}${ratio} The row is kept apart from the readiness gate's sizing figures.`;
+}
+
+/** ★★★ v1.210.1 — the capture's log line for a 'panel' / 'mixed' row's PV actual: the panel path's own outcome, from the note's own
+ *  arguments and in its precedence (panelPvActualNote) — withheld with the resolver's or the held telemetry's reason (`heldParts`: the
+ *  held devices, named), pending the 7-day energy balance, or withheld by it; null when the actual is written. On such a row the Cores'
+ *  per-Core coverage gate logs nothing (index.ts scoreNightRow): the figure is not theirs. One line at most per capture. PURE. */
+export function panelPvActualLogLine(
+  planDate: string,
+  basis: string | null,
+  withheldWhy: string | null,
+  admission: PanelPvAdmission | null,
+  heldParts: string | null = null,
+): { level: 'info' | 'warn'; text: string } | null {
+  const src = basis != null ? ` (actual_pv_basis ${basis})` : '';
+  if (admission?.state === 'pending') {
+    return {
+      level: 'info',
+      text: `night-charge ledger: actual_pv_kwh for ${planDate} pending the 7-day energy balance${src} — ${admission.lastDay} is judged no `
+        + `earlier than ${PANEL_PV_JUDGE_HOUR}:00 the next morning, and the row is re-captured once the night planner has read that judgement`,
+    };
+  }
+  if (admission?.state === 'withheld') {
+    return {
+      level: 'warn',
+      text: `night-charge ledger: actual_pv_kwh WITHHELD for ${planDate}${src} — slot ${admission.slot}'s ${admission.day} was not passed by `
+        + `the 7-day energy balance as of ${admission.asOfDay}`,
+    };
+  }
+  if (withheldWhy == null) return null;
+  const held = heldParts != null && heldParts !== '' ? ` (${heldParts} with no fresh readings)` : '';
+  return { level: 'warn', text: `night-charge ledger: actual_pv_kwh WITHHELD for ${planDate}${src} — ${withheldWhy}${held}` };
 }
 
 /**

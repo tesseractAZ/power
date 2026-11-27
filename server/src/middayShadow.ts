@@ -467,6 +467,18 @@ export function panelPvBasisNote(asOfDay: string | undefined): string {
   return asOfDay != null ? ` (on the panel-measured planning band as of ${asOfDay})` : '';
 }
 
+/** ★★★ v1.210.1 — E of the panel-measured band the COST leg was sized on, read back from a row's shadow_arm_disposition (written by
+ *  middayShadowLedgerColumns: "cost: <disposition> (on the panel-measured planning band as of E)", then option B's part, if any): the
+ *  capture grades the cost leg's window on the band it was sized on (nightLedgerScoring.shadowWindowActuals). Null on a cost leg
+ *  sized on the Cores' band, a row with no cost leg or only a note, and a row stamped before v1.210.0. PURE. */
+export function shadowCostPanelPvAsOfDay(disposition: string | null | undefined): string | null {
+  // The cost part ends at option B's part or at the end; option B's own note (a backup re-sized, which may take the panel band while
+  // the cost leg's daylight hours refuse it) is never the cost leg's.
+  const m = /(?:^|; )cost: (?:(?!; backup option B:)[\s\S])*? \(on the panel-measured planning band as of (\d{4}-\d{2}-\d{2})\)(?:; backup option B: \(on the panel-measured planning band as of \d{4}-\d{2}-\d{2}\))?$/
+    .exec(String(disposition ?? ''));
+  return m != null ? m[1] : null;
+}
+
 /** The solar band a leg was sized on, in words (the refresh's reason). PURE. */
 function solarBandWords(asOfDay: string | null): string {
   return asOfDay != null ? `the panel-measured planning band as of ${asOfDay}` : "the Cores' band";
