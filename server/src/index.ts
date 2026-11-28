@@ -341,6 +341,8 @@ import {
   runMiddayShadowEvening, shadowCycleConfig, shadowRefreshDue, standingRefresh, refreshFromSized, refreshSizing,
   liveOvernightWrote, notComparableRefresh, notArmedRefresh,
   middayShadowLedgerColumns, middayShadowRefreshLedgerColumns, middayShadowLogLines, middayShadowRefreshLogLine,
+  // ★★★ v1.210.1 — the band the shadow's cost leg was sized on, read back from its row (the capture grades its window on it).
+  shadowCostPanelPvAsOfDay,
   coerceMiddayShadowRecord, getMiddayShadow, setMiddayShadow, middayChargeStateFields, shadowServed, windowP50Kwh, MIDDAY_SHADOW_LOG_TAG,
   heldImportEstimate, heldSpan, type HeldImport,
   middayShadowPreview, middayShadowPreviewLogLines, middayShadowRefreshPreviewLogLine, weatherAgeSeconds,
@@ -386,8 +388,12 @@ import {
   heldLedgerVerdict, heldLedgerNote, heldLedgerRepair, heldRepairColumns, heldRepairClause, heldSides, basisIncompleteNote, cushionOnlyNote,
   // v1.204.0 — a row planned on the panel's own readings: its PV actual from the per-slot sources, and its note.
   isPanelBasisRow, panelRowPvActual, panelPvActualNote,
+  // ★★★ v1.210.1 — a panel row's PV actual, said in the log by the panel path itself (the Cores' gate says nothing on it).
+  panelPvActualLogLine,
   // v1.204.0 (L5) — a panel row's PV actual only on slot-days the 7-day energy balance admitted, judged after its span.
   panelPvAdmission, panelPvRecaptureDue, panelPvRecaptureColumns, type PanelAdmission,
+  // ★★★ v1.210.1 — the shadow's window on the panel band, measured alone on a row whose own PV actual no re-capture revisits.
+  shadowWindowHeld, shadowWindowPanelPv, shadowPanelPvRemeasureDue, shadowPanelPvRemeasureLogLine,
   // v1.196.0 — the saturation that censors a row's PV for the cost ceiling's PV factor.
   pvSaturationColumns,
 } from './nightLedgerScoring.js';
@@ -4918,6 +4924,9 @@ function scoreCompletedNights(nowMs: number): void {
   if (repairHeldNightOutcomes(rows, shp2Sn, nowMs)) rows = recorder.readNightLedger(LEDGER_BACKFILL_SWEEP_DAYS);
   // v1.204.0 (L5) — and a panel row captured with its PV actual pending, once the energy balance has judged its span's days.
   if (repairPendingPanelPv(rows, nowMs)) rows = recorder.readNightLedger(LEDGER_BACKFILL_SWEEP_DAYS);
+  // ★★★ v1.210.1 — and the mid-day shadow's window on the panel band, on a panel row whose own PV actual was settled at its capture
+  // while the window's day was unjudged: measured alone once the energy balance has judged that day (its shadow column only).
+  remeasurePendingShadowPv(rows, shp2Sn, nowMs);
   // ★ THE v1.39.0 COMPLETION GATE (review HIGH ×2): a night may be captured
   // only once its FULL scored span has elapsed — 16 h past its REAL window
   // close. The pre-fix midnight tick captured yesterday's row while its
@@ -5047,6 +5056,9 @@ function scoreNightRow(
   // v1.188.1 (review 5) — each actual is withheld on its own side only (nightLedgerScoring.heldSides).
   const heldSide = heldSides(heldVerdict);
   const deviceNameOf = (sn: string) => store.get().devices[sn]?.deviceName ?? sn;
+  // ★★★ v1.210.1 — read here (it was read after the gate): on a panel row the gate's figure is replaced below, and its log line is the
+  // panel path's (panelPvActualLogLine), not the Cores'.
+  const panelRow = isPanelBasisRow(y);
   let actualPvKwh: number | null = null;
   let actualPvCoverage: number | null = null;
   if (homeSns.size) {
@@ -5063,17 +5075,18 @@ function scoreNightRow(
     actualPvCoverage = round2(worstCov);
     const pvHeld = heldSide.pv;
     actualPvKwh = worstCov >= PV_LEDGER_MIN_CORE_COVERAGE && !pvHeld ? round2(pvWh / 1000) : null;
-    if (pvHeld && heldVerdict != null) {
-      app.log.warn(`night-charge ledger: actual_pv_kwh WITHHELD for ${yDate} — ${heldVerdict.pv.map((p) => `${deviceNameOf(p.sn)} ${(p.heldMs / 3_600_000).toFixed(1)} h`).join(', ')} of the span had no fresh readings (held telemetry)`);
-    } else if (actualPvKwh == null) {
-      app.log.warn(`night-charge ledger: actual_pv_kwh WITHHELD — worst per-core PV coverage ${worstCov.toFixed(2)} < ${PV_LEDGER_MIN_CORE_COVERAGE} over the scored span; a fleet sum across a dark core under-counts and this column is durable`);
+    if (!panelRow) {
+      if (pvHeld && heldVerdict != null) {
+        app.log.warn(`night-charge ledger: actual_pv_kwh WITHHELD for ${yDate} — ${heldVerdict.pv.map((p) => `${deviceNameOf(p.sn)} ${(p.heldMs / 3_600_000).toFixed(1)} h`).join(', ')} of the span had no fresh readings (held telemetry)`);
+      } else if (actualPvKwh == null) {
+        app.log.warn(`night-charge ledger: actual_pv_kwh WITHHELD — worst per-core PV coverage ${worstCov.toFixed(2)} < ${PV_LEDGER_MIN_CORE_COVERAGE} over the scored span; a fleet sum across a dark core under-counts and this column is durable`);
+      }
     }
   }
   // ★★★ v1.204.0 — a row planned on the panel's own per-slot readings ('panel' / 'mixed'): its PV actual is the per-slot resolver over
   // the same span — the panel's reading (src{n}_pv_w) for a slot that took it, the slot's Core's pv_total for one that did not
   // (panelRowPvActual) — each slot at the Cores' coverage minimum, and withheld when the panel or a Core read held telemetry. The
   // sources go to actual_pv_basis; the note (panelPvActualNote) says what it is and that the row is kept apart.
-  const panelRow = isPanelBasisRow(y);
   let panelPv: ReturnType<typeof panelRowPvActual> | null = null;
   let panelAdmission: ReturnType<typeof panelPvAdmission> | null = null;
   if (panelRow) {
@@ -5228,6 +5241,11 @@ function scoreNightRow(
   if (panelRow && panelPv != null) {
     const why = panelPv.why != null ? panelPv.why : panelPv.kwh == null && panelAdmission?.state === 'admitted' ? 'withheld' : null;
     scoreNotes += panelPvActualNote(y, panelPv.basis, why, why != null ? null : panelAdmission);
+    // ★★★ v1.210.1 — and the log says the same, once: withheld (why), pending or withheld by the balance; nothing when written.
+    const heldParts = heldVerdict != null && (heldSide.pv || heldSide.load)
+      ? [...heldVerdict.pv, ...heldVerdict.load].map((p) => `${deviceNameOf(p.sn)} ${(p.heldMs / 3_600_000).toFixed(1)} h`).join(', ') : null;
+    const pvLog = panelPvActualLogLine(yDate, panelPv.basis, why, why != null ? null : panelAdmission, heldParts);
+    if (pvLog != null) app.log[pvLog.level](pvLog.text);
   }
   scoreNotes += expectedBuyScoreNote({
     expectedBuyKwh: y.expected_buy_kwh ?? null,
@@ -5356,6 +5374,15 @@ function scoreNightRow(
     held: { spans: (a, b) => recorder.heldSpans?.(a, b) ?? [], panelSn: shp2Sn },
     // v1.189.0 (review) — the shadow's window P50 is from the row's own band: set aside with it.
     pvSetAside: cols.pvSetAside,
+    // ★★★ v1.210.1 — a cost leg the panel-measured band of the row's own evening sized, on a panel row: its window's PV is the panel
+    // path's (the row's per-slot sources on the window, through the same admission), not the Cores' meter.
+    panel: {
+      bandAsOfDay: shadowCostPanelPvAsOfDay(y.shadow_arm_disposition), panelSn: shp2Sn,
+      coreOfSlot: (slot) => ((findShp2(store.get().devices)?.projection?.sources ?? []) as Array<{ slot?: number; sn?: string; isConnected?: boolean }>)
+        .find((x) => x.slot === slot && x.isConnected === true && typeof x.sn === 'string')?.sn ?? null,
+      query: (sn, metric, a, b) => recorder.query(sn, metric, a, b),
+      admission: panelAdmissionMem,
+    },
   });
   if (shadowActuals != null) {
     recorder.recordNightOutcome(yDate, { shadow_window_pv_kwh: shadowActuals.pvKwh, shadow_window_load_kwh: shadowActuals.loadKwh });
@@ -5970,6 +5997,48 @@ function repairPendingPanelPv(rows: NightLedgerRow[], nowMs: number): boolean {
     app.log.debug(`night-charge: pending panel PV repair skipped (${e?.message ?? e})`);
   }
   return reset;
+}
+
+/** ★★★ v1.210.1 — the mid-day shadow's window on the panel band, on a 'panel' / 'mixed' row whose own PV actual was settled at its
+ *  capture (withheld for thin, unsourced or held readings over the span) while the window's day was still unjudged: no re-capture
+ *  follows such a row, so the window's PV is measured alone once the main thread has read a report that judges that day
+ *  (nightLedgerScoring.shadowPanelPvRemeasureDue), by the capture's own rule and inputs (shadowWindowHeld, shadowWindowPanelPv: the
+ *  row's slot sources on the window, at least 90 % covered, NULL on held telemetry, only on an admitted day). Only
+ *  shadow_window_pv_kwh is written, and only with a figure: no other column of the row changes. Once per row per boot: a window that
+ *  stays NULL (thin or held readings over it, or a day the balance did not pass) is not measured again on every tick. */
+const shadowPvRemeasuredThisBoot = new Set<string>();
+function remeasurePendingShadowPv(rows: NightLedgerRow[], shp2Sn: string, nowMs: number): void {
+  try {
+    const horizonMs = forecastSpanRecaptureHorizonMs(config.retentionDays, LEDGER_BACKFILL_SWEEP_DAYS);
+    for (const y of rows) {
+      const day = String(y.plan_date);
+      const band = shadowCostPanelPvAsOfDay(y.shadow_arm_disposition);
+      if (shadowPvRemeasuredThisBoot.has(day) || !shadowPanelPvRemeasureDue(y, band, panelAdmissionMem, nowMs, horizonMs)) continue;
+      shadowPvRemeasuredThisBoot.add(day);
+      const a = Number(y.shadow_cost_window_start_ms);
+      const b = Number(y.shadow_cost_window_end_ms);
+      const houseSlots = (findShp2(store.get().devices)?.projection?.sources ?? []) as Array<{ slot?: number; sn?: string; isConnected?: boolean }>;
+      const held = shadowWindowHeld({
+        homeSns: [...shp2ConnectedDpuSns(store.get().devices)],
+        held: { spans: (from, to) => recorder.heldSpans?.(from, to) ?? [], panelSn: shp2Sn },
+      }, a, b);
+      const m = shadowWindowPanelPv({
+        row: y, a, b, held,
+        panel: {
+          bandAsOfDay: band, panelSn: shp2Sn,
+          coreOfSlot: (slot) => houseSlots.find((x) => x.slot === slot && x.isConnected === true && typeof x.sn === 'string')?.sn ?? null,
+          query: (sn, metric, from, to) => recorder.query(sn, metric, from, to),
+          admission: panelAdmissionMem,
+        },
+      });
+      if (m == null) continue;
+      if (m.pvKwh != null) recorder.recordNightOutcome(day, { shadow_window_pv_kwh: m.pvKwh });
+      const line = shadowPanelPvRemeasureLogLine(day, m);
+      app.log[line.level](line.text);
+    }
+  } catch (e: any) {
+    app.log.debug(`night-charge: shadow window PV re-measure skipped (${e?.message ?? e})`);
+  }
 }
 
 function repairHeldNightOutcomes(rows: NightLedgerRow[], shp2Sn: string, nowMs: number): boolean {
